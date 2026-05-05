@@ -1135,6 +1135,42 @@ router.post('/reversal/execute', requirePermission('PROD_SUPERVISOR'), async (re
   }
 });
 
+// ── Scrap SAP helpers ─────────────────────────────────────────────────────────
+
+// Unwraps the BdcWrapper response from /api/production/scrap/post.
+// Validates every BdcResponse: type=S, messageClass=M7, messageNumber=060.
+// Returns the responses array or throws with the first failure message.
+function parseBomScrapResponse(sapRaw) {
+  if (sapRaw?.success === false) throw new Error(sapRaw.error || 'SAP scrap server error');
+  const responses = sapRaw?.data?.responses;
+  if (!Array.isArray(responses) || !responses.length)
+    throw new Error('SAP returned no posting responses');
+  for (const r of responses) {
+    if (r.type !== 'S' || r.messageClass !== 'M7' || r.messageNumber !== '060')
+      throw new Error(r.message || `SAP posting failed: ${r.type} ${r.messageClass} ${r.messageNumber}`);
+  }
+  return responses;
+}
+
+// Inserts one ScrapMaterialDocuments row per BdcResponse.
+async function insertScrapDocuments(pool, scrapID, responses, uid) {
+  for (const r of responses) {
+    await pool.request()
+      .input('scrapID', sql.Int,          scrapID)
+      .input('doc',     sql.NVarChar(18), r.documentNumber || '')
+      .input('type',    sql.NVarChar(1),  r.type           || '')
+      .input('mc',      sql.NVarChar(3),  r.messageClass   || null)
+      .input('mn',      sql.NVarChar(4),  r.messageNumber  || null)
+      .input('msg',     sql.NVarChar(500),r.message        || null)
+      .input('uid',     sql.Int,          uid)
+      .query(`
+        INSERT INTO prod.ScrapMaterialDocuments
+          (ScrapID, MaterialDocument, SAPType, MessageClass, MessageNumber, SAPMessage, PostedByUserID)
+        VALUES (@scrapID, @doc, @type, @mc, @mn, @msg, @uid)
+      `);
+  }
+}
+
 // ── Scrap summary ────────────────────────────────────────────────────────────
 
 router.get('/scrap/summary', async (req, res) => {
@@ -1197,12 +1233,11 @@ router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), asyn
   const uid  = userId(req);
 
   try {
-
     if (quantity || reasonID) {
       await pool.request()
         .input('id',  sql.Int,           scrapID)
-        .input('qty', sql.Decimal(12,3), quantity  ? Number(quantity)  : null)
-        .input('rid', sql.Int,           reasonID  ? Number(reasonID)  : null)
+        .input('qty', sql.Decimal(12,3), quantity ? Number(quantity) : null)
+        .input('rid', sql.Int,           reasonID ? Number(reasonID) : null)
         .query(`UPDATE prod.ScrapEntries SET
           Quantity = COALESCE(@qty, Quantity),
           ReasonID = COALESCE(@rid, ReasonID)
@@ -1226,30 +1261,34 @@ router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), asyn
 
     const matR = await pool.request()
       .input('id', sql.Int, s.ProcessRecordID)
-      .query(`SELECT Material FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
+      .query(`SELECT Material, ${cfg.ref} AS BatchRef FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
 
     if (!matR.recordset.length) return res.status(404).json({ success: false, error: 'Process record not found.' });
 
-    const sapRaw = await sapPost('/api/production/scrap/post', {
-      Material:   matR.recordset[0].Material,
-      Quantity:   s.Quantity,
-      ReasonCode: s.ReasonCode,
-    });
+    const { Material: material, BatchRef: batchRef } = matR.recordset[0];
+    const reasonCode  = s.ReasonCode?.trim();
+    const sapPayload  = {
+      Material:     material,
+      Quantity:     Number(s.Quantity),
+      Header:       batchRef || String(scrapID),
+      MovementType: '551',
+    };
+    if (reasonCode?.length === 4) sapPayload.ScrapReason = reasonCode;
 
-    if (sapRaw?.success === false) throw new Error(sapRaw.error || 'SAP server error');
-    const zf = sapRaw?.data ?? sapRaw;
-    if (zf?.type !== 'S') throw new Error(zf?.message || `SAP rejected: ${zf?.type} ${zf?.messageClass} ${zf?.messageNumber}`);
-    const sapMatDoc = zf.documentNumber || null;
+    const sapRaw    = await sapPost('/api/production/scrap/post', sapPayload);
+    const responses = parseBomScrapResponse(sapRaw);
+
+    await insertScrapDocuments(pool, scrapID, responses, uid);
 
     await pool.request()
-      .input('id',  sql.Int,          scrapID)
-      .input('doc', sql.NVarChar(10), sapMatDoc)
-      .query(`UPDATE prod.ScrapEntries SET SAPPosted=1, SAPMaterialDocument=@doc, SAPErrorMessage=NULL WHERE ScrapID=@id`);
+      .input('id', sql.Int, scrapID)
+      .query(`UPDATE prod.ScrapEntries SET SAPPosted=1, SAPErrorMessage=NULL WHERE ScrapID=@id`);
 
+    const docList = responses.map(r => r.documentNumber).filter(Boolean).join(', ');
     await writeEvent(pool, s.ProcessCode, s.ProcessRecordID, 'NOTE',
-      `Scrap retry succeeded — ScrapID ${scrapID} — MatDoc: ${sapMatDoc}`, 0, uid);
+      `Scrap retry succeeded — ScrapID ${scrapID} — MatDocs: ${docList}`, 0, uid);
 
-    res.json({ success: true, data: { materialDocument: sapMatDoc } });
+    res.json({ success: true, data: { materialDocuments: responses.map(r => r.documentNumber) } });
 
   } catch (err) {
     const d = err.response?.data;
@@ -2091,34 +2130,38 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
 
       const matR = await pool.request()
         .input('id', sql.Int, s.ProcessRecordID)
-        .query(`SELECT Material FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
+        .query(`SELECT Material, ${cfg.ref} AS BatchRef FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
 
       if (!matR.recordset.length) return { scrapID, success: false, error: 'Process record not found.' };
 
-      const material = matR.recordset[0].Material;
+      const { Material: material, BatchRef: batchRef } = matR.recordset[0];
+      const reasonCode = s.ReasonCode?.trim();
+      const sapPayload = {
+        Material:     material,
+        Quantity:     Number(s.Quantity),
+        Header:       batchRef || String(scrapID),
+        MovementType: '551',
+      };
+      if (reasonCode?.length === 4) sapPayload.ScrapReason = reasonCode;
 
-      const sapRaw = await sapPost('/api/production/scrap/post', {
-        Material:   material,
-        Quantity:   s.Quantity,
-        ReasonCode: s.ReasonCode,
-      });
+      const sapRaw    = await sapPost('/api/production/scrap/post', sapPayload);
+      const responses = parseBomScrapResponse(sapRaw);
 
-      if (sapRaw?.success === false) throw new Error(sapRaw.error || 'SAP server error');
-      const zf  = sapRaw?.data ?? sapRaw;
-      if (zf?.type !== 'S') throw new Error(zf?.message || `SAP rejected: ${zf?.type} ${zf?.messageClass} ${zf?.messageNumber}`);
-      const sapMatDoc = zf.documentNumber || null;
+      await insertScrapDocuments(pool, Number(scrapID), responses, uid);
 
       await pool.request()
-        .input('id',  sql.Int,          Number(scrapID))
-        .input('uid', sql.Int,          uid)
-        .input('doc', sql.NVarChar(10), sapMatDoc)
-        .query(`UPDATE prod.ScrapEntries SET IsApproved=1, ApprovedAt=GETDATE(), ApprovedByUserID=@uid,
-                SAPPosted=1, SAPMaterialDocument=@doc WHERE ScrapID=@id`);
+        .input('id',  sql.Int, Number(scrapID))
+        .input('uid', sql.Int, uid)
+        .query(`UPDATE prod.ScrapEntries
+                SET IsApproved=1, ApprovedAt=GETDATE(), ApprovedByUserID=@uid,
+                    SAPPosted=1, SAPErrorMessage=NULL
+                WHERE ScrapID=@id`);
 
+      const docList = responses.map(r => r.documentNumber).filter(Boolean).join(', ');
       await writeEvent(pool, s.ProcessCode, s.ProcessRecordID, 'NOTE',
-        `Scrap approved & posted — ScrapID ${scrapID} — MatDoc: ${sapMatDoc}`, 0, uid);
+        `Scrap approved & posted — ScrapID ${scrapID} — MatDocs: ${docList}`, 0, uid);
 
-      return { scrapID, success: true, materialDocument: sapMatDoc };
+      return { scrapID, success: true, materialDocuments: responses.map(r => r.documentNumber) };
 
     } catch (err) {
       const d = err.response?.data;
@@ -2143,6 +2186,29 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
   }));
 
   res.json({ success: true, results });
+});
+
+// ── GET /scrap/:scrapId/documents — all SAP material documents for a scrap entry
+router.get('/scrap/:scrapId/documents', async (req, res) => {
+  const scrapID = Number(req.params.scrapId);
+  if (!scrapID || isNaN(scrapID))
+    return res.status(400).json({ success: false, error: 'Invalid scrap ID.' });
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request()
+      .input('id', sql.Int, scrapID)
+      .query(`
+        SELECT ScrapDocumentID, MaterialDocument, SAPType, MessageClass, MessageNumber,
+               SAPMessage, PostedAt, PostedByUserID,
+               IsReversed, ReversalDocument, ReversedAt, ReversedByUserID
+        FROM   prod.ScrapMaterialDocuments
+        WHERE  ScrapID = @id
+        ORDER  BY ScrapDocumentID
+      `);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ── Reversal — SAP postings for a specific batch ─────────────────────────────
