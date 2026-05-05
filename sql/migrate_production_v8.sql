@@ -67,7 +67,7 @@ END
 
 
 /* ── Verify ──────────────────────────────────────────────────────────── */
-SELECT 'ScrapEntries columns' AS Check,
+SELECT 'ScrapEntries columns' AS Section,
        name, TYPE_NAME(system_type_id) AS DataType
 FROM sys.columns
 WHERE object_id = OBJECT_ID(N'prod.ScrapEntries')
@@ -75,7 +75,7 @@ WHERE object_id = OBJECT_ID(N'prod.ScrapEntries')
                N'IsReversed',N'ReversedAt',N'ReversedByUserID')
 ORDER BY name
 
-SELECT 'ScrapMaterialDocuments columns' AS Check,
+SELECT 'ScrapMaterialDocuments columns' AS Section,
        name, TYPE_NAME(system_type_id) AS DataType
 FROM sys.columns
 WHERE object_id = OBJECT_ID(N'prod.ScrapMaterialDocuments')
