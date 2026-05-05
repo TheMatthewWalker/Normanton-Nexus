@@ -568,3 +568,71 @@ tbody td:last-child { border-right: none; }
 .sql-result .error-state {
   color: var(--error);
 }
+
+/* ── ROLE BADGE (3-role system) ──────────────────────────────────────────── */
+.badge--operator   { background: rgba(148,168,194,0.15); color: var(--text-muted); }
+
+/* ── MODAL TEXT INPUT ────────────────────────────────────────────────────── */
+.modal-input {
+  width: 100%;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; color: var(--text);
+  background: var(--surface);
+  border: 1.5px solid var(--border); border-radius: 7px;
+  padding: 9px 12px; outline: none;
+  transition: border-color 0.15s;
+}
+.modal-input:focus    { border-color: var(--accent); }
+.modal-input:disabled { background: var(--surface2); color: var(--text-muted); cursor: not-allowed; }
+.modal-hint {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted); margin-top: 6px;
+}
+
+/* ── PERMISSION TAGS (in edit modal) ─────────────────────────────────────── */
+.perm-tags {
+  display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; margin-bottom: 10px;
+}
+.perm-tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 4px 8px; border-radius: 5px;
+  background: var(--pending-dim); color: var(--pending);
+  border: 1px solid rgba(124,58,237,0.2);
+}
+.perm-tag button {
+  background: none; border: none; cursor: pointer;
+  color: var(--pending); font-size: 12px; line-height: 1;
+  padding: 0 1px; opacity: 0.6; transition: opacity 0.15s;
+}
+.perm-tag button:hover { opacity: 1; }
+.perm-tag--empty {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted); padding: 4px 0;
+}
+
+.perm-add-row {
+  display: flex; gap: 8px; align-items: center;
+}
+.perm-add-row .modal-select { flex: 1; }
+.perm-add-row .btn-secondary { flex-shrink: 0; padding: 7px 14px; font-size: 12px; }
+
+/* ── PERMISSION CODE BADGE (in permissions table) ───────────────────────── */
+.perm-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 3px 8px; border-radius: 4px;
+  background: var(--pending-dim); color: var(--pending);
+  display: inline-block;
+}
+
+.btn-icon--delete   { background: var(--error-dim);   color: var(--error); }
+.btn-icon--delete:hover { background: var(--error);   color: #fff; }
+
+/* ── AUDIT EVENT BADGES — permissions ────────────────────────────────────── */
+.event--PERM_GRANT   { background: var(--pending-dim); color: var(--pending); }
+.event--PERM_REVOKE  { background: var(--warn-dim);    color: var(--warn); }
+.event--PERM_CREATE  { background: var(--success-dim); color: var(--success); }
+.event--PERM_UPDATE  { background: var(--accent-dim);  color: var(--accent); }
+.event--PERM_DELETE  { background: var(--error-dim);   color: var(--error); }

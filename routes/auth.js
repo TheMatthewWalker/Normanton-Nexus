@@ -119,15 +119,17 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.redirect('/?error=invalid_credentials');
     }
 
-    // ── Success — fetch departments ───────────────────────────────────────────
-    const deptResult = await pool.request()
-      .input('userID', sql.Int, user.UserID)
-      .query(`
-        SELECT Department FROM kongsberg.dbo.PortalUserDepartments
-        WHERE UserID = @userID
-      `);
+    // ── Success — fetch departments and permissions ───────────────────────────
+    const [deptResult, permResult] = await Promise.all([
+      pool.request().input('userID', sql.Int, user.UserID)
+        .query(`SELECT Department FROM kongsberg.dbo.PortalUserDepartments WHERE UserID = @userID`),
+      pool.request().input('userID', sql.Int, user.UserID)
+        .query(`SELECT PermissionCode FROM kongsberg.dbo.PortalUserPermissions WHERE UserID = @userID`)
+        .catch(() => ({ recordset: [] })), // graceful if table doesn't exist yet
+    ]);
 
     const departments = deptResult.recordset.map(r => r.Department);
+    const permissions = permResult.recordset.map(r => r.PermissionCode);
 
     // Reset failed login counter, update LastLogin
     await pool.request()
@@ -152,7 +154,8 @@ router.post('/login', loginLimiter, async (req, res) => {
         username:    user.Username,
         email:       user.Email,
         role:        user.Role,
-        departments, // array of permitted department slugs
+        departments,
+        permissions,
       };
 
       res.redirect('/private/landing.html');
@@ -187,21 +190,21 @@ const registerLimiter = rateLimit({
 });
 
 router.post('/register', registerLimiter, async (req, res) => {
-  const { username, email, password, confirmPassword } = req.body;
+  const { firstName, lastName, email, password, confirmPassword } = req.body;
 
   // ── Basic validation ───────────────────────────────────────────────────────
-  if (!username || !email || !password || !confirmPassword) {
+  if (!firstName || !lastName || !email || !password || !confirmPassword) {
     return res.status(400).json({ success: false, error: 'All fields are required.' });
   }
 
-  const usernameClean = username.trim();
-  const emailClean    = email.trim().toLowerCase();
+  const firstClean = firstName.trim();
+  const lastClean  = lastName.trim();
+  const emailClean = email.trim().toLowerCase();
 
-  if (usernameClean.length < 3 || usernameClean.length > 80) {
-    return res.status(400).json({ success: false, error: 'Username must be 3–80 characters.' });
+  if (firstClean.length < 1 || firstClean.length > 80 || lastClean.length < 1 || lastClean.length > 80) {
+    return res.status(400).json({ success: false, error: 'First and last name must be 1–80 characters.' });
   }
 
-  // Basic email format check
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailClean)) {
     return res.status(400).json({ success: false, error: 'Invalid email address.' });
   }
@@ -210,10 +213,7 @@ router.post('/register', registerLimiter, async (req, res) => {
     return res.status(400).json({ success: false, error: 'Passwords do not match.' });
   }
 
-  // Password strength: min 10 chars, at least one uppercase, one digit
-  if (password.length < 10 ||
-      !/[A-Z]/.test(password) ||
-      !/[0-9]/.test(password)) {
+  if (password.length < 10 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
     return res.status(400).json({
       success: false,
       error: 'Password must be at least 10 characters with one uppercase letter and one number.',
@@ -223,42 +223,48 @@ router.post('/register', registerLimiter, async (req, res) => {
   try {
     const pool = await sql.connect(sqlConfig);
 
-    // ── Check for existing username or email ──────────────────────────────────
-    const existing = await pool.request()
-      .input('username', sql.NVarChar(80),  usernameClean)
-      .input('email',    sql.NVarChar(160), emailClean)
-      .query(`
-        SELECT Username, Email FROM kongsberg.dbo.PortalUsers
-        WHERE Username = @username OR Email = @email
-      `);
+    // ── Check for existing email ──────────────────────────────────────────────
+    const emailCheck = await pool.request()
+      .input('email', sql.NVarChar(160), emailClean)
+      .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers WHERE Email = @email`);
 
-    if (existing.recordset.length > 0) {
-      const clash = existing.recordset[0];
-      const field = clash.Username?.toLowerCase() === usernameClean.toLowerCase()
-        ? 'username' : 'email address';
-      return res.status(409).json({
-        success: false,
-        error: `That ${field} is already registered.`,
-      });
+    if (emailCheck.recordset.length > 0) {
+      return res.status(409).json({ success: false, error: 'That email address is already registered.' });
+    }
+
+    // ── Generate unique username: firstname.lastname[.N] ─────────────────────
+    const slug = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const base = `${slug(firstClean)}.${slug(lastClean)}`;
+
+    let username = base;
+    let suffix   = 1;
+    while (true) {
+      const taken = await pool.request()
+        .input('u', sql.NVarChar(80), username)
+        .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers WHERE Username = @u`);
+      if (!taken.recordset.length) break;
+      suffix++;
+      username = `${base}.${suffix}`;
     }
 
     // ── Hash password and insert ──────────────────────────────────────────────
     const hash = await bcrypt.hash(password, 12);
 
     await pool.request()
-      .input('username', sql.NVarChar(80),  usernameClean)
-      .input('email',    sql.NVarChar(160), emailClean)
-      .input('hash',     sql.NVarChar(256), hash)
-      .query(`
-        INSERT INTO kongsberg.dbo.PortalUsers (Username, Email, PasswordHash, Role, IsActive)
-        VALUES (@username, @email, @hash, 'viewer', 0)
-      `);
+      .input('username',  sql.NVarChar(80),  username)
+      .input('firstName', sql.NVarChar(80),  firstClean)
+      .input('lastName',  sql.NVarChar(80),  lastClean)
+      .input('email',     sql.NVarChar(160), emailClean)
+      .input('hash',      sql.NVarChar(256), hash)
+      .query(`INSERT INTO kongsberg.dbo.PortalUsers
+                (Username, FirstName, LastName, Email, PasswordHash, Role, IsActive)
+              VALUES (@username, @firstName, @lastName, @email, @hash, 'operator', 0)`);
 
-    await audit('REGISTER', usernameClean, 'Registration request submitted — pending approval', req);
+    await audit('REGISTER', username, `Registration request submitted by ${firstClean} ${lastClean} — pending approval`, req);
 
     res.json({
       success: true,
-      message: 'Registration request submitted. An administrator will review your account.',
+      message: `Registration request submitted. Your username will be <strong>${username}</strong>. An administrator will review your account.`,
     });
 
   } catch (err) {
@@ -278,6 +284,7 @@ router.get('/session-check', (req, res) => {
     username:    user.username,
     role:        user.role,
     departments: user.departments,
+    permissions: user.permissions || [],
   });
 });
 

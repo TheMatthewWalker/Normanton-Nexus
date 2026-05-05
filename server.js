@@ -147,14 +147,14 @@ app.get('/private/:page', requireLogin, (req, res, next) => {
     });
   }
 
-  // admin.html — requires admin role minimum
+  // admin.html — admin role minimum
   if (page === 'admin.html') {
     return requireRole('admin')(req, res, () => {
       res.sendFile(path.join(__dirname, 'private', page));
     });
   }
 
-    // admin.html — requires admin role minimum
+  // rawsql.html — superadmin only
   if (page === 'rawsql.html') {
     return requireRole('superadmin')(req, res, () => {
       res.sendFile(path.join(__dirname, 'private', page));
@@ -278,7 +278,7 @@ app.post("/query", requireLogin, async (req, res) => {
       recordset: result.recordset || []    // will be empty if no SELECT returned
     });
   } catch (err) {
-    console.error(err);
+    console.error('[SQL]', err.message, err.number ? `(#${err.number})` : '');
     auditQuery('RAW_SQL_ERROR', username, `${query.slice(0, 400)} — ERR: ${err.message.slice(0, 80)}`, req);
     res.status(500).json({ success: false, error: err.message });
   }
@@ -331,7 +331,7 @@ app.post("/query-csv", async (req, res) => {
     res.send(csv);
 
   } catch (err) {
-    console.error("SQL error:", err);
+    console.error('[SQL]', err.message, err.number ? `(#${err.number})` : '');
     res.status(500).json({
       success: false,
       message: err.message

@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Kongsberg Nexus · User Administration</title>
+  <title>Normanton Nexus · User Administration</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/admin.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
 
@@ -73,6 +74,15 @@
           Audit Log
         </div>
 
+        <!-- Permissions — shown only for superadmin -->
+        <div class="nav-item" data-section="permissions" id="nav-permissions" style="display:none">
+          <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
+            <circle cx="7" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M7 8v5M5 10.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          Permissions
+        </div>
+
         <div class="nav-item" data-section="sql">
           <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
             <rect x="1" y="1" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
@@ -122,11 +132,12 @@
                 <th>Status</th>
                 <th>Last Login</th>
                 <th>Departments</th>
+                <th>Permissions</th>
                 <th class="col-actions">Actions</th>
               </tr>
             </thead>
             <tbody id="users-tbody">
-              <tr><td colspan="7" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
+              <tr><td colspan="8" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -155,6 +166,10 @@
               <option value="RAW_SQL_ERROR">Raw SQL errors</option>
               <option value="SAP_OK">SAP successes</option>
               <option value="SAP_ERROR">SAP errors</option>
+              <option value="PERM_GRANT">Permission grants</option>
+              <option value="PERM_REVOKE">Permission revocations</option>
+              <option value="PERM_CREATE">Permission created</option>
+              <option value="PERM_DELETE">Permission deleted</option>
             </select>
             <button type="button" class="btn-secondary" onclick="loadAudit()">Refresh</button>
           </div>
@@ -171,6 +186,35 @@
               </tr>
             </thead>
             <tbody id="audit-tbody">
+              <tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── PERMISSIONS ────────────────────────────────────────────────── -->
+      <section class="section" id="section-permissions">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Permission Definitions</div>
+            <div class="section-sub">Permission codes that can be assigned to users — superadmin only</div>
+          </div>
+          <div class="section-actions">
+            <button type="button" class="btn-primary" onclick="openCreatePermModal()">+ New Permission</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="perms-table">
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Description</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="perms-tbody">
               <tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
             </tbody>
           </table>
@@ -219,10 +263,9 @@
         <div class="modal-row">
           <label class="modal-label">Role</label>
           <select id="edit-role" class="modal-select" aria-label="User role">
-            <option value="viewer">Viewer — read only</option>
-            <option value="editor">Editor — can export &amp; filter</option>
-            <option value="admin">Admin — dept admin + user approval</option>
-            <option value="superadmin">Superadmin — full access</option>
+            <option value="operator">Operator — standard access</option>
+            <option value="admin">Admin — user approval &amp; department assignment</option>
+            <option value="superadmin">Superadmin — full access + raw SQL</option>
           </select>
         </div>
 
@@ -246,8 +289,17 @@
 
         <div class="modal-row">
           <label class="modal-label">Department Access</label>
-          <div class="dept-grid" id="edit-depts">
-            <!-- Populated by JS -->
+          <div class="dept-grid" id="edit-depts"></div>
+        </div>
+
+        <div class="modal-row">
+          <label class="modal-label">Permissions</label>
+          <div id="edit-perms-tags" class="perm-tags"></div>
+          <div class="perm-add-row">
+            <select id="edit-perm-select" class="modal-select" aria-label="Add permission">
+              <option value="">— Grant a permission —</option>
+            </select>
+            <button type="button" class="btn-secondary" onclick="addUserPermission()">Grant</button>
           </div>
         </div>
 
@@ -278,17 +330,14 @@
         <div class="modal-row">
           <label class="modal-label">Assign Role</label>
           <select id="approve-role" class="modal-select" aria-label="Assign role">
-            <option value="viewer">Viewer</option>
-            <option value="editor">Editor</option>
+            <option value="operator">Operator</option>
             <option value="admin">Admin</option>
           </select>
         </div>
 
         <div class="modal-row">
           <label class="modal-label">Department Access</label>
-          <div class="dept-grid" id="approve-depts">
-            <!-- Populated by JS -->
-          </div>
+          <div class="dept-grid" id="approve-depts"></div>
         </div>
 
       </div>
@@ -301,8 +350,53 @@
     </div>
   </div>
 
+  <!-- ── CREATE / EDIT PERMISSION MODAL ────────────────────────────────── -->
+  <div id="perm-overlay" class="modal-overlay">
+    <div class="modal modal--narrow">
+      <div class="modal-header">
+        <div class="modal-title" id="perm-modal-title">New Permission</div>
+        <button type="button" class="modal-close" onclick="closePermModal()">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <div class="modal-row">
+          <label class="modal-label">Permission Code</label>
+          <input type="text" id="perm-code-input" class="modal-input"
+            placeholder="e.g. PROD_SUPERVISOR" maxlength="50"
+            style="text-transform:uppercase">
+          <div class="modal-hint" id="perm-code-hint">
+            Uppercase letters, digits, underscores only. Cannot be changed after creation.
+          </div>
+        </div>
+
+        <div class="modal-row">
+          <label class="modal-label">Display Name</label>
+          <input type="text" id="perm-name-input" class="modal-input"
+            placeholder="e.g. Production Supervisor" maxlength="100">
+        </div>
+
+        <div class="modal-row">
+          <label class="modal-label">Category</label>
+          <input type="text" id="perm-category-input" class="modal-input"
+            placeholder="e.g. Production" maxlength="50">
+        </div>
+
+        <div class="modal-row">
+          <label class="modal-label">Description <span style="opacity:.5">(optional)</span></label>
+          <textarea id="perm-description-input" class="modal-textarea" rows="3"
+            placeholder="What does this permission allow?"></textarea>
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" onclick="closePermModal()">Cancel</button>
+        <button type="button" class="btn-primary"   onclick="savePermission()">Save</button>
+      </div>
+    </div>
+  </div>
+
   <footer class="footer">
-    <span>Kongsberg Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
+    <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
     <span class="footer-right">Administration</span>
   </footer>
 

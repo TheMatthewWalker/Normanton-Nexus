@@ -2,17 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Kongsberg Nexus</title>
+  <title>Normanton Nexus</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@700;800&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/index.css">
+  <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
   <div class="login-wrapper">
     <div class="brand">
       <div class="brand-logo">
         <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
-        <span class="brand-name">Kongsberg Nexus</span>
+        <span class="brand-name">Normanton Nexus</span>
       </div>
       <div class="brand-sub">Enterprise Operations Portal</div>
     </div>
@@ -41,10 +42,17 @@
       <div id="panel-register">
         <div class="card-title">Request Access</div>
         <form id="register-form" autocomplete="off">
-          <div class="field">
-            <label>Username</label>
-            <input id="reg-username" name="username" placeholder="Choose a username" autocomplete="off" required>
+          <div style="display:flex;gap:10px">
+            <div class="field" style="flex:1">
+              <label>First Name</label>
+              <input id="reg-firstname" name="firstName" placeholder="John" autocomplete="off" required>
+            </div>
+            <div class="field" style="flex:1">
+              <label>Last Name</label>
+              <input id="reg-lastname" name="lastName" placeholder="Smith" autocomplete="off" required>
+            </div>
           </div>
+          <div id="reg-username-preview" style="font-size:11px;color:#6b7f99;margin:-6px 0 10px;min-height:16px"></div>
           <div class="field">
             <label>Email</label>
             <input id="reg-email" name="email" type="email" placeholder="your@email.com" autocomplete="off" required>
@@ -65,7 +73,7 @@
 
     </div>
 
-    <div class="footer-note">Kongsberg Nexus &nbsp;·&nbsp; Authorised access only &nbsp;·&nbsp; All activity is logged</div>
+    <div class="footer-note">Normanton Nexus &nbsp;·&nbsp; Authorised access only &nbsp;·&nbsp; All activity is logged</div>
   </div>
 
   <script>
@@ -97,6 +105,19 @@
       document.getElementById('login-error').textContent = errorMessages[errKey] || 'An error occurred.';
     }
 
+    // ── Username preview ──────────────────────────────────────────────────────
+    function toUsernameSlug(s) {
+      return s.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+    function updatePreview() {
+      const fn = toUsernameSlug(document.getElementById('reg-firstname').value);
+      const ln = toUsernameSlug(document.getElementById('reg-lastname').value);
+      const el = document.getElementById('reg-username-preview');
+      el.textContent = fn && ln ? `Username will be: ${fn}.${ln}` : '';
+    }
+    document.getElementById('reg-firstname').addEventListener('input', updatePreview);
+    document.getElementById('reg-lastname').addEventListener('input',  updatePreview);
+
     // ── Registration form submit ───────────────────────────────────────────────
     document.getElementById('register-form').addEventListener('submit', async e => {
       e.preventDefault();
@@ -105,7 +126,8 @@
       errEl.style.color = '';
 
       const body = {
-        username:        document.getElementById('reg-username').value,
+        firstName:       document.getElementById('reg-firstname').value,
+        lastName:        document.getElementById('reg-lastname').value,
         email:           document.getElementById('reg-email').value,
         password:        document.getElementById('reg-password').value,
         confirmPassword: document.getElementById('reg-confirm').value,

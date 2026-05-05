@@ -2,12 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Kongsberg Nexus · Production</title>
+  <title>Normanton Nexus · Production</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/logistics.css">
   <link rel="stylesheet" href="./css/production-nexus.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
 
@@ -46,93 +47,215 @@
   <!-- MAIN -->
   <div class="sap-main pn-main">
 
-    <!-- TILE GRID -->
+    <!-- TILE GRID — grouped by section -->
     <div class="tile-section" id="tile-section">
-      <div class="tile-grid">
 
-        <div class="sap-tile sap-tile--live" data-fn="lineFloor">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
-              <circle cx="7" cy="10" r="1.5" fill="currentColor" stroke="none"/>
-              <circle cx="12" cy="10" r="1.5" fill="currentColor" stroke="none"/>
-              <circle cx="17" cy="10" r="1.5" fill="currentColor" stroke="none"/>
-            </svg>
+      <!-- Production Entry -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Production Entry</div>
+        <div class="tile-grid">
+          <div class="sap-tile sap-tile--live" data-fn="mixingEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M8 12c0-2.21 1.79-4 4-4s4 1.79 4 4-1.79 4-4 4"/><line x1="12" y1="8" x2="12" y2="16"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Mixing</div>
+            <div class="tile-desc">Enter a completed mixing batch and post directly to SAP</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Line Floor</div>
-          <div class="tile-desc">Live production dashboard — active batches across all work centres</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="newBatch">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
-            </svg>
+          <div class="sap-tile sap-tile--live" data-fn="extrusionEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Extrusion</div>
+            <div class="tile-desc">Enter a completed extrusion run and post to SAP</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">New Batch</div>
-          <div class="tile-desc">Start a production run at any work centre</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="activeBatches">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-            </svg>
+          <div class="sap-tile sap-tile--live" data-fn="convolutingEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 010 20M2 12h10"/><path d="M8 8l4 4-4 4"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Convoluting</div>
+            <div class="tile-desc">Enter a completed convoluting run and post to SAP</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Active Batches</div>
-          <div class="tile-desc">All open and in-progress runs across all work centres</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="batchHistory">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
+          <div class="sap-tile sap-tile--live" data-fn="tapewrapEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Tape Wrap</div>
+            <div class="tile-desc">Enter a completed tape wrap run and post to SAP</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Batch History</div>
-          <div class="tile-desc">Search completed and cancelled batches by reference, material or date</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="traceability">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-            </svg>
+          <div class="sap-tile sap-tile--live" data-fn="braidingEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v18M17 3v18"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Braiding</div>
+            <div class="tile-desc">Enter a completed braiding run and post to SAP</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Traceability</div>
-          <div class="tile-desc">Trace any batch back to raw materials through the full production chain</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="scrap">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
-              <path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-            </svg>
+          <div class="sap-tile sap-tile--live" data-fn="coverlineEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M2 12h20"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Coverline</div>
+            <div class="tile-desc">Enter a completed coverline run and post to SAP</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Scrap</div>
-          <div class="tile-desc">Scrap rates and entries by work centre, shift and reason</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="sapReversals">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/>
-            </svg>
+          <div class="sap-tile sap-tile--live" data-fn="drummingEntry">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4.03 3-9 3S3 13.66 3 12"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Drumming</div>
+            <div class="tile-desc">Step-by-step drum entry with BOM validation and SAP backflush</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">SAP Reversals</div>
-          <div class="tile-desc">Search and reverse SAP material document postings</div>
+          <div class="sap-tile sap-tile--wip">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/></svg></div>
+            <span class="tile-badge tile-badge--wip">WIP</span>
+            <div class="tile-title">Ewald</div>
+            <div class="tile-desc">Coming soon</div>
+          </div>
+          <div class="sap-tile sap-tile--wip">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></div>
+            <span class="tile-badge tile-badge--wip">WIP</span>
+            <div class="tile-title">Hose Assembly</div>
+            <div class="tile-desc">Coming soon</div>
+          </div>
         </div>
-
       </div>
+
+      <!-- Production Data -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Production Data</div>
+        <div class="tile-grid">
+          <div class="sap-tile sap-tile--live" data-fn="mixingData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Mixing Data</div>
+            <div class="tile-desc">Filter and export mixing records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="extrusionData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M12 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Extrusion Data</div>
+            <div class="tile-desc">Filter and export extrusion records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="convolutingData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Convoluting Data</div>
+            <div class="tile-desc">Filter and export convoluting records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="tapewrapData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M18 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Tape Wrap Data</div>
+            <div class="tile-desc">Filter and export tape wrap records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="braidingData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M15 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Braiding Data</div>
+            <div class="tile-desc">Filter and export braiding records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="coverlineData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M6 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Coverline Data</div>
+            <div class="tile-desc">Filter and export coverline records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="drummingData">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M15 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Drumming Data</div>
+            <div class="tile-desc">Filter and export drumming records for analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--wip">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M21 9V3"/></svg></div>
+            <span class="tile-badge tile-badge--wip">WIP</span>
+            <div class="tile-title">Ewald Data</div>
+            <div class="tile-desc">Coming soon</div>
+          </div>
+          <div class="sap-tile sap-tile--wip">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M21 9V3"/></svg></div>
+            <span class="tile-badge tile-badge--wip">WIP</span>
+            <div class="tile-title">Hose Assembly Data</div>
+            <div class="tile-desc">Coming soon</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Supervisor -->
+      <div class="pn-section" data-permission="PROD_SUPERVISOR">
+        <div class="pn-section-hdr">Supervisor</div>
+        <div class="tile-grid">
+          <div class="sap-tile sap-tile--live" data-fn="approveScrap">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+            <span class="tile-badge tile-badge--live" style="background:rgba(217,119,6,0.12);color:#D97706;border-color:rgba(217,119,6,0.3)">REVIEW</span>
+            <div class="tile-title">Approve Scrap</div>
+            <div class="tile-desc">Supervisor queue — review and post operator scrap entries to SAP</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="postedScrap">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg></div>
+            <span class="tile-badge tile-badge--live">DATA</span>
+            <div class="tile-title">Posted Scrap</div>
+            <div class="tile-desc">Approved and posted scrap summary by work centre and reason</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="sapReversals">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">SAP Reversals</div>
+            <div class="tile-desc">Search by material doc or batch — select and bulk-reverse postings</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="failedBackflush">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
+            <span class="tile-badge tile-badge--live" style="background:rgba(220,38,38,0.12);color:#DC2626;border-color:rgba(220,38,38,0.3)">ALERTS</span>
+            <div class="tile-title">Failed Backflush</div>
+            <div class="tile-desc">Supervisor queue — records saved locally but rejected by SAP</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="traceability">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Traceability</div>
+            <div class="tile-desc">Trace any batch back through the full production chain</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="batchHistory">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Batch History</div>
+            <div class="tile-desc">Search completed and cancelled batches by reference, material or date</div>
+          </div>
+        </div>
+      </div>
+      <!-- Reports -->
+      <div class="pn-section" data-permission="PROD_SUPERVISOR">
+        <div class="pn-section-hdr">Reports</div>
+        <div class="tile-grid">
+          <div class="sap-tile sap-tile--live" data-fn="reportOutput">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">Production Output</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="reportScrap">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">Scrap Analysis</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="reportSapPerf">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">SAP Performance</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="reportBatches">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">Batch Summary</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="reportShift">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">Shift Performance</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="reportOperator">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">Operator Output</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="reportMaterial">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></div>
+            <span class="tile-badge tile-badge--live">RPT</span>
+            <div class="tile-title">Material Throughput</div>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- RESULT PANEL (shared across all functions) -->
@@ -156,10 +279,11 @@
   <div class="ps-modal-overlay hidden" id="ps-modal-overlay"></div>
 
   <footer class="footer">
-    <span>Kongsberg Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
+    <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
     <span class="footer-right">Production</span>
   </footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="./js/production-nexus.js"></script>
 </body>
 </html>

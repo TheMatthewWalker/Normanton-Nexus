@@ -18,10 +18,16 @@ const DEPT_LABELS = {
   engineering: 'Engineering', management:  'Management',
 };
 
+const ROLE_LEVEL = { operator: 1, admin: 2, superadmin: 3 };
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let editingUserID     = null;
 let approvingUserID   = null;
 let allUsers          = [];
+let allPermissions    = [];
+let sessionRole       = '';
+let sessionUserID     = null;
+let permEditingCode   = null; // null = creating, string = editing
 
 // ── Initialise ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -33,7 +39,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load audit when that section is first opened
   document.querySelector('[data-section="audit"]')
-    .addEventListener('click', () => { if (allAuditLoaded === false) loadAudit(); }, { once: true });
+    .addEventListener('click', () => { if (!allAuditLoaded) loadAudit(); }, { once: true });
+
+  // Load permissions when that section is first opened (superadmin only)
+  const permNav = document.getElementById('nav-permissions');
+  if (permNav) {
+    permNav.addEventListener('click', () => { if (!allPermissionsLoaded) loadPermissions(); }, { once: true });
+  }
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -43,7 +55,16 @@ async function loadSession() {
     if (!data.loggedIn) { location.href = '/'; return; }
     document.getElementById('session-user').textContent = data.username;
     document.getElementById('session-role').textContent = data.role;
+    sessionRole   = data.role;
+    sessionUserID = data.userID || null;
+    applyRoleVisibility();
   } catch { location.href = '/'; }
+}
+
+function applyRoleVisibility() {
+  // Show permissions nav only for superadmin
+  const permNav = document.getElementById('nav-permissions');
+  if (permNav) permNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -64,7 +85,7 @@ async function loadPending() {
   list.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Loading…</div>';
 
   try {
-    const data = await api('/api/admin/pending');
+    const data  = await api('/api/admin/pending');
     const badge = document.getElementById('pending-count');
 
     if (!data.users || data.users.length === 0) {
@@ -81,20 +102,28 @@ async function loadPending() {
     badge.textContent = data.users.length;
     badge.classList.remove('zero');
 
-    list.innerHTML = data.users.map((u, i) => `
-      <div class="pending-card" style="animation-delay:${i * 0.05}s">
-        <div class="pending-avatar">${esc(u.Username.charAt(0).toUpperCase())}</div>
-        <div class="pending-info">
-          <div class="pending-name">${esc(u.Username)}</div>
-          <div class="pending-email">${esc(u.Email)}</div>
-          <div class="pending-meta">Registered ${formatDate(u.CreatedAt)}</div>
-        </div>
-        <div class="pending-actions">
-          <button class="btn-primary" onclick="openApproveModal(${u.UserID}, '${esc(u.Username)}', '${esc(u.Email)}')">
-            Review &amp; Approve
-          </button>
-        </div>
-      </div>`).join('');
+    list.innerHTML = data.users.map((u, i) => {
+      const displayName = (u.FirstName && u.LastName)
+        ? `${esc(u.FirstName)} ${esc(u.LastName)}`
+        : esc(u.Username);
+      return `
+        <div class="pending-card" style="animation-delay:${i * 0.05}s">
+          <div class="pending-avatar">${esc(u.Username.charAt(0).toUpperCase())}</div>
+          <div class="pending-info">
+            <div class="pending-name">${displayName}</div>
+            <div class="pending-email">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;opacity:.7">@${esc(u.Username)}</span>
+              &nbsp;·&nbsp; ${esc(u.Email)}
+            </div>
+            <div class="pending-meta">Registered ${formatDate(u.CreatedAt)}</div>
+          </div>
+          <div class="pending-actions">
+            <button class="btn-primary" onclick="openApproveModal(${u.UserID}, '${esc(u.Username)}', '${esc(u.Email)}')">
+              Review &amp; Approve
+            </button>
+          </div>
+        </div>`;
+    }).join('');
 
   } catch (err) {
     list.innerHTML = `<div class="empty-state">✕ ${esc(err.message)}</div>`;
@@ -104,7 +133,7 @@ async function loadPending() {
 // ── All Users ─────────────────────────────────────────────────────────────────
 async function loadUsers() {
   const tbody = document.getElementById('users-tbody');
-  tbody.innerHTML = '<tr><td colspan="7" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
 
   try {
     const data = await api('/api/admin/users');
@@ -112,7 +141,7 @@ async function loadUsers() {
     document.getElementById('users-count').textContent = allUsers.length;
     renderUsersTable(allUsers);
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="7" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -120,7 +149,7 @@ function renderUsersTable(users) {
   const tbody = document.getElementById('users-tbody');
 
   if (users.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No users found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="loading-cell">No users found</td></tr>';
     return;
   }
 
@@ -135,6 +164,10 @@ function renderUsersTable(users) {
       .map(d => `<span class="dept-tag">${esc(DEPT_LABELS[d] || d)}</span>`)
       .join('');
 
+    const permTags = (u.permissions || [])
+      .map(p => `<span class="perm-code" style="font-size:9px;padding:2px 5px">${esc(p)}</span>`)
+      .join(' ');
+
     return `
       <tr>
         <td><strong>${esc(u.Username)}</strong></td>
@@ -143,6 +176,7 @@ function renderUsersTable(users) {
         <td>${statusBadge}</td>
         <td>${u.LastLogin ? formatDate(u.LastLogin) : '<span style="color:var(--text-muted)">Never</span>'}</td>
         <td><div class="dept-tags">${deptTags || '<span style="color:var(--text-muted);font-size:11px">None</span>'}</div></td>
+        <td><div class="dept-tags">${permTags || '<span style="color:var(--text-muted);font-size:11px">None</span>'}</div></td>
         <td style="text-align:center">
           <button class="btn-icon btn-icon--edit" title="Edit user"
             onclick="openEditModal(${u.UserID})">✎</button>
@@ -164,27 +198,82 @@ function setupSearch() {
 }
 
 // ── Edit User Modal ───────────────────────────────────────────────────────────
-function openEditModal(userID) {
+async function openEditModal(userID) {
   const user = allUsers.find(u => u.UserID === userID);
   if (!user) return;
 
   editingUserID = userID;
   document.getElementById('edit-username').textContent = user.Username;
-  document.getElementById('edit-role').value           = user.Role;
   document.getElementById('edit-active').checked       = !!user.IsActive;
   document.getElementById('edit-locked').checked       = !!user.IsLocked;
   document.getElementById('edit-notes').value          = user.Notes || '';
 
-  updateToggleLabel('edit-active',  'edit-active-label',  'Active',  'Inactive');
-  updateToggleLabel('edit-locked',  'edit-locked-label',  'Locked',  'Unlocked');
+  // Build role dropdown filtered to what this actor can assign
+  const roleEl = document.getElementById('edit-role');
+  roleEl.innerHTML = buildRoleOptions(user.Role);
+  roleEl.value = user.Role;
 
-  document.getElementById('edit-active').addEventListener('change', () =>
-    updateToggleLabel('edit-active', 'edit-active-label', 'Active', 'Inactive'));
-  document.getElementById('edit-locked').addEventListener('change', () =>
-    updateToggleLabel('edit-locked', 'edit-locked-label', 'Locked', 'Unlocked'));
+  updateToggleLabel('edit-active', 'edit-active-label', 'Active',  'Inactive');
+  updateToggleLabel('edit-locked', 'edit-locked-label', 'Locked',  'Unlocked');
+
+  document.getElementById('edit-active').onchange = () =>
+    updateToggleLabel('edit-active', 'edit-active-label', 'Active', 'Inactive');
+  document.getElementById('edit-locked').onchange = () =>
+    updateToggleLabel('edit-locked', 'edit-locked-label', 'Locked', 'Unlocked');
 
   renderDeptGrid('edit-depts', user.departments || []);
+
+  // Load user permissions and populate the tags + select
+  await loadUserPermissionsForModal(userID, user.permissions || []);
+
   document.getElementById('edit-overlay').classList.add('open');
+}
+
+function buildRoleOptions(currentRole) {
+  // Admin can only assign up to operator; superadmin can assign anything
+  const allRoles = [
+    { val: 'operator',   label: 'Operator — standard access' },
+    { val: 'admin',      label: 'Admin — user approval &amp; department assignment' },
+    { val: 'superadmin', label: 'Superadmin — full access + raw SQL' },
+  ];
+  const actorLevel = ROLE_LEVEL[sessionRole] ?? 0;
+  return allRoles
+    .filter(r => sessionRole === 'superadmin' || ROLE_LEVEL[r.val] < actorLevel)
+    .map(r => `<option value="${r.val}">${r.label}</option>`)
+    .join('');
+}
+
+async function loadUserPermissionsForModal(userID, currentPerms) {
+  // Populate permission tags
+  renderPermTags('edit-perms-tags', currentPerms, userID);
+
+  // Populate "add permission" dropdown with all perms not already assigned
+  const selectEl = document.getElementById('edit-perm-select');
+  if (!allPermissions.length) {
+    try {
+      const data = await api('/api/admin/permissions');
+      allPermissions = data.permissions || [];
+    } catch {
+      allPermissions = [];
+    }
+  }
+  const available = allPermissions.filter(p => !currentPerms.includes(p.PermissionCode));
+  selectEl.innerHTML = '<option value="">— Grant a permission —</option>' +
+    available.map(p => `<option value="${esc(p.PermissionCode)}">${esc(p.PermissionCode)} — ${esc(p.PermissionName)}</option>`).join('');
+}
+
+function renderPermTags(containerId, perms, userID) {
+  const el = document.getElementById(containerId);
+  if (!perms.length) {
+    el.innerHTML = '<span class="perm-tag--empty">No permissions assigned</span>';
+    return;
+  }
+  el.innerHTML = perms.map(code => `
+    <span class="perm-tag">
+      ${esc(code)}
+      <button type="button" title="Revoke ${esc(code)}"
+        onclick="removeUserPermission(${userID}, '${esc(code)}')">×</button>
+    </span>`).join('');
 }
 
 function closeEditModal() {
@@ -213,14 +302,64 @@ async function saveUser() {
   }
 }
 
+// ── User Permission Add / Remove ──────────────────────────────────────────────
+async function addUserPermission() {
+  if (!editingUserID) return;
+  const selectEl = document.getElementById('edit-perm-select');
+  const code = selectEl.value;
+  if (!code) return;
+
+  try {
+    await api('/api/admin/users/' + editingUserID + '/permissions', 'POST', { permissionCode: code });
+
+    // Update local state
+    const user = allUsers.find(u => u.UserID === editingUserID);
+    if (user) {
+      if (!user.permissions) user.permissions = [];
+      user.permissions.push(code);
+      await loadUserPermissionsForModal(editingUserID, user.permissions);
+    }
+    showToast(`Permission ${code} granted`, 'success');
+  } catch (err) {
+    showToast('Grant failed: ' + err.message, 'error');
+  }
+}
+
+async function removeUserPermission(userID, code) {
+  try {
+    await api(`/api/admin/users/${userID}/permissions/${encodeURIComponent(code)}`, 'DELETE');
+
+    const user = allUsers.find(u => u.UserID === userID);
+    if (user) {
+      user.permissions = (user.permissions || []).filter(p => p !== code);
+      await loadUserPermissionsForModal(userID, user.permissions);
+    }
+    showToast(`Permission ${code} revoked`, 'success');
+  } catch (err) {
+    showToast('Revoke failed: ' + err.message, 'error');
+  }
+}
+
 // ── Approve Modal ─────────────────────────────────────────────────────────────
 function openApproveModal(userID, username, email) {
   approvingUserID = userID;
   document.getElementById('approve-info').innerHTML =
     `<strong>${esc(username)}</strong><br>${esc(email)}`;
-  document.getElementById('approve-role').value = 'viewer';
+
+  // Build approve role dropdown
+  const roleEl = document.getElementById('approve-role');
+  roleEl.innerHTML = buildApproveRoleOptions();
+  roleEl.value = 'operator';
+
   renderDeptGrid('approve-depts', []);
   document.getElementById('approve-overlay').classList.add('open');
+}
+
+function buildApproveRoleOptions() {
+  const actorLevel = ROLE_LEVEL[sessionRole] ?? 0;
+  const opts = [{ val: 'operator', label: 'Operator' }];
+  if (actorLevel >= ROLE_LEVEL.admin) opts.push({ val: 'admin', label: 'Admin' });
+  return opts.map(o => `<option value="${o.val}">${o.label}</option>`).join('');
 }
 
 function closeApproveModal() {
@@ -295,6 +434,125 @@ async function loadAudit() {
 document.getElementById('audit-filter')?.addEventListener('change', () => {
   if (allAuditLoaded) loadAudit();
 });
+
+// ── Permission Definitions (superadmin only) ──────────────────────────────────
+let allPermissionsLoaded = false;
+
+async function loadPermissions() {
+  const tbody = document.getElementById('perms-tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
+
+  try {
+    const data   = await api('/api/admin/permissions');
+    allPermissions = data.permissions || [];
+    allPermissionsLoaded = true;
+    renderPermissionsTable(allPermissions);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function renderPermissionsTable(perms) {
+  const tbody = document.getElementById('perms-tbody');
+
+  if (!perms.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="loading-cell">No permissions defined yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = perms.map(p => `
+    <tr>
+      <td><span class="perm-code">${esc(p.PermissionCode)}</span></td>
+      <td>${esc(p.PermissionName)}</td>
+      <td><span class="badge badge--operator" style="font-size:9px">${esc(p.Category)}</span></td>
+      <td style="color:var(--text-dim)">${p.Description ? esc(p.Description) : '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td style="text-align:center">
+        <button class="btn-icon btn-icon--edit" title="Edit" style="margin-right:4px"
+          onclick="openEditPermModal('${esc(p.PermissionCode)}')">✎</button>
+        <button class="btn-icon btn-icon--delete" title="Delete"
+          onclick="confirmDeletePermission('${esc(p.PermissionCode)}')">✕</button>
+      </td>
+    </tr>`).join('');
+}
+
+function openCreatePermModal() {
+  permEditingCode = null;
+  document.getElementById('perm-modal-title').textContent = 'New Permission';
+  document.getElementById('perm-code-input').value       = '';
+  document.getElementById('perm-code-input').disabled    = false;
+  document.getElementById('perm-code-hint').style.display = '';
+  document.getElementById('perm-name-input').value        = '';
+  document.getElementById('perm-category-input').value    = '';
+  document.getElementById('perm-description-input').value = '';
+  document.getElementById('perm-overlay').classList.add('open');
+}
+
+function openEditPermModal(code) {
+  const perm = allPermissions.find(p => p.PermissionCode === code);
+  if (!perm) return;
+
+  permEditingCode = code;
+  document.getElementById('perm-modal-title').textContent = 'Edit Permission';
+  document.getElementById('perm-code-input').value        = perm.PermissionCode;
+  document.getElementById('perm-code-input').disabled     = true;
+  document.getElementById('perm-code-hint').style.display = 'none';
+  document.getElementById('perm-name-input').value        = perm.PermissionName;
+  document.getElementById('perm-category-input').value    = perm.Category;
+  document.getElementById('perm-description-input').value = perm.Description || '';
+  document.getElementById('perm-overlay').classList.add('open');
+}
+
+function closePermModal() {
+  permEditingCode = null;
+  document.getElementById('perm-overlay').classList.remove('open');
+}
+
+async function savePermission() {
+  const code        = document.getElementById('perm-code-input').value.trim().toUpperCase();
+  const name        = document.getElementById('perm-name-input').value.trim();
+  const category    = document.getElementById('perm-category-input').value.trim();
+  const description = document.getElementById('perm-description-input').value.trim();
+
+  if (!name || !category) {
+    showToast('Display name and category are required', 'error');
+    return;
+  }
+
+  try {
+    if (permEditingCode) {
+      await api(`/api/admin/permissions/${encodeURIComponent(permEditingCode)}`, 'PUT', {
+        permissionName: name, description, category,
+      });
+    } else {
+      if (!code) { showToast('Permission code is required', 'error'); return; }
+      await api('/api/admin/permissions', 'POST', {
+        permissionCode: code, permissionName: name, description, category,
+      });
+    }
+
+    closePermModal();
+    allPermissionsLoaded = false;
+    allPermissions = [];
+    await loadPermissions();
+    showToast(permEditingCode ? 'Permission updated' : 'Permission created', 'success');
+  } catch (err) {
+    showToast('Save failed: ' + err.message, 'error');
+  }
+}
+
+async function confirmDeletePermission(code) {
+  if (!confirm(`Delete permission "${code}"?\n\nThis will also remove it from all users who currently hold it.`)) return;
+
+  try {
+    await api(`/api/admin/permissions/${encodeURIComponent(code)}`, 'DELETE');
+    allPermissionsLoaded = false;
+    allPermissions = [];
+    await loadPermissions();
+    showToast(`Permission ${code} deleted`, 'success');
+  } catch (err) {
+    showToast('Delete failed: ' + err.message, 'error');
+  }
+}
 
 // ── Department Grid Helper ────────────────────────────────────────────────────
 function renderDeptGrid(containerId, checked) {
@@ -485,10 +743,10 @@ function setupSqlConsole() {
       sqlLastRows = [];
       const resultEl  = document.getElementById('sql-result');
       const countEl   = document.getElementById('sql-row-count');
-      const exportBtn = document.getElementById('sql-export');
-      if (resultEl)  resultEl.innerHTML = '<div class="empty-state">No query executed yet.</div>';
-      if (countEl)   countEl.style.display = 'none';
-      if (exportBtn) exportBtn.style.display = 'none';
+      const exportBtn2 = document.getElementById('sql-export');
+      if (resultEl)   resultEl.innerHTML = '<div class="empty-state">No query executed yet.</div>';
+      if (countEl)    countEl.style.display = 'none';
+      if (exportBtn2) exportBtn2.style.display = 'none';
     });
   }
 }

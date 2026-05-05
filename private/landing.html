@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Kongsberg Nexus</title>
+  <title>Normanton Nexus</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/landing.css">
+  <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
 
@@ -13,7 +14,7 @@
   <header class="header">
     <div class="header-left">
       <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
-      <span class="brand-name">Kongsberg Nexus</span>
+      <span class="brand-name">Normanton Nexus</span>
       <div class="brand-sep"></div>
       <span class="brand-module">Enterprise Portal</span>
     </div>
@@ -40,7 +41,7 @@
       </div>
 
       <h1 class="hero-title">Good <span id="hero-greeting">day</span>, <span id="hero-username">operator</span>.</h1>
-      <p class="hero-sub">Kongsberg Nexus — unified operations portal. Select your area below.</p>
+      <p class="hero-sub">Normanton Nexus — unified operations portal. Select your area below.</p>
 
       <!-- System status ribbon -->
       <div class="hero-ribbon" id="hero-ribbon">
@@ -255,7 +256,28 @@
         </div>
       </a>
 
-      <a href="./admin.html" class="dept-card dept-card--admin" style="--delay:0.36s">
+      <a href="./production-nexus.html" class="dept-card" style="--delay:0.36s">
+        <div class="dept-card-top">
+          <div class="dept-icon">
+            <svg viewBox="0 0 28 28" fill="none">
+              <ellipse cx="14" cy="7" rx="8" ry="3" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M6 7v14c0 1.66 3.58 3 8 3s8-1.34 8-3V7" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M6 14c0 1.66 3.58 3 8 3s8-1.34 8-3" stroke="currentColor" stroke-width="1.8"/>
+            </svg>
+          </div>
+          <div class="dept-info">
+            <div class="dept-name">Production Nexus</div>
+            <div class="dept-desc">Mixing, drumming, SAP backflush &amp; scrap</div>
+          </div>
+          <span class="dept-status-dot dept-status-dot--live"></span>
+        </div>
+        <div class="dept-card-foot">
+          <span class="dept-tag dept-tag--live">Live</span>
+          <div class="dept-arrow">→</div>
+        </div>
+      </a>
+
+      <a href="./admin.html" class="dept-card dept-card--admin" style="--delay:0.40s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -282,7 +304,7 @@
 
   <!-- ── FOOTER ─────────────────────────────────────────────────────────────── -->
   <footer class="footer">
-    <span>Kongsberg Nexus &middot; Authorised access only &middot; All activity is logged</span>
+    <span>Normanton Nexus &middot; Authorised access only &middot; All activity is logged</span>
     <span id="footer-build">Build 1.0 &middot; <span id="footer-date"></span></span>
   </footer>
 
@@ -291,7 +313,7 @@
     <div class="gemini-window" id="gemini-window">
       <div class="gemini-header">
         <div>
-          <div class="gemini-title">Kongsberg Nexus</div>
+          <div class="gemini-title">Normanton Nexus</div>
           <div class="gemini-subtitle">Portal assistant</div>
         </div>
         <button type="button" class="gemini-close" id="gemini-close" aria-label="Close">&times;</button>

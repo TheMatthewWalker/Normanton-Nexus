@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   nexus-common.css  —  Kongsberg Nexus  —  Shared internal page chrome
+   nexus-common.css  —  Normanton Nexus  —  Shared internal page chrome
    Load LAST so it overrides the per-department CSS.
    Does not touch --accent / --accent2 / --accent-dim (per-page colours).
    ═══════════════════════════════════════════════════════════════════════════ */
