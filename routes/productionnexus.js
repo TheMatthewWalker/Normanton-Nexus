@@ -1327,6 +1327,7 @@ router.get('/scrap/entries', async (req, res) => {
              sr.ReasonCode, sr.ReasonDescription,
              se.Quantity, se.UnitOfMeasure, se.EnteredAt, se.Notes,
              se.IsApproved, se.SAPPosted, se.SAPMaterialDocument, se.SAPErrorMessage,
+             se.IsReversed,
              pu.Username AS EnteredBy,
              COALESCE(mx.MixRef, dr.DrumRef, ex.ExtRef, co.ConvRef,
                       br.BraidRef, cl.CovRef, tw.TWRef, ew.EwaldRef, ha.HARef) AS BatchRef,
@@ -1346,7 +1347,43 @@ router.get('/scrap/entries', async (req, res) => {
       LEFT JOIN prod.HoseAssembly ha ON ha.HoseAssemblyID = se.ProcessRecordID AND se.ProcessCode = 'HA'
       WHERE  1=1 ${where}
       ORDER BY se.EnteredAt DESC`);
-    res.json({ success: true, data: r.recordset });
+
+    const entries = r.recordset;
+
+    // Attach material documents from ScrapMaterialDocuments for entries that have them
+    if (entries.length) {
+      const ids = entries.map(e => e.ScrapID);
+      // Build parameterised IN list
+      const docsReq = pool.request();
+      const idParams = ids.map((id, i) => {
+        docsReq.input(`sid${i}`, sql.Int, id);
+        return `@sid${i}`;
+      }).join(',');
+
+      const docsR = await docsReq.query(`
+        SELECT ScrapID, MaterialDocument, IsReversed, ReversalDocument
+        FROM   prod.ScrapMaterialDocuments
+        WHERE  ScrapID IN (${idParams})
+        ORDER  BY ScrapDocumentID
+      `);
+
+      // Group by ScrapID
+      const docMap = {};
+      for (const d of docsR.recordset) {
+        if (!docMap[d.ScrapID]) docMap[d.ScrapID] = [];
+        docMap[d.ScrapID].push({
+          materialDocument: d.MaterialDocument,
+          isReversed:       d.IsReversed,
+          reversalDocument: d.ReversalDocument,
+        });
+      }
+
+      for (const entry of entries) {
+        entry.materialDocuments = docMap[entry.ScrapID] || [];
+      }
+    }
+
+    res.json({ success: true, data: entries });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 

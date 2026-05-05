@@ -1511,11 +1511,11 @@ async function openMeterProcessDetail(processCode, recordID, row) {
 
     const scrapHtml = scrap.length
       ? `<table class="pn-batch-table" style="margin:0">
-          <thead><tr><th>Reason</th><th>Qty (KG)</th><th>Material Document</th><th>SAP Status</th></tr></thead>
+          <thead><tr><th>Reason</th><th>Qty (KG)</th><th>SAP Material Documents</th><th>SAP Status</th></tr></thead>
           <tbody>${scrap.map(s=>`<tr>
             <td>${esc(s.ReasonDescription||s.ReasonCode)}</td>
             <td class="pn-batch-mono" style="color:var(--error)">${Number(s.Quantity).toFixed(3)}</td>
-            <td class="pn-batch-mono">${esc(s.SAPMaterialDocument||'—')}</td>
+            <td class="pn-batch-mono">${scrapDocsCell(s)}</td>
             <td>${s.SAPPosted?`<span class="pn-status pn-status--complete">Posted</span>`:s.IsApproved?`<span class="pn-status pn-status--cancelled" title="${esc(s.SAPErrorMessage||'')}">Failed</span>`:`<span class="pn-status pn-status--on-hold">Pending</span>`}</td>
           </tr>`).join('')}</tbody>
         </table>`
@@ -1824,11 +1824,11 @@ async function openDrummingDetailModal(drummingID, row) {
     // Scrap section
     const scrapHtml = scrap.length
       ? `<table class="pn-batch-table" style="margin:0">
-          <thead><tr><th>Reason</th><th>Qty (KG)</th><th>Material Document</th><th>SAP Status</th></tr></thead>
+          <thead><tr><th>Reason</th><th>Qty (KG)</th><th>SAP Material Documents</th><th>SAP Status</th></tr></thead>
           <tbody>${scrap.map(s => `<tr>
             <td>${esc(s.ReasonDescription || s.ReasonCode)}</td>
             <td class="pn-batch-mono" style="color:var(--error)">${Number(s.Quantity).toFixed(3)}</td>
-            <td class="pn-batch-mono">${esc(s.SAPMaterialDocument || '—')}</td>
+            <td class="pn-batch-mono">${scrapDocsCell(s)}</td>
             <td>${s.SAPPosted
               ? `<span class="pn-status pn-status--complete">Posted</span>`
               : s.IsApproved && !s.SAPPosted
@@ -1936,7 +1936,8 @@ async function runApproveScrap() {
           const el = document.getElementById(`scrap-result-${r.scrapID}`);
           if (r.success) {
             ok++;
-            if (el) el.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(r.materialDocument||'')}</span>`;
+            const docStr = (r.materialDocuments || []).join(', ') || r.materialDocument || '';
+            if (el) el.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(docStr)}</span>`;
           } else {
             fail++;
             if (el) el.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(r.error)}">✗ Failed</span>`;
@@ -2082,7 +2083,10 @@ async function runPostedScrap() {
             }),
           });
           if (!res.success) throw new Error(res.error);
-          if (msgEl) { msgEl.style.color = 'var(--accent)'; msgEl.textContent = `✓ Posted — MatDoc: ${res.data?.materialDocument || '—'}`; }
+          if (msgEl) {
+            const docs = (res.data?.materialDocuments || []).join(', ') || res.data?.materialDocument || '—';
+            msgEl.style.color = 'var(--accent)'; msgEl.textContent = `✓ Posted — MatDocs: ${docs}`;
+          }
           btn.disabled = false; btn.textContent = 'Retry';
           // Fade out the card after success
           const card = document.getElementById(`failed-scrap-${scrapID}`);
@@ -2097,6 +2101,20 @@ async function runPostedScrap() {
   } catch (err) {
     body.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
   }
+}
+
+function scrapDocsCell(s) {
+  if (s.materialDocuments?.length) {
+    return s.materialDocuments.map(d =>
+      `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;
+        padding:1px 5px;border-radius:3px;margin-right:3px;
+        background:${d.isReversed ? 'var(--warn-dim)' : 'var(--success-dim)'};
+        color:${d.isReversed ? 'var(--warn)' : 'var(--success)'};
+        text-decoration:${d.isReversed ? 'line-through' : 'none'}"
+        title="${d.isReversed ? 'Reversed' : 'Posted'}">${esc(d.materialDocument)}</span>`
+    ).join('');
+  }
+  return `<span style="color:var(--text-muted)">${esc(s.SAPMaterialDocument || '—')}</span>`;
 }
 
 async function openScrapDrilldown(processCode, reasonCode, reasonDescription) {
@@ -2142,11 +2160,11 @@ async function openScrapDrilldown(processCode, reasonCode, reasonDescription) {
             <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--error)">${total.toFixed(3)} ${esc(uom)}</div>
           </div>
           <table class="pn-batch-table" style="margin:0">
-            <thead><tr><th>Batch</th><th>Qty</th><th>Material Doc</th><th>Entered</th><th>By</th></tr></thead>
+            <thead><tr><th>Batch</th><th>Qty</th><th>SAP Material Documents</th><th>Entered</th><th>By</th></tr></thead>
             <tbody>${rows.map(r => `<tr>
               <td class="pn-batch-ref">${esc(r.BatchRef || r.ProcessCode+String(r.ProcessRecordID).padStart(8,'0'))}</td>
               <td class="pn-batch-mono" style="color:var(--error)">${Number(r.Quantity).toFixed(3)}</td>
-              <td class="pn-batch-mono">${esc(r.SAPMaterialDocument || '—')}</td>
+              <td class="pn-batch-mono">${scrapDocsCell(r)}</td>
               <td class="pn-batch-mono">${fmt(r.EnteredAt)}</td>
               <td>${esc(r.EnteredBy||'—')}</td>
             </tr>`).join('')}</tbody>
