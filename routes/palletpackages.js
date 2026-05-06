@@ -92,7 +92,7 @@ router.post('/', async (req, res) => {
         const pool   = await getPool();
         const result = await pool.request()
             .input('palletID',            sql.Int,          palletID)
-            .input('packagingID',         sql.NVarChar(2),  packagingID ?? null)
+            .input('packagingID',         sql.NVarChar(3),  packagingID ?? null)
             .input('palletLayer',         sql.Int,          palletLayer ?? null)
             .input('sapMaterial',         sql.NVarChar(18), sapMaterial ?? null)
             .input('sapQuantity',         sql.Decimal(18,3),sapQuantity ?? null)
