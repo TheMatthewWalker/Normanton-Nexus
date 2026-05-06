@@ -116,7 +116,7 @@ router.get('/open-picksheets', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query(`SELECT dm.deliveryID, d.destinationName, dm.dueDate,
+            .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dueDate,
                            dm.deliveryService, dm.picksheetComment, dm.deliveryPriority
                     FROM Logistics.dbo.DeliveryMain dm
                     LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
@@ -199,6 +199,21 @@ router.get('/:deliveryId/pallets', async (req, res) => {
                     WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                     ORDER BY pm.palletCreationDate ASC`);
         res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Mark delivery as complete ──
+router.patch('/:deliveryId/complete', async (req, res) => {
+    try {
+        const pool = await getPool();
+        await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`UPDATE Logistics.dbo.DeliveryMain
+                    SET completionStatus = 1, completionDate = GETDATE()
+                    WHERE deliveryID = @deliveryId`);
+        res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

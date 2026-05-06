@@ -575,7 +575,7 @@ function renderPicksheets(rows) {
       const tbody = bucketMap[b.key].map(r => {
         const due  = r.dueDate ? new Date(r.dueDate).toLocaleDateString('en-GB') : '—';
         const flag = b.key === 'priority' ? '<span class="ps-priority-flag"></span>' : '';
-        return `<tr class="ps-row" data-id="${esc(String(r.deliveryID))}" data-dest="${esc(r.destinationName ?? '')}">
+        return `<tr class="ps-row" data-id="${esc(String(r.deliveryID))}" data-dest="${esc(r.destinationName ?? '')}" data-custid="${esc(String(r.customerID ?? ''))}">
           <td>${flag}${esc(String(r.deliveryID))}</td>
           <td>${esc(r.destinationName ?? '—')}</td>
           <td>${esc(due)}</td>
@@ -603,16 +603,16 @@ function renderPicksheets(rows) {
   });
 
   document.querySelectorAll('.ps-row').forEach(tr => {
-    tr.addEventListener('click', () => showPickedPallets(tr.dataset.id, tr.dataset.dest));
+    tr.addEventListener('click', () => showPickedPallets(tr.dataset.id, tr.dataset.dest, tr.dataset.custid));
   });
 }
 
 // ── Pallet list modal ─────────────────────────────────────────────────────────
-let _palletListCtx = null; // { deliveryId, destName } for refresh after builder closes
+let _palletListCtx = null; // { deliveryId, destName, custId } for refresh after builder closes
 
-async function showPickedPallets(deliveryId, destName) {
+async function showPickedPallets(deliveryId, destName, custId) {
   if (!await checkSession()) return;
-  _palletListCtx = { deliveryId, destName };
+  _palletListCtx = { deliveryId, destName, custId: custId || '' };
 
   const overlay = document.getElementById('ps-modal-overlay');
   overlay.classList.remove('hidden');
@@ -629,6 +629,7 @@ async function showPickedPallets(deliveryId, destName) {
         <div class="sap-loading"><div class="spinner"></div>Fetching pallets…</div>
       </div>
       <div class="ps-modal-actions">
+        <button class="btn-secondary" onclick="completeDelivery()">Complete Delivery ✓</button>
         <button class="btn-submit" onclick="openPalletBuilder()">+ Add Pallet</button>
       </div>
     </div>`;
@@ -790,8 +791,10 @@ async function openPalletBuilder() {
   if (!await checkSession()) return;
   const { deliveryId, destName } = _palletListCtx || {};
 
-  pb = { deliveryId, destName, phase: 1, palletId: null, palletType: null,
-         palletTypeData: null, allowedPackIds: [], allPalletTypes: [],
+  const { custId } = _palletListCtx || {};
+  pb = { deliveryId, destName, customerId: custId || '', palletLocation: '',
+         phase: 1, palletId: null, palletType: null,
+         palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
 
   const overlay = getPbOverlay();
@@ -827,8 +830,10 @@ async function openPalletBuilderOnExisting(palletId) {
   if (!await checkSession()) return;
   const { deliveryId, destName } = _palletListCtx || {};
 
-  pb = { deliveryId, destName, phase: 2, palletId, palletType: null,
-         palletTypeData: null, allowedPackIds: [], allPalletTypes: [],
+  const { custId } = _palletListCtx || {};
+  pb = { deliveryId, destName, customerId: custId || '', palletLocation: '',
+         phase: 2, palletId, palletType: null,
+         palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
 
   const overlay = getPbOverlay();
@@ -863,6 +868,7 @@ async function openPalletBuilderOnExisting(palletId) {
     if (palletRecord) {
       pb.palletType     = palletRecord.palletType;
       pb.palletTypeData = pb.allPalletTypes.find(t => t.palletID === pb.palletType);
+      pb.palletLocation = palletRecord.palletLocation || '';
     }
 
     const existing  = pkgsRes.data || pkgsRes;
@@ -902,13 +908,9 @@ function renderBuilderPhase1() {
 
       <div class="pb-row" style="margin-top:8px">
         <div class="pb-field">
-          <label class="pb-label">Location <span style="opacity:.5;font-weight:400">(optional)</span></label>
+          <label class="pb-label">Location <span style="opacity:.5;font-weight:400">(optional — required before finishing)</span></label>
           <input class="pb-input" id="pb-location" type="text" maxlength="50"
             placeholder="e.g. WH-A1" autocomplete="off">
-        </div>
-        <div class="pb-field pb-field--short">
-          <label class="pb-label">Category <span style="opacity:.5;font-weight:400">(opt.)</span></label>
-          <input class="pb-input" id="pb-category" type="text" maxlength="2" placeholder="A1">
         </div>
       </div>
 
@@ -932,7 +934,6 @@ async function createPallet() {
   if (!pb.palletType) return;
   const td       = pb.palletTypeData;
   const location = document.getElementById('pb-location').value.trim();
-  const category = document.getElementById('pb-category').value.trim();
   const btn      = document.getElementById('pb-create-btn');
 
   btn.disabled = true;
@@ -952,7 +953,7 @@ async function createPallet() {
         palletWidth:       td?.palletWidth  ?? null,
         palletHeight:      td?.palletHeight ?? null,
         palletRemoved:     0,
-        palletCategory:    category || null,
+        palletCategory:    null,
         palletLocation:    location || null,
         palletCreationDate: new Date().toISOString(),
         palletFinishDate:  null,
@@ -977,6 +978,7 @@ async function createPallet() {
 
     // Validation endpoint returns full PackagingData rows (BIGINT packagingID included)
     pb.allowedPackaging = rows;
+    pb.palletLocation = location;
     pb.packages  = [];
     pb.nextLayer = 1;
 
@@ -989,16 +991,52 @@ async function createPallet() {
 }
 
 // ── Builder Phase 2: add packages ────────────────────────────────────────────
+function renderPackagingGroups() {
+  if (!pb.allowedPackaging.length) return '';
+  const groups = {};
+  pb.allowedPackaging.forEach(p => {
+    const mat = p.packMaterial || 'Other';
+    if (!groups[mat]) groups[mat] = [];
+    groups[mat].push(p);
+  });
+  return Object.entries(groups).map(([mat, pkgs]) => `
+    <div class="pb-pkg-group">
+      <div class="pb-pkg-group-label">${esc(mat)}</div>
+      <div class="pb-pkg-opts-row">
+        ${pkgs.map(p => `
+          <label class="pb-pkg-opt">
+            <input type="radio" name="pb-pack" value="${esc(p.packagingID)}">
+            <span class="pb-pkg-opt-inner">
+              <strong>${esc(p.packagingID)}</strong>
+              <span>${esc(p.packDescription || '')}</span>
+              ${p.packWeight != null ? `<span>${p.packWeight} kg</span>` : ''}
+            </span>
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
 function renderBuilderPhase2() {
-  const td    = pb.palletTypeData;
-  const label = td ? `${td.palletID} · ${td.palletDescription || ''}` : `Pallet #${pb.palletId}`;
+  const td       = pb.palletTypeData;
+  const label    = td ? `${td.palletID} · ${td.palletDescription || ''}` : `Pallet #${pb.palletId}`;
+  const hasPackaging = pb.allowedPackaging.length > 0;
+  const locRequired  = !pb.palletLocation;
 
   document.getElementById('pb-body').innerHTML = `
     <div class="pb-phase2">
 
+      <!-- LEFT: running pallet card -->
       <div class="pb-running">
         <div class="pb-running-title">${esc(label)}</div>
-        ${td ? `<div class="pb-running-dims">${[td.palletLength,td.palletWidth,td.palletHeight].filter(Boolean).join('×')} mm</div>` : ''}
+        ${td ? `<div class="pb-running-dims">${[td.palletLength,td.palletWidth,td.palletHeight].filter(Boolean).join('×')} mm · ${td.palletHeight ?? 0} cm base</div>` : ''}
+        <div class="pb-running-loc">
+          <label class="pb-label" style="margin-bottom:4px">
+            Location${locRequired ? ' <span style="color:var(--error)">*</span>' : ''}
+          </label>
+          <input class="pb-input${locRequired ? ' pb-input--req' : ''}" id="pb-loc-running"
+            type="text" maxlength="50" value="${esc(pb.palletLocation)}"
+            placeholder="Required to finish">
+        </div>
         <div class="pb-running-count" id="pb-pkg-count">${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}</div>
         <div class="pb-running-list" id="pb-running-list">${renderRunningList()}</div>
         <div class="pb-running-actions">
@@ -1006,68 +1044,24 @@ function renderBuilderPhase2() {
         </div>
       </div>
 
+      <!-- RIGHT: add package form or no-packaging message -->
+      ${hasPackaging ? `
       <div class="pb-form">
         <div class="pb-section-label">Packaging Type</div>
-        <div class="pb-pkg-options">
-          ${pb.allowedPackaging.length
-            ? pb.allowedPackaging.map(p => `
-                <label class="pb-pkg-opt">
-                  <input type="radio" name="pb-pack" value="${esc(p.packagingID)}">
-                  <span class="pb-pkg-opt-inner">
-                    <strong>${esc(p.packagingID)}</strong>
-                    <span>${esc(p.packDescription || p.packMaterial || '')}</span>
-                    ${p.packWeight != null ? `<span>${p.packWeight} kg</span>` : ''}
-                  </span>
-                </label>`).join('')
-            : `<span style="font-size:12px;color:var(--text-muted)">No packaging types configured for this pallet type.</span>`}
-        </div>
+        <div class="pb-pkg-groups">${renderPackagingGroups()}</div>
 
-        <div class="pb-row" style="margin-top:4px">
+        <div class="pb-row" style="margin-top:12px">
           <div class="pb-field pb-field--short">
             <label class="pb-label">Pallet Layer</label>
             <input class="pb-input" id="pb-layer" type="number" min="1" step="1" value="${pb.nextLayer}">
           </div>
         </div>
 
-        <div class="pb-section-label" style="margin-top:4px">SAP Details</div>
-
-        <div class="pb-sap-grid">
-          <div class="pb-field pb-field--wide">
-            <label class="pb-label">SAP Material <span class="pb-scan-hint">scan / type</span></label>
-            <input class="pb-input pb-scan" id="pb-mat" type="text" maxlength="18"
-              placeholder="Material number" autocomplete="off" autocorrect="off" spellcheck="false">
-          </div>
-          <div class="pb-field pb-field--short">
-            <label class="pb-label">Quantity</label>
-            <input class="pb-input" id="pb-qty" type="number" step="0.001" min="0.001" placeholder="0.000">
-          </div>
-        </div>
-
-        <div class="pb-sap-grid">
+        <div class="pb-row" style="margin-top:8px">
           <div class="pb-field">
-            <label class="pb-label">SAP Batch <span class="pb-scan-hint">scan / type</span></label>
+            <label class="pb-label">Batch Number <span class="pb-scan-hint">scan / type</span></label>
             <input class="pb-input pb-scan" id="pb-batch" type="text" maxlength="10"
               placeholder="Batch number" autocomplete="off" autocorrect="off" spellcheck="false">
-          </div>
-          <div class="pb-field">
-            <label class="pb-label">SAP Delivery</label>
-            <input class="pb-input" id="pb-deliv" type="text" maxlength="10"
-              value="${esc(String(pb.deliveryId))}" placeholder="Delivery no.">
-          </div>
-          <div class="pb-field pb-field--short">
-            <label class="pb-label">Del. Item</label>
-            <input class="pb-input" id="pb-delitem" type="text" maxlength="6" placeholder="000010">
-          </div>
-        </div>
-
-        <div class="pb-sap-grid">
-          <div class="pb-field">
-            <label class="pb-label">SAP Customer</label>
-            <input class="pb-input" id="pb-cust" type="text" maxlength="10" placeholder="Customer no.">
-          </div>
-          <div class="pb-field pb-field--wide">
-            <label class="pb-label">Customer Material</label>
-            <input class="pb-input" id="pb-custmat" type="text" maxlength="18" placeholder="Customer material no.">
           </div>
         </div>
 
@@ -1076,18 +1070,23 @@ function renderBuilderPhase2() {
           <button class="btn-submit" onclick="addPackage()">+ Add Package</button>
         </div>
       </div>
+      ` : `
+      <div class="pb-no-pkg-panel">
+        <div class="pb-no-pkg-msg">
+          <div style="font-size:28px;margin-bottom:10px;opacity:.3">📦</div>
+          <div style="font-weight:700;margin-bottom:6px">No packaging required</div>
+          <div style="font-size:12px;color:var(--text-muted)">
+            This pallet type does not carry packaged items.<br>
+            Enter the location and finish when ready.
+          </div>
+        </div>
+      </div>`}
 
     </div>`;
 
-  // Scanner-friendly: Enter advances to next relevant field
-  document.getElementById('pb-mat').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('pb-qty').focus(); }
-  });
-  document.getElementById('pb-batch').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('pb-deliv').focus(); }
-  });
-
-  document.getElementById('pb-mat').focus();
+  if (hasPackaging) {
+    document.getElementById('pb-batch').focus();
+  }
 }
 
 function renderRunningList() {
@@ -1097,26 +1096,32 @@ function renderRunningList() {
     <div class="pb-running-item">
       <span class="pb-running-layer">Layer ${p.palletLayer}</span>
       <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
-      <span class="pb-running-mat">${esc(p.sapMaterial || '—')}</span>
-      <span class="pb-running-qty">${p.sapQuantity != null ? Number(p.sapQuantity).toFixed(3) : ''}</span>
-      ${p.sapBatch ? `<span class="pb-running-batch">Batch: ${esc(p.sapBatch)}</span>` : ''}
+      ${p.sapBatch ? `<span class="pb-running-batch">${esc(p.sapBatch)}</span>` : ''}
     </div>`).join('');
 }
 
-async function addPackage() {
-  const packInput   = document.querySelector('input[name="pb-pack"]:checked');
-  const packType    = packInput?.value || '';   // NVARCHAR(2) packagingID = packID code
-  const layer       = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
-  const material  = document.getElementById('pb-mat').value.trim();
-  const qty       = parseFloat(document.getElementById('pb-qty').value) || null;
-  const batch     = document.getElementById('pb-batch').value.trim();
-  const delivery  = document.getElementById('pb-deliv').value.trim();
-  const delItem   = document.getElementById('pb-delitem').value.trim();
-  const customer  = document.getElementById('pb-cust').value.trim();
-  const custMat   = document.getElementById('pb-custmat').value.trim();
+function calcPalletHeight() {
+  const baseH = Number(pb.palletTypeData?.palletHeight || 0);
+  const layerMax = {};
+  for (const p of pb.packages) {
+    const layer = p.palletLayer || 1;
+    const h = Number(p.packHeight || 0);
+    if (h > (layerMax[layer] || 0)) layerMax[layer] = h;
+  }
+  return baseH + Object.values(layerMax).reduce((s, h) => s + h, 0);
+}
 
+async function addPackage() {
+  const packInput = document.querySelector('input[name="pb-pack"]:checked');
+  const packType  = packInput?.value || '';
   if (!packType) { showPbMsg('Select a packaging type first', 'error'); return; }
-  if (!material) { showPbMsg('SAP Material is required', 'error'); document.getElementById('pb-mat').focus(); return; }
+
+  const layer = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
+  const batch = document.getElementById('pb-batch').value.trim();
+
+  // packHeight needed for pallet height calculation on finish
+  const selectedPkg = pb.allowedPackaging.find(p => p.packagingID === packType);
+  const packHeight  = Number(selectedPkg?.packHeight || 0);
 
   showPbMsg('Adding…', '');
 
@@ -1124,29 +1129,24 @@ async function addPackage() {
     const res  = await fetch('/api/palletpackages', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        palletID:            pb.palletId,
-        packagingID:         packType,
-        palletLayer:         layer,
-        sapMaterial:         material  || null,
-        sapQuantity:         qty,
-        sapBatch:            batch     || null,
-        sapDelivery:         delivery  || null,
-        sapDeliveryItem:     delItem   || null,
-        sapCustomer:         customer  || null,
-        sapCustomerMaterial: custMat   || null,
-        scanTime:            new Date().toISOString(),
+        palletID:    pb.palletId,
+        packagingID: packType,
+        palletLayer: layer,
+        sapBatch:    batch || null,
+        sapDelivery: String(pb.deliveryId),
+        sapCustomer: pb.customerId ? String(pb.customerId) : null,
+        scanTime:    new Date().toISOString(),
       }),
     });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || 'Failed to add package');
 
     pb.packages.push({
-      palletItemID:  json.palletItemID,
-      palletLayer:   layer,
-      packagingID:   packType,   // NVARCHAR(2) code
-      sapMaterial:   material,
-      sapQuantity:   qty,
-      sapBatch:      batch,
+      palletItemID: json.palletItemID,
+      palletLayer:  layer,
+      packagingID:  packType,
+      sapBatch:     batch,
+      packHeight,
     });
     pb.nextLayer = layer + 1;
 
@@ -1154,15 +1154,11 @@ async function addPackage() {
     document.getElementById('pb-pkg-count').textContent =
       `${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}`;
 
-    // Reset scan fields; keep delivery/customer pre-fills; advance layer
-    document.getElementById('pb-mat').value   = '';
-    document.getElementById('pb-qty').value   = '';
     document.getElementById('pb-batch').value = '';
-    document.getElementById('pb-delitem').value = '';
     document.getElementById('pb-layer').value = pb.nextLayer;
 
-    showPbMsg(`✓ Package added (layer ${layer})`, 'ok');
-    document.getElementById('pb-mat').focus();
+    showPbMsg(`✓ Added (layer ${layer})`, 'ok');
+    document.getElementById('pb-batch').focus();
   } catch (err) {
     showPbMsg('✕ ' + err.message, 'error');
   }
@@ -1178,18 +1174,43 @@ function showPbMsg(text, type) {
 
 async function finishBuilderPallet() {
   if (!pb?.palletId) return;
-  if (!confirm('Mark this pallet as finished? You can still view it in the list.')) return;
+
+  // Location is mandatory to finish
+  const locInput = document.getElementById('pb-loc-running');
+  const loc = locInput?.value.trim() || pb.palletLocation || '';
+  if (!loc) {
+    if (locInput) { locInput.classList.add('pb-input--error'); locInput.focus(); }
+    showPbMsg('Location is required before finishing', 'error');
+    return;
+  }
+
+  const height = calcPalletHeight();
 
   try {
     const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ palletFinish: 1 }),
+      body: JSON.stringify({ palletFinish: 1, palletLocation: loc, palletHeight: height }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
     closePalletBuilder();
     await refreshPalletList();
-  } catch (err) { alert('Error finishing pallet: ' + err.message); }
+  } catch (err) { showPbMsg('✕ ' + err.message, 'error'); }
+}
+
+async function completeDelivery() {
+  const { deliveryId } = _palletListCtx || {};
+  if (!deliveryId) return;
+  if (!confirm(`Mark Delivery #${deliveryId} as complete?\n\nThis will remove it from the open picksheets list.`)) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/complete`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Update failed');
+    closePickModal();
+    await runOpenPicksheets();
+  } catch (err) { alert('Error: ' + err.message); }
 }
 
 function closePalletBuilder() {

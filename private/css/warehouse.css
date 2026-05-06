@@ -1036,6 +1036,32 @@ body::before {
 .pb-pkg-msg--ok    { color: var(--success); }
 .pb-pkg-msg--error { color: var(--error); }
 
+/* Location field in running card */
+.pb-running-loc { display: flex; flex-direction: column; }
+.pb-input--req   { border-color: #D97706; }
+.pb-input--req:focus { border-color: #D97706; box-shadow: 0 0 0 3px rgba(217,119,6,0.12); }
+.pb-input--error { border-color: var(--error); }
+.pb-input--error:focus { border-color: var(--error); box-shadow: 0 0 0 3px rgba(220,38,38,0.12); }
+
+/* Packaging groups */
+.pb-pkg-groups { display: flex; flex-direction: column; gap: 10px; }
+.pb-pkg-group  { display: flex; flex-direction: column; gap: 6px; }
+.pb-pkg-group-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--text-muted);
+  padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.pb-pkg-opts-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* No-packaging right panel */
+.pb-no-pkg-panel {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface2); border: 1px dashed var(--border2);
+  border-radius: 10px; padding: 40px 24px;
+}
+.pb-no-pkg-msg { text-align: center; font-size: 13px; color: var(--text-dim); }
+
 /* ── FOOTER ──────────────────────────────────────────────────────────────── */
 .footer {
   position: relative; z-index: 1;

@@ -41,7 +41,7 @@ router.get('/pallet/:palletId', async (req, res) => {
                            pp.sapMaterial, pp.sapQuantity, pp.sapBatch,
                            pp.sapDelivery, pp.sapDeliveryItem,
                            pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
-                           pd.packDescription, pd.packMaterial, pd.packWeight
+                           pd.packDescription, pd.packMaterial, pd.packWeight, pd.packHeight
                     FROM   Logistics.dbo.PalletPackages pp
                     LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pp.packagingID
                     WHERE  pp.palletID = @palletId
