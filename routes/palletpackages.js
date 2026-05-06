@@ -30,16 +30,25 @@ router.get('/id/:palletItemId', async (req, res) => {
     }
 });
 
-// ── Get by PalletID ──
+// ── Get by PalletID — joined with PackagingData for descriptions ──
 router.get('/pallet/:palletId', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
             .input('palletId', sql.BigInt, req.params.palletId)
-            .query('SELECT * FROM Logistics.dbo.PalletPackages WHERE palletID = @palletId');
-        res.json(result.recordset);
+            .query(`SELECT pp.palletItemID, pp.palletID, pp.packagingID, pp.palletLayer,
+                           pp.sapMaterial, pp.sapQuantity, pp.sapBatch,
+                           pp.sapDelivery, pp.sapDeliveryItem,
+                           pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
+                           pd.packDescription, pd.packMaterial, pd.packWeight
+                    FROM   Logistics.dbo.PalletPackages pp
+                    LEFT JOIN Logistics.dbo.PackagingData pd
+                           ON CAST(pd.packID AS NVARCHAR(4)) = CAST(pp.packagingID AS NVARCHAR(4))
+                    WHERE  pp.palletID = @palletId
+                    ORDER  BY pp.palletLayer, pp.palletItemID`);
+        res.json({ success: true, data: result.recordset });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -83,7 +92,7 @@ router.post('/', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('palletID', sql.BigInt, palletID)
-            .input('packagingID', sql.BigInt, packagingID)
+            .input('packagingID', sql.NVarChar(4), String(packagingID ?? ''))
             .input('palletLayer', sql.Int, palletLayer)
             .input('sapMaterial', sql.NVarChar, sapMaterial)
             .input('sapQuantity', sql.Decimal, sapQuantity)
@@ -104,9 +113,22 @@ router.post('/', async (req, res) => {
                 SELECT SCOPE_IDENTITY() AS palletItemID;`);
 
         const newId = result.recordset[0].palletItemID;
-        res.status(201).json({ message: 'Record created successfully', palletItemID: newId });
+        res.status(201).json({ success: true, palletItemID: newId });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Delete a single package ──
+router.delete('/:palletItemId', async (req, res) => {
+    try {
+        const pool = await getPool();
+        await pool.request()
+            .input('palletItemId', sql.BigInt, req.params.palletItemId)
+            .query('DELETE FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 

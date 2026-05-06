@@ -734,6 +734,308 @@ body::before {
 .btn-edit-pallet:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 .btn-edit-pallet:disabled { opacity: 0.4; cursor: default; }
 
+/* ── PALLET LIST CARDS (enhanced picked pallets modal) ───────────────────── */
+.ps-pcard-list { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
+
+.ps-pcard {
+  border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+  background: var(--surface);
+}
+
+.ps-pcard-hdr {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer; user-select: none;
+  background: var(--surface2);
+  transition: background 0.1s;
+  flex-wrap: wrap;
+}
+.ps-pcard-hdr:hover { background: var(--accent-dim); }
+
+.ps-pcard-type {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 700;
+  background: var(--sidebar-bg); color: #93C5FD;
+  padding: 2px 8px; border-radius: 4px; flex-shrink: 0;
+}
+.ps-pcard-dims, .ps-pcard-wt, .ps-pcard-loc {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted); flex-shrink: 0;
+}
+.ps-pcard-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 2px 8px; border-radius: 10px; flex-shrink: 0;
+}
+.ps-pcard-badge--done { background: rgba(5,150,105,0.12); color: var(--success); }
+.ps-pcard-badge--wip  { background: rgba(124,58,237,0.1); color: var(--accent); }
+
+.ps-pcard-chevron {
+  margin-left: auto; font-size: 10px; color: var(--text-muted);
+  transition: transform 0.2s; flex-shrink: 0;
+}
+.ps-pcard.open .ps-pcard-chevron { transform: rotate(180deg); }
+
+.ps-pcard-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600;
+  padding: 3px 10px;
+  background: transparent;
+  border: 1px solid var(--border2); border-radius: 4px;
+  color: var(--text-dim); cursor: pointer;
+  transition: border-color 0.15s, color 0.15s; flex-shrink: 0;
+}
+.ps-pcard-btn:hover              { border-color: var(--accent); color: var(--accent); }
+.ps-pcard-btn--finish:hover      { border-color: var(--success); color: var(--success); }
+
+.ps-pcard-body { border-top: 1px solid var(--border); }
+
+.ps-pcard-tbl { width: 100%; border-collapse: collapse; }
+.ps-pcard-tbl th {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 7px 12px; background: var(--bg); color: var(--text-muted); text-align: left;
+}
+.ps-pcard-tbl td {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; padding: 7px 12px; border-bottom: 1px solid var(--border);
+}
+.ps-pcard-tbl tbody tr:last-child td { border-bottom: none; }
+.ps-pcard-mono { font-family: 'JetBrains Mono', monospace; }
+
+.ps-pcard-del {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 13px; padding: 2px 6px;
+  border-radius: 3px; transition: color 0.15s, background 0.15s;
+}
+.ps-pcard-del:hover { color: var(--error); background: rgba(220,38,38,0.08); }
+
+.ps-pcard-empty {
+  padding: 16px; text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+}
+
+/* ── PALLET BUILDER OVERLAY ──────────────────────────────────────────────── */
+.pb-overlay {
+  position: fixed; inset: 0;
+  background: rgba(15,25,45,0.7);
+  z-index: 3000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.pb-overlay.hidden { display: none; }
+
+.pb-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(15,25,45,0.45);
+  width: 100%; max-width: 960px;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+  animation: fadeUp 0.2s ease both;
+}
+
+.pb-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 18px 24px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  border-radius: 14px 14px 0 0;
+  flex-shrink: 0;
+}
+.pb-title { font-size: 16px; font-weight: 800; }
+.pb-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted); margin-top: 3px;
+}
+.pb-close {
+  background: none; border: none; font-size: 18px;
+  color: var(--text-muted); cursor: pointer; padding: 4px 8px;
+  line-height: 1; transition: color 0.15s;
+}
+.pb-close:hover { color: var(--error); }
+
+.pb-body { flex: 1; overflow: auto; padding: 24px; }
+
+/* ── PHASE 1: Pallet type selection ──────────────────────────────────────── */
+.pb-phase1 { max-width: 720px; }
+
+.pb-section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; letter-spacing: 2px;
+  text-transform: uppercase; color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.pb-type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px; margin-bottom: 24px;
+}
+
+.pb-type-card {
+  border: 2px solid var(--border);
+  border-radius: 10px; padding: 14px 12px;
+  cursor: pointer; user-select: none;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+  text-align: center;
+}
+.pb-type-card:hover { border-color: var(--accent); background: var(--accent-dim); }
+.pb-type-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(124,58,237,0.15);
+}
+.pb-type-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 20px; font-weight: 800; color: var(--accent);
+  margin-bottom: 4px;
+}
+.pb-type-desc { font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+.pb-type-dims, .pb-type-wt {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text-muted);
+}
+
+.pb-row { display: flex; gap: 12px; }
+.pb-field { display: flex; flex-direction: column; flex: 1; }
+.pb-field--short { max-width: 100px; }
+.pb-field--wide  { flex: 2; }
+
+.pb-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.pb-scan-hint {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px; color: var(--accent); opacity: 0.7;
+  letter-spacing: 0.5px;
+}
+.pb-input {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px; color: var(--text);
+  background: var(--bg);
+  border: 1.5px solid var(--border); border-radius: 7px;
+  padding: 9px 12px; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pb-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(124,58,237,0.12);
+}
+.pb-input.pb-scan { font-size: 15px; letter-spacing: 0.5px; }
+.pb-input.pb-scan:focus {
+  border-color: #059669;
+  box-shadow: 0 0 0 3px rgba(5,150,105,0.12);
+}
+
+.pb-actions {
+  display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px;
+  padding-top: 20px; border-top: 1px solid var(--border);
+}
+
+/* ── PHASE 2: Two-column build layout ────────────────────────────────────── */
+.pb-phase2 {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 20px; min-height: 0;
+}
+
+/* Running pallet card (left) */
+.pb-running {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  align-self: start; position: sticky; top: 0;
+}
+.pb-running-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 700; color: var(--accent);
+}
+.pb-running-dims {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+}
+.pb-running-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600;
+  padding: 3px 10px; border-radius: 10px;
+  background: rgba(124,58,237,0.1); color: var(--accent);
+  display: inline-block;
+}
+.pb-running-list { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.pb-running-empty {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  text-align: center; padding: 16px 0;
+  border: 1px dashed var(--border2); border-radius: 6px;
+}
+.pb-running-item {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 5px; padding: 6px 8px;
+}
+.pb-running-layer { font-weight: 700; color: var(--accent); }
+.pb-running-mat   { color: var(--text); font-weight: 600; }
+.pb-running-pack  { color: var(--text-muted); font-size: 9px; }
+.pb-running-qty   { color: var(--text-dim); }
+.pb-running-batch { color: var(--text-muted); }
+.pb-running-actions { padding-top: 10px; border-top: 1px solid var(--border); }
+.pb-finish-btn { width: 100%; }
+
+/* Package add form (right) */
+.pb-form { display: flex; flex-direction: column; gap: 14px; }
+
+.pb-pkg-options {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.pb-pkg-opt { cursor: pointer; user-select: none; }
+.pb-pkg-opt input[type="radio"] { display: none; }
+.pb-pkg-opt-inner {
+  display: flex; flex-direction: column;
+  padding: 8px 14px; border-radius: 7px;
+  border: 2px solid var(--border);
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 80px;
+}
+.pb-pkg-opt-inner strong {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; color: var(--accent);
+}
+.pb-pkg-opt-inner span { font-size: 10px; color: var(--text-muted); }
+.pb-pkg-opt input:checked + .pb-pkg-opt-inner {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.pb-pkg-opt:hover .pb-pkg-opt-inner {
+  border-color: var(--accent); background: var(--accent-dim);
+}
+
+.pb-sap-grid {
+  display: flex; flex-wrap: wrap; gap: 10px;
+}
+.pb-sap-grid .pb-field { min-width: 140px; }
+
+.pb-form-actions {
+  display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+  padding-top: 14px; border-top: 1px solid var(--border);
+}
+.pb-pkg-msg {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; flex: 1;
+}
+.pb-pkg-msg--ok    { color: var(--success); }
+.pb-pkg-msg--error { color: var(--error); }
+
 /* ── FOOTER ──────────────────────────────────────────────────────────────── */
 .footer {
   position: relative; z-index: 1;

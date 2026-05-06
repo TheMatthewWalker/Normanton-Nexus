@@ -99,4 +99,50 @@ router.post('/', async (req, res) => {
     }
 });
 
+// ── Update pallet fields (finish, location, weights) ──
+router.patch('/:palletId', async (req, res) => {
+    const { palletFinish, palletLocation, palletCategory,
+            grossWeight, packagingWeight, palletVolume } = req.body;
+    try {
+        const pool    = await getPool();
+        const request = pool.request().input('palletId', sql.BigInt, req.params.palletId);
+        const sets    = [];
+
+        if (palletFinish !== undefined) {
+            request.input('palletFinish', sql.Bit, palletFinish ? 1 : 0);
+            sets.push('palletFinish = @palletFinish');
+            if (palletFinish) sets.push('palletFinishDate = GETDATE()');
+        }
+        if (palletLocation !== undefined) {
+            request.input('palletLocation', sql.NVarChar(50), palletLocation);
+            sets.push('palletLocation = @palletLocation');
+        }
+        if (palletCategory !== undefined) {
+            request.input('palletCategory', sql.NVarChar(2), palletCategory);
+            sets.push('palletCategory = @palletCategory');
+        }
+        if (grossWeight !== undefined) {
+            request.input('grossWeight', sql.Decimal(18, 3), grossWeight);
+            sets.push('grossWeight = @grossWeight');
+        }
+        if (packagingWeight !== undefined) {
+            request.input('packagingWeight', sql.Decimal(18, 3), packagingWeight);
+            sets.push('packagingWeight = @packagingWeight');
+        }
+        if (palletVolume !== undefined) {
+            request.input('palletVolume', sql.Decimal(18, 3), palletVolume);
+            sets.push('palletVolume = @palletVolume');
+        }
+
+        if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
+
+        await request.query(
+            `UPDATE Logistics.dbo.PalletMain SET ${sets.join(', ')} WHERE palletID = @palletId`
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 export default router;

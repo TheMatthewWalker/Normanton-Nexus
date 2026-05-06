@@ -607,70 +607,596 @@ function renderPicksheets(rows) {
   });
 }
 
-// ── Pallet popup modal ─────────────────────────────────────────────────────────
+// ── Pallet list modal ─────────────────────────────────────────────────────────
+let _palletListCtx = null; // { deliveryId, destName } for refresh after builder closes
+
 async function showPickedPallets(deliveryId, destName) {
   if (!await checkSession()) return;
+  _palletListCtx = { deliveryId, destName };
 
   const overlay = document.getElementById('ps-modal-overlay');
   overlay.classList.remove('hidden');
   overlay.innerHTML = `
-    <div class="ps-modal">
+    <div class="ps-modal" style="max-width:760px">
       <div class="ps-modal-header">
         <div>
           <div class="ps-modal-title">Picked Pallets</div>
-          <div class="ps-modal-sub">Delivery #${esc(deliveryId)} · ${esc(destName)}</div>
+          <div class="ps-modal-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
         </div>
         <button class="ps-modal-close" onclick="closePickModal()">✕</button>
       </div>
-      <div class="ps-modal-body">
+      <div class="ps-modal-body" id="pallet-list-body" style="padding:0">
         <div class="sap-loading"><div class="spinner"></div>Fetching pallets…</div>
       </div>
       <div class="ps-modal-actions">
-        <button class="btn-submit" disabled title="Coming soon">+ Add Pallet</button>
+        <button class="btn-submit" onclick="openPalletBuilder()">+ Add Pallet</button>
       </div>
     </div>`;
+
+  await refreshPalletList();
+}
+
+async function refreshPalletList() {
+  const { deliveryId, destName } = _palletListCtx || {};
+  const body = document.getElementById('pallet-list-body');
+  if (!body) return;
 
   try {
     const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/pallets`);
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to load pallets');
-
-    const body    = overlay.querySelector('.ps-modal-body');
     const pallets = json.data;
 
     if (!pallets.length) {
-      body.innerHTML = '<div class="sap-error" style="padding:24px">No pallets picked for this delivery yet.</div>';
+      body.innerHTML = `<div style="padding:40px;text-align:center;
+        font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted)">
+        No pallets built yet.<br><br>Click <strong>+ Add Pallet</strong> to start building.
+      </div>`;
       return;
     }
 
-    const rows = pallets.map(p => `<tr>
-      <td>${esc(p.palletType ?? '')}</td>
-      <td class="${p.palletFinish ? 'ps-finish-yes' : 'ps-finish-no'}">${p.palletFinish ? 'Yes' : 'No'}</td>
-      <td>${esc(String(p.palletLength ?? ''))}</td>
-      <td>${esc(String(p.palletWidth  ?? ''))}</td>
-      <td>${esc(String(p.palletHeight ?? ''))}</td>
-      <td>${esc(String(p.grossWeight  ?? ''))}</td>
-      <td>${esc(p.palletLocation ?? '')}</td>
-      <td><button class="btn-edit-pallet" disabled title="Coming soon">Edit</button></td>
-    </tr>`).join('');
+    body.innerHTML = `<div class="ps-pcard-list">${pallets.map(p => renderPalletCard(p)).join('')}</div>`;
 
-    body.innerHTML = `
-      <table class="ps-pallet-table">
-        <thead><tr>
-          <th>Type</th><th>Finished</th><th>Length</th><th>Width</th>
-          <th>Height</th><th>Gross Wt.</th><th>Location</th><th></th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
-
+    body.querySelectorAll('.ps-pcard-hdr').forEach(hdr => {
+      hdr.addEventListener('click', () => togglePalletCard(hdr.closest('.ps-pcard')));
+    });
   } catch (err) {
-    overlay.querySelector('.ps-modal-body').innerHTML =
-      `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
+    body.innerHTML = `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
   }
+}
+
+function renderPalletCard(p) {
+  const dims   = [p.palletLength, p.palletWidth, p.palletHeight].filter(Boolean).join('×');
+  const wt     = p.grossWeight != null ? `${Number(p.grossWeight).toFixed(1)} kg` : '—';
+  const status = p.palletFinish
+    ? `<span class="ps-pcard-badge ps-pcard-badge--done">Finished</span>`
+    : `<span class="ps-pcard-badge ps-pcard-badge--wip">In Progress</span>`;
+  const actions = p.palletFinish ? '' : `
+    <button class="ps-pcard-btn"
+      onclick="event.stopPropagation();openPalletBuilderOnExisting(${p.palletID})">Continue</button>
+    <button class="ps-pcard-btn ps-pcard-btn--finish"
+      onclick="event.stopPropagation();finishExistingPallet(${p.palletID})">Finish</button>`;
+
+  return `
+    <div class="ps-pcard" data-palletid="${p.palletID}">
+      <div class="ps-pcard-hdr">
+        <span class="ps-pcard-type">${esc(p.palletType ?? '—')}</span>
+        ${dims ? `<span class="ps-pcard-dims">${dims} mm</span>` : ''}
+        <span class="ps-pcard-wt">${wt}</span>
+        ${p.palletLocation ? `<span class="ps-pcard-loc">${esc(p.palletLocation)}</span>` : ''}
+        ${status}
+        ${actions}
+        <span class="ps-pcard-chevron">▼</span>
+      </div>
+      <div class="ps-pcard-body" id="pcard-body-${p.palletID}" style="display:none"></div>
+    </div>`;
+}
+
+async function togglePalletCard(card) {
+  const palletId = card.dataset.palletid;
+  const body     = document.getElementById(`pcard-body-${palletId}`);
+  const isOpen   = body.style.display !== 'none';
+
+  body.style.display = isOpen ? 'none' : 'block';
+  card.querySelector('.ps-pcard-chevron').textContent = isOpen ? '▼' : '▲';
+
+  if (!isOpen && body.dataset.loaded !== '1') {
+    body.innerHTML = `<div class="ps-pcard-empty"><div class="spinner" style="width:12px;height:12px;display:inline-block;margin-right:6px"></div>Loading…</div>`;
+    await loadPalletPackages(palletId, body);
+    body.dataset.loaded = '1';
+  }
+}
+
+async function loadPalletPackages(palletId, bodyEl) {
+  try {
+    const res  = await fetch(`/api/palletpackages/pallet/${encodeURIComponent(palletId)}`);
+    const json = await res.json();
+    const pkgs = json.data || [];
+
+    if (!pkgs.length) {
+      bodyEl.innerHTML = `<div class="ps-pcard-empty">No packages on this pallet yet.</div>`;
+      return;
+    }
+
+    bodyEl.innerHTML = `
+      <table class="ps-pcard-tbl">
+        <thead><tr>
+          <th>Layer</th><th>Pack Type</th><th>SAP Material</th>
+          <th>Qty</th><th>Batch</th><th>Delivery</th><th>Del. Item</th><th>Customer</th><th></th>
+        </tr></thead>
+        <tbody>${pkgs.map(pkg => `<tr>
+          <td>${esc(String(pkg.palletLayer ?? '—'))}</td>
+          <td>${esc(pkg.packDescription || pkg.packagingID || '—')}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapMaterial || '—')}</td>
+          <td class="ps-pcard-mono">${pkg.sapQuantity != null ? Number(pkg.sapQuantity).toFixed(3) : '—'}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapBatch || '—')}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapDelivery || '—')}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapDeliveryItem || '—')}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapCustomer || '—')}</td>
+          <td>
+            <button class="ps-pcard-del" title="Remove"
+              onclick="removePackage(${pkg.palletItemID}, ${palletId})">✕</button>
+          </td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+  } catch (err) {
+    bodyEl.innerHTML = `<div class="ps-pcard-empty" style="color:var(--error)">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+async function removePackage(palletItemId, palletId) {
+  if (!confirm('Remove this package from the pallet?')) return;
+  try {
+    const res  = await fetch(`/api/palletpackages/${palletItemId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
+    const bodyEl = document.getElementById(`pcard-body-${palletId}`);
+    if (bodyEl) { bodyEl.dataset.loaded = '0'; await loadPalletPackages(palletId, bodyEl); bodyEl.dataset.loaded = '1'; }
+  } catch (err) { alert('Remove failed: ' + err.message); }
+}
+
+async function finishExistingPallet(palletId) {
+  if (!confirm('Mark this pallet as finished? No more packages can be added.')) return;
+  try {
+    const res  = await fetch(`/api/palletmain/${palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletFinish: 1 }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Update failed');
+    await refreshPalletList();
+  } catch (err) { alert('Error: ' + err.message); }
 }
 
 function closePickModal() {
   document.getElementById('ps-modal-overlay').classList.add('hidden');
+}
+
+// ── Pallet Builder ────────────────────────────────────────────────────────────
+let pb = null; // active builder state
+
+function getPbOverlay() {
+  let el = document.getElementById('pb-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'pb-overlay';
+    el.className = 'pb-overlay hidden';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+async function openPalletBuilder() {
+  if (!await checkSession()) return;
+  const { deliveryId, destName } = _palletListCtx || {};
+
+  pb = { deliveryId, destName, phase: 1, palletId: null, palletType: null,
+         palletTypeData: null, allowedPackIds: [], allPalletTypes: [],
+         allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
+
+  const overlay = getPbOverlay();
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="pb-modal">
+      <div class="pb-header">
+        <div>
+          <div class="pb-title">Build New Pallet</div>
+          <div class="pb-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
+        </div>
+        <button class="pb-close" onclick="closePalletBuilder()">✕</button>
+      </div>
+      <div class="pb-body" id="pb-body">
+        <div class="sap-loading"><div class="spinner"></div>Loading pallet types…</div>
+      </div>
+    </div>`;
+
+  try {
+    const [ptRes, pkRes] = await Promise.all([
+      fetch('/api/palletdata').then(r => r.json()),
+      fetch('/api/packagingdata').then(r => r.json()),
+    ]);
+    pb.allPalletTypes = ptRes.data || ptRes;
+    pb.allPackaging   = pkRes.data || pkRes;
+    renderBuilderPhase1();
+  } catch (err) {
+    document.getElementById('pb-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+async function openPalletBuilderOnExisting(palletId) {
+  if (!await checkSession()) return;
+  const { deliveryId, destName } = _palletListCtx || {};
+
+  pb = { deliveryId, destName, phase: 2, palletId, palletType: null,
+         palletTypeData: null, allowedPackIds: [], allPalletTypes: [],
+         allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
+
+  const overlay = getPbOverlay();
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="pb-modal">
+      <div class="pb-header">
+        <div>
+          <div class="pb-title">Continue Building &nbsp;<span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent)">#${palletId}</span></div>
+          <div class="pb-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
+        </div>
+        <button class="pb-close" onclick="closePalletBuilder()">✕</button>
+      </div>
+      <div class="pb-body" id="pb-body">
+        <div class="sap-loading"><div class="spinner"></div>Loading…</div>
+      </div>
+    </div>`;
+
+  try {
+    const [ptRes, pkRes, palRes, pkgsRes, valRes] = await Promise.all([
+      fetch('/api/palletdata').then(r => r.json()),
+      fetch('/api/packagingdata').then(r => r.json()),
+      fetch(`/api/palletmain/id/${palletId}`).then(r => r.json()),
+      fetch(`/api/palletpackages/pallet/${palletId}`).then(r => r.json()),
+      fetch('/api/palletvalidation').then(r => r.json()),
+    ]);
+
+    pb.allPalletTypes = ptRes.data || ptRes;
+    pb.allPackaging   = pkRes.data || pkRes;
+
+    const palletRecord = (palRes.data || palRes)[0];
+    if (palletRecord) {
+      pb.palletType     = palletRecord.palletType;
+      pb.palletTypeData = pb.allPalletTypes.find(t => t.palletID === pb.palletType);
+    }
+
+    const existing  = pkgsRes.data || pkgsRes;
+    pb.packages     = existing;
+    pb.nextLayer    = existing.length
+      ? Math.max(...existing.map(p => p.palletLayer || 0)) + 1
+      : 1;
+
+    const validRows     = valRes.data || valRes;
+    pb.allowedPackIds   = validRows.filter(v => v.palletID === pb.palletType).map(v => v.packagingID);
+    pb.allowedPackaging = pb.allPackaging.filter(p => pb.allowedPackIds.includes(p.packID));
+
+    renderBuilderPhase2();
+  } catch (err) {
+    document.getElementById('pb-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Builder Phase 1: create pallet ───────────────────────────────────────────
+function renderBuilderPhase1() {
+  const typeCards = pb.allPalletTypes.map(t => {
+    const dims = [t.palletLength, t.palletWidth, t.palletHeight].filter(Boolean).join('×');
+    return `
+      <div class="pb-type-card" data-id="${esc(t.palletID)}" onclick="selectPalletType('${esc(t.palletID)}')">
+        <div class="pb-type-code">${esc(t.palletID)}</div>
+        <div class="pb-type-desc">${esc(t.palletDescription || '—')}</div>
+        ${dims ? `<div class="pb-type-dims">${dims} mm</div>` : ''}
+        ${t.palletWeight != null ? `<div class="pb-type-wt">${t.palletWeight} kg</div>` : ''}
+      </div>`;
+  }).join('');
+
+  document.getElementById('pb-body').innerHTML = `
+    <div class="pb-phase1">
+      <div class="pb-section-label">Select Pallet Type</div>
+      <div class="pb-type-grid">
+        ${typeCards || '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">No pallet types configured yet.</div>'}
+      </div>
+
+      <div class="pb-row" style="margin-top:8px">
+        <div class="pb-field">
+          <label class="pb-label">Location <span style="opacity:.5;font-weight:400">(optional)</span></label>
+          <input class="pb-input" id="pb-location" type="text" maxlength="50"
+            placeholder="e.g. WH-A1" autocomplete="off">
+        </div>
+        <div class="pb-field pb-field--short">
+          <label class="pb-label">Category <span style="opacity:.5;font-weight:400">(opt.)</span></label>
+          <input class="pb-input" id="pb-category" type="text" maxlength="2" placeholder="A1">
+        </div>
+      </div>
+
+      <div class="pb-actions">
+        <button class="btn-secondary" onclick="closePalletBuilder()">Cancel</button>
+        <button class="btn-submit" id="pb-create-btn" disabled onclick="createPallet()">
+          Create Pallet →
+        </button>
+      </div>
+    </div>`;
+}
+
+function selectPalletType(typeId) {
+  pb.palletType     = typeId;
+  pb.palletTypeData = pb.allPalletTypes.find(t => t.palletID === typeId);
+  document.querySelectorAll('.pb-type-card').forEach(c => c.classList.toggle('selected', c.dataset.id === typeId));
+  document.getElementById('pb-create-btn').disabled = false;
+}
+
+async function createPallet() {
+  if (!pb.palletType) return;
+  const td       = pb.palletTypeData;
+  const location = document.getElementById('pb-location').value.trim();
+  const category = document.getElementById('pb-category').value.trim();
+  const btn      = document.getElementById('pb-create-btn');
+
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+
+  try {
+    // 1. Create pallet record
+    const palRes  = await fetch('/api/palletmain', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        palletType:        pb.palletType,
+        palletFinish:      0,
+        packagingWeight:   0,
+        grossWeight:       td?.palletWeight ?? 0,
+        palletVolume:      0,
+        palletLength:      td?.palletLength ?? null,
+        palletWidth:       td?.palletWidth  ?? null,
+        palletHeight:      td?.palletHeight ?? null,
+        palletRemoved:     0,
+        palletCategory:    category || null,
+        palletLocation:    location || null,
+        palletCreationDate: new Date().toISOString(),
+        palletFinishDate:  null,
+      }),
+    });
+    const palJson = await palRes.json();
+    if (!palRes.ok) throw new Error(palJson.error || 'Failed to create pallet');
+    pb.palletId = palJson.palletID;
+
+    // 2. Link to delivery
+    const linkRes  = await fetch(`/api/deliverymain/${encodeURIComponent(pb.deliveryId)}/pallets`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletId: pb.palletId }),
+    });
+    const linkJson = await linkRes.json();
+    if (!linkRes.ok) throw new Error(linkJson.error || 'Failed to link pallet to delivery');
+
+    // 3. Fetch allowed packaging for this pallet type
+    const valRes  = await fetch(`/api/palletvalidation/pallet/${encodeURIComponent(pb.palletType)}`);
+    const valJson = await valRes.json();
+    const rows    = valJson.data || valJson;
+
+    pb.allowedPackIds   = rows.map(v => v.packagingID);
+    pb.allowedPackaging = pb.allPackaging.filter(p => pb.allowedPackIds.includes(p.packID));
+    pb.packages  = [];
+    pb.nextLayer = 1;
+
+    renderBuilderPhase2();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Create Pallet →';
+    showPbMsg('✕ ' + err.message, 'error');
+  }
+}
+
+// ── Builder Phase 2: add packages ────────────────────────────────────────────
+function renderBuilderPhase2() {
+  const td    = pb.palletTypeData;
+  const label = td ? `${td.palletID} · ${td.palletDescription || ''}` : `Pallet #${pb.palletId}`;
+
+  document.getElementById('pb-body').innerHTML = `
+    <div class="pb-phase2">
+
+      <div class="pb-running">
+        <div class="pb-running-title">${esc(label)}</div>
+        ${td ? `<div class="pb-running-dims">${[td.palletLength,td.palletWidth,td.palletHeight].filter(Boolean).join('×')} mm</div>` : ''}
+        <div class="pb-running-count" id="pb-pkg-count">${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}</div>
+        <div class="pb-running-list" id="pb-running-list">${renderRunningList()}</div>
+        <div class="pb-running-actions">
+          <button class="btn-submit pb-finish-btn" onclick="finishBuilderPallet()">Finish Pallet ✓</button>
+        </div>
+      </div>
+
+      <div class="pb-form">
+        <div class="pb-section-label">Packaging Type</div>
+        <div class="pb-pkg-options">
+          ${pb.allowedPackaging.length
+            ? pb.allowedPackaging.map(p => `
+                <label class="pb-pkg-opt">
+                  <input type="radio" name="pb-pack" value="${esc(p.packID)}">
+                  <span class="pb-pkg-opt-inner">
+                    <strong>${esc(p.packID)}</strong>
+                    <span>${esc(p.packDescription || p.packMaterial || '')}</span>
+                    ${p.packWeight != null ? `<span>${p.packWeight} kg</span>` : ''}
+                  </span>
+                </label>`).join('')
+            : `<span style="font-size:12px;color:var(--text-muted)">No packaging types configured for this pallet type.</span>`}
+        </div>
+
+        <div class="pb-row" style="margin-top:4px">
+          <div class="pb-field pb-field--short">
+            <label class="pb-label">Pallet Layer</label>
+            <input class="pb-input" id="pb-layer" type="number" min="1" step="1" value="${pb.nextLayer}">
+          </div>
+        </div>
+
+        <div class="pb-section-label" style="margin-top:4px">SAP Details</div>
+
+        <div class="pb-sap-grid">
+          <div class="pb-field pb-field--wide">
+            <label class="pb-label">SAP Material <span class="pb-scan-hint">scan / type</span></label>
+            <input class="pb-input pb-scan" id="pb-mat" type="text" maxlength="18"
+              placeholder="Material number" autocomplete="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="pb-field pb-field--short">
+            <label class="pb-label">Quantity</label>
+            <input class="pb-input" id="pb-qty" type="number" step="0.001" min="0.001" placeholder="0.000">
+          </div>
+        </div>
+
+        <div class="pb-sap-grid">
+          <div class="pb-field">
+            <label class="pb-label">SAP Batch <span class="pb-scan-hint">scan / type</span></label>
+            <input class="pb-input pb-scan" id="pb-batch" type="text" maxlength="10"
+              placeholder="Batch number" autocomplete="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="pb-field">
+            <label class="pb-label">SAP Delivery</label>
+            <input class="pb-input" id="pb-deliv" type="text" maxlength="10"
+              value="${esc(String(pb.deliveryId))}" placeholder="Delivery no.">
+          </div>
+          <div class="pb-field pb-field--short">
+            <label class="pb-label">Del. Item</label>
+            <input class="pb-input" id="pb-delitem" type="text" maxlength="6" placeholder="000010">
+          </div>
+        </div>
+
+        <div class="pb-sap-grid">
+          <div class="pb-field">
+            <label class="pb-label">SAP Customer</label>
+            <input class="pb-input" id="pb-cust" type="text" maxlength="10" placeholder="Customer no.">
+          </div>
+          <div class="pb-field pb-field--wide">
+            <label class="pb-label">Customer Material</label>
+            <input class="pb-input" id="pb-custmat" type="text" maxlength="18" placeholder="Customer material no.">
+          </div>
+        </div>
+
+        <div class="pb-form-actions">
+          <span id="pb-pkg-msg" class="pb-pkg-msg"></span>
+          <button class="btn-submit" onclick="addPackage()">+ Add Package</button>
+        </div>
+      </div>
+
+    </div>`;
+
+  // Scanner-friendly: Enter advances to next relevant field
+  document.getElementById('pb-mat').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('pb-qty').focus(); }
+  });
+  document.getElementById('pb-batch').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('pb-deliv').focus(); }
+  });
+
+  document.getElementById('pb-mat').focus();
+}
+
+function renderRunningList() {
+  if (!pb.packages.length)
+    return `<div class="pb-running-empty">No packages added yet</div>`;
+  return pb.packages.map(p => `
+    <div class="pb-running-item">
+      <span class="pb-running-layer">Layer ${p.palletLayer}</span>
+      <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
+      <span class="pb-running-mat">${esc(p.sapMaterial || '—')}</span>
+      <span class="pb-running-qty">${p.sapQuantity != null ? Number(p.sapQuantity).toFixed(3) : ''}</span>
+      ${p.sapBatch ? `<span class="pb-running-batch">Batch: ${esc(p.sapBatch)}</span>` : ''}
+    </div>`).join('');
+}
+
+async function addPackage() {
+  const packInput = document.querySelector('input[name="pb-pack"]:checked');
+  const packType  = packInput?.value || '';
+  const layer     = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
+  const material  = document.getElementById('pb-mat').value.trim();
+  const qty       = parseFloat(document.getElementById('pb-qty').value) || null;
+  const batch     = document.getElementById('pb-batch').value.trim();
+  const delivery  = document.getElementById('pb-deliv').value.trim();
+  const delItem   = document.getElementById('pb-delitem').value.trim();
+  const customer  = document.getElementById('pb-cust').value.trim();
+  const custMat   = document.getElementById('pb-custmat').value.trim();
+
+  if (!packType) { showPbMsg('Select a packaging type first', 'error'); return; }
+  if (!material) { showPbMsg('SAP Material is required', 'error'); document.getElementById('pb-mat').focus(); return; }
+
+  showPbMsg('Adding…', '');
+
+  try {
+    const res  = await fetch('/api/palletpackages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        palletID:            pb.palletId,
+        packagingID:         packType,
+        palletLayer:         layer,
+        sapMaterial:         material  || null,
+        sapQuantity:         qty,
+        sapBatch:            batch     || null,
+        sapDelivery:         delivery  || null,
+        sapDeliveryItem:     delItem   || null,
+        sapCustomer:         customer  || null,
+        sapCustomerMaterial: custMat   || null,
+        scanTime:            new Date().toISOString(),
+      }),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Failed to add package');
+
+    pb.packages.push({
+      palletItemID: json.palletItemID,
+      palletLayer:  layer,
+      packagingID:  packType,
+      sapMaterial:  material,
+      sapQuantity:  qty,
+      sapBatch:     batch,
+    });
+    pb.nextLayer = layer + 1;
+
+    document.getElementById('pb-running-list').innerHTML = renderRunningList();
+    document.getElementById('pb-pkg-count').textContent =
+      `${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}`;
+
+    // Reset scan fields; keep delivery/customer pre-fills; advance layer
+    document.getElementById('pb-mat').value   = '';
+    document.getElementById('pb-qty').value   = '';
+    document.getElementById('pb-batch').value = '';
+    document.getElementById('pb-delitem').value = '';
+    document.getElementById('pb-layer').value = pb.nextLayer;
+
+    showPbMsg(`✓ Package added (layer ${layer})`, 'ok');
+    document.getElementById('pb-mat').focus();
+  } catch (err) {
+    showPbMsg('✕ ' + err.message, 'error');
+  }
+}
+
+function showPbMsg(text, type) {
+  const el = document.getElementById('pb-pkg-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className = `pb-pkg-msg${type ? ' pb-pkg-msg--' + type : ''}`;
+  if (type === 'ok') setTimeout(() => { if (el) el.textContent = ''; }, 3000);
+}
+
+async function finishBuilderPallet() {
+  if (!pb?.palletId) return;
+  if (!confirm('Mark this pallet as finished? You can still view it in the list.')) return;
+
+  try {
+    const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletFinish: 1 }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Update failed');
+    closePalletBuilder();
+    await refreshPalletList();
+  } catch (err) { alert('Error finishing pallet: ' + err.message); }
+}
+
+function closePalletBuilder() {
+  const overlay = document.getElementById('pb-overlay');
+  if (overlay) overlay.classList.add('hidden');
+  pb = null;
 }
 
 // ── CSV export ────────────────────────────────────────────────────────────────

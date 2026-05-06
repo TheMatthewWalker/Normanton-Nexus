@@ -184,18 +184,38 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
 });
 
 
-// ── Pallets picked for a delivery (DeliveryMain → DeliveryLink → PalletMain) ──
+// ── Pallets picked for a delivery (includes palletID for builder) ──
 router.get('/:deliveryId/pallets', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`SELECT pm.palletType, pm.palletFinish, pm.palletLength,
-                           pm.palletWidth, pm.palletHeight, pm.grossWeight, pm.palletLocation
+            .query(`SELECT pm.palletID, pm.palletType, pm.palletFinish,
+                           pm.palletLength, pm.palletWidth, pm.palletHeight,
+                           pm.grossWeight, pm.packagingWeight, pm.palletVolume,
+                           pm.palletLocation, pm.palletCategory, pm.palletCreationDate
                     FROM Logistics.dbo.PalletMain pm
                     INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
-                    WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0`);
+                    WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    ORDER BY pm.palletCreationDate ASC`);
         res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Link an existing pallet to a delivery ──
+router.post('/:deliveryId/pallets', async (req, res) => {
+    const { palletId } = req.body;
+    if (!palletId) return res.status(400).json({ success: false, error: 'palletId required' });
+    try {
+        const pool = await getPool();
+        await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .input('palletId',   sql.BigInt, palletId)
+            .query(`INSERT INTO Logistics.dbo.DeliveryLink (deliveryID, palletID)
+                    VALUES (@deliveryId, @palletId)`);
+        res.status(201).json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
