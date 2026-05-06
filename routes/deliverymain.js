@@ -212,7 +212,7 @@ router.post('/:deliveryId/pallets', async (req, res) => {
         const pool = await getPool();
         await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .input('palletId',   sql.BigInt, palletId)
+            .input('palletId',   sql.Int,    palletId)
             .query(`INSERT INTO Logistics.dbo.DeliveryLink (deliveryID, palletID)
                     VALUES (@deliveryId, @palletId)`);
         res.status(201).json({ success: true });

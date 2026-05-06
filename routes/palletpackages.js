@@ -1,9 +1,9 @@
 import express from 'express';
-import sql from 'mssql';
+import sql     from 'mssql';
 import { sqlConfig } from '../server.js';
 
-const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const router   = express.Router();
+const getPool  = async () => await sql.connect(sqlConfig);
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
@@ -22,7 +22,7 @@ router.get('/id/:palletItemId', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .input('palletItemId', sql.BigInt, req.params.palletItemId)
+            .input('palletItemId', sql.Int, req.params.palletItemId)
             .query('SELECT * FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');
         res.json(result.recordset);
     } catch (err) {
@@ -31,18 +31,19 @@ router.get('/id/:palletItemId', async (req, res) => {
 });
 
 // ── Get by PalletID — joined with PackagingData for descriptions ──
+// packagingID is NVARCHAR(2) matching PackagingData.packID
 router.get('/pallet/:palletId', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .input('palletId', sql.BigInt, req.params.palletId)
+            .input('palletId', sql.Int, req.params.palletId)
             .query(`SELECT pp.palletItemID, pp.palletID, pp.packagingID, pp.palletLayer,
                            pp.sapMaterial, pp.sapQuantity, pp.sapBatch,
                            pp.sapDelivery, pp.sapDeliveryItem,
                            pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
-                           pd.packID, pd.packDescription, pd.packMaterial, pd.packWeight
+                           pd.packDescription, pd.packMaterial, pd.packWeight
                     FROM   Logistics.dbo.PalletPackages pp
-                    LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packagingID = pp.packagingID
+                    LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pp.packagingID
                     WHERE  pp.palletID = @palletId
                     ORDER  BY pp.palletLayer, pp.palletItemID`);
         res.json({ success: true, data: result.recordset });
@@ -77,9 +78,9 @@ router.get('/sapmaterial/:sapMaterial', async (req, res) => {
     }
 });
 
-// ── Create new record ──
-// palletItemID is an IDENTITY column — SQL Server assigns it automatically.
-// Do not include it in the INSERT; use SCOPE_IDENTITY() to read it back.
+// ── Create new package ──
+// palletItemID is IDENTITY — SQL Server assigns it automatically.
+// packagingID is NVARCHAR(2) referencing PackagingData.packID.
 router.post('/', async (req, res) => {
     try {
         const {
@@ -88,31 +89,30 @@ router.post('/', async (req, res) => {
             sapCustomer, sapCustomerMaterial, scanTime
         } = req.body;
 
-        const pool = await getPool();
+        const pool   = await getPool();
         const result = await pool.request()
-            .input('palletID', sql.BigInt, palletID)
-            .input('packagingID', sql.BigInt, packagingID)
-            .input('palletLayer', sql.Int, palletLayer)
-            .input('sapMaterial', sql.NVarChar, sapMaterial)
-            .input('sapQuantity', sql.Decimal, sapQuantity)
-            .input('sapBatch', sql.NVarChar, sapBatch)
-            .input('sapDelivery', sql.NVarChar, sapDelivery)
-            .input('sapDeliveryItem', sql.NVarChar, sapDeliveryItem)
-            .input('sapCustomer', sql.NVarChar, sapCustomer)
-            .input('sapCustomerMaterial', sql.NVarChar, sapCustomerMaterial)
-            .input('scanTime', sql.DateTime, scanTime ? new Date(scanTime) : null)
+            .input('palletID',            sql.Int,          palletID)
+            .input('packagingID',         sql.NVarChar(2),  packagingID ?? null)
+            .input('palletLayer',         sql.Int,          palletLayer ?? null)
+            .input('sapMaterial',         sql.NVarChar(18), sapMaterial ?? null)
+            .input('sapQuantity',         sql.Decimal(18,3),sapQuantity ?? null)
+            .input('sapBatch',            sql.NVarChar(10), sapBatch ?? null)
+            .input('sapDelivery',         sql.NVarChar(10), sapDelivery ?? null)
+            .input('sapDeliveryItem',     sql.NVarChar(6),  sapDeliveryItem ?? null)
+            .input('sapCustomer',         sql.NVarChar(10), sapCustomer ?? null)
+            .input('sapCustomerMaterial', sql.NVarChar(18), sapCustomerMaterial ?? null)
+            .input('scanTime',            sql.DateTime,     scanTime ? new Date(scanTime) : null)
             .query(`INSERT INTO Logistics.dbo.PalletPackages
-                (palletID, packagingID, palletLayer, sapMaterial,
-                 sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
-                 sapCustomer, sapCustomerMaterial, scanTime)
-                VALUES
-                (@palletID, @packagingID, @palletLayer, @sapMaterial,
-                 @sapQuantity, @sapBatch, @sapDelivery, @sapDeliveryItem,
-                 @sapCustomer, @sapCustomerMaterial, @scanTime);
-                SELECT SCOPE_IDENTITY() AS palletItemID;`);
+                        (palletID, packagingID, palletLayer, sapMaterial,
+                         sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
+                         sapCustomer, sapCustomerMaterial, scanTime)
+                    VALUES
+                        (@palletID, @packagingID, @palletLayer, @sapMaterial,
+                         @sapQuantity, @sapBatch, @sapDelivery, @sapDeliveryItem,
+                         @sapCustomer, @sapCustomerMaterial, @scanTime);
+                    SELECT SCOPE_IDENTITY() AS palletItemID;`);
 
-        const newId = result.recordset[0].palletItemID;
-        res.status(201).json({ success: true, palletItemID: newId });
+        res.status(201).json({ success: true, palletItemID: result.recordset[0].palletItemID });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -123,7 +123,7 @@ router.delete('/:palletItemId', async (req, res) => {
     try {
         const pool = await getPool();
         await pool.request()
-            .input('palletItemId', sql.BigInt, req.params.palletItemId)
+            .input('palletItemId', sql.Int, req.params.palletItemId)
             .query('DELETE FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');
         res.json({ success: true });
     } catch (err) {

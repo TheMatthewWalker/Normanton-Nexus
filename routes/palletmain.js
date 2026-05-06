@@ -22,7 +22,7 @@ router.get('/id/:palletId', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .input('palletId', sql.BigInt, req.params.palletId)
+            .input('palletId', sql.Int, req.params.palletId)
             .query('SELECT * FROM Logistics.dbo.PalletMain WHERE palletID = @palletId');
         res.json(result.recordset);
     } catch (err) {
@@ -105,7 +105,7 @@ router.patch('/:palletId', async (req, res) => {
             grossWeight, packagingWeight, palletVolume } = req.body;
     try {
         const pool    = await getPool();
-        const request = pool.request().input('palletId', sql.BigInt, req.params.palletId);
+        const request = pool.request().input('palletId', sql.Int, req.params.palletId);
         const sets    = [];
 
         if (palletFinish !== undefined) {

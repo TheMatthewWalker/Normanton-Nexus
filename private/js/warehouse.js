@@ -1012,10 +1012,9 @@ function renderBuilderPhase2() {
           ${pb.allowedPackaging.length
             ? pb.allowedPackaging.map(p => `
                 <label class="pb-pkg-opt">
-                  <input type="radio" name="pb-pack" value="${esc(String(p.packagingID))}"
-                    data-packid="${esc(p.packID)}" data-desc="${esc(p.packDescription || '')}">
+                  <input type="radio" name="pb-pack" value="${esc(p.packagingID)}">
                   <span class="pb-pkg-opt-inner">
-                    <strong>${esc(p.packID)}</strong>
+                    <strong>${esc(p.packagingID)}</strong>
                     <span>${esc(p.packDescription || p.packMaterial || '')}</span>
                     ${p.packWeight != null ? `<span>${p.packWeight} kg</span>` : ''}
                   </span>
@@ -1097,7 +1096,7 @@ function renderRunningList() {
   return pb.packages.map(p => `
     <div class="pb-running-item">
       <span class="pb-running-layer">Layer ${p.palletLayer}</span>
-      <span class="pb-running-pack">${esc(p.packID || p.packDescription || '')}</span>
+      <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
       <span class="pb-running-mat">${esc(p.sapMaterial || '—')}</span>
       <span class="pb-running-qty">${p.sapQuantity != null ? Number(p.sapQuantity).toFixed(3) : ''}</span>
       ${p.sapBatch ? `<span class="pb-running-batch">Batch: ${esc(p.sapBatch)}</span>` : ''}
@@ -1106,9 +1105,7 @@ function renderRunningList() {
 
 async function addPackage() {
   const packInput   = document.querySelector('input[name="pb-pack"]:checked');
-  const packType    = packInput ? Number(packInput.value) : null; // BIGINT packagingID
-  const packCode    = packInput?.dataset.packid  || '';           // display code e.g. "B2"
-  const packDesc    = packInput?.dataset.desc    || '';
+  const packType    = packInput?.value || '';   // NVARCHAR(2) packagingID = packID code
   const layer       = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
   const material  = document.getElementById('pb-mat').value.trim();
   const qty       = parseFloat(document.getElementById('pb-qty').value) || null;
@@ -1118,7 +1115,7 @@ async function addPackage() {
   const customer  = document.getElementById('pb-cust').value.trim();
   const custMat   = document.getElementById('pb-custmat').value.trim();
 
-  if (!packType || isNaN(packType)) { showPbMsg('Select a packaging type first', 'error'); return; }
+  if (!packType) { showPbMsg('Select a packaging type first', 'error'); return; }
   if (!material) { showPbMsg('SAP Material is required', 'error'); document.getElementById('pb-mat').focus(); return; }
 
   showPbMsg('Adding…', '');
@@ -1144,14 +1141,12 @@ async function addPackage() {
     if (!res.ok) throw new Error(json.error || 'Failed to add package');
 
     pb.packages.push({
-      palletItemID:   json.palletItemID,
-      palletLayer:    layer,
-      packagingID:    packType,   // BIGINT
-      packID:         packCode,   // display code
-      packDescription: packDesc,
-      sapMaterial:    material,
-      sapQuantity:    qty,
-      sapBatch:       batch,
+      palletItemID:  json.palletItemID,
+      palletLayer:   layer,
+      packagingID:   packType,   // NVARCHAR(2) code
+      sapMaterial:   material,
+      sapQuantity:   qty,
+      sapBatch:      batch,
     });
     pb.nextLayer = layer + 1;
 
