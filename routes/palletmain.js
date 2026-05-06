@@ -102,7 +102,7 @@ router.post('/', async (req, res) => {
 // ── Update pallet fields (finish, location, weights) ──
 router.patch('/:palletId', async (req, res) => {
     const { palletFinish, palletLocation, palletCategory,
-            grossWeight, packagingWeight, palletVolume } = req.body;
+            grossWeight, packagingWeight, palletVolume, palletRemoved, palletHeight } = req.body;
     try {
         const pool    = await getPool();
         const request = pool.request().input('palletId', sql.Int, req.params.palletId);
@@ -132,6 +132,14 @@ router.patch('/:palletId', async (req, res) => {
         if (palletVolume !== undefined) {
             request.input('palletVolume', sql.Decimal(18, 3), palletVolume);
             sets.push('palletVolume = @palletVolume');
+        }
+        if (palletHeight !== undefined) {
+            request.input('palletHeight', sql.Int, palletHeight);
+            sets.push('palletHeight = @palletHeight');
+        }
+        if (palletRemoved !== undefined) {
+            request.input('palletRemoved', sql.Bit, palletRemoved ? 1 : 0);
+            sets.push('palletRemoved = @palletRemoved');
         }
 
         if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });

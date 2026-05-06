@@ -677,6 +677,9 @@ function renderPalletCard(p) {
       onclick="event.stopPropagation();openPalletBuilderOnExisting(${p.palletID})">Continue</button>
     <button class="ps-pcard-btn ps-pcard-btn--finish"
       onclick="event.stopPropagation();finishExistingPallet(${p.palletID})">Finish</button>`;
+  const deleteBtn = `
+    <button class="ps-pcard-btn ps-pcard-btn--delete" title="Delete pallet"
+      onclick="event.stopPropagation();deletePallet(${p.palletID})">Delete</button>`;
 
   return `
     <div class="ps-pcard" data-palletid="${p.palletID}">
@@ -687,6 +690,7 @@ function renderPalletCard(p) {
         ${p.palletLocation ? `<span class="ps-pcard-loc">${esc(p.palletLocation)}</span>` : ''}
         ${status}
         ${actions}
+        ${deleteBtn}
         <span class="ps-pcard-chevron">▼</span>
       </div>
       <div class="ps-pcard-body" id="pcard-body-${p.palletID}" style="display:none"></div>
@@ -765,6 +769,19 @@ async function finishExistingPallet(palletId) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
+    await refreshPalletList();
+  } catch (err) { alert('Error: ' + err.message); }
+}
+
+async function deletePallet(palletId) {
+  if (!confirm('Delete this pallet and all its packages? This cannot be undone.')) return;
+  try {
+    const res  = await fetch(`/api/palletmain/${palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletRemoved: 1 }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
     await refreshPalletList();
   } catch (err) { alert('Error: ' + err.message); }
 }
@@ -1040,6 +1057,7 @@ function renderBuilderPhase2() {
         <div class="pb-running-count" id="pb-pkg-count">${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}</div>
         <div class="pb-running-list" id="pb-running-list">${renderRunningList()}</div>
         <div class="pb-running-actions">
+          <button class="btn-danger pb-delete-btn" onclick="deletePalletFromBuilder()">Delete</button>
           <button class="btn-submit pb-finish-btn" onclick="finishBuilderPallet()">Finish Pallet ✓</button>
         </div>
       </div>
@@ -1073,11 +1091,32 @@ function renderBuilderPhase2() {
       ` : `
       <div class="pb-no-pkg-panel">
         <div class="pb-no-pkg-msg">
-          <div style="font-size:28px;margin-bottom:10px;opacity:.3">📦</div>
-          <div style="font-weight:700;margin-bottom:6px">No packaging required</div>
-          <div style="font-size:12px;color:var(--text-muted)">
-            This pallet type does not carry packaged items.<br>
-            Enter the location and finish when ready.
+          <div style="font-size:22px;margin-bottom:8px;opacity:.3">📦</div>
+          <div style="font-weight:700;margin-bottom:4px">No packaging required</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:20px">
+            This pallet type does not carry packaged items.
+          </div>
+
+          <div class="pb-section-label" style="text-align:left">Scan Batch Numbers</div>
+
+          <div class="pb-row" style="margin-top:8px">
+            <div class="pb-field pb-field--short">
+              <label class="pb-label">Layer</label>
+              <input class="pb-input" id="pb-layer" type="number" min="1" step="1" value="${pb.nextLayer}">
+            </div>
+          </div>
+
+          <div class="pb-row" style="margin-top:8px">
+            <div class="pb-field">
+              <label class="pb-label">Batch Number <span class="pb-scan-hint">scan / type</span></label>
+              <input class="pb-input pb-scan" id="pb-batch" type="text" maxlength="10"
+                placeholder="Batch number" autocomplete="off" autocorrect="off" spellcheck="false">
+            </div>
+          </div>
+
+          <div class="pb-form-actions" style="margin-top:12px">
+            <span id="pb-pkg-msg" class="pb-pkg-msg"></span>
+            <button class="btn-submit" onclick="addPackage()">+ Add Batch</button>
           </div>
         </div>
       </div>`}
@@ -1112,15 +1151,18 @@ function calcPalletHeight() {
 }
 
 async function addPackage() {
-  const packInput = document.querySelector('input[name="pb-pack"]:checked');
-  const packType  = packInput?.value || '';
-  if (!packType) { showPbMsg('Select a packaging type first', 'error'); return; }
+  const packInput  = document.querySelector('input[name="pb-pack"]:checked');
+  const packType   = packInput?.value || null;
+  const hasPackaging = pb.allowedPackaging.length > 0;
+
+  if (hasPackaging && !packType) {
+    showPbMsg('Select a packaging type first', 'error'); return;
+  }
 
   const layer = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
   const batch = document.getElementById('pb-batch').value.trim();
 
-  // packHeight needed for pallet height calculation on finish
-  const selectedPkg = pb.allowedPackaging.find(p => p.packagingID === packType);
+  const selectedPkg = packType ? pb.allowedPackaging.find(p => p.packagingID === packType) : null;
   const packHeight  = Number(selectedPkg?.packHeight || 0);
 
   showPbMsg('Adding…', '');
@@ -1130,7 +1172,7 @@ async function addPackage() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         palletID:    pb.palletId,
-        packagingID: packType,
+        packagingID: packType || null,
         palletLayer: layer,
         sapBatch:    batch || null,
         sapDelivery: String(pb.deliveryId),
@@ -1158,7 +1200,7 @@ async function addPackage() {
     document.getElementById('pb-layer').value = pb.nextLayer;
 
     showPbMsg(`✓ Added (layer ${layer})`, 'ok');
-    document.getElementById('pb-batch').focus();
+    document.getElementById('pb-batch')?.focus();
   } catch (err) {
     showPbMsg('✕ ' + err.message, 'error');
   }
@@ -1193,6 +1235,21 @@ async function finishBuilderPallet() {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
+    closePalletBuilder();
+    await refreshPalletList();
+  } catch (err) { showPbMsg('✕ ' + err.message, 'error'); }
+}
+
+async function deletePalletFromBuilder() {
+  if (!pb?.palletId) return;
+  if (!confirm('Delete this pallet and all its packages? This cannot be undone.')) return;
+  try {
+    const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletRemoved: 1 }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
     closePalletBuilder();
     await refreshPalletList();
   } catch (err) { showPbMsg('✕ ' + err.message, 'error'); }
