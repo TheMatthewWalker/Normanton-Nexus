@@ -685,7 +685,7 @@ function renderPalletCard(p) {
     <div class="ps-pcard" data-palletid="${p.palletID}">
       <div class="ps-pcard-hdr">
         <span class="ps-pcard-type">${esc(p.palletType ?? '—')}</span>
-        ${dims ? `<span class="ps-pcard-dims">${dims} mm</span>` : ''}
+        ${dims ? `<span class="ps-pcard-dims">${dims} cm</span>` : ''}
         <span class="ps-pcard-wt">${wt}</span>
         ${p.palletLocation ? `<span class="ps-pcard-loc">${esc(p.palletLocation)}</span>` : ''}
         ${status}
@@ -911,7 +911,7 @@ function renderBuilderPhase1() {
       <div class="pb-type-card" data-id="${esc(t.palletID)}" onclick="selectPalletType('${esc(t.palletID)}')">
         <div class="pb-type-code">${esc(t.palletID)}</div>
         <div class="pb-type-desc">${esc(t.palletDescription || '—')}</div>
-        ${dims ? `<div class="pb-type-dims">${dims} mm</div>` : ''}
+        ${dims ? `<div class="pb-type-dims">${dims} cm</div>` : ''}
         ${t.palletWeight != null ? `<div class="pb-type-wt">${t.palletWeight} kg</div>` : ''}
       </div>`;
   }).join('');
@@ -1045,7 +1045,7 @@ function renderBuilderPhase2() {
       <!-- LEFT: running pallet card -->
       <div class="pb-running">
         <div class="pb-running-title">${esc(label)}</div>
-        ${td ? `<div class="pb-running-dims">${[td.palletLength,td.palletWidth,td.palletHeight].filter(Boolean).join('×')} mm · ${td.palletHeight ?? 0} cm base</div>` : ''}
+        ${td ? `<div class="pb-running-dims">${[td.palletLength,td.palletWidth,td.palletHeight].filter(Boolean).join('×')} cm · ${td.palletHeight ?? 0} cm base</div>` : ''}
         <div class="pb-running-loc">
           <label class="pb-label" style="margin-bottom:4px">
             Location${locRequired ? ' <span style="color:var(--error)">*</span>' : ''}
