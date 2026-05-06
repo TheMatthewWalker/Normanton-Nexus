@@ -187,14 +187,16 @@ BEGIN
 
     INSERT INTO dbo.DeliveryLink (deliveryID, palletID) VALUES (80003, @palletA);
 
+    -- packagingID is the BIGINT identity of PackagingData — look it up by packID code
     INSERT INTO dbo.PalletPackages
         (palletID, packagingID, palletLayer, sapMaterial, sapQuantity,
          sapBatch, sapDelivery, sapDeliveryItem, sapCustomer,
          sapCustomerMaterial, scanTime)
-    VALUES
-        (@palletA, N'B2', 1, N'TCEV9-5B01', 12, N'2026-0042', N'80003', N'000010', N'1002', N'NC-0042-B', DATEADD(minute,-90, GETDATE())),
-        (@palletA, N'B2', 1, N'TCEV9-5B02', 8,  N'2026-0043', N'80003', N'000020', N'1002', N'NC-0043-B', DATEADD(minute,-85, GETDATE())),
-        (@palletA, N'B1', 2, N'TCEV6-3A01', 24, N'2026-0044', N'80003', N'000030', N'1002', N'NC-0044-A', DATEADD(minute,-80, GETDATE()));
+    SELECT @palletA, packagingID, 1, N'TCEV9-5B01', 12, N'2026-0042', N'80003', N'000010', N'1002', N'NC-0042-B', DATEADD(minute,-90, GETDATE()) FROM dbo.PackagingData WHERE packID = N'B2'
+    UNION ALL
+    SELECT @palletA, packagingID, 1, N'TCEV9-5B02', 8,  N'2026-0043', N'80003', N'000020', N'1002', N'NC-0043-B', DATEADD(minute,-85, GETDATE()) FROM dbo.PackagingData WHERE packID = N'B2'
+    UNION ALL
+    SELECT @palletA, packagingID, 2, N'TCEV6-3A01', 24, N'2026-0044', N'80003', N'000030', N'1002', N'NC-0044-A', DATEADD(minute,-80, GETDATE()) FROM dbo.PackagingData WHERE packID = N'B1';
 END;
 
 /* In-progress pallet — partially built on delivery 80001 */
@@ -222,9 +224,9 @@ BEGIN
         (palletID, packagingID, palletLayer, sapMaterial, sapQuantity,
          sapBatch, sapDelivery, sapDeliveryItem, sapCustomer,
          sapCustomerMaterial, scanTime)
-    VALUES
-        (@palletB, N'B3', 1, N'KABS-7701A', 6, N'2026-0051', N'80001', N'000010', N'1001', N'MAP-A-7701', DATEADD(minute,-50, GETDATE())),
-        (@palletB, N'B3', 1, N'KABS-7701B', 6, N'2026-0051', N'80001', N'000020', N'1001', N'MAP-A-7701', DATEADD(minute,-45, GETDATE()));
+    SELECT @palletB, packagingID, 1, N'KABS-7701A', 6, N'2026-0051', N'80001', N'000010', N'1001', N'MAP-A-7701', DATEADD(minute,-50, GETDATE()) FROM dbo.PackagingData WHERE packID = N'B3'
+    UNION ALL
+    SELECT @palletB, packagingID, 1, N'KABS-7701B', 6, N'2026-0051', N'80001', N'000020', N'1001', N'MAP-A-7701', DATEADD(minute,-45, GETDATE()) FROM dbo.PackagingData WHERE packID = N'B3';
 END;
 
 

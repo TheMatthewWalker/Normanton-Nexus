@@ -40,10 +40,9 @@ router.get('/pallet/:palletId', async (req, res) => {
                            pp.sapMaterial, pp.sapQuantity, pp.sapBatch,
                            pp.sapDelivery, pp.sapDeliveryItem,
                            pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
-                           pd.packDescription, pd.packMaterial, pd.packWeight
+                           pd.packID, pd.packDescription, pd.packMaterial, pd.packWeight
                     FROM   Logistics.dbo.PalletPackages pp
-                    LEFT JOIN Logistics.dbo.PackagingData pd
-                           ON CAST(pd.packID AS NVARCHAR(4)) = CAST(pp.packagingID AS NVARCHAR(4))
+                    LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packagingID = pp.packagingID
                     WHERE  pp.palletID = @palletId
                     ORDER  BY pp.palletLayer, pp.palletItemID`);
         res.json({ success: true, data: result.recordset });
@@ -92,7 +91,7 @@ router.post('/', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('palletID', sql.BigInt, palletID)
-            .input('packagingID', sql.NVarChar(4), String(packagingID ?? ''))
+            .input('packagingID', sql.BigInt, packagingID)
             .input('palletLayer', sql.Int, palletLayer)
             .input('sapMaterial', sql.NVarChar, sapMaterial)
             .input('sapQuantity', sql.Decimal, sapQuantity)

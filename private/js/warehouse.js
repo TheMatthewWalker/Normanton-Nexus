@@ -871,9 +871,8 @@ async function openPalletBuilderOnExisting(palletId) {
       ? Math.max(...existing.map(p => p.palletLayer || 0)) + 1
       : 1;
 
-    const validRows     = valRes.data || valRes;
-    pb.allowedPackIds   = validRows.filter(v => v.palletID === pb.palletType).map(v => v.packagingID);
-    pb.allowedPackaging = pb.allPackaging.filter(p => pb.allowedPackIds.includes(p.packID));
+    // Validation endpoint now returns full PackagingData rows (BIGINT packagingID included)
+    pb.allowedPackaging = valRes.data || valRes;
 
     renderBuilderPhase2();
   } catch (err) {
@@ -976,8 +975,8 @@ async function createPallet() {
     const valJson = await valRes.json();
     const rows    = valJson.data || valJson;
 
-    pb.allowedPackIds   = rows.map(v => v.packagingID);
-    pb.allowedPackaging = pb.allPackaging.filter(p => pb.allowedPackIds.includes(p.packID));
+    // Validation endpoint returns full PackagingData rows (BIGINT packagingID included)
+    pb.allowedPackaging = rows;
     pb.packages  = [];
     pb.nextLayer = 1;
 
@@ -1013,7 +1012,8 @@ function renderBuilderPhase2() {
           ${pb.allowedPackaging.length
             ? pb.allowedPackaging.map(p => `
                 <label class="pb-pkg-opt">
-                  <input type="radio" name="pb-pack" value="${esc(p.packID)}">
+                  <input type="radio" name="pb-pack" value="${esc(String(p.packagingID))}"
+                    data-packid="${esc(p.packID)}" data-desc="${esc(p.packDescription || '')}">
                   <span class="pb-pkg-opt-inner">
                     <strong>${esc(p.packID)}</strong>
                     <span>${esc(p.packDescription || p.packMaterial || '')}</span>
@@ -1097,7 +1097,7 @@ function renderRunningList() {
   return pb.packages.map(p => `
     <div class="pb-running-item">
       <span class="pb-running-layer">Layer ${p.palletLayer}</span>
-      <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
+      <span class="pb-running-pack">${esc(p.packID || p.packDescription || '')}</span>
       <span class="pb-running-mat">${esc(p.sapMaterial || '—')}</span>
       <span class="pb-running-qty">${p.sapQuantity != null ? Number(p.sapQuantity).toFixed(3) : ''}</span>
       ${p.sapBatch ? `<span class="pb-running-batch">Batch: ${esc(p.sapBatch)}</span>` : ''}
@@ -1105,9 +1105,11 @@ function renderRunningList() {
 }
 
 async function addPackage() {
-  const packInput = document.querySelector('input[name="pb-pack"]:checked');
-  const packType  = packInput?.value || '';
-  const layer     = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
+  const packInput   = document.querySelector('input[name="pb-pack"]:checked');
+  const packType    = packInput ? Number(packInput.value) : null; // BIGINT packagingID
+  const packCode    = packInput?.dataset.packid  || '';           // display code e.g. "B2"
+  const packDesc    = packInput?.dataset.desc    || '';
+  const layer       = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
   const material  = document.getElementById('pb-mat').value.trim();
   const qty       = parseFloat(document.getElementById('pb-qty').value) || null;
   const batch     = document.getElementById('pb-batch').value.trim();
@@ -1116,7 +1118,7 @@ async function addPackage() {
   const customer  = document.getElementById('pb-cust').value.trim();
   const custMat   = document.getElementById('pb-custmat').value.trim();
 
-  if (!packType) { showPbMsg('Select a packaging type first', 'error'); return; }
+  if (!packType || isNaN(packType)) { showPbMsg('Select a packaging type first', 'error'); return; }
   if (!material) { showPbMsg('SAP Material is required', 'error'); document.getElementById('pb-mat').focus(); return; }
 
   showPbMsg('Adding…', '');
@@ -1142,12 +1144,14 @@ async function addPackage() {
     if (!res.ok) throw new Error(json.error || 'Failed to add package');
 
     pb.packages.push({
-      palletItemID: json.palletItemID,
-      palletLayer:  layer,
-      packagingID:  packType,
-      sapMaterial:  material,
-      sapQuantity:  qty,
-      sapBatch:     batch,
+      palletItemID:   json.palletItemID,
+      palletLayer:    layer,
+      packagingID:    packType,   // BIGINT
+      packID:         packCode,   // display code
+      packDescription: packDesc,
+      sapMaterial:    material,
+      sapQuantity:    qty,
+      sapBatch:       batch,
     });
     pb.nextLayer = layer + 1;
 

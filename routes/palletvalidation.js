@@ -17,16 +17,24 @@ router.get('/', async (req, res) => {
     }
 });
 
-// ── Get by PalletID ──
+// ── Get by PalletID — joined with PackagingData for full type details ──
+// Returns the allowed packaging types for a given pallet type code,
+// including the BIGINT packagingID needed to store in PalletPackages.
 router.get('/pallet/:palletId', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
             .input('palletId', sql.NVarChar, req.params.palletId)
-            .query('SELECT * FROM Logistics.dbo.PalletValidation WHERE palletID = @palletId');
-        res.json(result.recordset);
+            .query(`SELECT pv.palletID, pv.packagingID AS packCode,
+                           pd.packagingID, pd.packID, pd.packMaterial,
+                           pd.packDescription, pd.packWeight,
+                           pd.packLength, pd.packWidth, pd.packHeight
+                    FROM   Logistics.dbo.PalletValidation pv
+                    LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pv.packagingID
+                    WHERE  pv.palletID = @palletId`);
+        res.json({ success: true, data: result.recordset });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
