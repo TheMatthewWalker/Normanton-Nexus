@@ -131,7 +131,8 @@ router.put('/users/:id', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid user ID' });
   }
 
-  const { role, isActive, isLocked, notes, departments } = req.body;
+  const { role, isActive, isLocked, notes, departments,
+          username, firstName, lastName, email } = req.body;
 
   if (role && !VALID_ROLES.includes(role)) {
     return res.status(400).json({ success: false, error: 'Invalid role' });
@@ -140,31 +141,55 @@ router.put('/users/:id', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid department in list' });
   }
 
+  const actorRole  = req.session.user.role;
+  const actorLevel = ROLE_LEVEL[actorRole] ?? 0;
+
+  // Identity fields (username, name, email) — superadmin only
+  const hasIdentityChange = username !== undefined || firstName !== undefined
+                         || lastName !== undefined || email !== undefined;
+  if (hasIdentityChange && actorRole !== 'superadmin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Only superadmins can edit username, name and email.',
+    });
+  }
+
+  // Validate new username format if provided
+  const newUsername = username?.trim() || null;
+  if (newUsername && !/^[a-z0-9._-]{1,80}$/.test(newUsername)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Username must be 1–80 chars: lowercase letters, digits, dots, hyphens, underscores.',
+    });
+  }
+
+  // Validate email format if provided
+  const newEmail = email?.trim().toLowerCase() || null;
+  if (newEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+    return res.status(400).json({ success: false, error: 'Invalid email address.' });
+  }
+
   try {
     const pool = await sql.connect(sqlConfig);
 
     const current = await pool.request()
       .input('userID', sql.Int, userID)
-      .query('SELECT Username, Role, IsActive, IsLocked FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID');
+      .query(`SELECT Username, FirstName, LastName, Email, Role, IsActive, IsLocked
+              FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID`);
 
     if (!current.recordset[0]) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
-    const prev = current.recordset[0];
-
-    const actorRole  = req.session.user.role;
-    const actorLevel = ROLE_LEVEL[actorRole] ?? 0;
+    const prev       = current.recordset[0];
     const targetLevel = ROLE_LEVEL[prev.Role] ?? 0;
 
     if (actorRole !== 'superadmin') {
-      // Admin can only edit users with a strictly lower role level
       if (targetLevel >= actorLevel) {
         return res.status(403).json({
           success: false,
           error: 'You cannot edit a user with an equal or higher role.',
         });
       }
-      // Admin can only assign roles strictly below their own level
       if (role && (ROLE_LEVEL[role] ?? 0) >= actorLevel) {
         return res.status(403).json({
           success: false,
@@ -173,22 +198,81 @@ router.put('/users/:id', async (req, res) => {
       }
     }
 
+    // Check username uniqueness
+    if (newUsername && newUsername !== prev.Username) {
+      const taken = await pool.request()
+        .input('u',      sql.NVarChar(80), newUsername)
+        .input('userID', sql.Int,          userID)
+        .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers
+                WHERE Username = @u AND UserID != @userID`);
+      if (taken.recordset.length) {
+        return res.status(409).json({ success: false, error: 'That username is already taken.' });
+      }
+    }
+
+    // Check email uniqueness
+    if (newEmail && newEmail !== prev.Email) {
+      const taken = await pool.request()
+        .input('e',      sql.NVarChar(160), newEmail)
+        .input('userID', sql.Int,           userID)
+        .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers
+                WHERE Email = @e AND UserID != @userID`);
+      if (taken.recordset.length) {
+        return res.status(409).json({ success: false, error: 'That email address is already in use.' });
+      }
+    }
+
+    // ── Update the user record ────────────────────────────────────────────────
     await pool.request()
-      .input('userID',   sql.Int,          userID)
-      .input('role',     sql.NVarChar(20),  role     ?? prev.Role)
-      .input('isActive', sql.Bit,           isActive ?? prev.IsActive)
-      .input('isLocked', sql.Bit,           isLocked ?? prev.IsLocked)
-      .input('notes',    sql.NVarChar(500), notes    ?? null)
+      .input('userID',    sql.Int,          userID)
+      .input('role',      sql.NVarChar(20),  role      ?? prev.Role)
+      .input('isActive',  sql.Bit,           isActive  ?? prev.IsActive)
+      .input('isLocked',  sql.Bit,           isLocked  ?? prev.IsLocked)
+      .input('notes',     sql.NVarChar(500), notes     ?? null)
+      .input('uname',     sql.NVarChar(80),  newUsername ?? prev.Username)
+      .input('fname',     sql.NVarChar(80),  firstName !== undefined ? (firstName?.trim() || null) : prev.FirstName)
+      .input('lname',     sql.NVarChar(80),  lastName  !== undefined ? (lastName?.trim()  || null) : prev.LastName)
+      .input('email',     sql.NVarChar(160), newEmail  ?? prev.Email)
       .query(`
         UPDATE kongsberg.dbo.PortalUsers
-        SET Role     = @role,
-            IsActive = @isActive,
-            IsLocked = @isLocked,
-            Notes    = @notes,
+        SET Role       = @role,
+            IsActive   = @isActive,
+            IsLocked   = @isLocked,
+            Notes      = @notes,
+            Username   = @uname,
+            FirstName  = @fname,
+            LastName   = @lname,
+            Email      = @email,
             FailedLogins = CASE WHEN @isLocked = 0 THEN 0 ELSE FailedLogins END
         WHERE UserID = @userID
       `);
 
+    // ── Cascade username rename across all referencing tables ─────────────────
+    const oldUsername = prev.Username;
+    if (newUsername && newUsername !== oldUsername) {
+      // Audit log entries made by this user
+      await pool.request()
+        .input('old', sql.NVarChar(80), oldUsername)
+        .input('new', sql.NVarChar(80), newUsername)
+        .query(`UPDATE kongsberg.dbo.PortalAuditLog
+                SET Username = @new WHERE Username = @old`);
+
+      // ApprovedBy field on other user records
+      await pool.request()
+        .input('old', sql.NVarChar(80), oldUsername)
+        .input('new', sql.NVarChar(80), newUsername)
+        .query(`UPDATE kongsberg.dbo.PortalUsers
+                SET ApprovedBy = @new WHERE ApprovedBy = @old`);
+
+      // GrantedBy in department assignments
+      await pool.request()
+        .input('old', sql.NVarChar(80), oldUsername)
+        .input('new', sql.NVarChar(80), newUsername)
+        .query(`UPDATE kongsberg.dbo.PortalUserDepartments
+                SET GrantedBy = @new WHERE GrantedBy = @old`);
+    }
+
+    // ── Replace department access ─────────────────────────────────────────────
     if (Array.isArray(departments)) {
       await pool.request()
         .input('userID', sql.Int, userID)
@@ -199,25 +283,34 @@ router.put('/users/:id', async (req, res) => {
           .input('userID',    sql.Int,         userID)
           .input('dept',      sql.NVarChar(50), dept)
           .input('grantedBy', sql.NVarChar(80), req.session.user.username)
-          .query(`
-            INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
-            VALUES (@userID, @dept, @grantedBy)
-          `);
+          .query(`INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+                  VALUES (@userID, @dept, @grantedBy)`);
       }
     }
 
+    // ── Audit ─────────────────────────────────────────────────────────────────
     const actor = req.session.user.username;
+    if (newUsername && newUsername !== oldUsername) {
+      await audit('USERNAME_CHANGE', actor,
+        `Renamed ${oldUsername} → ${newUsername}`, req);
+    }
+    if ((firstName !== undefined && (firstName?.trim() || '') !== (prev.FirstName || ''))
+     || (lastName  !== undefined && (lastName?.trim()  || '') !== (prev.LastName  || ''))
+     || (newEmail && newEmail !== prev.Email)) {
+      await audit('PROFILE_CHANGE', actor,
+        `Updated profile details for ${newUsername ?? oldUsername}`, req);
+    }
     if (role && role !== prev.Role) {
       await audit('ROLE_CHANGE', actor,
-        `Changed ${prev.Username} role: ${prev.Role} → ${role}`, req);
+        `Changed ${newUsername ?? oldUsername} role: ${prev.Role} → ${role}`, req);
     }
     if (Array.isArray(departments)) {
       await audit('DEPT_CHANGE', actor,
-        `Updated ${prev.Username} departments: ${departments.join(', ') || 'none'}`, req);
+        `Updated ${newUsername ?? oldUsername} departments: ${departments.join(', ') || 'none'}`, req);
     }
     if (isLocked !== undefined && !!isLocked !== !!prev.IsLocked) {
       await audit(isLocked ? 'LOCKED' : 'UNLOCKED', actor,
-        `${isLocked ? 'Locked' : 'Unlocked'} account: ${prev.Username}`, req);
+        `${isLocked ? 'Locked' : 'Unlocked'} account: ${newUsername ?? oldUsername}`, req);
     }
 
     res.json({ success: true });
@@ -339,6 +432,7 @@ router.get('/audit', async (req, res) => {
   const VALID_EVENTS = [
     'LOGIN_OK','LOGIN_FAIL','LOGOUT','REGISTER',
     'APPROVED','REJECTED','ROLE_CHANGE','DEPT_CHANGE','LOCKED','UNLOCKED',
+    'USERNAME_CHANGE','PROFILE_CHANGE',
     'RAW_SQL','RAW_SQL_BLOCKED','RAW_SQL_ERROR',
     'SAP_OK','SAP_ERROR',
     'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE',

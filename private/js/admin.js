@@ -133,7 +133,7 @@ async function loadPending() {
 // ── All Users ─────────────────────────────────────────────────────────────────
 async function loadUsers() {
   const tbody = document.getElementById('users-tbody');
-  tbody.innerHTML = '<tr><td colspan="8" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="10" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
 
   try {
     const data = await api('/api/admin/users');
@@ -141,7 +141,7 @@ async function loadUsers() {
     document.getElementById('users-count').textContent = allUsers.length;
     renderUsersTable(allUsers);
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="8" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -149,7 +149,7 @@ function renderUsersTable(users) {
   const tbody = document.getElementById('users-tbody');
 
   if (users.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="loading-cell">No users found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="loading-cell">No users found</td></tr>';
     return;
   }
 
@@ -171,6 +171,8 @@ function renderUsersTable(users) {
     return `
       <tr>
         <td><strong>${esc(u.Username)}</strong></td>
+        <td>${esc(u.FirstName || '—')}</td>
+        <td>${esc(u.LastName  || '—')}</td>
         <td>${esc(u.Email)}</td>
         <td><span class="badge badge--${u.Role}">${esc(u.Role)}</span></td>
         <td>${statusBadge}</td>
@@ -220,6 +222,18 @@ async function openEditModal(userID) {
     updateToggleLabel('edit-active', 'edit-active-label', 'Active', 'Inactive');
   document.getElementById('edit-locked').onchange = () =>
     updateToggleLabel('edit-locked', 'edit-locked-label', 'Locked', 'Unlocked');
+
+  // Identity section — superadmin only
+  const identitySection = document.getElementById('edit-identity-section');
+  if (sessionRole === 'superadmin') {
+    identitySection.style.display = '';
+    document.getElementById('edit-username-input').value = user.Username || '';
+    document.getElementById('edit-firstname').value      = user.FirstName || '';
+    document.getElementById('edit-lastname').value       = user.LastName  || '';
+    document.getElementById('edit-email-input').value    = user.Email     || '';
+  } else {
+    identitySection.style.display = 'none';
+  }
 
   renderDeptGrid('edit-depts', user.departments || []);
 
@@ -290,10 +304,18 @@ async function saveUser() {
   const notes       = document.getElementById('edit-notes').value.trim();
   const departments = getCheckedDepts('edit-depts');
 
+  const payload = { role, isActive, isLocked, notes, departments };
+
+  // Include identity fields for superadmins
+  if (sessionRole === 'superadmin') {
+    payload.username   = document.getElementById('edit-username-input').value.trim();
+    payload.firstName  = document.getElementById('edit-firstname').value.trim();
+    payload.lastName   = document.getElementById('edit-lastname').value.trim();
+    payload.email      = document.getElementById('edit-email-input').value.trim();
+  }
+
   try {
-    await api('/api/admin/users/' + editingUserID, 'PUT', {
-      role, isActive, isLocked, notes, departments,
-    });
+    await api('/api/admin/users/' + editingUserID, 'PUT', payload);
     closeEditModal();
     await loadUsers();
     showToast('User updated successfully', 'success');

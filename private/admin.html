@@ -127,6 +127,8 @@
             <thead>
               <tr>
                 <th>Username</th>
+                <th>First Name</th>
+                <th>Last Name</th>
                 <th>Email</th>
                 <th>Role</th>
                 <th>Status</th>
@@ -137,7 +139,7 @@
               </tr>
             </thead>
             <tbody id="users-tbody">
-              <tr><td colspan="8" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
+              <tr><td colspan="10" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -170,6 +172,8 @@
               <option value="PERM_REVOKE">Permission revocations</option>
               <option value="PERM_CREATE">Permission created</option>
               <option value="PERM_DELETE">Permission deleted</option>
+              <option value="USERNAME_CHANGE">Username changes</option>
+              <option value="PROFILE_CHANGE">Profile changes</option>
             </select>
             <button type="button" class="btn-secondary" onclick="loadAudit()">Refresh</button>
           </div>
@@ -259,6 +263,41 @@
         <button type="button" class="modal-close" onclick="closeEditModal()">✕</button>
       </div>
       <div class="modal-body">
+
+        <!-- Identity fields — superadmin only, shown via JS -->
+        <div id="edit-identity-section" style="display:none">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;
+            letter-spacing:2px;text-transform:uppercase;color:var(--text-muted);
+            margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+            Identity — Superadmin Only
+          </div>
+
+          <div class="modal-row">
+            <label class="modal-label">Username</label>
+            <input type="text" id="edit-username-input" class="modal-input"
+              maxlength="80" autocomplete="off" autocorrect="off" spellcheck="false"
+              placeholder="lowercase letters, digits, dots, hyphens">
+            <div class="modal-hint">Renaming cascades to audit log, department grants and approval records.</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="modal-row" style="margin-bottom:0">
+              <label class="modal-label">First Name</label>
+              <input type="text" id="edit-firstname" class="modal-input" maxlength="80">
+            </div>
+            <div class="modal-row" style="margin-bottom:0">
+              <label class="modal-label">Last Name</label>
+              <input type="text" id="edit-lastname" class="modal-input" maxlength="80">
+            </div>
+          </div>
+
+          <div class="modal-row" style="margin-top:12px">
+            <label class="modal-label">Email</label>
+            <input type="email" id="edit-email-input" class="modal-input" maxlength="160">
+          </div>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+        </div>
 
         <div class="modal-row">
           <label class="modal-label">Role</label>
