@@ -249,6 +249,43 @@ body::before {
 .ctx-item--unblock { color: #059669; }
 .ctx-item--unblock:hover { background: rgba(5,150,105,0.08); }
 
+/* ── PAGINATION ──────────────────────────────────────────────────────────── */
+.q-pagination {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface2);
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+}
+.q-page-info { color: var(--text-muted); white-space: nowrap; }
+.q-page-controls { display: flex; align-items: center; gap: 3px; }
+
+.q-page-btn {
+  min-width: 30px; height: 26px; padding: 0 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text-dim);
+  cursor: pointer; transition: border-color 0.12s, color 0.12s, background 0.12s;
+  white-space: nowrap;
+}
+.q-page-btn:hover:not(:disabled):not(.q-page-btn--ellipsis) {
+  border-color: var(--accent); color: var(--accent);
+}
+.q-page-btn.active  { background: var(--accent); color: #fff; border-color: var(--accent); }
+.q-page-btn:disabled { opacity: 0.38; cursor: default; }
+.q-page-btn--ellipsis { border: none; background: none; cursor: default; pointer-events: none; }
+
+.q-page-size {
+  margin-left: auto; display: flex; align-items: center; gap: 6px;
+  color: var(--text-muted);
+}
+.q-page-size select {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text); cursor: pointer;
+}
+.q-page-size select:focus { outline: none; border-color: var(--accent); }
+
 /* ── FORM HELPERS (not in logistics.css) ────────────────────────────────── */
 .tf-req      { color: var(--error); margin-left: 2px; }
 .tf-optional { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 4px; }

@@ -9,6 +9,12 @@ let ctxRowData      = null;
 // WM-managed storage locations that require Bin Type + Bin
 const WM_LOCATIONS = new Set(['1710', '1711']);
 
+// Pagination state for the stock table
+let qAllRows      = [];
+let qFilteredRows = [];
+let qCurrentPage  = 1;
+let qPageSize     = 50;
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async () => {
   try {
@@ -147,12 +153,59 @@ async function displayStock() {
 }
 
 function renderStockTable(rows, cols) {
+  qAllRows      = rows;
+  qFilteredRows = rows;
+  qCurrentPage  = 1;
+  // keep qPageSize across refreshes
+
   const filterRow = cols.map(c =>
     `<th><input class="col-filter-input" type="text" placeholder="${esc(c)}…"
       data-col="${esc(c)}" autocomplete="off"></th>`
   ).join('');
 
-  const tbody = rows.map(row => {
+  document.getElementById('result-body').innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table q-stock-table" style="width:100%">
+        <thead>
+          <tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
+          <tr class="col-filter-row">${filterRow}</tr>
+        </thead>
+        <tbody id="q-tbody"></tbody>
+      </table>
+    </div>
+    <div class="q-pagination" id="q-pagination"></div>`;
+
+  // Column filter listeners — reset to page 1 on change
+  document.querySelectorAll('.col-filter-input').forEach(input => {
+    input.addEventListener('input', () => {
+      const filters = {};
+      document.querySelectorAll('.col-filter-input').forEach(i => {
+        if (i.value.trim()) filters[i.dataset.col] = i.value.trim().toLowerCase();
+      });
+      qFilteredRows = qAllRows.filter(row =>
+        Object.entries(filters).every(([col, val]) =>
+          String(row[col] ?? '').toLowerCase().includes(val)
+        )
+      );
+      qCurrentPage = 1;
+      renderPage(cols);
+    });
+  });
+
+  renderPage(cols);
+}
+
+function renderPage(cols) {
+  const total = qFilteredRows.length;
+  const pages = Math.max(1, Math.ceil(total / qPageSize));
+  qCurrentPage  = Math.min(qCurrentPage, pages);
+
+  const start = (qCurrentPage - 1) * qPageSize;
+  const end   = Math.min(start + qPageSize, total);
+  const slice = qFilteredRows.slice(start, end);
+
+  // Render visible rows
+  document.getElementById('q-tbody').innerHTML = slice.map(row => {
     const isBlocked = (row['Stock Cat'] || '').trim() === 'S';
     const rowClass  = isBlocked ? 'q-row q-row--blocked' : 'q-row';
     const cells     = cols.map(c => {
@@ -166,48 +219,85 @@ function renderStockTable(rows, cols) {
     return `<tr class="${rowClass}" data-row="${esc(JSON.stringify(row))}">${cells}</tr>`;
   }).join('');
 
-  document.getElementById('result-body').innerHTML = `
-    <div style="overflow-x:auto">
-      <table class="pn-batch-table q-stock-table" style="width:100%">
-        <thead>
-          <tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
-          <tr class="col-filter-row">${filterRow}</tr>
-        </thead>
-        <tbody id="q-tbody">${tbody}</tbody>
-      </table>
-    </div>`;
-
-  // Wire column filters
-  const badge   = document.getElementById('result-row-badge');
-  const allRows = [...document.querySelectorAll('#q-tbody .q-row')];
-
-  document.querySelectorAll('.col-filter-input').forEach(input => {
-    input.addEventListener('input', () => {
-      const filters = {};
-      document.querySelectorAll('.col-filter-input').forEach(i => {
-        if (i.value.trim()) filters[i.dataset.col] = i.value.trim().toLowerCase();
-      });
-      let visible = 0;
-      allRows.forEach(tr => {
-        const row  = JSON.parse(tr.dataset.row);
-        const show = Object.entries(filters).every(([col, val]) =>
-          String(row[col] ?? '').toLowerCase().includes(val)
-        );
-        tr.style.display = show ? '' : 'none';
-        if (show) visible++;
-      });
-      badge.textContent = `${visible} / ${allRows.length} rows`;
-    });
-  });
-
-  // Wire right-click menu
-  allRows.forEach(tr => {
+  // Right-click on each rendered row
+  document.querySelectorAll('#q-tbody .q-row').forEach(tr => {
     tr.addEventListener('contextmenu', e => {
       e.preventDefault();
       ctxRowData = JSON.parse(tr.dataset.row);
       showCtxMenu(e, ctxRowData);
     });
   });
+
+  // Update row badge
+  const badge = document.getElementById('result-row-badge');
+  badge.textContent = total === qAllRows.length
+    ? `${total} rows`
+    : `${total} / ${qAllRows.length} rows`;
+  badge.classList.remove('hidden');
+
+  // Render pagination bar
+  document.getElementById('q-pagination').innerHTML = buildPaginationBar(start, end, total, pages, cols);
+
+  document.getElementById('q-prev-btn')?.addEventListener('click', () => {
+    if (qCurrentPage > 1) { qCurrentPage--; renderPage(cols); }
+  });
+  document.getElementById('q-next-btn')?.addEventListener('click', () => {
+    if (qCurrentPage < pages) { qCurrentPage++; renderPage(cols); }
+  });
+  document.querySelectorAll('.q-page-num-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      qCurrentPage = Number(btn.dataset.page);
+      renderPage(cols);
+    });
+  });
+  document.getElementById('q-page-size-sel')?.addEventListener('change', e => {
+    qPageSize    = Number(e.target.value);
+    qCurrentPage = 1;
+    renderPage(cols);
+  });
+}
+
+function buildPaginationBar(start, end, total, pages, cols) {
+  const info = total === 0
+    ? 'No rows match'
+    : `Showing ${start + 1}–${end} of ${total}`;
+
+  const pageNums = pageRange(qCurrentPage, pages).map(p =>
+    p === '…'
+      ? `<span class="q-page-btn q-page-btn--ellipsis">…</span>`
+      : `<button class="q-page-btn q-page-num-btn${p === qCurrentPage ? ' active' : ''}"
+           data-page="${p}">${p}</button>`
+  ).join('');
+
+  const sizeOpts = [25, 50, 100, 200].map(n =>
+    `<option value="${n}"${n === qPageSize ? ' selected' : ''}>${n}</option>`
+  ).join('');
+
+  return `
+    <span class="q-page-info">${esc(info)}</span>
+    <div class="q-page-controls">
+      <button class="q-page-btn" id="q-prev-btn" ${qCurrentPage <= 1 ? 'disabled' : ''}>←</button>
+      ${pageNums}
+      <button class="q-page-btn" id="q-next-btn" ${qCurrentPage >= pages ? 'disabled' : ''}>→</button>
+    </div>
+    <div class="q-page-size">
+      Per page: <select id="q-page-size-sel">${sizeOpts}</select>
+    </div>`;
+}
+
+function pageRange(current, total) {
+  if (total <= 9) return Array.from({ length: total }, (_, i) => i + 1);
+  const around = new Set([1, 2, current - 1, current, current + 1, total - 1, total]
+    .filter(p => p >= 1 && p <= total));
+  const sorted = [...around].sort((a, b) => a - b);
+  const result = [];
+  let prev = 0;
+  for (const p of sorted) {
+    if (p - prev > 1) result.push('…');
+    result.push(p);
+    prev = p;
+  }
+  return result;
 }
 
 // ── Context Menu ──────────────────────────────────────────────────────────────
