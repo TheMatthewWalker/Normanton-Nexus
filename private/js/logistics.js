@@ -811,7 +811,14 @@ function buildShipmentDraft() {
     draft.grossWeight += Number(row.grossWeight || 0);
     draft.shipmentVolume += Number(row.deliveryVolume || 0);
     return draft;
-  }, { destinationName: first.destinationName || '', destinationStreet: first.destinationStreet || '', destinationCity: first.destinationCity || '', destinationPostCode: first.destinationPostCode || '', destinationCountry: first.destinationCountry || '', incoTerms: first.defaultIncoterms || '', plannedCollection: new Date().toISOString().slice(0, 10), palletCount: 0, grossWeight: 0, shipmentVolume: 0 });
+  }, {
+    destinationName: first.destinationName || '', destinationStreet: first.destinationStreet || '',
+    destinationCity: first.destinationCity || '', destinationPostCode: first.destinationPostCode || '',
+    destinationCountry: first.destinationCountry || '', incoTerms: first.defaultIncoterms || '',
+    plannedCollection: new Date().toISOString().slice(0, 10),
+    deliveryService: first.deliveryService || '',  // carried through to pre-select forwarder mode
+    palletCount: 0, grossWeight: 0, shipmentVolume: 0,
+  });
 }
 function openModal(html) {
   const overlay = document.getElementById('ps-modal-overlay');
@@ -841,6 +848,18 @@ async function openShipmentModal() {
   openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">Create Shipment</div><div class="ps-modal-sub">${esc(rows[0].destinationName || '')} - ${rows.length} deliveries</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><form id="lg-shipment-form" class="transfer-form"><div class="tf-section-label">Shipment Header</div><div class="tf-row"><div class="tf-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="lg-planned" value="${esc(draft.plannedCollection)}"></div><div class="tf-field"><label class="tf-label">Forwarder Mode</label><select class="tf-input" id="lg-forwarder-mode"><option value="">Select mode</option>${modeOptions.map(mode => `<option value="${esc(mode)}">${esc(mode)}</option>`).join('')}</select></div><div class="tf-field"><label class="tf-label">Forwarder Name</label><select class="tf-input" id="lg-forwarder-name" disabled><option value="">Select forwarder</option></select></div><div class="tf-field"><label class="tf-label">Incoterms</label><input class="tf-input" type="text" id="lg-incoterms" value="${esc(draft.incoTerms)}"></div></div><div class="tf-row"><div class="tf-field tf-field--wide"><label class="tf-label">Destination Name</label><input class="tf-input" type="text" id="lg-dest-name" value="${esc(draft.destinationName)}"></div><div class="tf-field tf-field--wide"><label class="tf-label">Destination Street</label><input class="tf-input" type="text" id="lg-dest-street" value="${esc(draft.destinationStreet)}"></div></div><div class="tf-row"><div class="tf-field"><label class="tf-label">City</label><input class="tf-input" type="text" id="lg-dest-city" value="${esc(draft.destinationCity)}"></div><div class="tf-field"><label class="tf-label">Post Code</label><input class="tf-input" type="text" id="lg-dest-postcode" value="${esc(draft.destinationPostCode)}"></div><div class="tf-field"><label class="tf-label">Country</label><input class="tf-input" type="text" id="lg-dest-country" value="${esc(draft.destinationCountry)}"></div></div><div class="tf-row"><label class="lg-flag"><input type="checkbox" id="lg-customs-required"> Customs Required</label><label class="lg-flag"><input type="checkbox" id="lg-customs-complete"> Customs Complete</label></div><div class="tf-section-label">Calculated Totals <span class="tf-locked">Read only</span></div><div class="tf-row"><div class="tf-field"><label class="tf-label">Pallet Count</label><input class="tf-input" readonly value="${esc(draft.palletCount.toFixed(3))}"></div><div class="tf-field"><label class="tf-label">Gross Weight</label><input class="tf-input" readonly value="${esc(draft.grossWeight.toFixed(3))}"></div><div class="tf-field"><label class="tf-label">Volume</label><input class="tf-input" readonly value="${esc(draft.shipmentVolume.toFixed(3))}"></div></div><div id="lg-submit-result"></div></form></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="lg-confirm-btn">Confirm Shipment</button></div></div>`);
   document.getElementById('lg-forwarder-mode').addEventListener('change', onShipmentForwarderModeChange);
   document.getElementById('lg-confirm-btn').addEventListener('click', submitShipmentCreate);
+
+  // Pre-select forwarder mode from deliveryService — exact match then case-insensitive
+  const svc = draft.deliveryService.trim();
+  if (svc) {
+    const modeEl = document.getElementById('lg-forwarder-mode');
+    const match  = modeOptions.find(m => m === svc)
+                || modeOptions.find(m => m.toLowerCase() === svc.toLowerCase());
+    if (match) {
+      modeEl.value = match;
+      onShipmentForwarderModeChange();  // populate forwarder name dropdown immediately
+    }
+  }
 }
 async function submitShipmentCreate() {
   const button = document.getElementById('lg-confirm-btn');
