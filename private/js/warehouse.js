@@ -810,6 +810,7 @@ async function openPalletBuilder() {
 
   const { custId } = _palletListCtx || {};
   pb = { deliveryId, destName, customerId: custId || '', palletLocation: '',
+         packagingWeight: 0,
          phase: 1, palletId: null, palletType: null,
          palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
@@ -849,6 +850,7 @@ async function openPalletBuilderOnExisting(palletId) {
 
   const { custId } = _palletListCtx || {};
   pb = { deliveryId, destName, customerId: custId || '', palletLocation: '',
+         packagingWeight: 0,
          phase: 2, palletId, palletType: null,
          palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
@@ -883,9 +885,10 @@ async function openPalletBuilderOnExisting(palletId) {
 
     const palletRecord = (palRes.data || palRes)[0];
     if (palletRecord) {
-      pb.palletType     = palletRecord.palletType;
-      pb.palletTypeData = pb.allPalletTypes.find(t => t.palletID === pb.palletType);
-      pb.palletLocation = palletRecord.palletLocation || '';
+      pb.palletType       = palletRecord.palletType;
+      pb.palletTypeData   = pb.allPalletTypes.find(t => t.palletID === pb.palletType);
+      pb.palletLocation   = palletRecord.palletLocation   || '';
+      pb.packagingWeight  = Number(palletRecord.packagingWeight || 0);
     }
 
     const existing  = pkgsRes.data || pkgsRes;
@@ -963,8 +966,8 @@ async function createPallet() {
       body: JSON.stringify({
         palletType:        pb.palletType,
         palletFinish:      0,
-        packagingWeight:   0,
-        grossWeight:       td?.palletWeight ?? 0,
+        packagingWeight:   Number(td?.palletWeight || 0),  // seed with pallet's own weight
+        grossWeight:       0,
         palletVolume:      0,
         palletLength:      td?.palletLength ?? null,
         palletWidth:       td?.palletWidth  ?? null,
@@ -995,7 +998,8 @@ async function createPallet() {
 
     // Validation endpoint returns full PackagingData rows (BIGINT packagingID included)
     pb.allowedPackaging = rows;
-    pb.palletLocation = location;
+    pb.palletLocation   = location;
+    pb.packagingWeight  = Number(td?.palletWeight || 0);
     pb.packages  = [];
     pb.nextLayer = 1;
 
@@ -1053,6 +1057,17 @@ function renderBuilderPhase2() {
           <input class="pb-input${locRequired ? ' pb-input--req' : ''}" id="pb-loc-running"
             type="text" maxlength="50" value="${esc(pb.palletLocation)}"
             placeholder="Required to finish">
+        </div>
+        <div class="pb-running-loc" style="margin-top:8px">
+          <label class="pb-label" style="margin-bottom:4px">
+            Gross Weight (kg) <span style="color:var(--error)">*</span>
+          </label>
+          <input class="pb-input" id="pb-gross-weight" type="number"
+            step="0.01" min="0.01" placeholder="Enter at finish">
+        </div>
+        <div class="pb-running-weights">
+          <span>Pkg weight</span>
+          <span id="pb-pkg-weight-display">${Number(pb.packagingWeight).toFixed(2)} kg</span>
         </div>
         <div class="pb-running-count" id="pb-pkg-count">${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}</div>
         <div class="pb-running-list" id="pb-running-list">${renderRunningList()}</div>
@@ -1164,6 +1179,7 @@ async function addPackage() {
 
   const selectedPkg = packType ? pb.allowedPackaging.find(p => p.packagingID === packType) : null;
   const packHeight  = Number(selectedPkg?.packHeight || 0);
+  const packWeight  = Number(selectedPkg?.packWeight || 0);
 
   showPbMsg('Adding…', '');
 
@@ -1189,12 +1205,22 @@ async function addPackage() {
       packagingID:  packType,
       sapBatch:     batch,
       packHeight,
+      packWeight,
     });
-    pb.nextLayer = layer + 1;
+    pb.nextLayer       = layer + 1;
+    pb.packagingWeight = (pb.packagingWeight || 0) + packWeight;
+
+    // Update DB packagingWeight in the background
+    fetch(`/api/palletmain/${pb.palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ packagingWeight: pb.packagingWeight }),
+    }).catch(() => {});
 
     document.getElementById('pb-running-list').innerHTML = renderRunningList();
     document.getElementById('pb-pkg-count').textContent =
       `${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}`;
+    const wtEl = document.getElementById('pb-pkg-weight-display');
+    if (wtEl) wtEl.textContent = `${Number(pb.packagingWeight).toFixed(2)} kg`;
 
     document.getElementById('pb-batch').value = '';
     document.getElementById('pb-layer').value = pb.nextLayer;
@@ -1226,12 +1252,24 @@ async function finishBuilderPallet() {
     return;
   }
 
+  // Gross weight — mandatory, entered by operator
+  const grossInput  = document.getElementById('pb-gross-weight');
+  const grossWeight = parseFloat(grossInput?.value) || 0;
+  if (!grossWeight || grossWeight <= 0) {
+    if (grossInput) { grossInput.classList.add('pb-input--error'); grossInput.focus(); }
+    showPbMsg('Gross weight is required before finishing', 'error');
+    return;
+  }
+
   const height = calcPalletHeight();
 
   try {
     const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ palletFinish: 1, palletLocation: loc, palletHeight: height }),
+      body: JSON.stringify({
+        palletFinish: 1, palletLocation: loc,
+        palletHeight: height, grossWeight,
+      }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');

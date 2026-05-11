@@ -1050,8 +1050,18 @@ body::before {
 .pb-pkg-msg--ok    { color: var(--success); }
 .pb-pkg-msg--error { color: var(--error); }
 
-/* Location field in running card */
+/* Location and gross weight fields in running card */
 .pb-running-loc { display: flex; flex-direction: column; }
+
+/* Auto-calculated packaging weight display */
+.pb-running-weights {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 8px; border-radius: 5px;
+  background: var(--accent-dim);
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+}
+.pb-running-weights span:first-child { color: var(--text-muted); }
+.pb-running-weights span:last-child  { font-weight: 700; color: var(--accent); }
 .pb-input--req   { border-color: #D97706; }
 .pb-input--req:focus { border-color: #D97706; box-shadow: 0 0 0 3px rgba(217,119,6,0.12); }
 .pb-input--error { border-color: var(--error); }
