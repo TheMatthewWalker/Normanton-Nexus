@@ -3,6 +3,7 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 let userPermissions = [];
 let sessionUsername = '';
+let sessionRole     = '';
 let ctxRowData      = null;  // row the context menu was opened on
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -10,7 +11,8 @@ let ctxRowData      = null;  // row the context menu was opened on
   try {
     const session = await fetch('/session-check').then(r => r.json());
     if (!session.loggedIn) { location.href = '/'; return; }
-    sessionUsername = session.username || '';
+    sessionUsername = session.username    || '';
+    sessionRole     = session.role        || '';
     userPermissions = session.permissions || [];
     document.getElementById('session-user').textContent = sessionUsername;
     applyPermissionVisibility();
@@ -22,17 +24,13 @@ let ctxRowData      = null;  // row the context menu was opened on
 function applyPermissionVisibility() {
   document.querySelectorAll('[data-permission]').forEach(el => {
     const code    = el.dataset.permission;
-    const allowed = session_isSuperadmin() || userPermissions.includes(code);
+    const allowed = sessionRole === 'superadmin' || userPermissions.includes(code);
     el.style.display = allowed ? '' : 'none';
   });
 }
-function session_isSuperadmin() {
-  // checked via permissions not role — superadmin bypasses everything
-  return document.getElementById('session-user')?.textContent === sessionUsername;
-  // actual check is done server-side; here we just check locally for tile visibility
-}
+
 function hasPermission(code) {
-  return userPermissions.includes(code);
+  return sessionRole === 'superadmin' || userPermissions.includes(code);
 }
 
 // ── Tile navigation ───────────────────────────────────────────────────────────
@@ -202,7 +200,7 @@ function setupContextMenu() {
 function showCtxMenu(e, row) {
   if (!hasPermission('QUAL_BLOCKING')) return;
 
-  const isBlocked = (row['Stock Cat'] || '').trim() === 'S';
+  const isBlocked   = (row['Stock Cat'] || '').trim() === 'S';
   const blockItem   = document.getElementById('ctx-block');
   const unblockItem = document.getElementById('ctx-unblock');
 
@@ -210,8 +208,9 @@ function showCtxMenu(e, row) {
   unblockItem.classList.toggle('hidden', !isBlocked);
 
   const menu = document.getElementById('ctx-menu');
-  menu.style.left = `${Math.min(e.pageX, window.innerWidth  - 180)}px`;
-  menu.style.top  = `${Math.min(e.pageY, window.innerHeight - 80)}px`;
+  // clientX/Y are viewport-relative — correct for position:fixed elements
+  menu.style.left = `${Math.min(e.clientX, window.innerWidth  - 180)}px`;
+  menu.style.top  = `${Math.min(e.clientY, window.innerHeight - 80)}px`;
   menu.classList.remove('hidden');
 }
 
