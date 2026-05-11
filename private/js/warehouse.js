@@ -1083,6 +1083,30 @@ function renderBuilderPhase2() {
         <div class="pb-section-label">Packaging Type</div>
         <div class="pb-pkg-groups">${renderPackagingGroups()}</div>
 
+        <!-- Custom dimensions — shown when selected type has no defaults -->
+        <div id="pb-custom-dims" style="display:none;margin-top:10px;
+          padding:10px 12px;border-radius:8px;
+          background:rgba(217,119,6,0.06);border:1px solid rgba(217,119,6,0.25)">
+          <div class="pb-section-label" style="color:#D97706;margin-bottom:8px">
+            Custom Dimensions (cm) — this box has no defaults
+          </div>
+          <div class="pb-sap-grid">
+            <div class="pb-field pb-field--short">
+              <label class="pb-label">Length</label>
+              <input class="pb-input" id="pb-dim-l" type="number" step="1" min="1" placeholder="cm">
+            </div>
+            <div class="pb-field pb-field--short">
+              <label class="pb-label">Width</label>
+              <input class="pb-input" id="pb-dim-w" type="number" step="1" min="1" placeholder="cm">
+            </div>
+            <div class="pb-field pb-field--short">
+              <label class="pb-label">Height <span style="color:var(--error)">*</span></label>
+              <input class="pb-input pb-input--req" id="pb-dim-h" type="number" step="1" min="1"
+                placeholder="cm — required">
+            </div>
+          </div>
+        </div>
+
         <div class="pb-row" style="margin-top:12px">
           <div class="pb-field pb-field--short">
             <label class="pb-label">Pallet Layer</label>
@@ -1139,6 +1163,26 @@ function renderBuilderPhase2() {
     </div>`;
 
   if (hasPackaging) {
+    // Show/hide custom dimension inputs when packaging type changes
+    document.querySelectorAll('input[name="pb-pack"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const pkg        = pb.allowedPackaging.find(p => p.packagingID === radio.value);
+        const needsDims  = pkg && (pkg.packHeight == null || pkg.packLength == null || pkg.packWidth == null);
+        const dimsEl     = document.getElementById('pb-custom-dims');
+        if (dimsEl) {
+          dimsEl.style.display = needsDims ? '' : 'none';
+          if (needsDims) {
+            // Clear previous values each time a custom-dims type is selected
+            ['pb-dim-l','pb-dim-w','pb-dim-h'].forEach(id => {
+              const el = document.getElementById(id);
+              if (el) el.value = '';
+            });
+            document.getElementById('pb-dim-l')?.focus();
+          }
+        }
+      });
+    });
+
     document.getElementById('pb-batch').focus();
   }
 }
@@ -1177,9 +1221,23 @@ async function addPackage() {
   const layer = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
   const batch = document.getElementById('pb-batch').value.trim();
 
-  const selectedPkg = packType ? pb.allowedPackaging.find(p => p.packagingID === packType) : null;
-  const packHeight  = Number(selectedPkg?.packHeight || 0);
-  const packWeight  = Number(selectedPkg?.packWeight || 0);
+  const selectedPkg   = packType ? pb.allowedPackaging.find(p => p.packagingID === packType) : null;
+  const packWeight    = Number(selectedPkg?.packWeight || 0);
+
+  // Use entered dimensions when the selected type has no defaults
+  const dimsEl        = document.getElementById('pb-custom-dims');
+  const usingCustom   = dimsEl && dimsEl.style.display !== 'none';
+  let packHeight = Number(selectedPkg?.packHeight || 0);
+  if (usingCustom) {
+    const enteredH = parseFloat(document.getElementById('pb-dim-h')?.value) || 0;
+    if (!enteredH) {
+      document.getElementById('pb-dim-h')?.classList.add('pb-input--error');
+      document.getElementById('pb-dim-h')?.focus();
+      showPbMsg('Enter the box height (required for height calculation)', 'error');
+      return;
+    }
+    packHeight = enteredH;
+  }
 
   showPbMsg('Adding…', '');
 
@@ -1224,6 +1282,12 @@ async function addPackage() {
 
     document.getElementById('pb-batch').value = '';
     document.getElementById('pb-layer').value = pb.nextLayer;
+    if (usingCustom) {
+      ['pb-dim-l','pb-dim-w','pb-dim-h'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.value = ''; el.classList.remove('pb-input--error'); }
+      });
+    }
 
     showPbMsg(`✓ Added (layer ${layer})`, 'ok');
     document.getElementById('pb-batch')?.focus();
