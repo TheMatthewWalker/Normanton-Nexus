@@ -59,6 +59,8 @@ router.get('/display', async (req, res) => {
 });
 
 // ── POST /block ───────────────────────────────────────────────────────────────
+// Username is taken from the portal session and injected into the SAP body as
+// QualityMb1bRequest.Username — the frontend never sends it.
 router.post('/block', requirePermission('QUAL_BLOCKING'), async (req, res) => {
   try {
     const body = { ...req.body, Username: req.session.user.username };

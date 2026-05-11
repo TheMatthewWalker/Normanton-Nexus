@@ -4,7 +4,10 @@
 let userPermissions = [];
 let sessionUsername = '';
 let sessionRole     = '';
-let ctxRowData      = null;  // row the context menu was opened on
+let ctxRowData      = null;
+
+// WM-managed storage locations that require Bin Type + Bin
+const WM_LOCATIONS = new Set(['1710', '1711']);
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async () => {
@@ -44,14 +47,10 @@ function setupTiles() {
     });
   });
 
-  // Collapsible section headers
+  // Collapsible section headers — always start expanded, no localStorage restore
   document.querySelectorAll('.pn-section-hdr').forEach(hdr => {
-    const section = hdr.closest('.pn-section');
-    const key     = `qual-collapsed:${hdr.textContent.trim()}`;
-    if (localStorage.getItem(key) === '1') section.classList.add('pn-section--collapsed');
     hdr.addEventListener('click', () => {
-      section.classList.toggle('pn-section--collapsed');
-      localStorage.setItem(key, section.classList.contains('pn-section--collapsed') ? '1' : '0');
+      hdr.closest('.pn-section').classList.toggle('pn-section--collapsed');
     });
   });
 }
@@ -148,7 +147,11 @@ async function displayStock() {
 }
 
 function renderStockTable(rows, cols) {
-  const thead = `<tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>`;
+  const filterRow = cols.map(c =>
+    `<th><input class="col-filter-input" type="text" placeholder="${esc(c)}…"
+      data-col="${esc(c)}" autocomplete="off"></th>`
+  ).join('');
+
   const tbody = rows.map(row => {
     const isBlocked = (row['Stock Cat'] || '').trim() === 'S';
     const rowClass  = isBlocked ? 'q-row q-row--blocked' : 'q-row';
@@ -164,15 +167,41 @@ function renderStockTable(rows, cols) {
   }).join('');
 
   document.getElementById('result-body').innerHTML = `
-    <div class="pn-batch-table-wrap">
-      <table class="pn-batch-table q-stock-table">
-        <thead>${thead}</thead>
-        <tbody>${tbody}</tbody>
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table q-stock-table" style="width:100%">
+        <thead>
+          <tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
+          <tr class="col-filter-row">${filterRow}</tr>
+        </thead>
+        <tbody id="q-tbody">${tbody}</tbody>
       </table>
     </div>`;
 
+  // Wire column filters
+  const badge   = document.getElementById('result-row-badge');
+  const allRows = [...document.querySelectorAll('#q-tbody .q-row')];
+
+  document.querySelectorAll('.col-filter-input').forEach(input => {
+    input.addEventListener('input', () => {
+      const filters = {};
+      document.querySelectorAll('.col-filter-input').forEach(i => {
+        if (i.value.trim()) filters[i.dataset.col] = i.value.trim().toLowerCase();
+      });
+      let visible = 0;
+      allRows.forEach(tr => {
+        const row  = JSON.parse(tr.dataset.row);
+        const show = Object.entries(filters).every(([col, val]) =>
+          String(row[col] ?? '').toLowerCase().includes(val)
+        );
+        tr.style.display = show ? '' : 'none';
+        if (show) visible++;
+      });
+      badge.textContent = `${visible} / ${allRows.length} rows`;
+    });
+  });
+
   // Wire right-click menu
-  document.querySelectorAll('.q-row').forEach(tr => {
+  allRows.forEach(tr => {
     tr.addEventListener('contextmenu', e => {
       e.preventDefault();
       ctxRowData = JSON.parse(tr.dataset.row);
@@ -208,7 +237,6 @@ function showCtxMenu(e, row) {
   unblockItem.classList.toggle('hidden', !isBlocked);
 
   const menu = document.getElementById('ctx-menu');
-  // clientX/Y are viewport-relative — correct for position:fixed elements
   menu.style.left = `${Math.min(e.clientX, window.innerWidth  - 180)}px`;
   menu.style.top  = `${Math.min(e.clientY, window.innerHeight - 80)}px`;
   menu.classList.remove('hidden');
@@ -219,13 +247,15 @@ function closeCtxMenu() {
 }
 
 // ── Block / Unblock Modal ─────────────────────────────────────────────────────
+// Username is injected server-side from req.session.user.username in
+// routes/quality.js — operators do not enter it.
+
 function openBlockUnblockModal(direction, prefill = null) {
   const isBlock  = direction === 'block';
   const title    = isBlock ? 'Block Stock' : 'Unblock Stock';
   const btnClass = isBlock ? 'btn-danger-solid' : 'btn-success-solid';
   const btnLabel = isBlock ? 'Block Stock' : 'Unblock Stock';
 
-  // Pre-fill from right-clicked row
   const mat   = prefill?.['Material']     || '';
   const qty   = prefill?.['Qty']          || '';
   const batch = prefill?.['Batch']        || '';
@@ -235,13 +265,18 @@ function openBlockUnblockModal(direction, prefill = null) {
   const sobkz = prefill?.['Spc Stock']    || '';
   const sonum = prefill?.['Spc Stock No'] || '';
 
+  // Only WM-managed locations need Bin Type + Bin
+  const isWM    = WM_LOCATIONS.has(sloc.trim());
+  const binShow = isWM ? '' : 'display:none';
+  const binReq  = isWM ? 'required' : '';
+
   const overlay = document.getElementById('modal-overlay');
   overlay.innerHTML = `
     <div class="ps-modal" style="max-width:580px">
       <div class="ps-modal-header">
         <div>
           <div class="ps-modal-title">${esc(title)}</div>
-          <div class="ps-modal-sub">MB1B movement ${isBlock ? '344 → quality block' : '343 → unrestricted'}</div>
+          <div class="ps-modal-sub">MB1B ${isBlock ? '344 → quality block' : '343 → unrestricted'}</div>
         </div>
         <button class="ps-modal-close" onclick="closeModal()">✕</button>
       </div>
@@ -282,19 +317,26 @@ function openBlockUnblockModal(direction, prefill = null) {
               <input class="tf-input" id="q-sloc" type="text" value="${esc(sloc)}"
                 maxlength="4" required>
             </div>
-            <div class="tf-field">
-              <label class="tf-label">Bin Type <span class="tf-req">*</span></label>
+            <div class="tf-field" id="q-bintype-wrap" style="${binShow}">
+              <label class="tf-label">Bin Type${isWM ? ' <span class="tf-req">*</span>' : ''}</label>
               <input class="tf-input" id="q-bintype" type="text" value="${esc(btyp)}"
-                maxlength="3" required>
+                maxlength="3" ${binReq}>
             </div>
-            <div class="tf-field">
-              <label class="tf-label">Bin <span class="tf-req">*</span></label>
+            <div class="tf-field" id="q-bin-wrap" style="${binShow}">
+              <label class="tf-label">Bin${isWM ? ' <span class="tf-req">*</span>' : ''}</label>
               <input class="tf-input" id="q-bin" type="text" value="${esc(bin)}"
-                maxlength="10" required>
+                maxlength="10" ${binReq}>
             </div>
           </div>
+          <div id="q-wm-hint" style="${isWM ? 'display:none' : ''};
+            font-family:'JetBrains Mono',monospace;font-size:10px;
+            color:var(--text-muted);margin-top:4px">
+            Bin Type and Bin are only required for WM-managed locations (1710, 1711).
+          </div>
 
-          <div class="tf-section-label">Special Stock <span class="tf-optional">(optional)</span></div>
+          <div class="tf-section-label" style="margin-top:14px">
+            Special Stock <span class="tf-optional">(optional)</span>
+          </div>
           <div class="tf-row">
             <div class="tf-field">
               <label class="tf-label">Spc Stock Indicator</label>
@@ -318,6 +360,29 @@ function openBlockUnblockModal(direction, prefill = null) {
 
   overlay.classList.remove('hidden');
   document.getElementById('q-header').focus();
+
+  // Toggle Bin Type / Bin visibility as operator types the storage location
+  document.getElementById('q-sloc').addEventListener('input', () => {
+    const loc      = document.getElementById('q-sloc').value.trim();
+    const wm       = WM_LOCATIONS.has(loc);
+    const btWrap   = document.getElementById('q-bintype-wrap');
+    const binWrap  = document.getElementById('q-bin-wrap');
+    const hint     = document.getElementById('q-wm-hint');
+    const btInput  = document.getElementById('q-bintype');
+    const binInput = document.getElementById('q-bin');
+
+    btWrap.style.display  = wm ? '' : 'none';
+    binWrap.style.display = wm ? '' : 'none';
+    hint.style.display    = wm ? 'none' : '';
+
+    if (wm) {
+      btInput.setAttribute('required', '');
+      binInput.setAttribute('required', '');
+    } else {
+      btInput.removeAttribute('required');
+      binInput.removeAttribute('required');
+    }
+  });
 }
 
 async function submitBlockUnblock(e, direction) {
@@ -325,20 +390,24 @@ async function submitBlockUnblock(e, direction) {
 
   const btn    = document.getElementById('q-submit');
   const result = document.getElementById('q-result');
-  btn.disabled = true;
+  btn.disabled    = true;
   btn.textContent = 'Posting to SAP…';
   result.innerHTML = '';
+
+  const sloc  = document.getElementById('q-sloc').value.trim();
+  const isWM  = WM_LOCATIONS.has(sloc);
 
   const body = {
     Material:              document.getElementById('q-material').value.trim(),
     Quantity:              parseFloat(document.getElementById('q-qty').value),
     Header:                document.getElementById('q-header').value.trim(),
-    StorageLocation:       document.getElementById('q-sloc').value.trim(),
-    BinType:               document.getElementById('q-bintype').value.trim(),
-    Bin:                   document.getElementById('q-bin').value.trim(),
+    StorageLocation:       sloc,
+    BinType:               isWM ? document.getElementById('q-bintype').value.trim() : '',
+    Bin:                   isWM ? document.getElementById('q-bin').value.trim()     : '',
     Batch:                 document.getElementById('q-batch').value.trim() || null,
     SpecialStockIndicator: document.getElementById('q-sobkz').value.trim() || '',
     SpecialStockNumber:    document.getElementById('q-sonum').value.trim() || '',
+    // Username is injected server-side from req.session.user.username
   };
 
   try {
@@ -351,17 +420,19 @@ async function submitBlockUnblock(e, direction) {
 
     if (!json.success) throw new Error(json.error || 'SAP returned an error');
 
-    const d = json.data;
+    const d    = json.data;
     const msgs = [
-      d?.mb1bMessage          ? `MB1B: ${d.mb1bMessage}`                   : null,
-      d?.toBlockedMessage     ? `→ Blocked: ${d.toBlockedMessage}`          : null,
-      d?.toNonBlockedMessage  ? `→ Unrestricted: ${d.toNonBlockedMessage}`  : null,
+      d?.mb1bMessage         ? `MB1B: ${d.mb1bMessage}`                  : null,
+      d?.toBlockedMessage    ? `→ Blocked: ${d.toBlockedMessage}`         : null,
+      d?.toNonBlockedMessage ? `→ Unrestricted: ${d.toNonBlockedMessage}` : null,
     ].filter(Boolean);
 
     result.innerHTML = `
       <div class="tf-success">
         <svg viewBox="0 0 20 20" fill="currentColor" style="width:20px;height:20px;flex-shrink:0">
-          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1
+            0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414
+            0l4-4z" clip-rule="evenodd"/>
         </svg>
         <div>
           <div class="tf-success-title">${direction === 'block' ? 'Stock Blocked' : 'Stock Unblocked'}</div>
@@ -369,14 +440,14 @@ async function submitBlockUnblock(e, direction) {
         </div>
       </div>`;
 
-    btn.disabled = false;
+    btn.disabled    = false;
     btn.textContent = 'Done — Close';
-    btn.onclick = closeModal;
-    btn.type = 'button';
+    btn.onclick     = closeModal;
+    btn.type        = 'button';
 
   } catch (err) {
     result.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
-    btn.disabled = false;
+    btn.disabled    = false;
     btn.textContent = direction === 'block' ? 'Block Stock' : 'Unblock Stock';
   }
 }
