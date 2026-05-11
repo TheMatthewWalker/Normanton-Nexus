@@ -750,18 +750,28 @@ async function loadPalletPackages(palletId, bodyEl) {
 }
 
 async function removePackage(palletItemId, palletId) {
-  if (!confirm('Remove this package from the pallet?')) return;
+  if (!await wConfirm({
+    title: 'Remove Package',
+    message: 'Remove this package from the pallet?',
+    confirmText: 'Remove',
+    variant: 'danger',
+  })) return;
   try {
     const res  = await fetch(`/api/palletpackages/${palletItemId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Delete failed');
     const bodyEl = document.getElementById(`pcard-body-${palletId}`);
     if (bodyEl) { bodyEl.dataset.loaded = '0'; await loadPalletPackages(palletId, bodyEl); bodyEl.dataset.loaded = '1'; }
-  } catch (err) { alert('Remove failed: ' + err.message); }
+  } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
 async function finishExistingPallet(palletId) {
-  if (!confirm('Mark this pallet as finished? No more packages can be added.')) return;
+  if (!await wConfirm({
+    title: 'Finish Pallet',
+    message: 'Mark this pallet as finished?\nNo more packages can be added.',
+    confirmText: 'Finish',
+    variant: 'success',
+  })) return;
   try {
     const res  = await fetch(`/api/palletmain/${palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -770,11 +780,16 @@ async function finishExistingPallet(palletId) {
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
     await refreshPalletList();
-  } catch (err) { alert('Error: ' + err.message); }
+  } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
 async function deletePallet(palletId) {
-  if (!confirm('Delete this pallet and all its packages? This cannot be undone.')) return;
+  if (!await wConfirm({
+    title: 'Delete Pallet',
+    message: 'Delete this pallet and all its packages?\nThis cannot be undone.',
+    confirmText: 'Delete',
+    variant: 'danger',
+  })) return;
   try {
     const res  = await fetch(`/api/palletmain/${palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -783,7 +798,7 @@ async function deletePallet(palletId) {
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Delete failed');
     await refreshPalletList();
-  } catch (err) { alert('Error: ' + err.message); }
+  } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
 function closePickModal() {
@@ -1344,7 +1359,12 @@ async function finishBuilderPallet() {
 
 async function deletePalletFromBuilder() {
   if (!pb?.palletId) return;
-  if (!confirm('Delete this pallet and all its packages? This cannot be undone.')) return;
+  if (!await wConfirm({
+    title: 'Delete Pallet',
+    message: 'Delete this pallet and all its packages?\nThis cannot be undone.',
+    confirmText: 'Delete',
+    variant: 'danger',
+  })) return;
   try {
     const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -1360,7 +1380,12 @@ async function deletePalletFromBuilder() {
 async function completeDelivery() {
   const { deliveryId } = _palletListCtx || {};
   if (!deliveryId) return;
-  if (!confirm(`Mark Delivery #${deliveryId} as complete?\n\nThis will remove it from the open picksheets list.`)) return;
+  if (!await wConfirm({
+    title: 'Complete Delivery',
+    message: `Mark Delivery #${deliveryId} as complete?\nThis will remove it from the open picksheets list.`,
+    confirmText: 'Complete',
+    variant: 'success',
+  })) return;
   try {
     const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/complete`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -1369,7 +1394,7 @@ async function completeDelivery() {
     if (!json.success) throw new Error(json.error || 'Update failed');
     closePickModal();
     await runOpenPicksheets();
-  } catch (err) { alert('Error: ' + err.message); }
+  } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
 function closePalletBuilder() {
@@ -1394,6 +1419,47 @@ function exportResultCSV() {
   a.href = url; a.download = `stock-${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// ── Custom confirm dialog ─────────────────────────────────────────────────────
+// wConfirm({ title, message, confirmText, variant })
+// variant: 'danger' | 'success' | '' (default = accent/purple)
+// Returns Promise<boolean>
+
+function wConfirm({ title, message, confirmText = 'Confirm', variant = '' }) {
+  return new Promise(resolve => {
+    document.getElementById('w-confirm-modal')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id        = 'w-confirm-modal';
+    overlay.className = 'wc-overlay';
+
+    const icon = variant === 'danger'  ? '🗑️'
+               : variant === 'success' ? '✓'
+               : '?';
+
+    const safeMsg = esc(message).replace(/\n/g, '<br>');
+
+    overlay.innerHTML = `
+      <div class="wc-modal">
+        <div class="wc-icon">${icon}</div>
+        <div class="wc-title">${esc(title)}</div>
+        <div class="wc-message">${safeMsg}</div>
+        <div class="wc-actions">
+          <button class="wc-btn-cancel">Cancel</button>
+          <button class="wc-btn-confirm${variant ? ' wc-btn-confirm--' + variant : ''}">
+            ${esc(confirmText)}
+          </button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(overlay);
+
+    const close = result => { overlay.remove(); resolve(result); };
+    overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => close(false));
+    overlay.querySelector('.wc-btn-confirm').addEventListener('click', () => close(true));
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+  });
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
