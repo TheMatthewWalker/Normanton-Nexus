@@ -311,3 +311,87 @@ body::before {
 .btn-danger-solid:hover  { background: #B91C1C !important; }
 .btn-success-solid { background: #059669 !important; }
 .btn-success-solid:hover { background: #047857 !important; }
+
+/* ── SELECTION BAR ───────────────────────────────────────────────────────── */
+.q-selection-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 14px;
+  background: #EFF6FF;
+  border-bottom: 1px solid #BFDBFE;
+}
+
+.q-sel-info {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  color: #1D4ED8;
+  white-space: nowrap;
+}
+
+.q-bulk-btn {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px; font-weight: 600;
+  padding: 5px 14px;
+  border: none; border-radius: 5px;
+  color: #fff; cursor: pointer;
+  transition: background 0.15s;
+}
+.q-bulk-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Checked row highlight */
+.q-stock-table tbody tr.q-row--checked td { background: rgba(59,130,246,0.06); }
+.q-stock-table tbody tr.q-row--checked:hover td { background: rgba(59,130,246,0.12); }
+
+/* ── PROGRESS MODAL ──────────────────────────────────────────────────────── */
+.ps-modal-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.q-prog-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.q-prog-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+}
+
+.q-prog-pct {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-muted);
+}
+
+.q-prog-bar-wrap {
+  height: 8px; border-radius: 4px;
+  background: var(--border);
+  overflow: hidden; margin-bottom: 14px;
+}
+
+.q-prog-bar {
+  height: 100%; border-radius: 4px;
+  background: var(--success);
+  transition: width 0.25s ease;
+}
+.q-prog-bar--block { background: var(--accent); }
+.q-prog-bar--done  { background: var(--success) !important; }
+
+.q-prog-results {
+  max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface2);
+}
+
+.q-prog-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 6px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+}
+.q-prog-item:last-child { border-bottom: none; }
+
+.q-prog-item--ok  { color: var(--success); }
+.q-prog-item--err { color: var(--error); }

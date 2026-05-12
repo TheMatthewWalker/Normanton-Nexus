@@ -86,4 +86,78 @@ router.post('/unblock', requirePermission('QUAL_BLOCKING'), async (req, res) => 
   } catch (err) { sapError(err, res); }
 });
 
+// ── POST /bulk ─────────────────────────────────────────────────────────────────
+// Accepts an array of stock rows and a direction ('block' | 'unblock').
+// Processes each row sequentially against the SAP server and streams progress
+// back as Server-Sent Events so the browser can update a live progress bar.
+router.post('/bulk', requirePermission('QUAL_BLOCKING'), async (req, res) => {
+  const { rows, direction, header } = req.body;
+
+  if (!Array.isArray(rows) || !rows.length) {
+    return res.status(400).json({ success: false, error: 'No rows provided.' });
+  }
+  if (!['block', 'unblock'].includes(direction)) {
+    return res.status(400).json({ success: false, error: 'Invalid direction.' });
+  }
+
+  const username = req.session.user.username;
+
+  res.setHeader('Content-Type',       'text/event-stream');
+  res.setHeader('Cache-Control',      'no-cache');
+  res.setHeader('Connection',         'keep-alive');
+  res.setHeader('X-Accel-Buffering',  'no'); // prevent nginx buffering
+
+  const send = data => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  send({ type: 'start', total: rows.length });
+
+  const WM = new Set(['1710', '1711']);
+
+  for (let i = 0; i < rows.length; i++) {
+    const row  = rows[i];
+    const sloc = String(row['Storage Loc'] || '').trim();
+    const isWM = WM.has(sloc);
+
+    // Parse SAP-format quantity (e.g. "10.875,000" → 10875)
+    const rawQty = String(row['Qty'] || '0').trim();
+    const qty    = rawQty.includes(',')
+      ? parseFloat(rawQty.replace(/\./g, '').replace(',', '.'))
+      : parseFloat(rawQty.replace(/\./g, '')) || 0;
+
+    const body = {
+      Material:              (row['Material'] || '').trim(),
+      Quantity:              qty || 1,
+      Header:                header || 'Bulk operation',
+      StorageLocation:       sloc,
+      BinType:               isWM ? (row['Storage Type'] || '') : '',
+      Bin:                   isWM ? (row['Storage Bin']  || '') : '',
+      Batch:                 row['Batch'] || null,
+      SpecialStockIndicator: row['Spc Stock']    || '',
+      SpecialStockNumber:    row['Spc Stock No'] || '',
+      Username:              username,
+    };
+
+    try {
+      const response = await axios.post(
+        `${sapConfig.url}/api/quality/${direction}`,
+        body,
+        { timeout: 60000, httpsAgent: sapAgent, headers: sapHeaders() }
+      );
+      const d   = response.data?.data;
+      const msg = d?.mb1bMessage || d?.toBlockedMessage || d?.toNonBlockedMessage || 'Posted';
+      send({ type: 'progress', done: i + 1, total: rows.length, success: true,
+             material: body.Material, message: msg });
+    } catch (err) {
+      const d   = err.response?.data;
+      const msg = (typeof d === 'string' ? d : null)
+               || d?.error || d?.message || d?.title || err.message;
+      send({ type: 'progress', done: i + 1, total: rows.length, success: false,
+             material: body.Material, error: msg });
+    }
+  }
+
+  send({ type: 'complete', total: rows.length });
+  res.end();
+});
+
 export default router;

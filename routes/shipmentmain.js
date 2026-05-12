@@ -6,7 +6,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
-import { sqlConfig } from '../server.js';
+import { sqlConfig, stampDbChange } from '../server.js';
 import e from 'express';
 
 const router = express.Router();
@@ -1556,7 +1556,7 @@ router.post('/update-planned-collection', async (req, res) => {
   await request.query(`
     UPDATE Logistics.dbo.ShipmentMain SET plannedCollection = @date
     WHERE shipmentID IN (${inClause}) AND ISNULL(shipmentCancelled, 0) = 0`);
-
+  stampDbChange(req.session?.user?.username, 'ShipmentMain');
   res.json({ success: true });
 });
 
@@ -1799,7 +1799,8 @@ router.post('/create-from-deliveries', async (req, res) => {
       await tx.request().input('shipmentID', sql.BigInt, shipmentID).input('deliveryID', sql.BigInt, deliveryID).query('INSERT INTO Logistics.dbo.ShipmentLink (shipmentID, deliveryID) VALUES (@shipmentID, @deliveryID)');
     
     await tx.commit();
-    const shipment = await getShipmentById(pool, shipmentID); 
+    stampDbChange(req.session?.user?.username, 'ShipmentMain');
+    const shipment = await getShipmentById(pool, shipmentID);
     const folder = getShipmentFolderInfo(shipment);
     return res.status(201).json({ success: true, data: { shipmentID, shipmentRef: formatShipmentRef(shipmentID), linkedDeliveries: deliveryIDs.length, canSendEmail: isExWorks(shipment.incoTerms), folderPath: folder.shipmentPath, shipment } });
   } catch (err) {
@@ -1913,6 +1914,7 @@ router.post('/customs/create', async (req, res) => {
             AND ISNULL(shipmentCancelled, 0) = 0
             AND ISNULL(customsRequired, 0) = 1;
         `);
+      stampDbChange(req.session?.user?.username, 'ShipmentMain');
 
       completed.push({
         shipmentID: shipment.shipmentID,
@@ -2012,7 +2014,7 @@ router.patch('/:shipmentId/customs-required', async (req, res) => {
       .input('required', sql.Bit, toBool(req.body.required) ? 1 : 0)
       .query(`UPDATE Logistics.dbo.ShipmentMain SET customsRequired = @required
               WHERE shipmentID = @shipmentId AND ISNULL(customsComplete, 0) = 0`);
-
+    stampDbChange(req.session?.user?.username, 'ShipmentMain');
     res.json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });

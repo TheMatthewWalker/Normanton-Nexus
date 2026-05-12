@@ -2,7 +2,7 @@ const Service = require('node-windows').Service;
 const path = require('path');
 
 const svc = new Service({
-  name: 'SQL2005 Bridge Service',
+  name: 'Normanton Nexus',
   script: path.join(__dirname, 'server.js'),
 });
 

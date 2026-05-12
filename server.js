@@ -228,6 +228,30 @@ function isAdmin(username) {
   return req => req.session?.user?.role === 'admin' || req.session?.user?.role === 'superadmin';
 }
 
+// ── DB change enrichment — stamps the portal username on the last trigger-written row ─────
+// The SQL trigger writes DBUser=SYSTEM_USER (the app's SQL login). Call this immediately
+// after any INSERT/UPDATE/DELETE to backfill the portal username on the DataChangeLog row
+// that the trigger just created for the same SPID in the last few milliseconds.
+// Fire-and-forget — never throws.
+export async function stampDbChange(username, tableName) {
+  if (!username || !tableName) return;
+  try {
+    const pool = await sql.connect(sqlConfig);
+    await pool.request()
+      .input('user',  sql.NVarChar(128), username)
+      .input('table', sql.NVarChar(100), tableName)
+      .query(`UPDATE TOP (1) kongsberg.dbo.DataChangeLog
+              SET DBUser = @user
+              WHERE TableName = @table
+                AND DBUser != @user
+                AND ChangedAt >= DATEADD(second, -5, GETDATE())
+                AND LogID = (
+                  SELECT MAX(LogID) FROM kongsberg.dbo.DataChangeLog
+                  WHERE TableName = @table AND ChangedAt >= DATEADD(second, -5, GETDATE())
+                )`);
+  } catch { /* never block the request */ }
+}
+
 // ── Audit helper — writes to kongsberg.dbo.PortalAuditLog (fire-and-forget) ─────────────
 async function auditQuery(eventType, username, detail, req) {
   try {

@@ -13,7 +13,15 @@ const WM_LOCATIONS = new Set(['1710', '1711']);
 let qAllRows      = [];
 let qFilteredRows = [];
 let qCurrentPage  = 1;
-let qPageSize     = 50;
+let qPageSize     = 25;
+
+// Selection state
+let qSelectedKeys = new Set();   // rowKey strings of selected rows
+let qStockCols    = [];          // column list — kept for re-renders
+
+function rowKey(row) {
+  return `${row['Material']}|${row['Storage Loc']}|${row['Storage Type']}|${row['Storage Bin']}|${row['Batch']}`;
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async () => {
@@ -156,7 +164,8 @@ function renderStockTable(rows, cols) {
   qAllRows      = rows;
   qFilteredRows = rows;
   qCurrentPage  = 1;
-  // keep qPageSize across refreshes
+  qStockCols    = cols;
+  qSelectedKeys.clear();
 
   const filterRow = cols.map(c =>
     `<th><input class="col-filter-input" type="text" placeholder="${esc(c)}…"
@@ -164,18 +173,32 @@ function renderStockTable(rows, cols) {
   ).join('');
 
   document.getElementById('result-body').innerHTML = `
+    <div class="q-selection-bar hidden" id="q-selection-bar">
+      <span id="q-sel-info" class="q-sel-info">0 selected</span>
+      <button class="btn-danger-solid  q-bulk-btn" id="q-block-sel-btn"   disabled>Block Selected</button>
+      <button class="btn-success-solid q-bulk-btn" id="q-unblock-sel-btn" disabled>Unblock Selected</button>
+      <button class="btn-secondary" style="font-size:12px;padding:6px 12px"
+        onclick="clearSelection()">Clear</button>
+    </div>
     <div style="overflow-x:auto">
       <table class="pn-batch-table q-stock-table" style="width:100%">
         <thead>
-          <tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
-          <tr class="col-filter-row">${filterRow}</tr>
+          <tr>
+            <th style="width:36px;text-align:center">
+              <input type="checkbox" id="q-select-all" title="Select / deselect this page">
+            </th>
+            ${cols.map(c => `<th>${esc(c)}</th>`).join('')}
+          </tr>
+          <tr class="col-filter-row">
+            <th></th>${filterRow}
+          </tr>
         </thead>
         <tbody id="q-tbody"></tbody>
       </table>
     </div>
     <div class="q-pagination" id="q-pagination"></div>`;
 
-  // Column filter listeners — reset to page 1 on change
+  // Column filters → re-filter + back to page 1
   document.querySelectorAll('.col-filter-input').forEach(input => {
     input.addEventListener('input', () => {
       const filters = {};
@@ -192,6 +215,10 @@ function renderStockTable(rows, cols) {
     });
   });
 
+  // Bulk action buttons
+  document.getElementById('q-block-sel-btn').addEventListener('click',   () => startBulkOperation('block'));
+  document.getElementById('q-unblock-sel-btn').addEventListener('click', () => startBulkOperation('unblock'));
+
   renderPage(cols);
 }
 
@@ -204,11 +231,18 @@ function renderPage(cols) {
   const end   = Math.min(start + qPageSize, total);
   const slice = qFilteredRows.slice(start, end);
 
-  // Render visible rows
+  // Render rows with checkboxes
   document.getElementById('q-tbody').innerHTML = slice.map(row => {
+    const key       = rowKey(row);
     const isBlocked = (row['Stock Cat'] || '').trim() === 'S';
-    const rowClass  = isBlocked ? 'q-row q-row--blocked' : 'q-row';
-    const cells     = cols.map(c => {
+    const isChecked = qSelectedKeys.has(key);
+    const rowClass  = [
+      'q-row',
+      isBlocked ? 'q-row--blocked' : '',
+      isChecked ? 'q-row--checked' : '',
+    ].filter(Boolean).join(' ');
+
+    const cells = cols.map(c => {
       if (c === 'Stock Cat') {
         return isBlocked
           ? `<td><span class="q-badge q-badge--blocked">Blocked</span></td>`
@@ -216,10 +250,44 @@ function renderPage(cols) {
       }
       return `<td>${esc(row[c] ?? '')}</td>`;
     }).join('');
-    return `<tr class="${rowClass}" data-row="${esc(JSON.stringify(row))}">${cells}</tr>`;
+
+    return `<tr class="${rowClass}" data-row="${esc(JSON.stringify(row))}" data-key="${esc(key)}">
+      <td style="text-align:center">
+        <input type="checkbox" class="q-row-check" data-key="${esc(key)}" ${isChecked ? 'checked' : ''}>
+      </td>
+      ${cells}
+    </tr>`;
   }).join('');
 
-  // Right-click on each rendered row
+  // Wire row checkboxes
+  document.querySelectorAll('.q-row-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const key = cb.dataset.key;
+      if (cb.checked) qSelectedKeys.add(key); else qSelectedKeys.delete(key);
+      cb.closest('tr').classList.toggle('q-row--checked', cb.checked);
+      syncSelectAll(slice);
+      updateSelectionBar();
+    });
+  });
+
+  // Wire select-all header checkbox
+  const selAll = document.getElementById('q-select-all');
+  if (selAll) {
+    syncSelectAll(slice);
+    selAll.addEventListener('change', () => {
+      slice.forEach(r => {
+        if (selAll.checked) qSelectedKeys.add(rowKey(r));
+        else                qSelectedKeys.delete(rowKey(r));
+      });
+      document.querySelectorAll('.q-row-check').forEach(cb => { cb.checked = selAll.checked; });
+      document.querySelectorAll('#q-tbody .q-row').forEach(tr =>
+        tr.classList.toggle('q-row--checked', selAll.checked)
+      );
+      updateSelectionBar();
+    });
+  }
+
+  // Right-click context menu
   document.querySelectorAll('#q-tbody .q-row').forEach(tr => {
     tr.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -228,16 +296,15 @@ function renderPage(cols) {
     });
   });
 
-  // Update row badge
+  // Row badge
   const badge = document.getElementById('result-row-badge');
   badge.textContent = total === qAllRows.length
     ? `${total} rows`
     : `${total} / ${qAllRows.length} rows`;
   badge.classList.remove('hidden');
 
-  // Render pagination bar
+  // Pagination
   document.getElementById('q-pagination').innerHTML = buildPaginationBar(start, end, total, pages, cols);
-
   document.getElementById('q-prev-btn')?.addEventListener('click', () => {
     if (qCurrentPage > 1) { qCurrentPage--; renderPage(cols); }
   });
@@ -245,16 +312,214 @@ function renderPage(cols) {
     if (qCurrentPage < pages) { qCurrentPage++; renderPage(cols); }
   });
   document.querySelectorAll('.q-page-num-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      qCurrentPage = Number(btn.dataset.page);
-      renderPage(cols);
-    });
+    btn.addEventListener('click', () => { qCurrentPage = Number(btn.dataset.page); renderPage(cols); });
   });
   document.getElementById('q-page-size-sel')?.addEventListener('change', e => {
-    qPageSize    = Number(e.target.value);
-    qCurrentPage = 1;
-    renderPage(cols);
+    qPageSize = Number(e.target.value); qCurrentPage = 1; renderPage(cols);
   });
+}
+
+function syncSelectAll(pageSlice) {
+  const selAll = document.getElementById('q-select-all');
+  if (!selAll) return;
+  const checks   = pageSlice.map(r => qSelectedKeys.has(rowKey(r)));
+  const allOn    = checks.every(Boolean);
+  const someOn   = checks.some(Boolean);
+  selAll.checked       = allOn;
+  selAll.indeterminate = !allOn && someOn;
+}
+
+function updateSelectionBar() {
+  const selected   = qAllRows.filter(r => qSelectedKeys.has(rowKey(r)));
+  const unblocked  = selected.filter(r => (r['Stock Cat'] || '').trim() !== 'S');
+  const blocked    = selected.filter(r => (r['Stock Cat'] || '').trim() === 'S');
+  const total      = qSelectedKeys.size;
+
+  const bar        = document.getElementById('q-selection-bar');
+  if (!bar) return;
+
+  if (total === 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+
+  document.getElementById('q-sel-info').textContent = `${total} selected`;
+  const bb = document.getElementById('q-block-sel-btn');
+  const ub = document.getElementById('q-unblock-sel-btn');
+  bb.textContent = `Block Selected (${unblocked.length})`;
+  bb.disabled    = unblocked.length === 0;
+  ub.textContent = `Unblock Selected (${blocked.length})`;
+  ub.disabled    = blocked.length === 0;
+}
+
+function clearSelection() {
+  qSelectedKeys.clear();
+  document.querySelectorAll('.q-row-check').forEach(cb => { cb.checked = false; });
+  document.querySelectorAll('#q-tbody .q-row').forEach(tr => tr.classList.remove('q-row--checked'));
+  const selAll = document.getElementById('q-select-all');
+  if (selAll) { selAll.checked = false; selAll.indeterminate = false; }
+  updateSelectionBar();
+}
+
+// ── Bulk Block / Unblock ──────────────────────────────────────────────────────
+function startBulkOperation(direction) {
+  const allSelected = qAllRows.filter(r => qSelectedKeys.has(rowKey(r)));
+  const relevant    = direction === 'block'
+    ? allSelected.filter(r => (r['Stock Cat'] || '').trim() !== 'S')
+    : allSelected.filter(r => (r['Stock Cat'] || '').trim() === 'S');
+
+  if (!relevant.length) return;
+
+  // Step 1: collect the reference header in a small modal
+  let _resolve = null;
+  const promise = new Promise(res => { _resolve = res; });
+
+  const label   = direction === 'block' ? 'Block' : 'Unblock';
+  const overlay = document.getElementById('modal-overlay');
+
+  const cancel = () => { overlay.classList.add('hidden'); overlay.innerHTML = ''; _resolve(null); };
+
+  overlay.innerHTML = `
+    <div class="ps-modal" style="max-width:420px">
+      <div class="ps-modal-header">
+        <div class="ps-modal-title">${label} ${relevant.length} Row${relevant.length !== 1 ? 's' : ''}</div>
+        <button class="ps-modal-close" id="q-bulk-cancel">✕</button>
+      </div>
+      <div class="ps-modal-body" style="padding:20px">
+        <div class="tf-section-label">Reference / Reason</div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Header <span class="tf-req">*</span></label>
+            <input class="tf-input" id="q-bulk-hdr" type="text" maxlength="25"
+              placeholder="e.g. Bulk hold — Q.Control" autofocus>
+          </div>
+        </div>
+        <div class="tf-actions" style="margin-top:16px">
+          <button class="btn-secondary" id="q-bulk-cancel-btn">Cancel</button>
+          <button class="btn-submit ${direction === 'block' ? 'btn-danger-solid' : 'btn-success-solid'}"
+            id="q-bulk-go">${label} ${relevant.length} Rows →</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  document.getElementById('q-bulk-cancel').addEventListener('click', cancel);
+  document.getElementById('q-bulk-cancel-btn').addEventListener('click', cancel);
+  document.getElementById('q-bulk-hdr').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('q-bulk-go').click();
+    if (e.key === 'Escape') cancel();
+  });
+  document.getElementById('q-bulk-go').addEventListener('click', () => {
+    const h = document.getElementById('q-bulk-hdr').value.trim();
+    if (!h) { document.getElementById('q-bulk-hdr').focus(); return; }
+    overlay.classList.add('hidden'); overlay.innerHTML = '';
+    _resolve(h);
+  });
+
+  promise.then(header => {
+    if (header === null) return;
+    runBulkOperation(direction, relevant, header);
+  });
+}
+
+async function runBulkOperation(direction, rows, header) {
+  const label   = direction === 'block' ? 'Blocking' : 'Unblocking';
+  const total   = rows.length;
+  const overlay = document.getElementById('modal-overlay');
+
+  overlay.innerHTML = `
+    <div class="ps-modal" style="max-width:520px">
+      <div class="ps-modal-header">
+        <div>
+          <div class="ps-modal-title">${label} Stock</div>
+          <div class="ps-modal-sub" id="q-prog-sub">${total} lines · Processing…</div>
+        </div>
+        <button class="ps-modal-close" id="q-prog-close" disabled>✕</button>
+      </div>
+      <div class="ps-modal-body" style="padding:20px">
+        <div class="q-prog-header">
+          <span class="q-prog-count" id="q-prog-count">0 / ${total}</span>
+          <span class="q-prog-pct"  id="q-prog-pct">0%</span>
+        </div>
+        <div class="q-prog-bar-wrap">
+          <div class="q-prog-bar${direction === 'block' ? ' q-prog-bar--block' : ''}" id="q-prog-bar"
+            style="width:0%"></div>
+        </div>
+        <div class="q-prog-results" id="q-prog-results"></div>
+        <div class="tf-actions" style="margin-top:12px;display:none" id="q-prog-actions">
+          <button class="btn-submit" onclick="closeModal();clearSelection();displayStock()">
+            Refresh Stock &amp; Close
+          </button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  document.getElementById('q-prog-close').addEventListener('click', closeModal);
+
+  try {
+    const res = await fetch('/api/quality/bulk', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ rows, direction, header }),
+    });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || `HTTP ${res.status}`);
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data: ')) continue;
+        try { handleBulkEvent(JSON.parse(line.slice(6)), total); } catch {}
+      }
+    }
+
+  } catch (err) {
+    const sub = document.getElementById('q-prog-sub');
+    if (sub) sub.textContent = `Error: ${err.message}`;
+  }
+
+  // Enable close + show refresh button
+  const closeBtn = document.getElementById('q-prog-close');
+  if (closeBtn) closeBtn.disabled = false;
+  const actions = document.getElementById('q-prog-actions');
+  if (actions) actions.style.display = '';
+}
+
+function handleBulkEvent(event, total) {
+  if (event.type === 'progress') {
+    const pct = Math.round((event.done / total) * 100);
+    const bar = document.getElementById('q-prog-bar');
+    if (bar) bar.style.width = `${pct}%`;
+    const cnt = document.getElementById('q-prog-count');
+    if (cnt) cnt.textContent = `${event.done} / ${total}`;
+    const pctEl = document.getElementById('q-prog-pct');
+    if (pctEl) pctEl.textContent = `${pct}%`;
+
+    const list = document.getElementById('q-prog-results');
+    if (list) {
+      const item = document.createElement('div');
+      item.className = `q-prog-item q-prog-item--${event.success ? 'ok' : 'err'}`;
+      item.textContent = event.success
+        ? `✓ ${event.material} — ${event.message || 'Posted'}`
+        : `✗ ${event.material} — ${event.error || 'Error'}`;
+      list.prepend(item);
+    }
+  }
+  if (event.type === 'complete') {
+    const sub = document.getElementById('q-prog-sub');
+    if (sub) sub.textContent = `${total} lines — complete`;
+    const bar = document.getElementById('q-prog-bar');
+    if (bar) { bar.style.width = '100%'; bar.classList.add('q-prog-bar--done'); }
+  }
 }
 
 function buildPaginationBar(start, end, total, pages, cols) {

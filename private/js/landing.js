@@ -9,6 +9,8 @@ const messages = document.getElementById('gemini-messages');
 const statusEl = document.getElementById('gemini-status');
 const sendBtn = document.getElementById('gemini-send');
 
+
+
 (async () => {
   try {
     const session = await fetch('/session-check').then(r => r.json());
@@ -16,9 +18,9 @@ const sendBtn = document.getElementById('gemini-send');
       window.location.href = '/';
       return;
     }
-    document.getElementById('session-user').textContent = session.username;
+    document.getElementById('session-user').textContent = session.username.split('.')[0].toProperCase(); // Show the first name (username before the dot)
     const heroName = document.getElementById('hero-username');
-    if (heroName) heroName.textContent = session.username;
+    if (heroName) heroName.textContent = session.username.split('.')[0].toProperCase(); // Show first name in hero section, properly capitalized
   } catch {
     window.location.href = '/';
   }
@@ -86,3 +88,12 @@ function appendMessage(text, role) {
   messages.appendChild(row);
   messages.scrollTop = messages.scrollHeight;
 }
+
+
+// Source - https://stackoverflow.com/a/5574446
+// Posted by Tuan
+// Retrieved 2026-05-08, License - CC BY-SA 2.5
+
+String.prototype.toProperCase = function () {
+    return this.replace(/\w\S*/g, function(txt){return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();});
+};

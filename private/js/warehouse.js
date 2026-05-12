@@ -9,17 +9,25 @@ let currentResult = [];
   const d = await fetch('/session-check').then(r => r.json());
   if (!d.loggedIn) { window.location.href = '/'; return; }
   document.getElementById('session-user').textContent = d.username;
+  setupTiles();
 })();
 
-// ── Tile click handlers ───────────────────────────────────────────────────────
-document.querySelectorAll('.sap-tile--live').forEach(tile => {
-  tile.addEventListener('click', () => {
-    const fn = tile.dataset.fn;
-    if (fn === 'displayStock')   runDisplayStock();
-    if (fn === 'transferOrders') showTransferForm();
-    if (fn === 'openPicksheets') runOpenPicksheets();
+function setupTiles() {
+  document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const fn = tile.dataset.fn;
+      if (fn === 'displayStock')   runDisplayStock();
+      if (fn === 'transferOrders') showTransferForm();
+      if (fn === 'openPicksheets') runOpenPicksheets();
+    });
   });
-});
+
+  document.querySelectorAll('.pn-section-hdr').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      hdr.closest('.pn-section').classList.toggle('pn-section--collapsed');
+    });
+  });
+}
 
 // ── Display Stock ─────────────────────────────────────────────────────────────
 async function runDisplayStock() {

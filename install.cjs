@@ -2,8 +2,8 @@ const Service = require('node-windows').Service;
 const path = require('path');
 
 const svc = new Service({
-  name: 'SQL2005 Bridge Service',
-  description: 'Local API bridge between SQL Server 2005 and modern apps',
+  name: 'Normanton Nexus',
+  description: 'Enterprise bridge service for SAP and SQL Server integration for Kongsberg Normanton',
   script: path.join(__dirname, 'server.js'),
   nodeOptions: [
     '--max_old_space_size=4096'

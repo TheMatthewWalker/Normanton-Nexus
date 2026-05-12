@@ -13,6 +13,8 @@ let currentShipmentView = null;
 let approvedForwarders = null;
 let allForwarders = null;
 let customsBatchNotice = null;
+let userPermissions = [];
+let sessionRole     = '';
 
 
 const BUCKETS = [
@@ -59,20 +61,43 @@ const SHIPMENT_VIEWS = {
   const d = await fetch('/session-check').then(r => r.json());
   if (!d.loggedIn) { window.location.href = '/'; return; }
   document.getElementById('session-user').textContent = d.username;
+  sessionRole     = d.role        || '';
+  userPermissions = d.permissions || [];
+  applyPermissionVisibility();
+  setupTiles();
 })();
 
-
-document.querySelectorAll('.sap-tile--live').forEach(tile => {
-  tile.addEventListener('click', () => {
-    const fn = tile.dataset.fn;
-    if (fn === 'openDeliveries') runOpenDeliveries();
-    if (fn === 'awaitingCollection') runShipmentQueue('awaiting-collection');
-    if (fn === 'inboundShipments') runShipmentQueue('inbound');
-    if (fn === 'inTransitShipments') runShipmentQueue('in-transit');
-    if (fn === 'awaitingBooking') runShipmentBooking();
-    if (fn === 'customsDocs') runCustomsDocuments();
+function applyPermissionVisibility() {
+  document.querySelectorAll('[data-permission]').forEach(el => {
+    const code    = el.dataset.permission;
+    const allowed = sessionRole === 'superadmin' || userPermissions.includes(code);
+    el.style.display = allowed ? '' : 'none';
   });
-});
+}
+
+function setupTiles() {
+  document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const fn = tile.dataset.fn;
+      if (fn === 'openDeliveries')      runOpenDeliveries();
+      if (fn === 'awaitingCollection')  runShipmentQueue('awaiting-collection');
+      if (fn === 'inTransitShipments')  runShipmentQueue('in-transit');
+      if (fn === 'awaitingBooking')     runShipmentBooking();
+      if (fn === 'customsDocs')         runCustomsDocuments();
+      if (fn === 'completedShipments')  runCompletedShipments();
+      if (fn === 'customerSpecifics')   runCustomerSpecifics();
+      if (fn === 'updatePalletData')    runUpdatePalletData();
+      if (fn === 'updatePackagingData') runUpdatePackagingData();
+      if (fn === 'updateDestinations')  runUpdateDestinations();
+    });
+  });
+
+  document.querySelectorAll('.pn-section-hdr').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      hdr.closest('.pn-section').classList.toggle('pn-section--collapsed');
+    });
+  });
+}
 
 
 async function checkSession() {
@@ -1488,3 +1513,56 @@ function exportResultCSV() {
   a.href = url; a.download = `logistics-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url);
 }
 function esc(str) { if (str == null) return ''; return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+
+// ── Stub functions for tiles pending full implementation ──────────────────────
+
+async function runCompletedShipments() {
+  showResultPanel('Completed Shipments', 'Delivered and closed shipments');
+  try {
+    const res  = await fetch('/api/shipmentmain?status=delivered');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load');
+    const rows = json.data || [];
+    if (!rows.length) { document.getElementById('result-body').innerHTML = '<div class="sap-error">No completed shipments found.</div>'; return; }
+    currentResult = rows;
+    const cols = ['shipmentID', 'shipmentRef', 'destinationName', 'forwarderName', 'plannedDelivery', 'status'];
+    document.getElementById('result-body').innerHTML = renderSimpleTable(rows, cols);
+    document.getElementById('result-row-badge').textContent = `${rows.length} rows`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+    document.getElementById('btn-export-csv').classList.remove('hidden');
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function runCustomerSpecifics() {
+  showResultPanel('Customer Specifics', 'Customer-specific packaging and logistics requirements');
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-error" style="color:var(--text-muted)">Customer Specifics — coming soon.</div>';
+}
+
+function runUpdatePalletData() {
+  showResultPanel('Update Pallet Data', 'Maintain pallet type definitions, codes and weight limits');
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-error" style="color:var(--text-muted)">Pallet Data admin panel — coming soon.</div>';
+}
+
+function runUpdatePackagingData() {
+  showResultPanel('Update Packaging Data', 'Maintain packaging codes, types and dimensions');
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-error" style="color:var(--text-muted)">Packaging Data admin panel — coming soon.</div>';
+}
+
+function runUpdateDestinations() {
+  showResultPanel('Update Destinations', 'Maintain delivery destinations, addresses and transit times');
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-error" style="color:var(--text-muted)">Destinations admin panel — coming soon.</div>';
+}
+
+function renderSimpleTable(rows, cols) {
+  if (!rows.length) return '<div class="sap-error">No data.</div>';
+  const head = cols.map(c => `<th>${esc(c)}</th>`).join('');
+  const body = rows.map(r => `<tr>${cols.map(c => `<td>${esc(String(r[c] ?? ''))}</td>`).join('')}</tr>`).join('');
+  return `<div style="overflow-x:auto"><table class="pn-batch-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}

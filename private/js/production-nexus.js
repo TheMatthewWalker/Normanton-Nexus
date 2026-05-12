@@ -138,6 +138,7 @@ function openFunction(fn) {
     postedScrap:     ['Posted Scrap',      'Approved and SAP-posted scrap summary by work centre and reason'],
     failedBackflush: ['Failed Backflush',  'Records saved locally but rejected by SAP'],
     sapReversals:    ['SAP Reversals',     'Search by material document or batch ref — select and bulk-reverse postings'],
+    scrapReversal:   ['Scrap Reversal',    'Search and reverse SAP scrap documents · alerts on missed reversals from reversed backflushes'],
     reportOutput:    ['Production Output',  'Metres and KG produced by process, over time'],
     reportScrap:     ['Scrap Analysis',     'Scrap KG by reason, process and trend'],
     reportSapPerf:   ['SAP Performance',    'Backflush success rate, failures and 190 alerts'],
@@ -174,6 +175,7 @@ function openFunction(fn) {
     postedScrap:     runPostedScrap,
     failedBackflush: runFailedBackflush,
     sapReversals:    runSapReversals,
+    scrapReversal:   runScrapReversal,
     reportOutput:    runReportOutput,
     reportScrap:     runReportScrap,
     reportSapPerf:   runReportSapPerf,
@@ -549,29 +551,88 @@ async function runTraceability() {
     const el = document.getElementById('trace-results');
     el.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Tracing…</div>';
     try {
-      // Find the record by ref: search active + history
       const hist = await api(`/history?ref=${encodeURIComponent(ref)}${pc?'&processCode='+pc:''}`);
       const batch = (hist.data || [])[0];
       if (!batch) { el.innerHTML = '<div class="pn-empty">Batch not found.</div>'; return; }
 
       const traceJson = await api(`/trace/${batch.ProcessCode}/${batch.RecordID}`);
-      const chain = traceJson.data || [];
+      const { chain = [], details = {} } = traceJson.data || {};
 
-      if (!chain.length) {
-        el.innerHTML = `<div class="pn-empty"><strong>${esc(batch.BatchRef)}</strong> — no trace links recorded for this batch.</div>`;
-        return;
-      }
+      // Build an ordered, deduplicated list of batches: searched batch first,
+      // then ancestors in depth order up to the root.
+      const seen  = new Set();
+      const nodes = [];
+      const push  = (pc, rid, depth) => {
+        const key = `${pc}-${rid}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        nodes.push({ pc, rid, depth, key });
+      };
 
-      el.innerHTML = `<div style="font-size:13px;margin-bottom:12px">
-        Showing ${chain.length} trace link(s) for <strong>${esc(batch.BatchRef)}</strong></div>
-        <table class="pn-batch-table">
-          <thead><tr><th>Depth</th><th>Child Batch</th><th>Parent Batch</th></tr></thead>
-          <tbody>${chain.map(t => `<tr>
-            <td class="pn-batch-mono">${t.Depth}</td>
-            <td class="pn-batch-ref">${esc(t.ChildProcessCode)}${String(t.ChildRecordID).padStart(8,'0')}</td>
-            <td class="pn-batch-ref">${esc(t.ParentProcessCode)}${String(t.ParentRecordID).padStart(8,'0')}</td>
-          </tr>`).join('')}</tbody>
-        </table>`;
+      push(batch.ProcessCode, batch.RecordID, 0);
+      chain.forEach(t => {
+        push(t.ChildProcessCode,  t.ChildRecordID,  t.Depth);
+        push(t.ParentProcessCode, t.ParentRecordID, t.Depth + 1);
+      });
+
+      const fmtQty = (qty, uom) =>
+        qty != null ? `${Number(qty).toFixed(3)} ${esc(uom || '')}` : '—';
+      const fmtDate = dt => dt ? fmt(dt) : '—';
+
+      const badge = (text, color) =>
+        `<span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;
+          letter-spacing:.5px;padding:2px 7px;border-radius:4px;
+          background:${color}20;color:${color};margin-left:6px">${text}</span>`;
+
+      const rows = nodes.map((n, i) => {
+        const d         = details[n.key] || {};
+        const isStart   = i === 0;
+        const isRoot    = i === nodes.length - 1 && nodes.length > 1;
+        const batchRef  = d.BatchRef  || `${n.pc}${String(n.rid).padStart(8,'0')}`;
+        const rowStyle  = isStart ? 'background:var(--accent-dim)' : '';
+        const label     = isStart ? badge('SEARCHED', 'var(--accent)')
+                        : isRoot  ? badge('ROOT', '#6B7280')
+                        : '';
+
+        return `<tr style="${rowStyle}">
+          <td class="pn-batch-mono" style="white-space:nowrap">
+            ${n.depth}${label}
+          </td>
+          <td>${esc(PROCESS_LABELS[n.pc] || n.pc)}</td>
+          <td class="pn-batch-ref">${esc(batchRef)}</td>
+          <td class="pn-batch-mono">${esc(d.Material || '—')}</td>
+          <td class="pn-batch-mono">${fmtQty(d.Quantity, d.UOM)}</td>
+          <td class="pn-batch-mono">${fmtDate(d.CreatedAt)}</td>
+          <td>${esc(d.Operator || '—')}</td>
+        </tr>`;
+      }).join('');
+
+      const badge2 = document.getElementById('result-row-badge');
+      badge2.textContent = `${nodes.length} component${nodes.length !== 1 ? 's' : ''}`;
+      badge2.classList.remove('hidden');
+
+      const noLinks = chain.length === 0
+        ? `<div style="font-size:12px;color:var(--text-muted);margin-top:10px;
+              font-family:'JetBrains Mono',monospace">
+            No trace links recorded — showing batch details only.
+          </div>`
+        : '';
+
+      el.innerHTML = `
+        <div style="overflow-x:auto">
+          <table class="pn-batch-table">
+            <thead><tr>
+              <th>Level</th>
+              <th>Process</th>
+              <th>Batch Ref</th>
+              <th>Material</th>
+              <th>Quantity</th>
+              <th>Created</th>
+              <th>Operator</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>${noLinks}`;
     } catch (err) { el.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`; }
   });
 }
@@ -2188,30 +2249,53 @@ async function openScrapDrilldown(processCode, reasonCode, reasonDescription) {
 // ── SAP REVERSALS ─────────────────────────────────────────────────────────────
 
 async function runSapReversals() {
-  let searchMode = 'matdoc'; // 'matdoc' | 'batch'
+  // 'matdoc' | 'batch' | 'material' | 'daterange' | 'operator'
+  let searchMode = 'matdoc';
   let resultRows = [];
 
+  function searchInputsHtml() {
+    switch (searchMode) {
+      case 'matdoc':
+        return `<div class="tf-field"><label class="tf-label">Material Document</label>
+          <input class="tf-input" id="rev-matdoc" placeholder="e.g. 4973004925" style="width:200px" autocomplete="off"></div>`;
+      case 'batch':
+        return `<div class="tf-field"><label class="tf-label">Process</label>
+          <select class="tf-input" id="rev-pc" style="width:150px">
+            ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+          </select></div>
+          <div class="tf-field"><label class="tf-label">Record ID</label>
+          <input class="tf-input" id="rev-rid" type="number" placeholder="Record ID" style="width:140px"></div>`;
+      case 'material':
+        return `<div class="tf-field"><label class="tf-label">Material Number</label>
+          <input class="tf-input" id="rev-material" placeholder="e.g. HOS-12345" style="width:200px" autocomplete="off"></div>`;
+      case 'daterange':
+        return `<div class="tf-field"><label class="tf-label">From</label>
+          <input class="tf-input" id="rev-date-from" type="date" style="width:150px"></div>
+          <div class="tf-field"><label class="tf-label">To</label>
+          <input class="tf-input" id="rev-date-to" type="date" style="width:150px"></div>`;
+      case 'operator':
+        return `<div class="tf-field"><label class="tf-label">Operator / Username</label>
+          <input class="tf-input" id="rev-operator" placeholder="e.g. jsmith" style="width:200px" autocomplete="off"></div>`;
+    }
+  }
+
   function renderSearch() {
+    const modes = [
+      ['matdoc',    'By Material Document'],
+      ['batch',     'By Batch Reference'],
+      ['material',  'By Material'],
+      ['daterange', 'By Date Range'],
+      ['operator',  'By Operator'],
+    ];
     document.getElementById('result-body').innerHTML = `
       <div style="padding:16px 20px">
         <div class="bm-section" style="margin-bottom:14px">
           <div class="bm-section-title">Search Mode</div>
-          <div style="display:flex;gap:8px;margin-bottom:12px">
-            <button class="btn-secondary rev-mode-btn ${searchMode==='matdoc'?'btn-secondary--active':''}" data-mode="matdoc">By Material Document</button>
-            <button class="btn-secondary rev-mode-btn ${searchMode==='batch'?'btn-secondary--active':''}" data-mode="batch">By Batch Reference</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            ${modes.map(([m,l])=>`<button class="btn-secondary rev-mode-btn${searchMode===m?' btn-secondary--active':''}" data-mode="${m}">${l}</button>`).join('')}
           </div>
           <div id="rev-search-inputs" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-            ${searchMode === 'matdoc' ? `
-              <div class="tf-field"><label class="tf-label">Material Document</label>
-              <input class="tf-input" id="rev-matdoc" placeholder="e.g. 4973004925" style="width:200px" autocomplete="off"></div>
-            ` : `
-              <div class="tf-field"><label class="tf-label">Process</label>
-              <select class="tf-input" id="rev-pc" style="width:150px">
-                ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-              </select></div>
-              <div class="tf-field"><label class="tf-label">Record ID</label>
-              <input class="tf-input" id="rev-rid" type="number" placeholder="Record ID" style="width:140px"></div>
-            `}
+            ${searchInputsHtml()}
             <button class="btn-filter-search" id="rev-search-btn">Search</button>
           </div>
         </div>
@@ -2221,12 +2305,9 @@ async function runSapReversals() {
     document.querySelectorAll('.rev-mode-btn').forEach(btn => {
       btn.addEventListener('click', () => { searchMode = btn.dataset.mode; renderSearch(); });
     });
-
     document.getElementById('rev-search-btn').addEventListener('click', doSearch);
-
-    if (searchMode === 'matdoc') {
-      document.getElementById('rev-matdoc')?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-    }
+    document.querySelector('#rev-search-inputs input:not([type=date])')
+      ?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   }
 
   async function doSearch() {
@@ -2239,22 +2320,42 @@ async function runSapReversals() {
         const doc = document.getElementById('rev-matdoc')?.value.trim();
         if (!doc) { el.innerHTML = '<div class="pn-empty">Enter a material document number.</div>'; return; }
         json = await api(`/reversal/search?materialDocument=${encodeURIComponent(doc)}`);
-      } else {
+
+      } else if (searchMode === 'batch') {
         const pc  = document.getElementById('rev-pc')?.value;
         const rid = document.getElementById('rev-rid')?.value.trim();
         if (!pc || !rid) { el.innerHTML = '<div class="pn-empty">Select a process and enter the record ID.</div>'; return; }
         json = await api(`/reversal/by-batch/${encodeURIComponent(pc)}/${encodeURIComponent(rid)}`);
+
+      } else if (searchMode === 'material') {
+        const mat = document.getElementById('rev-material')?.value.trim();
+        if (!mat) { el.innerHTML = '<div class="pn-empty">Enter a material number.</div>'; return; }
+        json = await api(`/reversal/find?material=${encodeURIComponent(mat)}`);
+
+      } else if (searchMode === 'daterange') {
+        const from = document.getElementById('rev-date-from')?.value;
+        const to   = document.getElementById('rev-date-to')?.value;
+        if (!from && !to) { el.innerHTML = '<div class="pn-empty">Enter at least one date.</div>'; return; }
+        const p = new URLSearchParams();
+        if (from) p.set('dateFrom', from);
+        if (to)   p.set('dateTo', to);
+        json = await api(`/reversal/find?${p.toString()}`);
+
+      } else if (searchMode === 'operator') {
+        const op = document.getElementById('rev-operator')?.value.trim();
+        if (!op) { el.innerHTML = '<div class="pn-empty">Enter an operator name.</div>'; return; }
+        json = await api(`/reversal/find?operator=${encodeURIComponent(op)}`);
       }
 
       resultRows = json.data || [];
       if (!resultRows.length) { el.innerHTML = '<div class="pn-empty">No SAP postings found.</div>'; return; }
-
       renderResults(el);
     } catch (err) { el.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`; }
   }
 
   function renderResults(el) {
-    const reversible = resultRows.filter(r => !r.IsReversed && r.MaterialDocumentSAP);
+    const reversible  = resultRows.filter(r => !r.IsReversed && r.MaterialDocumentSAP);
+    const showMaterial = resultRows.some(r => r.Material);
     const badge = document.getElementById('result-row-badge');
     badge.textContent = `${resultRows.length} posting${resultRows.length !== 1 ? 's' : ''}`;
     badge.classList.remove('hidden');
@@ -2267,6 +2368,7 @@ async function runSapReversals() {
             : ''}
         </td>
         <td class="pn-batch-mono" style="font-weight:700">${esc(r.MaterialDocumentSAP || '—')}</td>
+        ${showMaterial ? `<td class="pn-batch-mono">${esc(r.Material || '—')}</td>` : ''}
         <td>${esc(r.PostingType)}</td>
         <td class="pn-batch-mono">${Number(r.Quantity||0).toFixed(3)} ${esc(r.UnitOfMeasure||'')}</td>
         <td class="pn-batch-mono">${fmt(r.PostedAt)}</td>
@@ -2289,7 +2391,12 @@ async function runSapReversals() {
       </div>
       <div style="overflow-x:auto">
       <table class="pn-batch-table">
-        <thead><tr><th style="width:32px"></th><th>Material Doc</th><th>Type</th><th>Quantity</th><th>Posted</th><th>Posted By</th><th>Status</th><th></th></tr></thead>
+        <thead><tr>
+          <th style="width:32px"></th>
+          <th>Material Doc</th>
+          ${showMaterial ? '<th>Material</th>' : ''}
+          <th>Type</th><th>Quantity</th><th>Posted</th><th>Posted By</th><th>Status</th><th></th>
+        </tr></thead>
         <tbody>${tableRows}</tbody>
       </table></div>
       <div id="rev-bulk-msg" style="margin-top:10px;font-size:13px"></div>`;
@@ -2300,49 +2407,386 @@ async function runSapReversals() {
 
     document.getElementById('rev-bulk-btn')?.addEventListener('click', async () => {
       const btn  = document.getElementById('rev-bulk-btn');
-      const msg  = document.getElementById('rev-bulk-msg');
       const docs = [...document.querySelectorAll('.rev-chk:checked')].map(c => c.dataset.matdoc);
-      if (!docs.length) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; return; }
+      if (!docs.length) {
+        const msg = document.getElementById('rev-bulk-msg');
+        if (msg) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; }
+        return;
+      }
 
-      btn.disabled = true; btn.textContent = `Reversing ${docs.length} document${docs.length!==1?'s':''}…`;
-      msg.style.color = 'var(--text-muted)';
-      msg.textContent = `Sending ${docs.length} request${docs.length!==1?'s':''} to SAP — this may take ${Math.ceil(docs.length * 12)}s…`;
+      btn.disabled    = true;
+      btn.textContent = 'Reversing…';
+      const total = docs.length;
+
+      // Inject a prominent progress banner at the very top of the results area
+      const resultsEl = document.getElementById('rev-results');
+      const banner = document.createElement('div');
+      banner.id = 'rev-prog-banner';
+      banner.style.cssText = [
+        'background:var(--surface2)',
+        'border:1px solid var(--border)',
+        'border-radius:8px',
+        'padding:14px 16px',
+        'margin-bottom:14px',
+      ].join(';');
+      banner.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:13px;font-weight:700;color:var(--text)">Reversing documents</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-dim)">
+            <span id="rev-prog-count">0 / ${total}</span>
+            <span id="rev-prog-pct" style="color:var(--text-muted);font-size:11px;margin-left:8px">0%</span>
+          </span>
+        </div>
+        <div style="height:8px;border-radius:4px;background:var(--border);overflow:hidden;margin-bottom:8px">
+          <div id="rev-prog-bar" style="height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width 0.3s ease"></div>
+        </div>
+        <div id="rev-prog-summary" style="font-size:12px;color:var(--text-muted)">
+          Sending to SAP — SapServer is processing in parallel…
+        </div>`;
+      resultsEl.insertBefore(banner, resultsEl.firstChild);
+      // Scroll banner into view so the user definitely sees it
+      banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+      let ok = 0, fail = 0;
 
       try {
-        const res = await api('/reversal/bulk', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ materialDocuments: docs }),
+        const res = await fetch('/api/productionnexus/reversal/bulk', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ materialDocuments: docs }),
         });
 
-        let ok = 0, fail = 0;
-        (res.results || []).forEach(r => {
-          const rowEl = document.getElementById(`rev-row-${r.materialDocument}`);
-          const alreadyReversed = r.error && r.error.includes('Already reversed');
-          if (r.success) {
-            ok++;
-            if (rowEl) rowEl.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(r.reversalDocument||'')}</span>`;
-          } else if (alreadyReversed) {
-            ok++;
-            if (rowEl) rowEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px" title="Was reversed in SAP — DB updated">↺ Synced</span>`;
-          } else {
-            fail++;
-            if (rowEl) rowEl.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(r.error)}">✗ ${esc(r.error)}</span>`;
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let   buffer  = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop();
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const ev = JSON.parse(line.slice(6));
+
+              if (ev.type === 'progress') {
+                const pct = Math.round((ev.done / ev.total) * 100);
+                const bar = document.getElementById('rev-prog-bar');
+                if (bar) bar.style.width = `${pct}%`;
+                const cnt = document.getElementById('rev-prog-count');
+                if (cnt) cnt.textContent = `${ev.done} / ${ev.total}`;
+                const pctEl = document.getElementById('rev-prog-pct');
+                if (pctEl) pctEl.textContent = `${pct}%`;
+                btn.textContent = `Reversing… ${ev.done}/${ev.total}`;
+
+                const rowEl = document.getElementById(`rev-row-${ev.materialDocument}`);
+                if (ev.success) {
+                  ok++;
+                  if (rowEl) rowEl.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(ev.reversalDocument||'')}</span>`;
+                } else if (ev.synced) {
+                  ok++;
+                  if (rowEl) rowEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px" title="${esc(ev.error)}">↺ Synced</span>`;
+                } else {
+                  fail++;
+                  if (rowEl) rowEl.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(ev.error)}">✗ ${esc(ev.error)}</span>`;
+                }
+              }
+
+              if (ev.type === 'complete') {
+                const bar     = document.getElementById('rev-prog-bar');
+                const summary = document.getElementById('rev-prog-summary');
+                if (bar) {
+                  bar.style.width      = '100%';
+                  bar.style.background = fail ? '#D97706' : 'var(--accent)';
+                }
+                if (summary) {
+                  summary.style.color = fail ? '#D97706' : 'var(--accent)';
+                  summary.style.fontWeight = '600';
+                  summary.textContent = fail
+                    ? `${ok} reversed, ${fail} failed — see inline results below.`
+                    : `✓ All ${ok} document${ok !== 1 ? 's' : ''} reversed successfully.`;
+                }
+              }
+            } catch { /* malformed SSE line — skip */ }
           }
-        });
-
-        msg.style.color = fail ? '#D97706' : 'var(--accent)';
-        msg.textContent = fail
-          ? `${ok} reversed successfully, ${fail} failed — see inline results.`
-          : `✓ All ${ok} document${ok!==1?'s':''} reversed successfully.`;
-        btn.disabled = false; btn.textContent = 'Reverse Selected';
+        }
       } catch (err) {
-        msg.style.color = 'var(--error)'; msg.textContent = err.message;
-        btn.disabled = false; btn.textContent = 'Reverse Selected';
+        const summary = document.getElementById('rev-prog-summary');
+        if (summary) { summary.style.color = 'var(--error)'; summary.textContent = `Error: ${err.message}`; }
       }
+
+      btn.disabled    = false;
+      btn.textContent = 'Reverse Selected';
     });
   }
 
   renderSearch();
+}
+
+// ── SCRAP REVERSAL ────────────────────────────────────────────────────────────
+
+async function runScrapReversal() {
+  let searchMode = 'matdoc';
+
+  // ── shared render helpers ─────────────────────────────────────────────────
+
+  function searchInputsHtml() {
+    switch (searchMode) {
+      case 'matdoc':
+        return `<div class="tf-field"><label class="tf-label">Material Document</label>
+          <input class="tf-input" id="sr-matdoc" placeholder="e.g. 4973095655" style="width:200px" autocomplete="off"></div>`;
+      case 'batch':
+        return `<div class="tf-field"><label class="tf-label">Batch Reference</label>
+          <input class="tf-input" id="sr-batch" placeholder="e.g. EX00000031" style="width:200px" autocomplete="off"></div>
+          <div class="tf-field"><label class="tf-label">Process</label>
+          <select class="tf-input" id="sr-pc" style="width:150px">
+            <option value="">All</option>
+            ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+          </select></div>`;
+      case 'material':
+        return `<div class="tf-field"><label class="tf-label">Material Number</label>
+          <input class="tf-input" id="sr-material" placeholder="e.g. HOS-12345" style="width:200px" autocomplete="off"></div>`;
+      case 'daterange':
+        return `<div class="tf-field"><label class="tf-label">From</label>
+          <input class="tf-input" id="sr-date-from" type="date" style="width:150px"></div>
+          <div class="tf-field"><label class="tf-label">To</label>
+          <input class="tf-input" id="sr-date-to" type="date" style="width:150px"></div>`;
+      case 'operator':
+        return `<div class="tf-field"><label class="tf-label">Operator</label>
+          <input class="tf-input" id="sr-operator" placeholder="e.g. jsmith" style="width:200px" autocomplete="off"></div>`;
+    }
+  }
+
+  function renderDocsTable(rows, prefix) {
+    const reversible = rows.filter(r => !r.IsReversed);
+    const tableRows  = rows.map(r => {
+      const batchDisplay = esc(r.BatchRef || `${r.ProcessCode}${String(r.ProcessRecordID).padStart(8,'0')}`);
+      const bfWarn = r.BackflushReversed && !r.IsReversed
+        ? `<span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;
+              padding:2px 5px;border-radius:3px;background:rgba(220,38,38,.12);
+              color:#DC2626;margin-left:5px" title="Parent backflush was reversed">BF REV</span>` : '';
+      const statusCell = r.IsReversed
+        ? `<span class="pn-status pn-status--cancelled">Reversed</span>
+           <span class="pn-batch-mono" style="font-size:10px;margin-left:4px">${esc(r.ReversalDocument||'')}</span>`
+        : `<span class="pn-status pn-status--open">Not Reversed</span>${bfWarn}`;
+      return `<tr>
+        <td style="text-align:center;width:32px">${!r.IsReversed
+          ? `<input type="checkbox" class="${prefix}-chk" data-id="${r.ScrapDocumentID}" data-doc="${esc(r.MaterialDocument)}" checked>`
+          : ''}</td>
+        <td class="pn-batch-mono" style="font-weight:700">${esc(r.MaterialDocument)}</td>
+        <td class="pn-batch-ref">${batchDisplay}</td>
+        <td class="pn-batch-mono">${esc(r.Material||'—')}</td>
+        <td>${esc(r.ReasonCode||'—')}
+            <span style="font-size:11px;color:var(--text-muted);margin-left:3px">${esc(r.ReasonDescription||'')}</span></td>
+        <td class="pn-batch-mono">${r.Quantity != null ? Number(r.Quantity).toFixed(3)+' '+esc(r.UnitOfMeasure||'') : '—'}</td>
+        <td class="pn-batch-mono">${r.PostedAt ? fmt(r.PostedAt) : '—'}</td>
+        <td>${esc(r.PostedBy||'—')}</td>
+        <td>${statusCell}</td>
+        <td id="${prefix}-row-${r.ScrapDocumentID}"></td>
+      </tr>`;
+    }).join('');
+
+    return `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="${prefix}-selall" ${reversible.length?'checked':'disabled'}> Select All
+        </label>
+        <span style="flex:1"></span>
+        <button class="btn-submit" id="${prefix}-rev-btn" ${!reversible.length?'disabled':''}>
+          Reverse Selected
+        </button>
+      </div>
+      <div style="overflow-x:auto">
+      <table class="pn-batch-table">
+        <thead><tr>
+          <th style="width:32px"></th>
+          <th>Material Doc</th><th>Batch</th><th>Material</th><th>Reason</th>
+          <th>Quantity</th><th>Posted</th><th>Operator</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table></div>
+      <div id="${prefix}-msg" style="margin-top:10px;font-size:13px"></div>`;
+  }
+
+  function wireTable(prefix) {
+    document.getElementById(`${prefix}-selall`)?.addEventListener('change', e => {
+      document.querySelectorAll(`.${prefix}-chk`).forEach(c => { c.checked = e.target.checked; });
+    });
+
+    document.getElementById(`${prefix}-rev-btn`)?.addEventListener('click', async () => {
+      const btn      = document.getElementById(`${prefix}-rev-btn`);
+      const msg      = document.getElementById(`${prefix}-msg`);
+      const selected = [...document.querySelectorAll(`.${prefix}-chk:checked`)]
+        .map(c => ({ id: Number(c.dataset.id), doc: c.dataset.doc }));
+      if (!selected.length) {
+        if (msg) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; }
+        return;
+      }
+
+      btn.disabled = true;
+      if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = `Sending ${selected.length} request${selected.length!==1?'s':''} to SAP…`; }
+
+      let ok = 0, fail = 0;
+      for (const { id, doc } of selected) {
+        const rowEl = document.getElementById(`${prefix}-row-${id}`);
+        btn.textContent = `Reversing… ${ok+fail+1}/${selected.length}`;
+        try {
+          const res = await api('/scrap-reversal/reverse', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scrapDocumentID: id, materialDocument: doc }),
+          });
+          if (!res.success) throw new Error(res.error || 'SAP error');
+          ok++;
+          if (rowEl) rowEl.innerHTML = res.synced
+            ? `<span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace"
+                title="Already reversed in SAP — DB synced">↺ Synced</span>`
+            : `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(res.data?.reversalDocument||'')}</span>`;
+        } catch (err) {
+          fail++;
+          if (rowEl) rowEl.innerHTML =
+            `<span style="color:var(--error);font-size:11px" title="${esc(err.message)}">✗ ${esc(err.message)}</span>`;
+        }
+      }
+
+      if (msg) {
+        msg.style.color = fail ? '#D97706' : 'var(--accent)';
+        msg.textContent = fail
+          ? `${ok} reversed, ${fail} failed — see inline results.`
+          : `✓ All ${ok} document${ok!==1?'s':''} reversed successfully.`;
+      }
+      btn.disabled = false; btn.textContent = 'Reverse Selected';
+    });
+  }
+
+  // ── missed reversals (auto-loads) ─────────────────────────────────────────
+
+  async function loadMissed() {
+    const wrap = document.getElementById('sr-missed-wrap');
+    if (!wrap) return;
+    try {
+      const json = await api('/scrap-reversal/missed');
+      if (!json.success) {
+        wrap.innerHTML = `<div class="pn-empty" style="color:var(--error)">Missed reversals check failed: ${esc(json.error || 'Unknown error')}</div>`;
+        return;
+      }
+      const rows = json.data || [];
+      if (!rows.length) { wrap.innerHTML = ''; return; }
+
+      wrap.innerHTML = `
+        <div style="background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.25);
+                    border-radius:8px;padding:14px 16px;margin-bottom:18px">
+          <div style="font-size:13px;font-weight:700;color:#DC2626;margin-bottom:10px">
+            ⚠ ${rows.length} unreversed scrap document${rows.length!==1?'s':''} — parent backflush was reversed
+          </div>
+          ${renderDocsTable(rows, 'sr-missed')}
+        </div>`;
+      wireTable('sr-missed');
+    } catch (err) {
+      wrap.innerHTML = `<div class="pn-empty" style="color:var(--error)">Error loading missed reversals: ${esc(err.message)}</div>`;
+    }
+  }
+
+  // ── search ────────────────────────────────────────────────────────────────
+
+  async function doSearch() {
+    const el = document.getElementById('sr-results');
+    el.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Searching…</div>';
+
+    const params = new URLSearchParams();
+    try {
+      if (searchMode === 'matdoc') {
+        const v = document.getElementById('sr-matdoc')?.value.trim();
+        if (!v) { el.innerHTML = '<div class="pn-empty">Enter a material document number.</div>'; return; }
+        params.set('materialDocument', v);
+      } else if (searchMode === 'batch') {
+        const ref = document.getElementById('sr-batch')?.value.trim();
+        const pc  = document.getElementById('sr-pc')?.value;
+        if (!ref && !pc) { el.innerHTML = '<div class="pn-empty">Enter a batch reference or select a process.</div>'; return; }
+        if (ref) params.set('batchRef', ref);
+        if (pc)  params.set('processCode', pc);
+      } else if (searchMode === 'material') {
+        const v = document.getElementById('sr-material')?.value.trim();
+        if (!v) { el.innerHTML = '<div class="pn-empty">Enter a material number.</div>'; return; }
+        params.set('material', v);
+      } else if (searchMode === 'daterange') {
+        const from = document.getElementById('sr-date-from')?.value;
+        const to   = document.getElementById('sr-date-to')?.value;
+        if (!from && !to) { el.innerHTML = '<div class="pn-empty">Enter at least one date.</div>'; return; }
+        if (from) params.set('dateFrom', from);
+        if (to)   params.set('dateTo', to);
+      } else if (searchMode === 'operator') {
+        const v = document.getElementById('sr-operator')?.value.trim();
+        if (!v) { el.innerHTML = '<div class="pn-empty">Enter an operator name.</div>'; return; }
+        params.set('operator', v);
+      }
+
+      const json = await api(`/scrap-reversal/search?${params.toString()}`);
+      if (!json.success) { el.innerHTML = `<div class="pn-empty" style="color:var(--error)">Search error: ${esc(json.error || 'Unknown error')}</div>`; return; }
+      const rows = json.data || [];
+      if (!rows.length) { el.innerHTML = '<div class="pn-empty">No scrap documents found.</div>'; return; }
+
+      const badge = document.getElementById('result-row-badge');
+      badge.textContent = `${rows.length} doc${rows.length!==1?'s':''}`;
+      badge.classList.remove('hidden');
+
+      el.innerHTML = renderDocsTable(rows, 'sr-search');
+      wireTable('sr-search');
+    } catch (err) { el.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`; }
+  }
+
+  // ── initial render ────────────────────────────────────────────────────────
+
+  const modes = [
+    ['matdoc',    'By Material Document'],
+    ['batch',     'By Batch Reference'],
+    ['material',  'By Material'],
+    ['daterange', 'By Date Range'],
+    ['operator',  'By Operator'],
+  ];
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="padding:16px 20px">
+      <div id="sr-missed-wrap"></div>
+      <div class="bm-section" style="margin-bottom:14px">
+        <div class="bm-section-title">Search Scrap Documents</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          ${modes.map(([m,l])=>`<button class="btn-secondary sr-mode-btn${searchMode===m?' btn-secondary--active':''}" data-mode="${m}">${l}</button>`).join('')}
+        </div>
+        <div id="sr-search-inputs" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          ${searchInputsHtml()}
+          <button class="btn-filter-search" id="sr-search-btn">Search</button>
+        </div>
+      </div>
+      <div id="sr-results"></div>
+    </div>`;
+
+  document.querySelectorAll('.sr-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      searchMode = btn.dataset.mode;
+      document.querySelectorAll('.sr-mode-btn').forEach(b => b.classList.remove('btn-secondary--active'));
+      btn.classList.add('btn-secondary--active');
+      document.getElementById('sr-search-inputs').innerHTML =
+        searchInputsHtml() + `<button class="btn-filter-search" id="sr-search-btn">Search</button>`;
+      document.getElementById('sr-search-btn').addEventListener('click', doSearch);
+      document.querySelector('#sr-search-inputs input:not([type=date])')
+        ?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    });
+  });
+
+  document.getElementById('sr-search-btn').addEventListener('click', doSearch);
+  document.querySelector('#sr-search-inputs input:not([type=date])')
+    ?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+  loadMissed();
 }
 
 // ── NEW BATCH ─────────────────────────────────────────────────────────────────
