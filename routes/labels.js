@@ -151,18 +151,35 @@ async function fetchLabelData(processCode, recordID) {
 
 // ── PDF builder ───────────────────────────────────────────────────────────────
 const C = {
-  teal:       '#0d4c45',
-  tealMid:    '#0d9488',
-  tealLight:  '#ccfbf1',
-  amber:      '#d97706',
-  amberLight: '#fef3c7',
-  red:        '#dc2626',
-  text:       '#111827',
-  muted:      '#6b7280',
-  border:     '#d1d5db',
-  bg2:        '#f3f4f6',
-  white:      '#ffffff',
+  teal:    '#0d4c45',
+  tealMid: '#0d9488',
+  amber:   '#d97706',
+  red:     '#dc2626',
+  text:    '#111827',
+  muted:   '#6b7280',
+  border:  '#d1d5db',
+  white:   '#ffffff',
 };
+
+const STATUS_BADGE = {
+  1: { text: 'OPEN',             fill: '#d97706' },
+  2: { text: 'RUNNING',          fill: '#0d9488' },
+  3: { text: 'ON HOLD',          fill: '#6b7280' },
+  4: { text: 'COMPLETE',         fill: '#0d9488' },
+  5: { text: 'CANCELLED',        fill: '#dc2626' },
+  6: { text: 'BACKFLUSH FAILED', fill: '#dc2626' },
+};
+
+// Read pixel dimensions from a PNG buffer header (bytes 16–23).
+function pngSize(buf) {
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+}
+
+// Rendered height of a PNG image when displayed at a given width (aspect-ratio preserved).
+function renderedH(buf, displayW) {
+  const { w, h } = pngSize(buf);
+  return (h / w) * displayW;
+}
 
 async function buildPDF(data) {
   return new Promise(async (resolve, reject) => {
@@ -181,10 +198,9 @@ async function buildPDF(data) {
 
       const W  = doc.page.width;   // ≈595
       const H  = doc.page.height;  // ≈420
-      const ML = 18;               // left/right margin
-      const CW = W - 2 * ML;      // content width ≈559
+      const ML = 18;
+      const CW = W - 2 * ML;      // ≈559
       const isComplete = data.status === 4;
-      const isOpen     = data.status === 1;
 
       // ── Header bar ──────────────────────────────────────────────────────
       const HDR = 46;
@@ -192,17 +208,21 @@ async function buildPDF(data) {
 
       doc.font('Helvetica-Bold').fontSize(13).fillColor(C.white)
          .text('KONGSBERG AUTOMOTIVE', ML, 10, { lineBreak: false });
-
       doc.font('Helvetica').fontSize(9).fillColor('rgba(255,255,255,0.7)')
          .text(data.processName.toUpperCase() + ' — PRODUCTION ENTRY', ML, 27, { lineBreak: false });
 
-      // Status badge
-      const statusText  = isComplete ? 'COMPLETE' : isOpen ? 'OPEN' : `STATUS ${data.status}`;
-      const statusFill  = isComplete ? C.tealMid  : isOpen ? C.amber : C.muted;
-      const badgeW = 78, badgeH = 22, badgeX = W - ML - badgeW, badgeY = 12;
-      doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 4).fill(statusFill);
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(C.white)
-         .text(statusText, badgeX, badgeY + 6, { width: badgeW, align: 'center', lineBreak: false });
+      // Status badge — width adapts to text length
+      const badgeInfo  = STATUS_BADGE[data.status] || { text: `STATUS ${data.status}`, fill: C.muted };
+      const badgeText  = badgeInfo.text;
+      doc.font('Helvetica-Bold').fontSize(8);
+      const badgeTextW = doc.widthOfString(badgeText);
+      const badgeW     = badgeTextW + 20;
+      const badgeH     = 22;
+      const badgeX     = W - ML - badgeW;
+      const badgeY     = 12;
+      doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 4).fill(badgeInfo.fill);
+      doc.fillColor(C.white)
+         .text(badgeText, badgeX, badgeY + 6, { width: badgeW, align: 'center', lineBreak: false });
 
       let y = HDR + 10;
 
@@ -214,8 +234,9 @@ async function buildPDF(data) {
       const bcRef = await makeBarcode(data.batchRef);
       if (bcRef) {
         const bw = Math.min(CW * 0.65, 320);
+        const bh = renderedH(bcRef, bw);
         doc.image(bcRef, ML + (CW - bw) / 2, y, { width: bw });
-        y += 38;
+        y += bh + 5;
       }
 
       doc.font('Helvetica-Bold').fontSize(14).fillColor(C.text)
@@ -228,9 +249,9 @@ async function buildPDF(data) {
 
       // ── Two-column info grid ─────────────────────────────────────────────
       const HALF = CW / 2;
-      const xR   = ML + HALF + 8;  // right column x
+      const xR   = ML + HALF + 8;
 
-      // Row 1: Material | Machine
+      // Material | Machine
       doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
          .text('MATERIAL', ML, y, { lineBreak: false })
          .text('MACHINE', xR, y, { lineBreak: false });
@@ -243,11 +264,13 @@ async function buildPDF(data) {
 
       const bcMat = await makeBarcode(data.material);
       if (bcMat) {
-        doc.image(bcMat, ML, y, { width: Math.min(HALF - 20, 190) });
+        const matW = Math.min(HALF - 20, 190);
+        const matH = renderedH(bcMat, matW);
+        doc.image(bcMat, ML, y, { width: matW });
+        y += matH + 4;
       }
-      y += 22;
 
-      // Row 2: Operator(s) | Date
+      // Operator(s) | Date
       const primaryOp = data.operators.find(o => o.IsPrimary) || data.operators[0];
       const opList    = isComplete
         ? data.operators.map(o => o.DisplayName || o.Username).join(', ')
@@ -262,7 +285,7 @@ async function buildPDF(data) {
 
       doc.font('Helvetica').fontSize(9).fillColor(C.text)
          .text(opList, ML, y, { width: HALF - 12, lineBreak: false })
-         .text(dateVal, xR, y, { width: HALF - 8,  lineBreak: false });
+         .text(dateVal, xR, y, { width: HALF - 8, lineBreak: false });
       y += 16;
 
       // ── Divider ──────────────────────────────────────────────────────────
@@ -291,14 +314,10 @@ async function buildPDF(data) {
         doc.moveTo(ML, y).lineTo(W - ML, y).strokeColor(C.border).lineWidth(0.5).stroke();
         y += 8;
 
-        // Output quantity | SAP material document side by side
-        const qLabel = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
-        const qValue = data.quantity != null
-          ? `${Number(data.quantity).toFixed(3)} ${data.uom}`
-          : '—';
-
-        const hasDoc = Boolean(data.sapMatDoc);
-        const QW     = hasDoc ? HALF - 12 : CW;
+        const qLabel  = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
+        const qValue  = data.quantity != null ? `${Number(data.quantity).toFixed(3)} ${data.uom}` : '—';
+        const hasDoc  = Boolean(data.sapMatDoc);
+        const QW      = hasDoc ? HALF - 12 : CW;
 
         doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
            .text(qLabel, ML, y, { lineBreak: false });
@@ -314,9 +333,10 @@ async function buildPDF(data) {
         if (hasDoc) {
           const bcSap = await makeBarcode(data.sapMatDoc);
           if (bcSap) {
-            const sapBcW = Math.min(HALF - 20, 180);
-            doc.image(bcSap, xR, y, { width: sapBcW });
-            y += 28;
+            const sapW = Math.min(HALF - 20, 180);
+            const sapH = renderedH(bcSap, sapW);
+            doc.image(bcSap, xR, y, { width: sapW });
+            y += sapH + 4;
           } else {
             y += 16;
           }
