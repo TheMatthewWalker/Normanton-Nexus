@@ -224,6 +224,8 @@ export const sapConfig = {
 export const sapServerSecret = process.env.SAP_SERVER_SECRET
     ?? (() => { throw new Error('SAP_SERVER_SECRET env var is not set'); })();
 
+export const printersConfig = config.printers || [];
+
 // Role check helper — reads role from session (replaces config-based isAdmin)
 function isAdmin(username) {
   // For backward compat with /query endpoint — check session role directly

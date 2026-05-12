@@ -196,6 +196,63 @@ function backToTiles() {
   currentFn = null;
 }
 
+// ── Server-side label printing ────────────────────────────────────────────────
+let _printerCache = null;
+
+async function labelPrint(processCode, recordID, btnEl) {
+  const origText = btnEl.textContent;
+  btnEl.disabled = true;
+  btnEl.textContent = 'Loading…';
+
+  const reset = (msg, color = '', delay = 2500) => {
+    btnEl.textContent = msg; btnEl.style.color = color;
+    setTimeout(() => { btnEl.textContent = origText; btnEl.disabled = false; btnEl.style.color = ''; }, delay);
+  };
+
+  try {
+    if (!_printerCache) {
+      const r = await fetch('/api/labels/printers').then(r => r.json());
+      _printerCache = r.data || [];
+    }
+    const printers = _printerCache;
+
+    if (!printers.length) { reset('No printers configured', 'var(--error)', 3500); return; }
+
+    let printerId;
+    if (printers.length === 1) {
+      printerId = printers[0].id;
+    } else {
+      // Inline picker: replace button with select + send button
+      const sel = document.createElement('select');
+      sel.className = 'tf-input';
+      sel.style.cssText = 'width:160px;font-size:12px;padding:3px 6px;display:inline-block';
+      printers.forEach(p => { const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
+      const sendBtn = document.createElement('button');
+      sendBtn.className = 'btn-submit';
+      sendBtn.textContent = '🖨 Send';
+      sendBtn.style.cssText = 'font-size:12px;padding:4px 10px;margin-left:6px';
+      btnEl.replaceWith(sel);
+      sel.insertAdjacentElement('afterend', sendBtn);
+      printerId = await new Promise(resolve => {
+        sendBtn.addEventListener('click', () => { sendBtn.disabled = true; sendBtn.textContent = 'Sending…'; resolve(sel.value); });
+      });
+      sendBtn.remove();
+      sel.replaceWith(btnEl);
+    }
+
+    btnEl.textContent = 'Sending…';
+    const res = await fetch(`/api/labels/process/${processCode}/${recordID}/print`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ printerId }),
+    }).then(r => r.json());
+
+    if (res.success) reset('✓ Sent to printer', 'var(--accent)');
+    else             reset(`✗ ${res.error}`, 'var(--error)', 4000);
+  } catch (err) {
+    reset(`✗ ${err.message}`, 'var(--error)', 4000);
+  }
+}
+
 // ── Modal helpers ────────────────────────────────────────────────────────────
 
 function openModal(html) {
@@ -1326,7 +1383,7 @@ function runNewEntry(processCode, machines) {
               Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete this run later using <strong>Complete Run</strong>.
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <a href="/api/labels/process/${processCode}/${d.recordID}" target="_blank" class="btn-secondary" style="text-decoration:none">🖨 Print Label</a>
+              <button class="btn-secondary" onclick="labelPrint('${processCode}',${d.recordID},this)">🖨 Print Label</button>
               <button class="btn-secondary" id="ne-another">New Entry</button>
               <button class="btn-submit" id="ne-done">Done</button>
             </div>
@@ -1636,7 +1693,7 @@ async function advanceCompleteWizard(state, entry, reasons, processCode, render)
       });
 
       const d = json.data || {};
-      const printBtn = `<a href="/api/labels/process/${processCode}/${entry.RecordID}" target="_blank" class="btn-secondary" style="display:inline-block;margin-top:10px;text-decoration:none;font-size:12px">🖨 Print Label</a>`;
+      const printBtn = `<button class="btn-secondary" onclick="labelPrint('${processCode}',${entry.RecordID},this)" style="margin-top:10px;font-size:12px">🖨 Print Label</button>`;
       if (d.status === 'SAP_FAILED') {
         resultEl.style.color = '#D97706';
         resultEl.innerHTML = `⚠ Saved as ${esc(d.batchRef||'')} but SAP failed.<br>
@@ -1741,7 +1798,7 @@ async function openMeterProcessDetail(processCode, recordID, row) {
         <div class="ps-modal-sub">${esc(PROCESS_LABELS[processCode]||processCode)} &nbsp;·&nbsp; ${esc(row?.Material||'')} &nbsp;·&nbsp; ${row?Number(row.LengthMetres).toFixed(3)+' M':''}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <a href="/api/labels/process/${processCode}/${recordID}" target="_blank" class="btn-secondary" style="text-decoration:none;font-size:12px;padding:4px 10px">🖨 Reprint Label</a>
+        <button class="btn-secondary" onclick="labelPrint('${processCode}',${recordID},this)" style="font-size:12px;padding:4px 10px">🖨 Reprint Label</button>
         <button class="ps-modal-close" onclick="closeModal()">×</button>
       </div>
     </div>
