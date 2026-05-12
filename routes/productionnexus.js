@@ -1530,7 +1530,11 @@ router.get('/scrap/summary', async (req, res) => {
              SUM(se.Quantity) AS TotalScrap
       FROM   prod.ScrapEntries se
       LEFT JOIN prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-      WHERE  se.SAPPosted = 1 AND se.IsReversed = 0
+      WHERE  se.SAPPosted = 1
+        AND  EXISTS (
+               SELECT 1 FROM prod.ScrapMaterialDocuments smd
+               WHERE  smd.ScrapID = se.ScrapID AND smd.IsReversed = 0
+             )
       GROUP  BY se.ProcessCode, sr.ReasonCode, sr.ReasonDescription, se.UnitOfMeasure
       ORDER  BY se.ProcessCode, TotalScrap DESC`);
     res.json({ success: true, data: r.recordset });
