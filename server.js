@@ -40,6 +40,7 @@ import geminiRoutes            from './routes/gemini.js';
 import freightBookingRoutes    from './routes/freightbooking.js';
 import clearportExportRoutes  from './routes/clearportexport.js';
 import qualityRoutes           from './routes/quality.js';
+import labelsRoutes            from './routes/labels.js';
 
 import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
@@ -118,6 +119,7 @@ app.use('/api/gemini', requireLogin,            geminiRoutes);
 app.use('/api/freight-booking', requireLogin,   freightBookingRoutes);
 app.use('/api/clearport',      requireLogin,   clearportExportRoutes);
 app.use('/api/quality',       requireLogin,   qualityRoutes);
+app.use('/api/labels',        requireLogin,   labelsRoutes);
 
 
 // Serve static front-end files

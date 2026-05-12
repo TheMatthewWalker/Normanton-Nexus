@@ -1325,7 +1325,8 @@ function runNewEntry(processCode, machines) {
             <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
               Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete this run later using <strong>Complete Run</strong>.
             </div>
-            <div style="display:flex;gap:8px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <a href="/api/labels/process/${processCode}/${d.recordID}" target="_blank" class="btn-secondary" style="text-decoration:none">🖨 Print Label</a>
               <button class="btn-secondary" id="ne-another">New Entry</button>
               <button class="btn-submit" id="ne-done">Done</button>
             </div>
@@ -1635,19 +1636,22 @@ async function advanceCompleteWizard(state, entry, reasons, processCode, render)
       });
 
       const d = json.data || {};
+      const printBtn = `<a href="/api/labels/process/${processCode}/${entry.RecordID}" target="_blank" class="btn-secondary" style="display:inline-block;margin-top:10px;text-decoration:none;font-size:12px">🖨 Print Label</a>`;
       if (d.status === 'SAP_FAILED') {
         resultEl.style.color = '#D97706';
         resultEl.innerHTML = `⚠ Saved as ${esc(d.batchRef||'')} but SAP failed.<br>
           <span style="font-size:12px">${esc(d.error)}</span><br>
-          <span style="font-size:12px">Now in the Failed Backflush queue for supervisor review.</span>`;
+          <span style="font-size:12px">Now in the Failed Backflush queue for supervisor review.</span><br>${printBtn}`;
       } else if (processCode === 'BR') {
         resultEl.style.color = 'var(--accent)';
         resultEl.innerHTML = `✓ ${esc(d.batchRef||'')} saved — recorded for traceability and labelling.
-          ${state.hasScrap ? `<br><span style="font-size:12px;color:var(--text-muted)">Scrap submitted to the Approve Scrap queue.</span>` : ''}`;
+          ${state.hasScrap ? `<br><span style="font-size:12px;color:var(--text-muted)">Scrap submitted to the Approve Scrap queue.</span>` : ''}
+          <br>${printBtn}`;
       } else {
         resultEl.style.color = 'var(--accent)';
         resultEl.innerHTML = `✓ ${esc(d.batchRef||'')} posted successfully — MatDoc: ${esc(d.materialDocument||'—')}
-          ${d.warning ? `<br><span style="font-size:12px;color:#D97706">⚠ ${esc(d.warning)}</span>` : ''}`;
+          ${d.warning ? `<br><span style="font-size:12px;color:#D97706">⚠ ${esc(d.warning)}</span>` : ''}
+          <br>${printBtn}`;
       }
       submitBtn.disabled = false; submitBtn.textContent = processCode === 'BR' ? 'Save & Complete' : 'Submit & Post to SAP';
     } catch (err) {
@@ -1736,7 +1740,10 @@ async function openMeterProcessDetail(processCode, recordID, row) {
         <div class="ps-modal-title">${esc(row?.BatchRef || `${processCode}${String(recordID).padStart(8,'0')}`)}</div>
         <div class="ps-modal-sub">${esc(PROCESS_LABELS[processCode]||processCode)} &nbsp;·&nbsp; ${esc(row?.Material||'')} &nbsp;·&nbsp; ${row?Number(row.LengthMetres).toFixed(3)+' M':''}</div>
       </div>
-      <button class="ps-modal-close" onclick="closeModal()">×</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <a href="/api/labels/process/${processCode}/${recordID}" target="_blank" class="btn-secondary" style="text-decoration:none;font-size:12px;padding:4px 10px">🖨 Reprint Label</a>
+        <button class="ps-modal-close" onclick="closeModal()">×</button>
+      </div>
     </div>
     <div class="ps-modal-body" id="mpd-detail-body">
       <div class="pn-loading"><div class="spinner"></div>Loading…</div>
