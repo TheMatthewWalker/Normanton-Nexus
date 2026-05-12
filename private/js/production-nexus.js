@@ -1420,7 +1420,7 @@ function runCompleteWizard(processCode, entry, machines, reasons) {
         color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
         border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
 
-    renderCompletePhase(state, reasons, processCode);
+    renderCompletePhase(state, entry, reasons, processCode);
 
     document.getElementById('cr-back').addEventListener('click', () => {
       if (state.phase === 1) runCompleteRun(processCode, machines, reasons);
@@ -1432,7 +1432,7 @@ function runCompleteWizard(processCode, entry, machines, reasons) {
   render();
 }
 
-function renderCompletePhase(state, reasons, processCode) {
+function renderCompletePhase(state, entry, reasons, processCode) {
   const body = document.getElementById('cr-phase-body');
 
   if (state.phase === 1) {
@@ -1467,7 +1467,7 @@ function renderCompletePhase(state, reasons, processCode) {
     document.querySelectorAll('.cr-remove-op').forEach(btn => {
       btn.addEventListener('click', () => {
         state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
-        renderCompletePhase(state, reasons, processCode);
+        renderCompletePhase(state, entry, reasons, processCode);
       });
     });
     document.getElementById('cr-op-search').addEventListener('click', async () => {
@@ -1483,7 +1483,7 @@ function renderCompletePhase(state, reasons, processCode) {
         btn.addEventListener('click', () => {
           if (!state.additionalOperators.find(u => u.uid === Number(btn.dataset.uid)))
             state.additionalOperators.push({ uid: Number(btn.dataset.uid), username: btn.dataset.name });
-          renderCompletePhase(state, reasons, processCode);
+          renderCompletePhase(state, entry, reasons, processCode);
         });
       });
     });
@@ -1522,10 +1522,10 @@ function renderCompletePhase(state, reasons, processCode) {
     });
     document.getElementById('cr-add-reason')?.addEventListener('click', () => {
       state.scrapReasons.push({ reasonID: '', occurrences: 1 });
-      renderCompletePhase(state, reasons, processCode);
+      renderCompletePhase(state, entry, reasons, processCode);
     });
     document.querySelectorAll('.cr-remove-reason').forEach(btn => {
-      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderCompletePhase(state, reasons, processCode); });
+      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderCompletePhase(state, entry, reasons, processCode); });
     });
     document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
       sel.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].reasonID = Number(e.target.value); });
