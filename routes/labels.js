@@ -182,17 +182,9 @@ async function buildHTML(data) {
 
   const completionSection = isComplete ? `
     <div class="divider"></div>
-    <div class="two-col">
-      <div>
-        <div class="lbl">${qLabel}</div>
-        <div class="qty">${qValue}</div>
-      </div>
-      ${data.sapMatDoc ? `
-      <div>
-        <div class="lbl">SAP MATERIAL DOCUMENT</div>
-        ${bcImg(bcSap, 10)}
-        <div class="sap-num">${esc(data.sapMatDoc)}</div>
-      </div>` : ''}
+    <div>
+      <div class="lbl">${qLabel}</div>
+      <div class="qty">${qValue}</div>
     </div>
     ${data.notes ? `
     <div class="divider"></div>
@@ -260,10 +252,7 @@ async function buildHTML(data) {
     flex-shrink: 0;
   }
 
-  /* Batch reference */
-  .batch-section { text-align: center; }
-  .batch-barcode { margin: 2px auto; }
-  .batch-barcode img { height: 13mm; width: auto; max-width: 65%; }
+  /* Batch reference / SAP doc */
   .batch-id {
     font-size: 11pt; font-weight: 700;
     letter-spacing: 0.08em; margin-top: 1px;
@@ -317,10 +306,18 @@ async function buildHTML(data) {
 
   <div class="body">
 
-    <div class="batch-section">
-      <div class="lbl">BATCH REFERENCE</div>
-      <div class="batch-barcode">${bcImg(bcRef, 13)}</div>
-      <div class="batch-id">${esc(data.batchRef)}</div>
+    <div class="two-col">
+      <div>
+        <div class="lbl">BATCH REFERENCE</div>
+        ${bcImg(bcRef, 13)}
+        <div class="batch-id">${esc(data.batchRef)}</div>
+      </div>
+      ${isComplete && data.sapMatDoc ? `
+      <div>
+        <div class="lbl">SAP MATERIAL DOCUMENT</div>
+        ${bcImg(bcSap, 13)}
+        <div class="batch-id">${esc(data.sapMatDoc)}</div>
+      </div>` : ''}
     </div>
 
     <div class="divider"></div>
