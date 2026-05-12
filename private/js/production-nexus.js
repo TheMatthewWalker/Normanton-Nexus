@@ -1265,7 +1265,7 @@ function runNewEntry(processCode, machines) {
             <input class="tf-input" id="ne-parent-rid" type="number" placeholder="Record ID" style="width:130px">
             <button class="btn-secondary" id="ne-add-batch">+ Add</button>
           </div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">${batchTags}</div>
+          <div id="ne-batch-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <button class="btn-secondary" id="ne-back">← Back</button>
@@ -1274,6 +1274,22 @@ function runNewEntry(processCode, machines) {
         </div>
       </div>`;
 
+    const refreshBatchTags = () => {
+      const el = document.getElementById('ne-batch-tags');
+      if (!el) return;
+      el.innerHTML = state.parentBatches.length
+        ? state.parentBatches.map((pb, i) =>
+            `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
+              ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
+              <button class="ne-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+            </span>`).join(' ')
+        : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
+      el.querySelectorAll('.ne-remove-batch').forEach(btn => {
+        btn.addEventListener('click', () => { state.parentBatches.splice(Number(btn.dataset.idx), 1); refreshBatchTags(); });
+      });
+    };
+    refreshBatchTags();
+
     document.getElementById('ne-back').addEventListener('click', () => runMeterProcessEntry(processCode));
     document.getElementById('ne-add-batch').addEventListener('click', () => {
       const pc  = document.getElementById('ne-parent-pc')?.value;
@@ -1281,10 +1297,8 @@ function runNewEntry(processCode, machines) {
       if (!pc || !rid) return;
       if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
         state.parentBatches.push({ processCode: pc, recordID: rid });
-      render();
-    });
-    document.querySelectorAll('.ne-remove-batch').forEach(btn => {
-      btn.addEventListener('click', () => { state.parentBatches.splice(Number(btn.dataset.idx), 1); render(); });
+      document.getElementById('ne-parent-rid').value = '';
+      refreshBatchTags();
     });
     document.getElementById('ne-save').addEventListener('click', async () => {
       const mat = document.getElementById('ne-material')?.value.trim();
@@ -1447,11 +1461,6 @@ function renderCompletePhase(state, entry, reasons, processCode) {
       </div>`;
 
   } else if (state.phase === 2) {
-    const opTags = state.additionalOperators.map(u =>
-      `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
-        ${esc(u.username)} <button class="cr-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-       </span>`).join(' ');
-
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
         <div class="bm-section-title">Step 2 — Additional Operators</div>
@@ -1461,15 +1470,27 @@ function renderCompletePhase(state, entry, reasons, processCode) {
           <button class="btn-secondary" id="cr-op-search">Search</button>
         </div>
         <div id="cr-op-results" style="margin-bottom:8px"></div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">${opTags || '<span style="font-size:12px;color:var(--text-muted)">None added</span>'}</div>
+        <div id="cr-op-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
       </div>`;
 
-    document.querySelectorAll('.cr-remove-op').forEach(btn => {
-      btn.addEventListener('click', () => {
-        state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
-        renderCompletePhase(state, entry, reasons, processCode);
+    const refreshOpTags = () => {
+      const el = document.getElementById('cr-op-tags');
+      if (!el) return;
+      el.innerHTML = state.additionalOperators.length
+        ? state.additionalOperators.map(u =>
+            `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
+              ${esc(u.username)} <button class="cr-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+            </span>`).join(' ')
+        : '<span style="font-size:12px;color:var(--text-muted)">None added</span>';
+      el.querySelectorAll('.cr-remove-op').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
+          refreshOpTags();
+        });
       });
-    });
+    };
+    refreshOpTags();
+
     document.getElementById('cr-op-search').addEventListener('click', async () => {
       const q  = document.getElementById('cr-op-q').value.trim();
       const el = document.getElementById('cr-op-results');
@@ -1483,7 +1504,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
         btn.addEventListener('click', () => {
           if (!state.additionalOperators.find(u => u.uid === Number(btn.dataset.uid)))
             state.additionalOperators.push({ uid: Number(btn.dataset.uid), username: btn.dataset.name });
-          renderCompletePhase(state, entry, reasons, processCode);
+          refreshOpTags();
         });
       });
     });
@@ -1516,16 +1537,35 @@ function renderCompletePhase(state, entry, reasons, processCode) {
         </div>
       </div>`;
 
+    const syncScrapFromDom = () => {
+      state.hasScrap    = document.getElementById('cr-has-scrap')?.checked ?? state.hasScrap;
+      const kg          = document.getElementById('cr-scrap-kg')?.value;
+      if (kg !== '' && kg != null) state.scrapTotalKG = Number(kg);
+      document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
+        const idx = Number(sel.dataset.idx);
+        if (state.scrapReasons[idx]) state.scrapReasons[idx].reasonID = Number(sel.value);
+      });
+      document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
+        const idx = Number(inp.dataset.idx);
+        if (state.scrapReasons[idx]) state.scrapReasons[idx].occurrences = Number(inp.value) || 1;
+      });
+    };
+
     document.getElementById('cr-has-scrap').addEventListener('change', e => {
       state.hasScrap = e.target.checked;
       document.getElementById('cr-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
     });
     document.getElementById('cr-add-reason')?.addEventListener('click', () => {
+      syncScrapFromDom();
       state.scrapReasons.push({ reasonID: '', occurrences: 1 });
       renderCompletePhase(state, entry, reasons, processCode);
     });
     document.querySelectorAll('.cr-remove-reason').forEach(btn => {
-      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderCompletePhase(state, entry, reasons, processCode); });
+      btn.addEventListener('click', () => {
+        syncScrapFromDom();
+        state.scrapReasons.splice(Number(btn.dataset.idx), 1);
+        renderCompletePhase(state, entry, reasons, processCode);
+      });
     });
     document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
       sel.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].reasonID = Number(e.target.value); });
