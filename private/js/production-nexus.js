@@ -1396,7 +1396,7 @@ function runCompleteWizard(processCode, entry, machines, reasons) {
     notes: '',
   };
 
-  const steps = ['Length', 'Operators', 'Scrap', 'Review & Submit'];
+  const steps = ['Length', 'Operators', 'Scrap', processCode === 'BR' ? 'Review & Save' : 'Review & Submit'];
 
   const render = () => {
     const body = document.getElementById('result-body');
@@ -1409,7 +1409,7 @@ function runCompleteWizard(processCode, entry, machines, reasons) {
         <div id="cr-phase-body"></div>
         <div style="display:flex;gap:8px;margin-top:16px">
           <button class="btn-secondary" id="cr-back">${state.phase === 1 ? '← Back to list' : '← Back'}</button>
-          <button class="btn-submit" id="cr-next">${state.phase === 4 ? 'Submit & Post to SAP' : 'Next →'}</button>
+          <button class="btn-submit" id="cr-next">${state.phase === 4 ? (processCode === 'BR' ? 'Save & Complete' : 'Submit & Post to SAP') : 'Next →'}</button>
           <span id="cr-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
         </div>
       </div>`;
@@ -1535,9 +1535,11 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     });
 
   } else if (state.phase === 4) {
+    const isBraiding = processCode === 'BR';
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Step 4 — Review &amp; Submit</div>
+        <div class="bm-section-title">Step 4 — ${isBraiding ? 'Review &amp; Save' : 'Review &amp; Submit'}</div>
+        ${isBraiding ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Braiding is saved for traceability and labelling only — no SAP backflush. Any scrap entered will go to the Approve Scrap queue as normal.</div>` : ''}
         <div class="tf-field" style="margin-bottom:14px">
           <label class="tf-label">Comments (optional)</label>
           <input class="tf-input" id="cr-notes" value="${esc(state.notes)}" placeholder="Any notes for this run…">
@@ -1598,12 +1600,16 @@ async function advanceCompleteWizard(state, entry, reasons, processCode, render)
         resultEl.innerHTML = `⚠ Saved as ${esc(d.batchRef||'')} but SAP failed.<br>
           <span style="font-size:12px">${esc(d.error)}</span><br>
           <span style="font-size:12px">Now in the Failed Backflush queue for supervisor review.</span>`;
+      } else if (processCode === 'BR') {
+        resultEl.style.color = 'var(--accent)';
+        resultEl.innerHTML = `✓ ${esc(d.batchRef||'')} saved — recorded for traceability and labelling.
+          ${state.hasScrap ? `<br><span style="font-size:12px;color:var(--text-muted)">Scrap submitted to the Approve Scrap queue.</span>` : ''}`;
       } else {
         resultEl.style.color = 'var(--accent)';
         resultEl.innerHTML = `✓ ${esc(d.batchRef||'')} posted successfully — MatDoc: ${esc(d.materialDocument||'—')}
           ${d.warning ? `<br><span style="font-size:12px;color:#D97706">⚠ ${esc(d.warning)}</span>` : ''}`;
       }
-      submitBtn.disabled = false; submitBtn.textContent = 'Submit & Post to SAP';
+      submitBtn.disabled = false; submitBtn.textContent = processCode === 'BR' ? 'Save & Complete' : 'Submit & Post to SAP';
     } catch (err) {
       resultEl.style.color = 'var(--error)';
       resultEl.textContent = err.message;

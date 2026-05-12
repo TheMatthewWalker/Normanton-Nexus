@@ -609,6 +609,10 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
 
     await writeEvent(pool, code, recordID, 'STARTED', `${code} completed: ${material} ${length.toFixed(3)} M`, 0, uid);
 
+    if (code === 'BR') {
+      return res.status(200).json({ success: true, data: { recordID, batchRef, status: 'COMPLETE' } });
+    }
+
     try {
       const sapRaw = await sapPost('/api/production/backflush', {
         Material:  material,
