@@ -197,7 +197,7 @@ function backToTiles() {
 }
 
 // ── Server-side label printing ────────────────────────────────────────────────
-let _printerCache = null;
+let _printerCache = null;  // { printers: [...], userDefault: string|null }
 
 async function labelPrint(processCode, recordID, btnEl) {
   const origText = btnEl.textContent;
@@ -212,31 +212,66 @@ async function labelPrint(processCode, recordID, btnEl) {
   try {
     if (!_printerCache) {
       const r = await fetch('/api/labels/printers').then(r => r.json());
-      _printerCache = r.data || [];
+      _printerCache = { printers: r.data || [], userDefault: r.userDefault || null };
     }
-    const printers = _printerCache;
+    const { printers, userDefault } = _printerCache;
 
     if (!printers.length) { reset('No printers configured', 'var(--error)', 3500); return; }
+
+    // Priority: user personal default → process-code match → first printer
+    const defaultId =
+      (userDefault && printers.find(p => p.id === userDefault)) ? userDefault :
+      (printers.find(p => p.id === processCode)?.id ?? printers[0].id);
 
     let printerId;
     if (printers.length === 1) {
       printerId = printers[0].id;
     } else {
-      // Inline picker: replace button with select + send button
+      // Inline picker pre-selected to the resolved default
       const sel = document.createElement('select');
       sel.className = 'tf-input';
-      sel.style.cssText = 'width:160px;font-size:12px;padding:3px 6px;display:inline-block';
-      printers.forEach(p => { const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
+      sel.style.cssText = 'width:150px;font-size:12px;padding:3px 6px;display:inline-block';
+      printers.forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.id; o.textContent = p.name;
+        if (p.id === defaultId) o.selected = true;
+        sel.appendChild(o);
+      });
+
+      // "Save as default" checkbox
+      const chkWrap = document.createElement('label');
+      chkWrap.style.cssText = 'font-size:11px;color:var(--text-muted);cursor:pointer;margin-left:6px;white-space:nowrap;vertical-align:middle';
+      const chk = document.createElement('input');
+      chk.type = 'checkbox'; chk.style.marginRight = '3px'; chk.style.verticalAlign = 'middle';
+      chkWrap.appendChild(chk);
+      chkWrap.appendChild(document.createTextNode('Set as default'));
+
       const sendBtn = document.createElement('button');
       sendBtn.className = 'btn-submit';
       sendBtn.textContent = '🖨 Send';
       sendBtn.style.cssText = 'font-size:12px;padding:4px 10px;margin-left:6px';
+
       btnEl.replaceWith(sel);
-      sel.insertAdjacentElement('afterend', sendBtn);
+      sel.insertAdjacentElement('afterend', chkWrap);
+      chkWrap.insertAdjacentElement('afterend', sendBtn);
+
       printerId = await new Promise(resolve => {
-        sendBtn.addEventListener('click', () => { sendBtn.disabled = true; sendBtn.textContent = 'Sending…'; resolve(sel.value); });
+        sendBtn.addEventListener('click', () => {
+          sendBtn.disabled = true; sendBtn.textContent = 'Sending…';
+          resolve(sel.value);
+        });
       });
-      sendBtn.remove();
+
+      // Persist default if checked (fire-and-forget; invalidate cache)
+      if (chk.checked) {
+        _printerCache = null;
+        fetch('/api/labels/printers/default', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ printerId }),
+        }).catch(() => {});
+      }
+
+      sendBtn.remove(); chkWrap.remove();
       sel.replaceWith(btnEl);
     }
 
@@ -246,7 +281,8 @@ async function labelPrint(processCode, recordID, btnEl) {
       body: JSON.stringify({ printerId }),
     }).then(r => r.json());
 
-    if (res.success) reset('✓ Sent to printer', 'var(--accent)');
+    const printerName = printers.find(p => p.id === printerId)?.name || printerId;
+    if (res.success) reset(`✓ Sent to ${printerName}`, 'var(--accent)');
     else             reset(`✗ ${res.error}`, 'var(--error)', 4000);
   } catch (err) {
     reset(`✗ ${err.message}`, 'var(--error)', 4000);

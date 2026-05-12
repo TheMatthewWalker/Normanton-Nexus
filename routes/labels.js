@@ -3,7 +3,7 @@ import express     from 'express';
 import sql         from 'mssql';
 import PDFDocument from 'pdfkit';
 import bwipjs      from 'bwip-js';
-import { getProductionPool, printersConfig } from '../server.js';
+import { getProductionPool, printersConfig, sqlConfig } from '../server.js';
 
 const router = express.Router();
 
@@ -496,9 +496,43 @@ function tcpPrint(buffer, host, port = 9100) {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-// List configured printers
-router.get('/printers', (_req, res) => {
-  res.json({ success: true, data: printersConfig.map(p => ({ id: p.id, name: p.name })) });
+// List configured printers + the requesting user's personal default
+router.get('/printers', async (req, res) => {
+  try {
+    const uid = req.session?.user?.userID;
+    let userDefault = null;
+    if (uid) {
+      const pool = await sql.connect(sqlConfig);
+      const r = await pool.request()
+        .input('uid', sql.Int, uid)
+        .query(`SELECT DefaultPrinterID FROM kongsberg.dbo.PortalUsers WHERE UserID = @uid`);
+      userDefault = r.recordset[0]?.DefaultPrinterID || null;
+    }
+    res.json({
+      success:     true,
+      data:        printersConfig.map(p => ({ id: p.id, name: p.name })),
+      userDefault,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Save (or clear) the user's personal default printer
+router.patch('/printers/default', async (req, res) => {
+  const uid = req.session?.user?.userID;
+  if (!uid) return res.status(401).json({ error: 'Not logged in.' });
+  const { printerId } = req.body;
+  try {
+    const pool = await sql.connect(sqlConfig);
+    await pool.request()
+      .input('uid', sql.Int,           uid)
+      .input('pid', sql.NVarChar(50),  printerId || null)
+      .query(`UPDATE kongsberg.dbo.PortalUsers SET DefaultPrinterID = @pid WHERE UserID = @uid`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Browser preview (opens in new tab, auto-prints via window.print())
