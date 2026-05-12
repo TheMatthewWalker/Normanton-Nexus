@@ -1,7 +1,6 @@
-import express   from 'express';
-import sql       from 'mssql';
-import PDFDocument from 'pdfkit';
-import bwipjs    from 'bwip-js';
+import express from 'express';
+import sql     from 'mssql';
+import bwipjs  from 'bwip-js';
 import { getProductionPool } from '../server.js';
 
 const router = express.Router();
@@ -18,21 +17,18 @@ const PROC = {
   TW: { table: 'prod.TapeWrap',    pk: 'TapeWrapID',    uom: 'M',  qtyCol: 'LengthMetres',  name: 'Tape Wrap'   },
 };
 
+const STATUS_BADGE = {
+  1: { text: 'OPEN',             bg: '#d97706' },
+  2: { text: 'RUNNING',          bg: '#0d9488' },
+  3: { text: 'ON HOLD',          bg: '#6b7280' },
+  4: { text: 'COMPLETE',         bg: '#0d9488' },
+  5: { text: 'CANCELLED',        bg: '#dc2626' },
+  6: { text: 'BACKFLUSH FAILED', bg: '#dc2626' },
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
-async function makeBarcode(text) {
-  const clean = String(text ?? '').toUpperCase().replace(/[^A-Z0-9\-\.\$\/\+\% ]/g, '');
-  if (!clean) return null;
-  try {
-    return await bwipjs.toBuffer({
-      bcid:          'code39',
-      text:          clean,
-      scale:         2,
-      height:        10,
-      includetext:   false,
-      paddingwidth:  4,
-      paddingheight: 2,
-    });
-  } catch { return null; }
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function fmtLabel(dt) {
@@ -43,9 +39,22 @@ function fmtLabel(dt) {
   });
 }
 
-function displayName(row) {
-  const full = [row.FirstName, row.LastName].filter(Boolean).join(' ').trim();
-  return full || row.Username || '—';
+async function barcode64(text) {
+  const clean = String(text ?? '').toUpperCase().replace(/[^A-Z0-9\-\.\$\/\+\% ]/g, '');
+  if (!clean) return null;
+  try {
+    const buf = await bwipjs.toBuffer({
+      bcid: 'code39', text: clean,
+      scale: 3, height: 10,
+      includetext: false, paddingwidth: 4, paddingheight: 2,
+    });
+    return `data:image/png;base64,${buf.toString('base64')}`;
+  } catch { return null; }
+}
+
+function bcImg(src, heightMm) {
+  if (!src) return '';
+  return `<img src="${src}" style="display:block;height:${heightMm}mm;width:auto;max-width:100%">`;
 }
 
 // ── DB fetch ──────────────────────────────────────────────────────────────────
@@ -53,7 +62,6 @@ async function fetchLabelData(processCode, recordID) {
   const cfg  = PROC[processCode];
   const pool = await getProductionPool();
 
-  // ── Main record ──────────────────────────────────────────────────────────
   let rec;
   if (processCode === 'MX') {
     const r = await pool.request()
@@ -61,8 +69,7 @@ async function fetchLabelData(processCode, recordID) {
       .query(`SELECT m.MixingID AS RecordID, m.MixRef AS BatchRef,
                      m.Material, m.TotalWeightKG AS Quantity,
                      m.Status, m.CreatedAt, m.CompletedAt, m.Notes,
-                     m.SupplierBatchNo, m.SupplierTubNo,
-                     s.ShiftName,
+                     m.SupplierBatchNo, m.SupplierTubNo, s.ShiftName,
                      pu.Username,
                      COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
               FROM   prod.Mixing m
@@ -88,7 +95,6 @@ async function fetchLabelData(processCode, recordID) {
   }
   if (!rec) throw Object.assign(new Error('Record not found.'), { statusCode: 404 });
 
-  // ── Operators ────────────────────────────────────────────────────────────
   const opsR = await pool.request()
     .input('pc',  sql.NVarChar(5), processCode)
     .input('rid', sql.Int,         recordID)
@@ -100,7 +106,6 @@ async function fetchLabelData(processCode, recordID) {
               AND  bo.RemovedAt IS NULL
             ORDER  BY bo.IsPrimary DESC, bo.AssignedAt`);
 
-  // ── Traceability ─────────────────────────────────────────────────────────
   const traceR = await pool.request()
     .input('pc',  sql.NVarChar(5), processCode)
     .input('rid', sql.Int,         recordID)
@@ -109,7 +114,6 @@ async function fetchLabelData(processCode, recordID) {
             WHERE  ChildProcessCode = @pc AND ChildRecordID = @rid
             ORDER  BY LinkedAt`);
 
-  // ── SAP material document (completed non-BR) ─────────────────────────────
   let sapMatDoc = null;
   if (rec.Status === 4 && processCode !== 'BR') {
     const sapR = await pool.request()
@@ -129,247 +133,237 @@ async function fetchLabelData(processCode, recordID) {
 
   return {
     processCode,
-    processName: PROC[processCode].name,
+    processName:     PROC[processCode].name,
     batchRef,
-    status:      rec.Status,
-    material:    rec.Material || '—',
-    machine:     rec.MachineName || rec.MachineCode || null,
-    shiftName:   rec.ShiftName  || null,
-    operators:   opsR.recordset,
-    createdAt:   rec.CreatedAt,
-    completedAt: rec.CompletedAt,
-    quantity:    rec.Quantity,
-    uom:         PROC[processCode].uom,
-    parentBatches: traceR.recordset.map(r =>
-      `${r.ParentProcessCode}${String(r.ParentRecordID).padStart(8, '0')}`),
+    status:          rec.Status,
+    material:        rec.Material || '—',
+    machine:         rec.MachineName || rec.MachineCode || null,
+    shiftName:       rec.ShiftName  || null,
+    operators:       opsR.recordset,
+    createdAt:       rec.CreatedAt,
+    completedAt:     rec.CompletedAt,
+    quantity:        rec.Quantity,
+    uom:             PROC[processCode].uom,
+    parentBatches:   traceR.recordset.map(r => `${r.ParentProcessCode}${String(r.ParentRecordID).padStart(8, '0')}`),
     sapMatDoc,
-    notes:           rec.Notes         || null,
+    notes:           rec.Notes          || null,
     supplierBatchNo: rec.SupplierBatchNo || null,
     supplierTubNo:   rec.SupplierTubNo   || null,
   };
 }
 
-// ── PDF builder ───────────────────────────────────────────────────────────────
-const C = {
-  teal:    '#0d4c45',
-  tealMid: '#0d9488',
-  amber:   '#d97706',
-  red:     '#dc2626',
-  text:    '#111827',
-  muted:   '#6b7280',
-  border:  '#d1d5db',
-  white:   '#ffffff',
-};
+// ── HTML label builder ────────────────────────────────────────────────────────
+async function buildHTML(data) {
+  const isComplete = data.status === 4;
+  const badge      = STATUS_BADGE[data.status] || { text: `STATUS ${data.status}`, bg: '#6b7280' };
 
-const STATUS_BADGE = {
-  1: { text: 'OPEN',             fill: '#d97706' },
-  2: { text: 'RUNNING',          fill: '#0d9488' },
-  3: { text: 'ON HOLD',          fill: '#6b7280' },
-  4: { text: 'COMPLETE',         fill: '#0d9488' },
-  5: { text: 'CANCELLED',        fill: '#dc2626' },
-  6: { text: 'BACKFLUSH FAILED', fill: '#dc2626' },
-};
+  const bcRef = await barcode64(data.batchRef);
+  const bcMat = await barcode64(data.material);
+  const bcSap = data.sapMatDoc ? await barcode64(data.sapMatDoc) : null;
 
-// Read pixel dimensions from a PNG buffer header (bytes 16–23).
-function pngSize(buf) {
-  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
-}
+  const primaryOp = data.operators.find(o => o.IsPrimary) || data.operators[0];
+  const opList    = isComplete
+    ? data.operators.map(o => esc(o.DisplayName || o.Username)).join(', ')
+    : esc(primaryOp?.DisplayName || primaryOp?.Username || '—');
+  const dateLabel = isComplete ? 'COMPLETED' : 'CREATED';
+  const dateVal   = fmtLabel(isComplete ? data.completedAt : data.createdAt);
 
-// Rendered height of a PNG image when displayed at a given width (aspect-ratio preserved).
-function renderedH(buf, displayW) {
-  const { w, h } = pngSize(buf);
-  return (h / w) * displayW;
-}
+  const traceText = data.processCode === 'MX'
+    ? [
+        data.supplierBatchNo ? `Supplier Batch: ${esc(data.supplierBatchNo)}` : null,
+        data.supplierTubNo   ? `Tub No: ${esc(data.supplierTubNo)}`           : null,
+      ].filter(Boolean).join(' &nbsp;&nbsp; ') || '—'
+    : (data.parentBatches.length
+        ? data.parentBatches.map(esc).join(' &nbsp;&nbsp; ')
+        : '—');
 
-async function buildPDF(data) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const doc = new PDFDocument({
-        size:   'A5',
-        layout: 'landscape',
-        margin: 0,
-        info:   { Title: `${data.processName} Label — ${data.batchRef}`, Author: 'Kongsberg Automotive' },
-      });
+  const qLabel = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
+  const qValue = data.quantity != null ? `${Number(data.quantity).toFixed(3)} ${esc(data.uom)}` : '—';
 
-      const chunks = [];
-      doc.on('data',  c  => chunks.push(c));
-      doc.on('end',   () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
+  const completionSection = isComplete ? `
+    <div class="divider"></div>
+    <div class="two-col">
+      <div>
+        <div class="lbl">${qLabel}</div>
+        <div class="qty">${qValue}</div>
+      </div>
+      ${data.sapMatDoc ? `
+      <div>
+        <div class="lbl">SAP MATERIAL DOCUMENT</div>
+        ${bcImg(bcSap, 10)}
+        <div class="sap-num">${esc(data.sapMatDoc)}</div>
+      </div>` : ''}
+    </div>
+    ${data.notes ? `
+    <div class="divider"></div>
+    <div class="lbl">NOTES</div>
+    <div class="notes">${esc(data.notes)}</div>` : ''}
+  ` : '';
 
-      const W  = doc.page.width;   // ≈595
-      const H  = doc.page.height;  // ≈420
-      const ML = 18;
-      const CW = W - 2 * ML;      // ≈559
-      const isComplete = data.status === 4;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>${esc(data.batchRef)} — ${esc(data.processName)} Label</title>
+<style>
+  @page { size: 210mm 148mm; margin: 0; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 210mm; height: 148mm;
+    overflow: hidden;
+    font-family: Helvetica Neue, Helvetica, Arial, sans-serif;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .label {
+    width: 210mm; height: 148mm;
+    display: flex; flex-direction: column;
+  }
 
-      // ── Header bar ──────────────────────────────────────────────────────
-      const HDR = 46;
-      doc.rect(0, 0, W, HDR).fill(C.teal);
+  /* ── Header ── */
+  .header {
+    background: #0d4c45;
+    color: #fff;
+    padding: 6px 12px 6px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .co-name  { font-size: 11pt; font-weight: 700; letter-spacing: 0.02em; }
+  .co-proc  { font-size: 7.5pt; opacity: 0.75; margin-top: 2px; }
+  .badge {
+    font-size: 7pt; font-weight: 700;
+    color: #fff; padding: 3px 9px;
+    border-radius: 4px; white-space: nowrap;
+  }
 
-      doc.font('Helvetica-Bold').fontSize(13).fillColor(C.white)
-         .text('KONGSBERG AUTOMOTIVE', ML, 10, { lineBreak: false });
-      doc.font('Helvetica').fontSize(9).fillColor('rgba(255,255,255,0.7)')
-         .text(data.processName.toUpperCase() + ' — PRODUCTION ENTRY', ML, 27, { lineBreak: false });
+  /* ── Content ── */
+  .body {
+    flex: 1; overflow: hidden;
+    padding: 6px 12px 2px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
 
-      // Status badge — width adapts to text length
-      const badgeInfo  = STATUS_BADGE[data.status] || { text: `STATUS ${data.status}`, fill: C.muted };
-      const badgeText  = badgeInfo.text;
-      doc.font('Helvetica-Bold').fontSize(8);
-      const badgeTextW = doc.widthOfString(badgeText);
-      const badgeW     = badgeTextW + 20;
-      const badgeH     = 22;
-      const badgeX     = W - ML - badgeW;
-      const badgeY     = 12;
-      doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 4).fill(badgeInfo.fill);
-      doc.fillColor(C.white)
-         .text(badgeText, badgeX, badgeY + 6, { width: badgeW, align: 'center', lineBreak: false });
+  .lbl {
+    font-size: 5.5pt; font-weight: 700;
+    color: #6b7280; letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
 
-      let y = HDR + 10;
+  .divider {
+    border: none;
+    border-top: 0.5px solid #d1d5db;
+    margin: 2px 0;
+    flex-shrink: 0;
+  }
 
-      // ── Batch reference ──────────────────────────────────────────────────
-      doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-         .text('BATCH REFERENCE', ML, y, { lineBreak: false });
-      y += 12;
+  /* Batch reference */
+  .batch-section { text-align: center; }
+  .batch-barcode { margin: 2px auto; }
+  .batch-barcode img { height: 13mm; width: auto; max-width: 65%; }
+  .batch-id {
+    font-size: 11pt; font-weight: 700;
+    letter-spacing: 0.08em; margin-top: 1px;
+  }
 
-      const bcRef = await makeBarcode(data.batchRef);
-      if (bcRef) {
-        const bw = Math.min(CW * 0.65, 320);
-        const bh = renderedH(bcRef, bw);
-        doc.image(bcRef, ML + (CW - bw) / 2, y, { width: bw });
-        y += bh + 5;
-      }
+  /* Two-column grid */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 12px;
+  }
 
-      doc.font('Helvetica-Bold').fontSize(14).fillColor(C.text)
-         .text(data.batchRef, ML, y, { width: CW, align: 'center', lineBreak: false });
-      y += 20;
+  .mat-val  { font-size: 9pt;  font-weight: 700; }
+  .mat-bc img { height: 9mm; width: auto; max-width: 100%; margin-top: 2px; }
+  .mach-val { font-size: 9pt;  font-weight: 700; }
 
-      // ── Divider ──────────────────────────────────────────────────────────
-      doc.moveTo(ML, y).lineTo(W - ML, y).strokeColor(C.border).lineWidth(0.5).stroke();
-      y += 8;
+  .op-val   { font-size: 8pt; }
+  .date-val { font-size: 8pt; }
 
-      // ── Two-column info grid ─────────────────────────────────────────────
-      const HALF = CW / 2;
-      const xR   = ML + HALF + 8;
+  .trace-val { font-size: 8pt; }
 
-      // Material | Machine
-      doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-         .text('MATERIAL', ML, y, { lineBreak: false })
-         .text('MACHINE', xR, y, { lineBreak: false });
-      y += 11;
+  .qty      { font-size: 12pt; font-weight: 700; color: #0d4c45; margin-top: 1px; }
+  .sap-num  { font-size: 9pt;  font-weight: 700; margin-top: 1px; }
+  .notes    { font-size: 7.5pt; }
 
-      doc.font('Helvetica-Bold').fontSize(10).fillColor(C.text)
-         .text(data.material, ML, y, { width: HALF - 12, lineBreak: false })
-         .text(data.machine || '—', xR, y, { width: HALF - 8, lineBreak: false });
-      y += 14;
+  /* ── Footer ── */
+  .footer {
+    border-top: 2px solid #0d4c45;
+    padding: 2px 12px;
+    font-size: 6pt; color: #9ca3af;
+    flex-shrink: 0;
+  }
 
-      const bcMat = await makeBarcode(data.material);
-      if (bcMat) {
-        const matW = Math.min(HALF - 20, 190);
-        const matH = renderedH(bcMat, matW);
-        doc.image(bcMat, ML, y, { width: matW });
-        y += matH + 4;
-      }
+  /* Screen-only: centre for preview */
+  @media screen {
+    html, body { display: flex; justify-content: center; align-items: flex-start; background: #e5e7eb; }
+    .label { margin: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+  }
+</style>
+</head>
+<body>
+<div class="label">
 
-      // Operator(s) | Date
-      const primaryOp = data.operators.find(o => o.IsPrimary) || data.operators[0];
-      const opList    = isComplete
-        ? data.operators.map(o => o.DisplayName || o.Username).join(', ')
-        : (primaryOp?.DisplayName || primaryOp?.Username || '—');
-      const dateLabel = isComplete ? 'COMPLETED' : 'CREATED';
-      const dateVal   = fmtLabel(isComplete ? data.completedAt : data.createdAt);
+  <div class="header">
+    <div>
+      <div class="co-name">KONGSBERG AUTOMOTIVE</div>
+      <div class="co-proc">${esc(data.processName.toUpperCase())} — PRODUCTION ENTRY</div>
+    </div>
+    <div class="badge" style="background:${badge.bg}">${esc(badge.text)}</div>
+  </div>
 
-      doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-         .text(isComplete ? 'OPERATORS' : 'OPERATOR', ML, y, { lineBreak: false })
-         .text(dateLabel, xR, y, { lineBreak: false });
-      y += 11;
+  <div class="body">
 
-      doc.font('Helvetica').fontSize(9).fillColor(C.text)
-         .text(opList, ML, y, { width: HALF - 12, lineBreak: false })
-         .text(dateVal, xR, y, { width: HALF - 8, lineBreak: false });
-      y += 16;
+    <div class="batch-section">
+      <div class="lbl">BATCH REFERENCE</div>
+      <div class="batch-barcode">${bcImg(bcRef, 13)}</div>
+      <div class="batch-id">${esc(data.batchRef)}</div>
+    </div>
 
-      // ── Divider ──────────────────────────────────────────────────────────
-      doc.moveTo(ML, y).lineTo(W - ML, y).strokeColor(C.border).lineWidth(0.5).stroke();
-      y += 8;
+    <div class="divider"></div>
 
-      // ── Traceability ─────────────────────────────────────────────────────
-      doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-         .text('INPUT BATCHES', ML, y, { lineBreak: false });
-      y += 11;
+    <div class="two-col">
+      <div>
+        <div class="lbl">MATERIAL</div>
+        <div class="mat-val">${esc(data.material)}</div>
+        <div class="mat-bc">${bcImg(bcMat, 9)}</div>
+      </div>
+      <div>
+        <div class="lbl">MACHINE</div>
+        <div class="mach-val">${esc(data.machine || '—')}</div>
+      </div>
+    </div>
 
-      if (data.processCode === 'MX') {
-        const parts = [];
-        if (data.supplierBatchNo) parts.push(`Supplier Batch: ${data.supplierBatchNo}`);
-        if (data.supplierTubNo)   parts.push(`Tub No: ${data.supplierTubNo}`);
-        doc.font('Helvetica').fontSize(9).fillColor(C.text)
-           .text(parts.length ? parts.join('    ') : '—', ML, y, { width: CW, lineBreak: false });
-      } else {
-        doc.font('Helvetica').fontSize(9).fillColor(C.text)
-           .text(data.parentBatches.length ? data.parentBatches.join('    ') : '—', ML, y, { width: CW, lineBreak: false });
-      }
-      y += 14;
+    <div class="two-col">
+      <div>
+        <div class="lbl">${isComplete ? 'OPERATORS' : 'OPERATOR'}</div>
+        <div class="op-val">${opList}</div>
+      </div>
+      <div>
+        <div class="lbl">${dateLabel}</div>
+        <div class="date-val">${esc(dateVal)}</div>
+      </div>
+    </div>
 
-      // ── Completed-label additions ─────────────────────────────────────────
-      if (isComplete) {
-        doc.moveTo(ML, y).lineTo(W - ML, y).strokeColor(C.border).lineWidth(0.5).stroke();
-        y += 8;
+    <div class="divider"></div>
 
-        const qLabel  = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
-        const qValue  = data.quantity != null ? `${Number(data.quantity).toFixed(3)} ${data.uom}` : '—';
-        const hasDoc  = Boolean(data.sapMatDoc);
-        const QW      = hasDoc ? HALF - 12 : CW;
+    <div>
+      <div class="lbl">INPUT BATCHES</div>
+      <div class="trace-val">${traceText}</div>
+    </div>
 
-        doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-           .text(qLabel, ML, y, { lineBreak: false });
-        if (hasDoc) {
-          doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-             .text('SAP MATERIAL DOCUMENT', xR, y, { lineBreak: false });
-        }
-        y += 11;
+    ${completionSection}
 
-        doc.font('Helvetica-Bold').fontSize(13).fillColor(C.teal)
-           .text(qValue, ML, y, { width: QW, lineBreak: false });
+  </div>
 
-        if (hasDoc) {
-          const bcSap = await makeBarcode(data.sapMatDoc);
-          if (bcSap) {
-            const sapW = Math.min(HALF - 20, 180);
-            const sapH = renderedH(bcSap, sapW);
-            doc.image(bcSap, xR, y, { width: sapW });
-            y += sapH + 4;
-          } else {
-            y += 16;
-          }
-          doc.font('Helvetica-Bold').fontSize(10).fillColor(C.text)
-             .text(data.sapMatDoc, xR, y, { lineBreak: false });
-          y += 16;
-        } else {
-          y += 20;
-        }
-
-        // Notes
-        if (data.notes) {
-          doc.moveTo(ML, y).lineTo(W - ML, y).strokeColor(C.border).lineWidth(0.5).stroke();
-          y += 8;
-          doc.font('Helvetica-Bold').fontSize(7).fillColor(C.muted)
-             .text('NOTES', ML, y, { lineBreak: false });
-          y += 11;
-          doc.font('Helvetica').fontSize(9).fillColor(C.text)
-             .text(data.notes, ML, y, { width: CW });
-        }
-      }
-
-      // ── Footer rule ───────────────────────────────────────────────────────
-      doc.moveTo(0, H - 18).lineTo(W, H - 18).strokeColor(C.teal).lineWidth(2).stroke();
-      doc.font('Helvetica').fontSize(7).fillColor(C.muted)
-         .text(`Printed ${fmtLabel(new Date())}  ·  ${data.batchRef}`, ML, H - 14,
-               { width: CW, align: 'left', lineBreak: false });
-
-      doc.end();
-    } catch (err) {
-      reject(err);
-    }
-  });
+  <div class="footer">Printed ${esc(fmtLabel(new Date()))} &nbsp;·&nbsp; ${esc(data.batchRef)}</div>
+</div>
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 300));</script>
+</body>
+</html>`;
 }
 
 // ── Route ─────────────────────────────────────────────────────────────────────
@@ -384,16 +378,13 @@ router.get('/process/:processCode/:recordID', async (req, res) => {
 
   try {
     const data = await fetchLabelData(code, recordID);
-    const pdf  = await buildPDF(data);
+    const html = await buildHTML(data);
 
-    const filename = `${data.batchRef}-label.pdf`;
     res.set({
-      'Content-Type':        'application/pdf',
-      'Content-Length':      pdf.length,
-      'Content-Disposition': `inline; filename="${filename}"`,
-      'Cache-Control':       'no-store',
+      'Content-Type':  'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
     });
-    res.send(pdf);
+    res.send(html);
   } catch (err) {
     const status = err.statusCode || 500;
     res.status(status).json({ error: err.message });
