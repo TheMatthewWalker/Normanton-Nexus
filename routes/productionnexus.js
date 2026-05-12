@@ -453,6 +453,229 @@ router.post('/process/:processCode/entry', async (req, res) => {
   }
 });
 
+// ── Create open (draft) entry — EX / CO / BR / CL / TW ──────────────────────
+
+router.post('/process/:processCode/draft', async (req, res) => {
+  try {
+    const code = req.params.processCode.toUpperCase();
+    if (!METRE_PROCESSES.has(code))
+      return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+    const { material, machineID, parentBatches = [], notes } = req.body;
+    if (!material)
+      return res.status(400).json({ success: false, error: 'material is required.' });
+
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+    const cfg  = PROCESS[code];
+    const sid  = currentShiftID();
+
+    const ins = await pool.request()
+      .input('shift', sql.TinyInt,           sid)
+      .input('mach',  sql.Int,               machineID ? Number(machineID) : null)
+      .input('mat',   sql.NVarChar(18),      material)
+      .input('uid',   sql.Int,               uid)
+      .input('notes', sql.NVarChar(sql.MAX), notes || null)
+      .query(`INSERT INTO ${cfg.table} (ShiftID,MachineID,Material,LengthMetres,Status,CreatedByUserID,Notes)
+              OUTPUT INSERTED.${cfg.pk}
+              VALUES (@shift,@mach,@mat,0,1,@uid,@notes)`);
+
+    const recordID = ins.recordset[0][cfg.pk];
+    const batchRef = `${code}${String(recordID).padStart(8, '0')}`;
+
+    await pool.request()
+      .input('pc',  sql.NVarChar(5), code)
+      .input('rid', sql.Int,         recordID)
+      .input('uid', sql.Int,         uid)
+      .query(`INSERT INTO prod.BatchOperators (ProcessCode,ProcessRecordID,UserID,IsPrimary,AssignedByUserID) VALUES (@pc,@rid,@uid,1,@uid)`);
+
+    for (const pb of parentBatches) {
+      if (!pb.processCode || !pb.recordID) continue;
+      await pool.request()
+        .input('cc',  sql.NVarChar(5), code)
+        .input('cr',  sql.Int,         recordID)
+        .input('pc',  sql.NVarChar(5), pb.processCode.toUpperCase())
+        .input('pr',  sql.Int,         Number(pb.recordID))
+        .input('uid', sql.Int,         uid)
+        .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
+    }
+
+    await writeEvent(pool, code, recordID, 'STARTED', `${code} open entry created: ${material}`, 0, uid);
+
+    res.status(201).json({ success: true, data: { recordID, batchRef } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── List open entries — EX / CO / BR / CL / TW ───────────────────────────────
+
+router.get('/process/:processCode/open-entries', async (req, res) => {
+  try {
+    const code = req.params.processCode.toUpperCase();
+    if (!METRE_PROCESSES.has(code))
+      return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+    const cfg  = PROCESS[code];
+    const pool = await getProductionPool();
+
+    const result = await pool.request()
+      .query(`SELECT t.${cfg.pk} AS RecordID, t.${cfg.ref} AS BatchRef,
+                     t.Material, t.MachineID, m.MachineCode, m.MachineName,
+                     t.Notes, t.CreatedAt,
+                     pu.Username AS CreatedBy
+              FROM ${cfg.table} t
+              LEFT JOIN prod.Machines m ON m.MachineID = t.MachineID
+              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+              WHERE t.Status = 1 AND t.IsReversed = 0
+              ORDER BY t.CreatedAt DESC`);
+
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Complete an open entry — EX / CO / BR / CL / TW ──────────────────────────
+
+router.post('/process/:processCode/complete/:recordID', async (req, res) => {
+  try {
+    const code     = req.params.processCode.toUpperCase();
+    const recordID = Number(req.params.recordID);
+    if (!METRE_PROCESSES.has(code))
+      return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+    const {
+      lengthMetres, shiftID,
+      additionalOperatorIDs = [],
+      hasScrap, scrapTotalKG, scrapReasons = [],
+      notes,
+    } = req.body;
+
+    if (!lengthMetres || Number(lengthMetres) <= 0)
+      return res.status(400).json({ success: false, error: 'lengthMetres is required.' });
+
+    const pool   = await getProductionPool();
+    const uid    = userId(req);
+    const cfg    = PROCESS[code];
+    const sid    = shiftID || currentShiftID();
+    const length = Number(lengthMetres);
+
+    const check = await pool.request()
+      .input('rid', sql.Int, recordID)
+      .query(`SELECT ${cfg.pk}, Material, Status FROM ${cfg.table} WHERE ${cfg.pk}=@rid`);
+
+    if (!check.recordset.length)
+      return res.status(404).json({ success: false, error: 'Record not found.' });
+    if (check.recordset[0].Status !== 1)
+      return res.status(409).json({ success: false, error: 'Record is not open — it may already be complete or cancelled.' });
+
+    const material = check.recordset[0].Material;
+    const batchRef = `${code}${String(recordID).padStart(8, '0')}`;
+
+    await pool.request()
+      .input('rid',   sql.Int,               recordID)
+      .input('len',   sql.Decimal(12, 3),    length)
+      .input('shift', sql.TinyInt,           sid)
+      .input('notes', sql.NVarChar(sql.MAX), notes || null)
+      .query(`UPDATE ${cfg.table} SET LengthMetres=@len, ShiftID=@shift, Status=4, CompletedAt=GETDATE(), Notes=COALESCE(@notes, Notes) WHERE ${cfg.pk}=@rid`);
+
+    for (const addUid of additionalOperatorIDs) {
+      try {
+        await pool.request()
+          .input('pc',  sql.NVarChar(5), code)
+          .input('rid', sql.Int,         recordID)
+          .input('uid', sql.Int,         Number(addUid))
+          .input('by',  sql.Int,         uid)
+          .query(`INSERT INTO prod.BatchOperators (ProcessCode,ProcessRecordID,UserID,IsPrimary,AssignedByUserID) VALUES (@pc,@rid,@uid,0,@by)`);
+      } catch { /* ignore duplicate operator */ }
+    }
+
+    if (hasScrap && scrapTotalKG && scrapReasons.length) {
+      const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+      for (const { reasonID, occurrences } of scrapReasons) {
+        const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+        const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+        await pool.request()
+          .input('pc',  sql.NVarChar(5),   code)
+          .input('rid', sql.Int,           recordID)
+          .input('r',   sql.Int,           Number(reasonID))
+          .input('qty', sql.Decimal(12,3), qty)
+          .input('uid', sql.Int,           uid)
+          .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+      }
+      await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+    }
+
+    await writeEvent(pool, code, recordID, 'STARTED', `${code} completed: ${material} ${length.toFixed(3)} M`, 0, uid);
+
+    try {
+      const sapRaw = await sapPost('/api/production/backflush', {
+        Material:  material,
+        Quantity:  length,
+        Header:    batchRef,
+        Packaging: '',
+        Charge:    '',
+        Customer:  '',
+      });
+
+      const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+      audit('SAP_OK', req.session?.user?.username, `'${batchRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+
+      if (messageNumber === '190') {
+        await logBackflushAlert(pool, code, recordID, batchRef, sapMatDoc, messageNumber, message);
+        await writeEvent(pool, code, recordID, 'NOTE', `SAP 190: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+      }
+
+      await pool.request()
+        .input('pc',   sql.NVarChar(5),   code)
+        .input('rid',  sql.Int,           recordID)
+        .input('type', sql.NVarChar(20),  'BACKFLUSH')
+        .input('qty',  sql.Decimal(12,3), length)
+        .input('doc',  sql.NVarChar(10),  sapMatDoc)
+        .input('uid',  sql.Int,           uid)
+        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+      await writeEvent(pool, code, recordID, 'SAP_POST', `Backflush posted — MatDoc: ${sapMatDoc}${messageNumber==='190'?' (190: no components consumed)':''}`, 0, uid);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          recordID, batchRef, materialDocument: sapMatDoc, status: 'COMPLETE',
+          ...(messageNumber === '190' ? { warning: 'SAP 190: posted but no components consumed — flagged for data review.' } : {}),
+        },
+      });
+
+    } catch (sapErr) {
+      await pool.request()
+        .input('rid', sql.Int, recordID)
+        .query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@rid`);
+
+      const errMsg = sapErr.response?.data?.error || sapErr.message;
+      audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' FAILED - Message = "${errMsg}"`, req);
+
+      await pool.request()
+        .input('pc',   sql.NVarChar(5),      code)
+        .input('rid',  sql.Int,              recordID)
+        .input('type', sql.NVarChar(20),     'BACKFLUSH')
+        .input('qty',  sql.Decimal(12,3),    length)
+        .input('err',  sql.NVarChar(sql.MAX), errMsg)
+        .input('uid',  sql.Int,              uid)
+        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
+
+      await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+      res.status(200).json({
+        success: true,
+        data: { recordID, batchRef, status: 'SAP_FAILED', error: errMsg },
+        warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Generic data view — EX / CO / BR / CL / TW ───────────────────────────────
 
 router.get('/process/:processCode/data', async (req, res) => {

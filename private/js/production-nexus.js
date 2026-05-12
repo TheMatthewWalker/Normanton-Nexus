@@ -1183,14 +1183,6 @@ async function runReportMaterial() {
 // ── METRE PROCESS ENTRY  (EX / CO / BR / CL / TW) ────────────────────────────
 
 async function runMeterProcessEntry(processCode) {
-  const state = {
-    phase: 1,
-    material: '', lengthMetres: null, machineID: null,
-    parentBatches: [], additionalOperators: [],
-    hasScrap: false, scrapTotalKG: 0, scrapReasons: [],
-    notes: '',
-  };
-
   const [wcJson, reasonsJson] = await Promise.all([
     api('/work-centres'),
     api(`/scrap-reasons?pc=${processCode}`),
@@ -1200,130 +1192,298 @@ async function runMeterProcessEntry(processCode) {
     .filter(wc => wc.ProcessCode === processCode && wc.MachineID)
     .sort((a, b) => (a.MachineName||'').localeCompare(b.MachineName||''));
   const reasons = reasonsJson.data || [];
-  const steps   = ['Material & Output', 'Traceability & Operators', 'Scrap', 'Review & Submit'];
 
-  const render = () => {
-    document.getElementById('result-body').innerHTML = `
-      <div style="padding:20px;max-width:600px">
-        <div class="pn-wizard-steps" id="mp-steps"></div>
-        <div id="mp-phase-body"></div>
-        <div style="display:flex;gap:8px;margin-top:16px">
-          ${state.phase > 1 ? `<button class="btn-secondary" id="mp-back">← Back</button>` : ''}
-          <button class="btn-submit" id="mp-next">${state.phase === 4 ? 'Submit & Post to SAP' : 'Next →'}</button>
-          <span id="mp-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
-        </div>
-      </div>`;
+  const body = document.getElementById('result-body');
+  body.innerHTML = `
+    <div style="padding:24px;max-width:580px">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">
+        Choose how you want to record this ${esc(PROCESS_LABELS[processCode]||processCode)} run.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <button id="mp-mode-new" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 16px;text-align:left;cursor:pointer;transition:border-color 0.15s">
+          <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">New Entry</div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">Log the start of a run — material, machine and traceability. Save and close without finishing yet.</div>
+        </button>
+        <button id="mp-mode-complete" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 16px;text-align:left;cursor:pointer;transition:border-color 0.15s">
+          <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Complete Run</div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">Finalise an open entry — add length, operators, scrap and post to SAP.</div>
+        </button>
+      </div>
+    </div>`;
 
-    document.getElementById('mp-steps').innerHTML = steps.map((s, i) => `
-      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;border-radius:20px;
-        background:${i+1===state.phase?'var(--accent)':i+1<state.phase?'rgba(13,148,136,0.15)':'var(--surface2)'};
-        color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
-        border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
+  document.getElementById('mp-mode-new').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
+  document.getElementById('mp-mode-new').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
+  document.getElementById('mp-mode-complete').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
+  document.getElementById('mp-mode-complete').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
 
-    renderMeterProcessPhase(state, machines, reasons, processCode);
-    document.getElementById('mp-next')?.addEventListener('click', () => advanceMeterProcess(state, machines, reasons, processCode, render));
-    document.getElementById('mp-back')?.addEventListener('click', () => { state.phase--; render(); });
-  };
-
-  render();
+  document.getElementById('mp-mode-new').addEventListener('click', () => runNewEntry(processCode, machines));
+  document.getElementById('mp-mode-complete').addEventListener('click', () => runCompleteRun(processCode, machines, reasons));
 }
 
-function renderMeterProcessPhase(state, machines, reasons, processCode) {
-  const body = document.getElementById('mp-phase-body');
+// ── New Entry flow ────────────────────────────────────────────────────────────
 
-  if (state.phase === 1) {
-    body.innerHTML = `
-      <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 1 — Material &amp; Output</div>
-        <div class="tf-field" style="margin-bottom:12px">
-          <label class="tf-label">SAP Material Number</label>
-          <input class="tf-input" id="mp-material" value="${esc(state.material)}" placeholder="e.g. K-NBR-87-1234" autocomplete="off">
+function runNewEntry(processCode, machines) {
+  const state = { material: '', machineID: null, parentBatches: [] };
+
+  const render = () => {
+    const batchTags = state.parentBatches.length
+      ? state.parentBatches.map((pb, i) =>
+          `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
+            ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
+            <button class="ne-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+          </span>`)
+          .join(' ')
+      : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
+
+    document.getElementById('result-body').innerHTML = `
+      <div style="padding:20px;max-width:560px">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">
+          Operator and creation date are recorded automatically.
         </div>
-        <div class="tf-row">
-          <div class="tf-field">
-            <label class="tf-label">Total Length (M)</label>
-            <input class="tf-input" id="mp-length" type="number" step="0.001" min="0.001" placeholder="0.000" value="${state.lengthMetres||''}">
+        <div class="bm-section" style="margin-bottom:14px">
+          <div class="bm-section-title">Starting Info</div>
+          <div class="tf-field" style="margin-bottom:12px">
+            <label class="tf-label">SAP Material Number</label>
+            <input class="tf-input" id="ne-material" value="${esc(state.material)}" placeholder="e.g. K-NBR-87-1234" autocomplete="off">
           </div>
           ${machines.length ? `
-          <div class="tf-field">
+          <div class="tf-field" style="margin-bottom:0">
             <label class="tf-label">Machine</label>
-            <select class="tf-input" id="mp-machine">
+            <select class="tf-input" id="ne-machine">
               <option value="">No machine</option>
               ${machines.map(m=>`<option value="${m.MachineID}" ${state.machineID===m.MachineID?'selected':''}>${esc(m.MachineName||m.MachineCode)}</option>`).join('')}
             </select>
           </div>` : ''}
         </div>
+        <div class="bm-section" style="margin-bottom:14px">
+          <div class="bm-section-title">Previous Batch Numbers for Traceability</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Add each input batch this run consumes.</div>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <select class="tf-input" id="ne-parent-pc" style="width:150px">
+              ${Object.entries(PROCESS_LABELS).filter(([k])=>k!==processCode).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+            </select>
+            <input class="tf-input" id="ne-parent-rid" type="number" placeholder="Record ID" style="width:130px">
+            <button class="btn-secondary" id="ne-add-batch">+ Add</button>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">${batchTags}</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn-secondary" id="ne-back">← Back</button>
+          <button class="btn-submit" id="ne-save">Save &amp; Close</button>
+          <span id="ne-msg" style="font-size:12px;color:var(--error)"></span>
+        </div>
+      </div>`;
+
+    document.getElementById('ne-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+    document.getElementById('ne-add-batch').addEventListener('click', () => {
+      const pc  = document.getElementById('ne-parent-pc')?.value;
+      const rid = Number(document.getElementById('ne-parent-rid')?.value);
+      if (!pc || !rid) return;
+      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
+        state.parentBatches.push({ processCode: pc, recordID: rid });
+      render();
+    });
+    document.querySelectorAll('.ne-remove-batch').forEach(btn => {
+      btn.addEventListener('click', () => { state.parentBatches.splice(Number(btn.dataset.idx), 1); render(); });
+    });
+    document.getElementById('ne-save').addEventListener('click', async () => {
+      const mat = document.getElementById('ne-material')?.value.trim();
+      const msg = document.getElementById('ne-msg');
+      if (!mat) { msg.textContent = 'Material number is required.'; return; }
+
+      state.material  = mat;
+      state.machineID = Number(document.getElementById('ne-machine')?.value) || null;
+
+      const btn = document.getElementById('ne-save');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      msg.textContent = '';
+
+      try {
+        const json = await api(`/process/${processCode}/draft`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches }),
+        });
+        const d = json.data || {};
+        document.getElementById('result-body').innerHTML = `
+          <div style="padding:24px;max-width:480px">
+            <div style="font-size:22px;color:var(--accent);margin-bottom:8px">✓</div>
+            <div style="font-size:15px;font-weight:700;margin-bottom:4px">Entry saved</div>
+            <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+              Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete this run later using <strong>Complete Run</strong>.
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn-secondary" id="ne-another">New Entry</button>
+              <button class="btn-submit" id="ne-done">Done</button>
+            </div>
+          </div>`;
+        document.getElementById('ne-another').addEventListener('click', () => runNewEntry(processCode, machines));
+        document.getElementById('ne-done').addEventListener('click', backToTiles);
+      } catch (err) {
+        msg.textContent = err.message;
+        btn.disabled = false; btn.textContent = 'Save & Close';
+      }
+    });
+  };
+
+  render();
+}
+
+// ── Complete Run flow ─────────────────────────────────────────────────────────
+
+async function runCompleteRun(processCode, machines, reasons) {
+  const body = document.getElementById('result-body');
+  body.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading open entries…</div>';
+
+  let openEntries;
+  try {
+    const json = await api(`/process/${processCode}/open-entries`);
+    openEntries = json.data || [];
+  } catch (err) {
+    body.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+    return;
+  }
+
+  if (!openEntries.length) {
+    body.innerHTML = `
+      <div style="padding:24px;max-width:480px">
+        <div style="font-size:14px;color:var(--text-muted);margin-bottom:16px">
+          No open ${esc(PROCESS_LABELS[processCode]||processCode)} entries found. Create one first using <strong>New Entry</strong>.
+        </div>
+        <button class="btn-secondary" id="cr-back">← Back</button>
+      </div>`;
+    document.getElementById('cr-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+    return;
+  }
+
+  const renderPicker = () => {
+    body.innerHTML = `
+      <div style="padding:20px;max-width:600px">
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Select the open entry you want to complete.</div>
+        <table class="pn-batch-table" style="margin-bottom:14px">
+          <thead><tr><th>Ref</th><th>Material</th><th>Machine</th><th>Created</th><th>By</th><th></th></tr></thead>
+          <tbody>${openEntries.map(e => `
+            <tr>
+              <td class="pn-batch-ref">${esc(e.BatchRef||'')}</td>
+              <td class="pn-batch-mono">${esc(e.Material)}</td>
+              <td>${esc(e.MachineName||e.MachineCode||'—')}</td>
+              <td class="pn-batch-mono">${fmt(e.CreatedAt)}</td>
+              <td>${esc(e.CreatedBy||'—')}</td>
+              <td><button class="btn-submit cr-select-entry" data-idx="${openEntries.indexOf(e)}" style="padding:3px 12px;font-size:12px">Select</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <button class="btn-secondary" id="cr-back">← Back</button>
+      </div>`;
+
+    document.getElementById('cr-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+    document.querySelectorAll('.cr-select-entry').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const entry = openEntries[Number(btn.dataset.idx)];
+        runCompleteWizard(processCode, entry, machines, reasons);
+      });
+    });
+  };
+
+  renderPicker();
+}
+
+function runCompleteWizard(processCode, entry, machines, reasons) {
+  const state = {
+    phase: 1,
+    lengthMetres: null,
+    additionalOperators: [],
+    hasScrap: false, scrapTotalKG: 0, scrapReasons: [],
+    notes: '',
+  };
+
+  const steps = ['Length', 'Operators', 'Scrap', 'Review & Submit'];
+
+  const render = () => {
+    const body = document.getElementById('result-body');
+    body.innerHTML = `
+      <div style="padding:20px;max-width:600px">
+        <div style="font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);margin-bottom:12px">
+          ${esc(entry.BatchRef||'')} &nbsp;·&nbsp; ${esc(entry.Material)} &nbsp;·&nbsp; ${esc(entry.MachineName||entry.MachineCode||'No machine')}
+        </div>
+        <div class="pn-wizard-steps" id="cr-steps"></div>
+        <div id="cr-phase-body"></div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn-secondary" id="cr-back">${state.phase === 1 ? '← Back to list' : '← Back'}</button>
+          <button class="btn-submit" id="cr-next">${state.phase === 4 ? 'Submit & Post to SAP' : 'Next →'}</button>
+          <span id="cr-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
+        </div>
+      </div>`;
+
+    document.getElementById('cr-steps').innerHTML = steps.map((s, i) => `
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;border-radius:20px;
+        background:${i+1===state.phase?'var(--accent)':i+1<state.phase?'rgba(13,148,136,0.15)':'var(--surface2)'};
+        color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
+        border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
+
+    renderCompletePhase(state, reasons, processCode);
+
+    document.getElementById('cr-back').addEventListener('click', () => {
+      if (state.phase === 1) runCompleteRun(processCode, machines, reasons);
+      else { state.phase--; render(); }
+    });
+    document.getElementById('cr-next').addEventListener('click', () => advanceCompleteWizard(state, entry, reasons, processCode, render));
+  };
+
+  render();
+}
+
+function renderCompletePhase(state, reasons, processCode) {
+  const body = document.getElementById('cr-phase-body');
+
+  if (state.phase === 1) {
+    body.innerHTML = `
+      <div class="bm-section" style="margin-bottom:0">
+        <div class="bm-section-title">Step 1 — Length</div>
+        <div class="tf-field">
+          <label class="tf-label">Total Length (M)</label>
+          <input class="tf-input" id="cr-length" type="number" step="0.001" min="0.001" placeholder="0.000" value="${state.lengthMetres||''}" style="width:180px">
+        </div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:8px">Shift is detected automatically from the current time.</div>
       </div>`;
 
   } else if (state.phase === 2) {
-    const batchTags = state.parentBatches.length
-      ? state.parentBatches.map((pb, i) =>
-          `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
-            ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
-            <button class="mp-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-           </span>`).join(' ')
-      : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
-
     const opTags = state.additionalOperators.map(u =>
       `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
-        ${esc(u.username)} <button class="mp-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+        ${esc(u.username)} <button class="cr-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
        </span>`).join(' ');
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 2 — Traceability &amp; Operators</div>
-        <div style="margin-bottom:12px">
-          <label class="tf-label">Previous Stage Batches</label>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Add each input batch — this run can consume multiple upstream records.</div>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
-            <select class="tf-input" id="mp-parent-pc" style="width:150px">
-              ${Object.entries(PROCESS_LABELS).filter(([k])=>k!==processCode).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-            </select>
-            <input class="tf-input" id="mp-parent-rid" type="number" placeholder="Record ID" style="width:130px">
-            <button class="btn-secondary" id="mp-add-batch">+ Add</button>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">${batchTags}</div>
+        <div class="bm-section-title">Step 2 — Additional Operators</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">You are already recorded as primary operator. Add anyone else who worked this run.</div>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <input class="tf-input" id="cr-op-q" placeholder="Search username…" style="flex:1">
+          <button class="btn-secondary" id="cr-op-search">Search</button>
         </div>
-        <div>
-          <label class="tf-label">Additional Operators</label>
-          <div style="display:flex;gap:6px;margin-top:4px">
-            <input class="tf-input" id="mp-op-q" placeholder="Search username…" style="flex:1">
-            <button class="btn-secondary" id="mp-op-search">Search</button>
-          </div>
-          <div id="mp-op-results" style="margin-top:6px"></div>
-          <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${opTags}</div>
-        </div>
+        <div id="cr-op-results" style="margin-bottom:8px"></div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">${opTags || '<span style="font-size:12px;color:var(--text-muted)">None added</span>'}</div>
       </div>`;
 
-    document.getElementById('mp-add-batch')?.addEventListener('click', () => {
-      const pc  = document.getElementById('mp-parent-pc')?.value;
-      const rid = Number(document.getElementById('mp-parent-rid')?.value);
-      if (!pc || !rid) return;
-      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
-        state.parentBatches.push({ processCode: pc, recordID: rid });
-      renderMeterProcessPhase(state, machines, reasons, processCode);
+    document.querySelectorAll('.cr-remove-op').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
+        renderCompletePhase(state, reasons, processCode);
+      });
     });
-    document.querySelectorAll('.mp-remove-batch').forEach(btn => {
-      btn.addEventListener('click', () => { state.parentBatches.splice(Number(btn.dataset.idx), 1); renderMeterProcessPhase(state, machines, reasons, processCode); });
-    });
-    document.querySelectorAll('.mp-remove-op').forEach(btn => {
-      btn.addEventListener('click', () => { state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid)); renderMeterProcessPhase(state, machines, reasons, processCode); });
-    });
-    document.getElementById('mp-op-search')?.addEventListener('click', async () => {
-      const q  = document.getElementById('mp-op-q').value.trim();
-      const el = document.getElementById('mp-op-results');
+    document.getElementById('cr-op-search').addEventListener('click', async () => {
+      const q  = document.getElementById('cr-op-q').value.trim();
+      const el = document.getElementById('cr-op-results');
       const r  = await api(`/users?q=${encodeURIComponent(q)}`);
       el.innerHTML = (r.data||[]).map(u => `
-        <div style="display:flex;justify-content:space-between;padding:3px 0">
+        <div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border)">
           <span style="font-size:13px">${esc(u.DisplayName||u.Username)}</span>
-          <button class="btn-secondary mp-add-op" data-uid="${u.UserID}" data-name="${esc(u.DisplayName||u.Username)}" style="padding:2px 8px;font-size:11px">Add</button>
+          <button class="btn-secondary cr-add-op" data-uid="${u.UserID}" data-name="${esc(u.DisplayName||u.Username)}" style="padding:2px 8px;font-size:11px">Add</button>
         </div>`).join('');
-      el.querySelectorAll('.mp-add-op').forEach(btn => {
+      el.querySelectorAll('.cr-add-op').forEach(btn => {
         btn.addEventListener('click', () => {
           if (!state.additionalOperators.find(u => u.uid === Number(btn.dataset.uid)))
             state.additionalOperators.push({ uid: Number(btn.dataset.uid), username: btn.dataset.name });
-          renderMeterProcessPhase(state, machines, reasons, processCode);
+          renderCompletePhase(state, reasons, processCode);
         });
       });
     });
@@ -1331,108 +1491,99 @@ function renderMeterProcessPhase(state, machines, reasons, processCode) {
   } else if (state.phase === 3) {
     const reasonRows = state.scrapReasons.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
-        <select class="tf-input mp-scrap-reason" data-idx="${i}" style="flex:1">
+        <select class="tf-input cr-scrap-reason" data-idx="${i}" style="flex:1">
           <option value="">Select reason…</option>
           ${reasons.map(sr=>`<option value="${sr.ReasonID}" ${Number(r.reasonID)===sr.ReasonID?'selected':''}>${esc(sr.ReasonCode)} — ${esc(sr.ReasonDescription)}</option>`).join('')}
         </select>
-        <input class="tf-input mp-scrap-occ" type="number" min="1" step="1" value="${r.occurrences||1}" data-idx="${i}" style="width:90px" placeholder="Count">
-        <button class="mp-remove-reason btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>
+        <input class="tf-input cr-scrap-occ" type="number" min="1" step="1" value="${r.occurrences||1}" data-idx="${i}" style="width:90px" placeholder="Count">
+        <button class="cr-remove-reason btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>
       </div>`).join('');
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 3 — Scrap</div>
+        <div class="bm-section-title">Step 3 — Scrap</div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
-          <input type="checkbox" id="mp-has-scrap" ${state.hasScrap?'checked':''}> Scrap to record for this run
+          <input type="checkbox" id="cr-has-scrap" ${state.hasScrap?'checked':''}> Scrap to record for this run
         </label>
-        <div id="mp-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
+        <div id="cr-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
           <div class="tf-field" style="margin-bottom:8px">
             <label class="tf-label">Total Scrap Weight (KG)</label>
-            <input class="tf-input" id="mp-scrap-kg" type="number" min="0" step="0.001" value="${state.scrapTotalKG||''}" style="width:160px">
+            <input class="tf-input" id="cr-scrap-kg" type="number" min="0" step="0.001" value="${state.scrapTotalKG||''}" style="width:160px">
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Weight is split proportionally by occurrence count.</div>
-          <div id="mp-reason-rows">${reasonRows}</div>
-          <button class="btn-secondary" id="mp-add-reason" style="margin-top:8px">+ Add Reason</button>
+          <div id="cr-reason-rows">${reasonRows}</div>
+          <button class="btn-secondary" id="cr-add-reason" style="margin-top:8px">+ Add Reason</button>
         </div>
       </div>`;
 
-    document.getElementById('mp-has-scrap')?.addEventListener('change', e => {
+    document.getElementById('cr-has-scrap').addEventListener('change', e => {
       state.hasScrap = e.target.checked;
-      document.getElementById('mp-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
+      document.getElementById('cr-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
     });
-    document.getElementById('mp-add-reason')?.addEventListener('click', () => {
+    document.getElementById('cr-add-reason')?.addEventListener('click', () => {
       state.scrapReasons.push({ reasonID: '', occurrences: 1 });
-      renderMeterProcessPhase(state, machines, reasons, processCode);
+      renderCompletePhase(state, reasons, processCode);
     });
-    document.querySelectorAll('.mp-remove-reason').forEach(btn => {
-      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderMeterProcessPhase(state, machines, reasons, processCode); });
+    document.querySelectorAll('.cr-remove-reason').forEach(btn => {
+      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderCompletePhase(state, reasons, processCode); });
     });
-    document.querySelectorAll('.mp-scrap-reason').forEach(sel => {
+    document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
       sel.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].reasonID = Number(e.target.value); });
     });
-    document.querySelectorAll('.mp-scrap-occ').forEach(inp => {
+    document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
       inp.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].occurrences = Number(e.target.value); });
     });
 
   } else if (state.phase === 4) {
-    const machine = machines.find(m => m.MachineID === state.machineID);
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 4 — Review &amp; Submit</div>
+        <div class="bm-section-title">Step 4 — Review &amp; Submit</div>
         <div class="tf-field" style="margin-bottom:14px">
           <label class="tf-label">Comments (optional)</label>
-          <input class="tf-input" id="mp-notes" value="${esc(state.notes)}" placeholder="Any notes for this run…">
+          <input class="tf-input" id="cr-notes" value="${esc(state.notes)}" placeholder="Any notes for this run…">
         </div>
-        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px">
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;margin-bottom:10px">
           <div style="font-weight:700;margin-bottom:8px">Summary</div>
-          <div class="pn-batch-mono">Material: ${esc(state.material)}</div>
+          <div class="pn-batch-mono">Entry: ${esc(entry.BatchRef||'')} — ${esc(entry.Material)}</div>
           <div class="pn-batch-mono">Length: ${state.lengthMetres ? Number(state.lengthMetres).toFixed(3)+' M' : '—'}</div>
-          <div class="pn-batch-mono">Machine: ${machine ? esc(machine.MachineName||machine.MachineCode) : 'None'}</div>
-          <div class="pn-batch-mono">Prev batches: ${state.parentBatches.length ? state.parentBatches.map(pb=>`${pb.processCode}${String(pb.recordID).padStart(8,'0')}`).join(', ') : 'None'}</div>
+          <div class="pn-batch-mono">Extra operators: ${state.additionalOperators.length ? state.additionalOperators.map(u=>esc(u.username)).join(', ') : 'None'}</div>
           <div class="pn-batch-mono">Scrap: ${state.hasScrap ? state.scrapTotalKG+' KG across '+state.scrapReasons.length+' reason(s)' : 'None'}</div>
         </div>
-        <div id="mp-submit-result" style="margin-top:10px;font-size:13px"></div>
+        <div id="cr-submit-result" style="font-size:13px"></div>
       </div>`;
   }
 }
 
-async function advanceMeterProcess(state, machines, reasons, processCode, render) {
-  const msg = document.getElementById('mp-msg');
+async function advanceCompleteWizard(state, entry, reasons, processCode, render) {
+  const msg = document.getElementById('cr-msg');
   if (msg) msg.textContent = '';
 
   if (state.phase === 1) {
-    const mat = document.getElementById('mp-material')?.value.trim();
-    const len = document.getElementById('mp-length')?.value;
-    if (!mat) { if (msg) msg.textContent = 'Material number is required.'; return; }
+    const len = document.getElementById('cr-length')?.value;
     if (!len || Number(len) <= 0) { if (msg) msg.textContent = 'Total length is required.'; return; }
-    state.material     = mat;
     state.lengthMetres = Number(len);
-    state.machineID    = Number(document.getElementById('mp-machine')?.value) || null;
 
   } else if (state.phase === 2) {
-    // parentBatches + additionalOperators maintained via add/remove buttons
+    // operators maintained via add/remove buttons
 
   } else if (state.phase === 3) {
-    state.hasScrap = document.getElementById('mp-has-scrap')?.checked || false;
+    state.hasScrap = document.getElementById('cr-has-scrap')?.checked || false;
     if (state.hasScrap) {
-      state.scrapTotalKG = Number(document.getElementById('mp-scrap-kg')?.value) || 0;
+      state.scrapTotalKG = Number(document.getElementById('cr-scrap-kg')?.value) || 0;
       if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Enter total scrap weight.'; return; }
     }
 
   } else if (state.phase === 4) {
-    state.notes = document.getElementById('mp-notes')?.value.trim() || '';
-    const submitBtn = document.getElementById('mp-next');
-    const resultEl  = document.getElementById('mp-submit-result');
+    state.notes = document.getElementById('cr-notes')?.value.trim() || '';
+    const submitBtn = document.getElementById('cr-next');
+    const resultEl  = document.getElementById('cr-submit-result');
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
     try {
-      const json = await api(`/process/${processCode}/entry`, {
+      const json = await api(`/process/${processCode}/complete/${entry.RecordID}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          material:              state.material,
           lengthMetres:          state.lengthMetres,
-          machineID:             state.machineID,
-          parentBatches:         state.parentBatches,
           additionalOperatorIDs: state.additionalOperators.map(u => u.uid),
           hasScrap:              state.hasScrap,
           scrapTotalKG:          state.hasScrap ? state.scrapTotalKG : 0,
