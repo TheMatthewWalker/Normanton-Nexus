@@ -839,9 +839,10 @@ function buildShipmentDraft() {
   }, {
     destinationName: first.destinationName || '', destinationStreet: first.destinationStreet || '',
     destinationCity: first.destinationCity || '', destinationPostCode: first.destinationPostCode || '',
-    destinationCountry: first.destinationCountry || '', incoTerms: first.defaultIncoterms || '',
+    destinationCountry: first.destinationCountry || '', incoTerms: first.incoterms || first.defaultIncoterms || '',
     plannedCollection: new Date().toISOString().slice(0, 10),
-    deliveryService: first.deliveryService || '',  // carried through to pre-select forwarder mode
+    deliveryService: first.deliveryService || '',
+    defaultForwarder: first.defaultForwarder || '',
     palletCount: 0, grossWeight: 0, shipmentVolume: 0,
   });
 }
@@ -861,17 +862,57 @@ function onShipmentForwarderModeChange() {
   const uniqueForwarders = matches.filter((item, index, arr) => arr.findIndex(other => String(other.forwarderName || '').trim() === String(item.forwarderName || '').trim()) === index);
   nameSelect.innerHTML = `<option value="">Select forwarder</option>${uniqueForwarders.map(item => `<option value="${esc(String(item.forwarderID))}">${esc(String(item.forwarderName || '').trim())}</option>`).join('')}`;
   nameSelect.disabled = !selectedMode;
+  if (uniqueForwarders.length === 1) nameSelect.value = String(uniqueForwarders[0].forwarderID);
 }
 
 
 async function openShipmentModal() {
   if (!await checkSession()) return;
   const rows = getSelectedRows(); if (!rows.length) return;
+
+  // Enforce incoterms consistency before opening — delivery-level overrides destination default
+  const effectiveTerms = rows.map(r => String(r.incoterms || r.defaultIncoterms || '').trim().toUpperCase());
+  const uniqueTerms    = [...new Set(effectiveTerms.filter(Boolean))];
+  if (uniqueTerms.length > 1) {
+    const detail = rows.map(r =>
+      `#${r.deliveryID} → ${String(r.incoterms || r.defaultIncoterms || '?').toUpperCase()}`
+    ).join(', ');
+    showSelectionMessage(`Cannot create shipment — deliveries have conflicting incoterms (${uniqueTerms.join(' vs ')}): ${detail}`);
+    return;
+  }
+
   const draft = buildShipmentDraft();
   const forwarders = await loadAllForwarders();
   const modeOptions = [...new Set(forwarders.map(item => String(item.forwarderMode || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">Create Shipment</div><div class="ps-modal-sub">${esc(rows[0].destinationName || '')} - ${rows.length} deliveries</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><form id="lg-shipment-form" class="transfer-form"><div class="tf-section-label">Shipment Header</div><div class="tf-row"><div class="tf-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="lg-planned" value="${esc(draft.plannedCollection)}"></div><div class="tf-field"><label class="tf-label">Forwarder Mode</label><select class="tf-input" id="lg-forwarder-mode"><option value="">Select mode</option>${modeOptions.map(mode => `<option value="${esc(mode)}">${esc(mode)}</option>`).join('')}</select></div><div class="tf-field"><label class="tf-label">Forwarder Name</label><select class="tf-input" id="lg-forwarder-name" disabled><option value="">Select forwarder</option></select></div><div class="tf-field"><label class="tf-label">Incoterms</label><input class="tf-input" type="text" id="lg-incoterms" value="${esc(draft.incoTerms)}"></div></div><div class="tf-row"><div class="tf-field tf-field--wide"><label class="tf-label">Destination Name</label><input class="tf-input" type="text" id="lg-dest-name" value="${esc(draft.destinationName)}"></div><div class="tf-field tf-field--wide"><label class="tf-label">Destination Street</label><input class="tf-input" type="text" id="lg-dest-street" value="${esc(draft.destinationStreet)}"></div></div><div class="tf-row"><div class="tf-field"><label class="tf-label">City</label><input class="tf-input" type="text" id="lg-dest-city" value="${esc(draft.destinationCity)}"></div><div class="tf-field"><label class="tf-label">Post Code</label><input class="tf-input" type="text" id="lg-dest-postcode" value="${esc(draft.destinationPostCode)}"></div><div class="tf-field"><label class="tf-label">Country</label><input class="tf-input" type="text" id="lg-dest-country" value="${esc(draft.destinationCountry)}"></div></div><div class="tf-row"><label class="lg-flag"><input type="checkbox" id="lg-customs-required"> Customs Required</label><label class="lg-flag"><input type="checkbox" id="lg-customs-complete"> Customs Complete</label></div><div class="tf-section-label">Calculated Totals <span class="tf-locked">Read only</span></div><div class="tf-row"><div class="tf-field"><label class="tf-label">Pallet Count</label><input class="tf-input" readonly value="${esc(draft.palletCount.toFixed(3))}"></div><div class="tf-field"><label class="tf-label">Gross Weight</label><input class="tf-input" readonly value="${esc(draft.grossWeight.toFixed(3))}"></div><div class="tf-field"><label class="tf-label">Volume</label><input class="tf-input" readonly value="${esc(draft.shipmentVolume.toFixed(3))}"></div></div><div id="lg-submit-result"></div></form></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="lg-confirm-btn">Confirm Shipment</button></div></div>`);
-  document.getElementById('lg-forwarder-mode').addEventListener('change', onShipmentForwarderModeChange);
+  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">Create Shipment</div><div class="ps-modal-sub">${esc(rows[0].destinationName || '')} - ${rows.length} deliveries</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><form id="lg-shipment-form" class="transfer-form"><div class="tf-section-label">Shipment Header</div><div class="tf-row"><div class="tf-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="lg-planned" value="${esc(draft.plannedCollection)}"></div><div class="tf-field"><label class="tf-label">Forwarder Mode</label><select class="tf-input" id="lg-forwarder-mode"><option value="">Select mode</option>${modeOptions.map(mode => `<option value="${esc(mode)}">${esc(mode)}</option>`).join('')}</select></div><div class="tf-field"><label class="tf-label">Forwarder Name</label><select class="tf-input" id="lg-forwarder-name" disabled><option value="">Select forwarder</option></select></div><div class="tf-field"><label class="tf-label">Incoterms</label><input class="tf-input" type="text" id="lg-incoterms" value="${esc(draft.incoTerms)}"></div></div><div id="lg-forwarder-warn"></div><div class="tf-row"><div class="tf-field tf-field--wide"><label class="tf-label">Destination Name</label><input class="tf-input" type="text" id="lg-dest-name" value="${esc(draft.destinationName)}"></div><div class="tf-field tf-field--wide"><label class="tf-label">Destination Street</label><input class="tf-input" type="text" id="lg-dest-street" value="${esc(draft.destinationStreet)}"></div></div><div class="tf-row"><div class="tf-field"><label class="tf-label">City</label><input class="tf-input" type="text" id="lg-dest-city" value="${esc(draft.destinationCity)}"></div><div class="tf-field"><label class="tf-label">Post Code</label><input class="tf-input" type="text" id="lg-dest-postcode" value="${esc(draft.destinationPostCode)}"></div><div class="tf-field"><label class="tf-label">Country</label><input class="tf-input" type="text" id="lg-dest-country" value="${esc(draft.destinationCountry)}"></div></div><div class="tf-row"><label class="lg-flag"><input type="checkbox" id="lg-customs-required"> Customs Required</label><label class="lg-flag"><input type="checkbox" id="lg-customs-complete"> Customs Complete</label></div><div class="tf-section-label">Calculated Totals <span class="tf-locked">Read only</span></div><div class="tf-row"><div class="tf-field"><label class="tf-label">Pallet Count</label><input class="tf-input" readonly value="${esc(draft.palletCount.toFixed(3))}"></div><div class="tf-field"><label class="tf-label">Gross Weight</label><input class="tf-input" readonly value="${esc(draft.grossWeight.toFixed(3))}"></div><div class="tf-field"><label class="tf-label">Volume</label><input class="tf-input" readonly value="${esc(draft.shipmentVolume.toFixed(3))}"></div></div><div id="lg-submit-result"></div></form></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="lg-confirm-btn">Confirm Shipment</button></div></div>`);
+  function applyDefaultForwarder() {
+    const defaultForwarder = draft.defaultForwarder;
+    if (!defaultForwarder) return;
+    const modeEl = document.getElementById('lg-forwarder-mode');
+    const nameEl = document.getElementById('lg-forwarder-name');
+    const warnEl = document.getElementById('lg-forwarder-warn');
+    if (!modeEl || !nameEl || !warnEl) return;
+    if (!modeEl.value) { warnEl.innerHTML = ''; return; }
+
+    const opt = [...nameEl.options].find(o =>
+      o.text.trim().toLowerCase() === String(defaultForwarder).trim().toLowerCase() ||
+      o.value === String(defaultForwarder).trim()
+    );
+    if (opt) {
+      nameEl.value = opt.value;
+      warnEl.innerHTML = '';
+    } else {
+      warnEl.innerHTML = `<div style="background:rgba(217,119,6,0.1);border:1px solid rgba(217,119,6,0.35);
+        border-radius:6px;padding:8px 12px;font-size:12px;color:#D97706;margin:6px 0">
+        Default haulier <strong>${esc(defaultForwarder)}</strong> not available for selected service.
+      </div>`;
+    }
+  }
+
+  document.getElementById('lg-forwarder-mode').addEventListener('change', () => {
+    onShipmentForwarderModeChange();
+    applyDefaultForwarder();
+  });
   document.getElementById('lg-confirm-btn').addEventListener('click', submitShipmentCreate);
 
   // Pre-select forwarder mode from deliveryService — exact match then case-insensitive
@@ -882,7 +923,8 @@ async function openShipmentModal() {
                 || modeOptions.find(m => m.toLowerCase() === svc.toLowerCase());
     if (match) {
       modeEl.value = match;
-      onShipmentForwarderModeChange();  // populate forwarder name dropdown immediately
+      onShipmentForwarderModeChange();
+      applyDefaultForwarder();
     }
   }
 }
@@ -1405,15 +1447,22 @@ function renderShipmentDeliveriesPanel(shipmentId, shipment, deliveries, availab
   } else if (!available.length) {
     availHtml = `<div class="sd-picker-empty">No available deliveries for this customer.</div>`;
   } else {
-    const availRows = available.map(d => `<tr>
-      <td class="lg-check-cell"><input type="checkbox" class="sd-avail-check" data-id="${esc(String(d.deliveryID))}"></td>
-      <td>${esc(String(d.deliveryID))}</td>
-      <td>${esc(d.destinationName || d.deliveryService || '—')}</td>
-      <td>${Number(d.grossWeight || 0).toFixed(3)}</td>
-      <td>${Number(d.palletCount || 0).toFixed(0)}</td>
-    </tr>`).join('');
+    const shipmentTerms = String(shipment.incoTerms || '').trim().toUpperCase();
+    const availRows = available.map(d => {
+      const effectiveTerm = String(d.incoterms || d.defaultIncoterms || '').trim().toUpperCase();
+      const conflicts     = shipmentTerms && effectiveTerm && effectiveTerm !== shipmentTerms;
+      const rowStyle      = conflicts ? ' style="opacity:0.45;pointer-events:none" title="Incoterms mismatch: delivery is ' + effectiveTerm + ', shipment is ' + shipmentTerms + '"' : '';
+      return `<tr${rowStyle}>
+        <td class="lg-check-cell"><input type="checkbox" class="sd-avail-check" data-id="${esc(String(d.deliveryID))}"${conflicts ? ' disabled' : ''}></td>
+        <td>${esc(String(d.deliveryID))}</td>
+        <td>${esc(d.destinationName || d.deliveryService || '—')}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(effectiveTerm || '—')}</td>
+        <td>${Number(d.grossWeight || 0).toFixed(3)}</td>
+        <td>${Number(d.palletCount || 0).toFixed(0)}</td>
+      </tr>`;
+    }).join('');
     availHtml = `<table class="sd-delivery-table">
-      <thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Gross kg</th><th>Pallets</th></tr></thead>
+      <thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Incoterms</th><th>Gross kg</th><th>Pallets</th></tr></thead>
       <tbody>${availRows}</tbody>
     </table>
     <div class="sd-picker-actions"><button class="btn-submit" id="sd-add-btn">Add Selected</button></div>
@@ -1751,7 +1800,7 @@ async function runUpdatePackagingData() {
 
 // ── Admin: Update Destinations ────────────────────────────────────────────────
 async function runUpdateDestinations() {
-  showResultPanel('Update Destinations', 'Click any row to edit · Changes update the SQL table immediately');
+  showResultPanel('Update Destinations', 'Click a row to edit · Tick rows for bulk actions');
   try {
     const rows = await fetch('/api/destinations').then(r => r.json());
     if (!Array.isArray(rows) || !rows.length) {
@@ -1764,48 +1813,195 @@ async function runUpdateDestinations() {
     document.getElementById('result-row-badge').textContent = `${rows.length} destinations`;
     document.getElementById('result-row-badge').classList.remove('hidden');
 
-    const thead = `<tr><th>ID</th><th>Name</th><th>City</th><th>Country</th><th>Zone</th><th>Def. Service</th><th>Incoterms</th></tr>`;
-    const tbody = rows.map((r, i) => `<tr class="admin-row" data-idx="${i}" style="cursor:pointer">
+    const thead = `<tr>
+      <th style="width:36px;text-align:center"><input type="checkbox" id="dest-select-all" title="Select all"></th>
+      <th>ID</th><th>Name</th><th>City</th><th>Country</th><th>Zone</th><th>Def. Service</th><th>Def. Forwarder</th>
+    </tr>`;
+    const tbody = rows.map((r, i) => `<tr class="admin-row" data-idx="${i}" data-id="${esc(String(r.destinationID))}" style="cursor:pointer">
+      <td class="dest-check-cell" style="text-align:center" onclick="event.stopPropagation()">
+        <input type="checkbox" class="dest-row-check" data-id="${esc(String(r.destinationID))}">
+      </td>
       <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted)">${esc(String(r.destinationID))}</td>
       <td><strong>${esc(r.destinationName      ?? '')}</strong></td>
       <td>${esc(r.destinationCity              ?? '')}</td>
       <td>${esc(r.destinationCountry           ?? '')}</td>
-      <td>${esc(r.destinationZone              ?? '')}</td>
-      <td>${esc(r.defaultDeliveryService       ?? '')}</td>
-      <td>${esc(r.defaultIncoterms             ?? '')}</td>
+      <td class="dest-cell-zone">${esc(r.destinationZone        ?? '')}</td>
+      <td class="dest-cell-service">${esc(r.defaultDeliveryService ?? '')}</td>
+      <td class="dest-cell-forwarder">${esc(r.defaultForwarder   ?? '')}</td>
     </tr>`).join('');
 
-    document.getElementById('result-body').innerHTML =
-      `<div style="overflow-x:auto"><table class="pn-batch-table admin-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
+    document.getElementById('result-body').innerHTML = `
+      <div id="dest-bulk-bar" class="hidden" style="
+        display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+        background:var(--surface2);border:1px solid var(--border);
+        border-radius:8px;padding:10px 14px;margin-bottom:12px">
+        <span id="dest-bulk-count" style="font-family:'JetBrains Mono',monospace;font-size:11px;
+          font-weight:700;color:var(--accent);white-space:nowrap">0 selected</span>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1">
+          <div style="display:flex;gap:5px;align-items:center">
+            <input id="dest-bulk-forwarder" class="tf-input" placeholder="Default Forwarder" style="width:160px">
+            <button class="btn-secondary" data-bulk-field="defaultForwarder" data-bulk-input="dest-bulk-forwarder">Apply</button>
+          </div>
+          <div style="display:flex;gap:5px;align-items:center">
+            <input id="dest-bulk-service" class="tf-input" placeholder="Default Service" style="width:140px">
+            <button class="btn-secondary" data-bulk-field="defaultDeliveryService" data-bulk-input="dest-bulk-service">Apply</button>
+          </div>
+          <div style="display:flex;gap:5px;align-items:center">
+            <input id="dest-bulk-zone" class="tf-input" placeholder="Zone" style="width:100px">
+            <button class="btn-secondary" data-bulk-field="destinationZone" data-bulk-input="dest-bulk-zone">Apply</button>
+          </div>
+          <button id="dest-bulk-delete" class="btn-submit" style="margin-left:auto;background:var(--error,#DC2626)">
+            Delete Selected
+          </button>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>
+      </div>`;
 
+    // ── Selection state ───────────────────────────────────────────────────────
+    const selectedIds = new Set();
+
+    function updateBulkBar() {
+      const bar   = document.getElementById('dest-bulk-bar');
+      const count = document.getElementById('dest-bulk-count');
+      if (!bar || !count) return;
+      if (selectedIds.size) {
+        bar.classList.remove('hidden');
+        count.textContent = `${selectedIds.size} selected`;
+      } else {
+        bar.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('dest-select-all').addEventListener('change', function () {
+      document.querySelectorAll('.dest-row-check').forEach(cb => {
+        cb.checked = this.checked;
+        const id = Number(cb.dataset.id);
+        if (this.checked) selectedIds.add(id); else selectedIds.delete(id);
+      });
+      updateBulkBar();
+    });
+
+    document.querySelectorAll('.dest-row-check').forEach(cb => {
+      cb.addEventListener('change', function () {
+        const id = Number(this.dataset.id);
+        if (this.checked) selectedIds.add(id); else selectedIds.delete(id);
+        const all = document.querySelectorAll('.dest-row-check');
+        document.getElementById('dest-select-all').checked = [...all].every(c => c.checked);
+        updateBulkBar();
+      });
+    });
+
+    // ── Bulk apply ────────────────────────────────────────────────────────────
+    document.querySelectorAll('[data-bulk-field]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!selectedIds.size) return;
+        const field    = btn.dataset.bulkField;
+        const inputId  = btn.dataset.bulkInput;
+        const value    = document.getElementById(inputId)?.value?.trim() ?? '';
+        const original = btn.textContent;
+        btn.disabled = true; btn.textContent = 'Applying…';
+
+        try {
+          const res  = await fetch('/api/destinations/bulk', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [...selectedIds], field, value }),
+          });
+          const json = await res.json();
+          if (!json.success) throw new Error(json.error || 'Update failed');
+
+          // Patch visible cells and local data
+          const cellClass = { defaultForwarder: 'dest-cell-forwarder', defaultDeliveryService: 'dest-cell-service', destinationZone: 'dest-cell-zone' }[field];
+          const fieldKey  = { defaultForwarder: 'defaultForwarder', defaultDeliveryService: 'defaultDeliveryService', destinationZone: 'destinationZone' }[field];
+          document.querySelectorAll(`.admin-row`).forEach(tr => {
+            if (!selectedIds.has(Number(tr.dataset.id))) return;
+            const cell = tr.querySelector(`.${cellClass}`);
+            if (cell) cell.textContent = value;
+            const idx = parseInt(tr.dataset.idx, 10);
+            if (rows[idx]) rows[idx][fieldKey] = value;
+          });
+          btn.textContent = '✓';
+          setTimeout(() => { btn.disabled = false; btn.textContent = original; }, 1200);
+        } catch (err) {
+          btn.disabled = false; btn.textContent = original;
+          alert(`✕ ${err.message}`);
+        }
+      });
+    });
+
+    // ── Bulk delete ───────────────────────────────────────────────────────────
+    document.getElementById('dest-bulk-delete').addEventListener('click', async () => {
+      if (!selectedIds.size) return;
+      if (!confirm(`Permanently delete ${selectedIds.size} destination${selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.`)) return;
+      const btn = document.getElementById('dest-bulk-delete');
+      btn.disabled = true; btn.textContent = 'Deleting…';
+      try {
+        const res  = await fetch('/api/destinations/bulk', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: [...selectedIds] }),
+        });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error || 'Delete failed');
+        runUpdateDestinations();
+      } catch (err) {
+        btn.disabled = false; btn.textContent = 'Delete Selected';
+        alert(`✕ ${err.message}`);
+      }
+    });
+
+    // ── Row click → edit modal ────────────────────────────────────────────────
     document.querySelectorAll('.admin-row').forEach(tr => {
-      tr.addEventListener('click', () => {
+      tr.addEventListener('click', async e => {
+        if (e.target.closest('.dest-check-cell')) return;
         const r = rows[parseInt(tr.dataset.idx, 10)];
+
+        let currentEmails = '';
+        try {
+          const emailRes  = await fetch(`/api/destinations/${encodeURIComponent(r.destinationID)}/emails`);
+          const emailJson = await emailRes.json();
+          currentEmails   = (emailJson.addresses || []).join('\n');
+        } catch (_) {}
+
         openAdminEditModal(
           `Edit Destination — ${r.destinationID}`,
           r.destinationName || '',
           [
-            { key: 'destinationName',        label: 'Name',            wide: true },
-            { key: 'destinationStreet',      label: 'Street',          wide: true },
+            { key: 'destinationName',        label: 'Name',                          wide: true },
+            { key: 'destinationStreet',      label: 'Street',                        wide: true },
             { key: 'destinationCity',        label: 'City' },
             { key: 'destinationPostCode',    label: 'Post Code' },
             { key: 'destinationCountry',     label: 'Country' },
             { key: 'destinationZone',        label: 'Zone' },
             { key: 'defaultDeliveryService', label: 'Default Service' },
             { key: 'defaultIncoterms',       label: 'Incoterms' },
-            { key: 'destinationEmail',       label: 'Email',           wide: true },
-            { key: 'destinationComment',     label: 'Comment',         wide: true, multiline: true },
+            { key: 'defaultForwarder',       label: 'Default Forwarder' },
+            { key: 'emails',                 label: 'Email Addresses (one per line)', wide: true, multiline: true },
+            { key: 'destinationComment',     label: 'Comment',                       wide: true, multiline: true },
           ],
-          r,
+          { ...r, emails: currentEmails },
           async values => {
+            const { emails, ...destValues } = values;
             const res2 = await fetch(`/api/destinations/${encodeURIComponent(r.destinationID)}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(values),
+              body: JSON.stringify(destValues),
             });
             const json = await res2.json();
             if (!json.success) throw new Error(json.error || 'Save failed');
-            Object.assign(r, values);
+
+            const addresses = emails.split('\n').map(a => a.trim()).filter(Boolean);
+            const emailRes2  = await fetch(`/api/destinations/${encodeURIComponent(r.destinationID)}/emails`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ addresses }),
+            });
+            const emailJson2 = await emailRes2.json();
+            if (!emailJson2.success) throw new Error(emailJson2.error || 'Email save failed');
+
+            Object.assign(r, destValues);
           }
         );
       });

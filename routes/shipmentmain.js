@@ -1746,9 +1746,9 @@ router.post('/create-from-deliveries', async (req, res) => {
     const inClause = createInClause(request, deliveryIDs, 'deliveryId');
 
     const deliveriesResult = await request.query(`
-      SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, 
-        CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, 
-        CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume, 
+      SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, dm.incoterms,
+        CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
+        CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
         d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, d.defaultIncoterms,
         STUFF((
           SELECT '; ' + e.address
@@ -1769,10 +1769,24 @@ router.post('/create-from-deliveries', async (req, res) => {
       throw new Error('One or more deliveries are no longer available for shipment creation. Please refresh and try again.');
 
     const customerIds = [...new Set(deliveries.map(row => String(row.customerID)))];
-    if (customerIds.length !== 1) 
+    if (customerIds.length !== 1)
       throw new Error('Selected deliveries must all belong to the same customer.');
 
-    const first = deliveries[0]; 
+    // Enforce incoterms consistency — delivery-level incoterms take priority over destination default
+    const effectiveIncoterms = deliveries.map(row =>
+      String(row.incoterms || row.defaultIncoterms || '').trim().toUpperCase()
+    );
+    const uniqueIncoterms = [...new Set(effectiveIncoterms.filter(Boolean))];
+    if (uniqueIncoterms.length > 1) {
+      const detail = deliveries.map(row =>
+        `#${row.deliveryID} → ${String(row.incoterms || row.defaultIncoterms || '?').toUpperCase()}`
+      ).join(', ');
+      const err = new Error(`Deliveries have conflicting incoterms (${uniqueIncoterms.join(' vs ')}): ${detail}. All deliveries in a shipment must share the same incoterms.`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const first = deliveries[0];
     const settings = getLogisticsSettings();
     const totals = deliveries.reduce((acc, row) => { acc.netWeight += toDecimal(row.netWeight); acc.grossWeight += toDecimal(row.grossWeight); acc.palletCount += toDecimal(row.palletCount); acc.shipmentVolume += toDecimal(row.deliveryVolume); return acc; }, { netWeight: 0, grossWeight: 0, palletCount: 0, shipmentVolume: 0 });
     const shipmentDraft = {
@@ -1787,7 +1801,7 @@ router.post('/create-from-deliveries', async (req, res) => {
       collectionStatus: toBool(req.body.collectionStatus),
       forwarderID: toNullableInteger(req.body.forwarderID),
       trackingNumber: String(req.body.trackingNumber || '').trim(),
-      incoTerms: String(req.body.incoTerms || first.defaultIncoterms || '').trim(),
+      incoTerms: String(req.body.incoTerms || effectiveIncoterms[0] || '').trim(),
       customsRequired: toBool(req.body.customsRequired),
       customsComplete: toBool(req.body.customsComplete),
       shipmentCancelled: toBool(req.body.shipmentCancelled),
@@ -2061,18 +2075,19 @@ router.post('/:shipmentId/deliveries', async (req, res) => {
 
     const shipmentResult = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT destinationID FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0');
+      .query('SELECT destinationID, incoTerms FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0');
 
     if (!shipmentResult.recordset.length)
       return res.status(404).json({ success: false, error: 'Shipment not found or cancelled.' });
 
-    const customerId = shipmentResult.recordset[0].destinationID;
+    const { destinationID: customerId, incoTerms: shipmentIncoTerms } = shipmentResult.recordset[0];
 
     const req2 = pool.request();
     const inClause = createInClause(req2, deliveryIDs, 'deliveryId');
     const available = await req2.query(`
-      SELECT dm.deliveryID, dm.customerID
+      SELECT dm.deliveryID, dm.customerID, dm.incoterms, d.defaultIncoterms
       FROM Logistics.dbo.DeliveryMain dm
+      LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = dm.customerID
       LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
       WHERE dm.deliveryID IN (${inClause})
         AND dm.completionStatus = 1
@@ -2085,6 +2100,24 @@ router.post('/:shipmentId/deliveries', async (req, res) => {
     const wrongCustomer = available.recordset.filter(d => String(d.customerID) !== String(customerId));
     if (wrongCustomer.length)
       return res.status(400).json({ success: false, error: 'All deliveries must belong to the same customer as the shipment.' });
+
+    // Validate incoterms match the shipment
+    const shipmentTerms = String(shipmentIncoTerms || '').trim().toUpperCase();
+    if (shipmentTerms) {
+      const conflicting = available.recordset.filter(d => {
+        const effective = String(d.incoterms || d.defaultIncoterms || '').trim().toUpperCase();
+        return effective && effective !== shipmentTerms;
+      });
+      if (conflicting.length) {
+        const detail = conflicting.map(d =>
+          `#${d.deliveryID} (${String(d.incoterms || d.defaultIncoterms || '?').toUpperCase()})`
+        ).join(', ');
+        return res.status(400).json({
+          success: false,
+          error: `Incoterms mismatch: shipment is ${shipmentTerms} but ${detail} differ. Only deliveries with matching incoterms can be added.`,
+        });
+      }
+    }
 
     for (const deliveryId of deliveryIDs) {
       await pool.request()

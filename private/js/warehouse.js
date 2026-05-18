@@ -1832,8 +1832,24 @@ async function runSAPSync() {
     if (!json.success) throw new Error(json.error || 'SAP sync failed');
 
     const errLines = (json.errors || []).map(e =>
-      `Delivery ${esc(String(e.deliveryID))}: ${esc(e.error)}`
+      `Delivery ${esc(String(e.deliveryNumber))}: ${esc(e.error)}`
     ).join('<br>');
+
+    const missingBlock = (json.missing || []).length ? `
+      <div style="margin-top:16px;background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.35);
+        border-radius:8px;padding:12px 16px">
+        <div style="font-size:13px;font-weight:700;color:#D97706;margin-bottom:8px">
+          ⚠ ${json.missing.length} delivery${json.missing.length !== 1 ? 'ies' : ''} skipped — unknown customer
+        </div>
+        <div style="font-size:12px;color:#D97706;line-height:1.8;font-family:'JetBrains Mono',monospace">
+          ${json.missing.map(m =>
+            `Delivery <strong>${esc(String(m.deliveryNumber))}</strong> — customer <strong>${esc(String(m.customerNumber))}</strong> not found in Destinations table`
+          ).join('<br>')}
+        </div>
+        <div style="font-size:12px;color:var(--text-muted,#888);margin-top:8px">
+          Add the customer to the Destinations table (Logistics → Admin → Update Destinations) then sync again.
+        </div>
+      </div>` : '';
 
     document.getElementById('result-hint').textContent =
       `SAP returned ${json.total} open deliveries`;
@@ -1855,6 +1871,7 @@ async function runSAPSync() {
             ${errLines ? `<br><span style="color:var(--danger,#ef4444)">${errLines}</span>` : ''}
           </div>
         </div>
+        ${missingBlock}
       </div>`;
   } catch (err) {
     document.getElementById('result-body').innerHTML =

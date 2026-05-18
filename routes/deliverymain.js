@@ -80,7 +80,7 @@ router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
             deliveryID, customerID, dueDate, completionDate, completionStatus,
             operatorName, supervisorName, netWeight, grossWeight, palletCount,
             deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
-            deliveryService
+            deliveryService, incoterms
         } = req.body;
 
         const pool = await getPool();
@@ -100,16 +100,17 @@ router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
             .input('deliveryCancelled', sql.Bit, deliveryCancelled ?? 0)
             .input('deliveryPriority', sql.Int, deliveryPriority ?? 0)
             .input('deliveryService', sql.NVarChar, deliveryService ?? null)
+            .input('incoterms', sql.NVarChar(3), incoterms ?? null)
             .query(`INSERT INTO Logistics.dbo.DeliveryMain
                 (deliveryID, customerID, dueDate, completionDate, completionStatus,
                  operatorName, supervisorName, netWeight, grossWeight, palletCount,
                  deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
-                 deliveryService)
+                 deliveryService, incoterms)
                 VALUES
                 (@deliveryID, @customerID, @dueDate, @completionDate, @completionStatus,
                  @operatorName, @supervisorName, @netWeight, @grossWeight, @palletCount,
                  @deliveryVolume, @picksheetComment, @deliveryCancelled, @deliveryPriority,
-                 @deliveryService)`);
+                 @deliveryService, @incoterms)`);
 
         res.status(201).json({ success: true, deliveryID });
     } catch (err) {
@@ -123,7 +124,8 @@ router.get('/open-picksheets', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dueDate,
-                           dm.deliveryService, dm.picksheetComment, dm.deliveryPriority
+                           dm.deliveryService, dm.picksheetComment, dm.deliveryPriority,
+                           dm.incoterms
                     FROM Logistics.dbo.DeliveryMain dm
                     LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
                     WHERE dm.completionStatus = 0 AND dm.deliveryCancelled = 0
@@ -147,7 +149,7 @@ router.get('/completed-unshipped', async (req, res) => {
                            CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
                            d.destinationName, d.destinationStreet, d.destinationCity,
                            d.destinationPostCode, d.destinationCountry, e.address,
-                           d.defaultIncoterms
+                           d.defaultIncoterms, d.defaultForwarder, dm.incoterms
                     FROM Logistics.dbo.DeliveryMain dm
                     LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
                     LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
@@ -169,12 +171,12 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
         const result = await pool.request()
             .input('customerId', sql.BigInt, req.params.customerId)
             .query(`SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate,
-                           dm.deliveryService, dm.picksheetComment,
+                           dm.deliveryService, dm.picksheetComment, dm.incoterms,
                            CAST(ISNULL(dm.netWeight,      0) AS decimal(18,3)) AS netWeight,
                            CAST(ISNULL(dm.grossWeight,    0) AS decimal(18,3)) AS grossWeight,
                            CAST(ISNULL(dm.palletCount,    0) AS decimal(18,3)) AS palletCount,
                            CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
-                           d.destinationName
+                           d.destinationName, d.defaultIncoterms
                     FROM Logistics.dbo.DeliveryMain dm
                     LEFT JOIN Logistics.dbo.Destinations  d  ON d.destinationID  = dm.customerID
                     LEFT JOIN Logistics.dbo.ShipmentLink  sl ON sl.deliveryID    = dm.deliveryID
@@ -261,14 +263,15 @@ router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
                 .input('deliveryID',      sql.BigInt,   r.deliveryID)
                 .input('customerID',      sql.BigInt,   r.customerID)
                 .input('dueDate',         sql.DateTime, r.dueDate ? new Date(r.dueDate) : null)
-                .input('deliveryService', sql.NVarChar, r.deliveryService  ?? null)
-                .input('deliveryPriority',sql.Int,      r.deliveryPriority ?? 0)
-                .input('picksheetComment',sql.NVarChar, r.picksheetComment ?? null)
+                .input('deliveryService', sql.NVarChar,    r.deliveryService  ?? null)
+                .input('deliveryPriority',sql.Int,         r.deliveryPriority ?? 0)
+                .input('picksheetComment',sql.NVarChar,    r.picksheetComment ?? null)
+                .input('incoterms',       sql.NVarChar(3), r.incoterms        ?? null)
                 .query(`INSERT INTO Logistics.dbo.DeliveryMain
                             (deliveryID, customerID, dueDate, completionStatus, deliveryCancelled,
-                             deliveryService, deliveryPriority, picksheetComment)
+                             deliveryService, deliveryPriority, picksheetComment, incoterms)
                         SELECT @deliveryID, @customerID, @dueDate, 0, 0,
-                               @deliveryService, @deliveryPriority, @picksheetComment
+                               @deliveryService, @deliveryPriority, @picksheetComment, @incoterms
                         WHERE NOT EXISTS (
                             SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
                         )`);
@@ -287,7 +290,7 @@ router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
 // Expected response shape: { data: [{ deliveryID, customerID, dueDate, deliveryService, deliveryPriority, picksheetComment }] }
 router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
     const sapSecret = process.env.SAP_SERVER_SECRET;
-    const syncUrl   = `${sapConfig.url}/api/picksheets/open`;
+    const syncUrl   = `${sapConfig.url}/api/logistics/picksheets/open`;
 
     try {
         const sapRes = await axios.get(syncUrl, {
@@ -301,34 +304,68 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
         }
 
         const pool = await getPool();
+
+        // Load all destinations once to derive deliveryService and picksheetComment
+        const destResult = await pool.request()
+            .query('SELECT destinationID, defaultDeliveryService, destinationComment, destinationCountry FROM Logistics.dbo.Destinations');
+        const destMap = Object.fromEntries(destResult.recordset.map(d => [String(d.destinationID), d]));
+
+        function parseSapDate(str) {
+            if (!str) return null;
+            const [day, month, year] = String(str).split('.');
+            if (!day || !month || !year) return null;
+            const date = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
+            return isNaN(date.getTime()) ? null : date;
+        }
+
         let inserted = 0, skipped = 0;
-        const errors = [];
+        const errors  = [];
+        const missing = []; // customerNumbers not found in Destinations
 
         for (const d of deliveries) {
             try {
+                const deliveryID = parseInt(d.deliveryNumber, 10);
+                const customerID = parseInt(d.customerNumber, 10);
+                const dueDate    = parseSapDate(d.dueDate);
+                const incoterms  = d.incoterms ?? null;
+
+                const dest = destMap[String(customerID)];
+                if (!dest) {
+                    missing.push({ deliveryNumber: d.deliveryNumber, customerNumber: d.customerNumber });
+                    continue;
+                }
+                const deliveryService = String(incoterms ?? '').trim().toUpperCase() === 'EXW'
+                    ? 'Ex Works'
+                    : dest?.defaultDeliveryService ||
+                      (String(dest?.destinationCountry ?? '').trim().toUpperCase() === 'UK'
+                          ? 'Domestic'
+                          : 'Groupage');
+                const picksheetComment = dest?.destinationComment ?? null;
+
                 const result = await pool.request()
-                    .input('deliveryID',      sql.BigInt,   d.deliveryID)
-                    .input('customerID',      sql.BigInt,   d.customerID)
-                    .input('dueDate',         sql.DateTime, d.dueDate ? new Date(d.dueDate) : null)
-                    .input('deliveryService', sql.NVarChar, d.deliveryService  ?? null)
-                    .input('deliveryPriority',sql.Int,      d.deliveryPriority ?? 0)
-                    .input('picksheetComment',sql.NVarChar, d.picksheetComment ?? null)
+                    .input('deliveryID',       sql.BigInt,      deliveryID)
+                    .input('customerID',       sql.BigInt,      customerID)
+                    .input('dueDate',          sql.DateTime,    dueDate)
+                    .input('deliveryService',  sql.NVarChar,    deliveryService)
+                    .input('deliveryPriority', sql.Int,         0)
+                    .input('picksheetComment', sql.NVarChar,    picksheetComment)
+                    .input('incoterms',        sql.NVarChar(3), incoterms)
                     .query(`INSERT INTO Logistics.dbo.DeliveryMain
                                 (deliveryID, customerID, dueDate, completionStatus, deliveryCancelled,
-                                 deliveryService, deliveryPriority, picksheetComment)
+                                 deliveryService, deliveryPriority, picksheetComment, incoterms)
                             SELECT @deliveryID, @customerID, @dueDate, 0, 0,
-                                   @deliveryService, @deliveryPriority, @picksheetComment
+                                   @deliveryService, @deliveryPriority, @picksheetComment, @incoterms
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
                             )`);
                 if (result.rowsAffected[0] > 0) inserted++;
                 else skipped++;
             } catch (err) {
-                errors.push({ deliveryID: d.deliveryID, error: err.message });
+                errors.push({ deliveryNumber: d.deliveryNumber, error: err.message });
             }
         }
 
-        res.json({ success: true, total: deliveries.length, inserted, skipped, errors });
+        res.json({ success: true, total: deliveries.length, inserted, skipped, errors, missing });
 
     } catch (err) {
         if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
