@@ -35,7 +35,19 @@ router.get('/approved', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1');
+            .query('SELECT DISTINCT forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1');
+        res.json(result.recordset);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Get distinct delivery modes from approved forwarders ──
+router.get('/modes', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query('SELECT DISTINCT forwarderMode FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1 AND forwarderMode IS NOT NULL ORDER BY forwarderMode');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });

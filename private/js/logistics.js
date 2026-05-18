@@ -1542,22 +1542,277 @@ function runCustomerSpecifics() {
     '<div class="sap-error" style="color:var(--text-muted)">Customer Specifics — coming soon.</div>';
 }
 
-function runUpdatePalletData() {
-  showResultPanel('Update Pallet Data', 'Maintain pallet type definitions, codes and weight limits');
-  document.getElementById('result-body').innerHTML =
-    '<div class="sap-error" style="color:var(--text-muted)">Pallet Data admin panel — coming soon.</div>';
+// ── Admin: shared edit modal ──────────────────────────────────────────────────
+// fields: [{ key, label, type, step, wide, multiline }]
+// onSave: async (values) — should throw on failure
+function openAdminEditModal(title, subtitle, fields, record, onSave) {
+  const fieldHtml = fields.map(f => {
+    const raw = String(record[f.key] ?? '');
+    const inputEl = f.multiline
+      ? `<textarea id="aed-${f.key}" class="tf-input" rows="2" style="resize:vertical">${esc(raw)}</textarea>`
+      : `<input id="aed-${f.key}" class="tf-input" type="${f.type || 'text'}"${f.step ? ` step="${f.step}"` : ''} value="${raw.replace(/"/g, '&quot;')}">`;
+    return `<div class="tf-field${f.wide ? ' tf-field--wide' : ''}">
+      <label class="tf-label">${esc(f.label)}</label>
+      ${inputEl}
+    </div>`;
+  }).join('');
+
+  openModal(`<div class="ps-modal ps-modal--wide">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">${esc(title)}</div>
+        <div class="ps-modal-sub">${esc(subtitle)}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">${fieldHtml}</div>
+      <div id="aed-result" style="margin-top:12px;font-size:13px"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button class="btn-submit" id="aed-save">Save Changes</button>
+    </div>
+  </div>`);
+
+  document.getElementById('aed-save').addEventListener('click', async () => {
+    const btn      = document.getElementById('aed-save');
+    const resultEl = document.getElementById('aed-result');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    resultEl.textContent = '';
+
+    const values = {};
+    fields.forEach(f => {
+      const el = document.getElementById(`aed-${f.key}`);
+      values[f.key] = el ? el.value.trim() : '';
+    });
+
+    try {
+      await onSave(values);
+      resultEl.style.color = 'var(--success, #059669)';
+      resultEl.textContent = 'Saved successfully.';
+      btn.textContent = 'Saved ✓';
+      setTimeout(closePickModal, 700);
+    } catch (err) {
+      resultEl.style.color = 'var(--error, #DC2626)';
+      resultEl.textContent = `✕ ${err.message}`;
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+    }
+  });
 }
 
-function runUpdatePackagingData() {
-  showResultPanel('Update Packaging Data', 'Maintain packaging codes, types and dimensions');
-  document.getElementById('result-body').innerHTML =
-    '<div class="sap-error" style="color:var(--text-muted)">Packaging Data admin panel — coming soon.</div>';
+// ── Admin: Update Pallet Data ─────────────────────────────────────────────────
+async function runUpdatePalletData() {
+  showResultPanel('Update Pallet Data', 'Click any row to edit · Changes update the SQL table immediately');
+  try {
+    const rows = await fetch('/api/palletdata').then(r => r.json());
+    if (!Array.isArray(rows) || !rows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="sap-error">No pallet types found.</div>';
+      return;
+    }
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} types`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const thead = `<tr><th>Code</th><th>Description</th><th>Weight (kg)</th><th>Length (cm)</th><th>Width (cm)</th><th>Height (cm)</th></tr>`;
+    const tbody = rows.map((r, i) => `<tr class="admin-row" data-idx="${i}" style="cursor:pointer">
+      <td><strong>${esc(r.palletID)}</strong></td>
+      <td>${esc(r.palletDescription ?? '')}</td>
+      <td>${r.palletWeight ?? ''}</td>
+      <td>${r.palletLength ?? ''}</td>
+      <td>${r.palletWidth  ?? ''}</td>
+      <td>${r.palletHeight ?? ''}</td>
+    </tr>`).join('');
+
+    document.getElementById('result-body').innerHTML =
+      `<div style="overflow-x:auto"><table class="pn-batch-table admin-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
+
+    document.querySelectorAll('.admin-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const r = rows[parseInt(tr.dataset.idx, 10)];
+        openAdminEditModal(
+          `Edit Pallet — ${r.palletID}`,
+          r.palletDescription || '',
+          [
+            { key: 'palletDescription', label: 'Description', wide: true },
+            { key: 'palletWeight',      label: 'Weight (kg)', type: 'number', step: '0.001' },
+            { key: 'palletLength',      label: 'Length (cm)', type: 'number', step: '1' },
+            { key: 'palletWidth',       label: 'Width (cm)',  type: 'number', step: '1' },
+            { key: 'palletHeight',      label: 'Height (cm)', type: 'number', step: '1' },
+          ],
+          r,
+          async values => {
+            const res2 = await fetch(`/api/palletdata/${encodeURIComponent(r.palletID)}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                palletDescription: values.palletDescription,
+                palletWeight:      parseFloat(values.palletWeight) || 0,
+                palletLength:      parseInt(values.palletLength,  10) || 0,
+                palletWidth:       parseInt(values.palletWidth,   10) || 0,
+                palletHeight:      parseInt(values.palletHeight,  10) || 0,
+              }),
+            });
+            const json = await res2.json();
+            if (!json.success) throw new Error(json.error || 'Save failed');
+            Object.assign(r, {
+              palletDescription: values.palletDescription,
+              palletWeight: values.palletWeight,
+              palletLength: values.palletLength,
+              palletWidth:  values.palletWidth,
+              palletHeight: values.palletHeight,
+            });
+          }
+        );
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
 }
 
-function runUpdateDestinations() {
-  showResultPanel('Update Destinations', 'Maintain delivery destinations, addresses and transit times');
-  document.getElementById('result-body').innerHTML =
-    '<div class="sap-error" style="color:var(--text-muted)">Destinations admin panel — coming soon.</div>';
+// ── Admin: Update Packaging Data ──────────────────────────────────────────────
+async function runUpdatePackagingData() {
+  showResultPanel('Update Packaging Data', 'Click any row to edit · Changes update the SQL table immediately');
+  try {
+    const rows = await fetch('/api/packagingdata').then(r => r.json());
+    if (!Array.isArray(rows) || !rows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="sap-error">No packaging types found.</div>';
+      return;
+    }
+
+    rows.sort((a, b) => (a.packID ?? '').localeCompare(b.packID ?? ''));
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} types`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const thead = `<tr><th>Code</th><th>Description</th><th>Material</th><th>Weight (kg)</th><th>Length (cm)</th><th>Width (cm)</th><th>Height (cm)</th></tr>`;
+    const tbody = rows.map((r, i) => `<tr class="admin-row" data-idx="${i}" style="cursor:pointer">
+      <td><strong>${esc(r.packID)}</strong></td>
+      <td>${esc(r.packDescription ?? '')}</td>
+      <td>${esc(r.packMaterial    ?? '')}</td>
+      <td>${r.packWeight ?? ''}</td>
+      <td>${r.packLength ?? ''}</td>
+      <td>${r.packWidth  ?? ''}</td>
+      <td>${r.packHeight ?? ''}</td>
+    </tr>`).join('');
+
+    document.getElementById('result-body').innerHTML =
+      `<div style="overflow-x:auto"><table class="pn-batch-table admin-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
+
+    document.querySelectorAll('.admin-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const r = rows[parseInt(tr.dataset.idx, 10)];
+        openAdminEditModal(
+          `Edit Packaging — ${r.packID}`,
+          r.packDescription || '',
+          [
+            { key: 'packDescription', label: 'Description', wide: true },
+            { key: 'packMaterial',    label: 'Material' },
+            { key: 'packWeight',      label: 'Weight (kg)', type: 'number', step: '0.001' },
+            { key: 'packLength',      label: 'Length (cm)', type: 'number', step: '1' },
+            { key: 'packWidth',       label: 'Width (cm)',  type: 'number', step: '1' },
+            { key: 'packHeight',      label: 'Height (cm)', type: 'number', step: '1' },
+          ],
+          r,
+          async values => {
+            const res2 = await fetch(`/api/packagingdata/${encodeURIComponent(r.packID)}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                packDescription: values.packDescription,
+                packMaterial:    values.packMaterial,
+                packWeight:      parseFloat(values.packWeight) || 0,
+                packLength:      parseInt(values.packLength,  10) || 0,
+                packWidth:       parseInt(values.packWidth,   10) || 0,
+                packHeight:      parseInt(values.packHeight,  10) || 0,
+              }),
+            });
+            const json = await res2.json();
+            if (!json.success) throw new Error(json.error || 'Save failed');
+            Object.assign(r, {
+              packDescription: values.packDescription,
+              packMaterial:    values.packMaterial,
+              packWeight:      values.packWeight,
+              packLength:      values.packLength,
+              packWidth:       values.packWidth,
+              packHeight:      values.packHeight,
+            });
+          }
+        );
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Admin: Update Destinations ────────────────────────────────────────────────
+async function runUpdateDestinations() {
+  showResultPanel('Update Destinations', 'Click any row to edit · Changes update the SQL table immediately');
+  try {
+    const rows = await fetch('/api/destinations').then(r => r.json());
+    if (!Array.isArray(rows) || !rows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="sap-error">No destinations found.</div>';
+      return;
+    }
+
+    rows.sort((a, b) => (a.destinationName ?? '').localeCompare(b.destinationName ?? ''));
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} destinations`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const thead = `<tr><th>ID</th><th>Name</th><th>City</th><th>Country</th><th>Zone</th><th>Def. Service</th><th>Incoterms</th></tr>`;
+    const tbody = rows.map((r, i) => `<tr class="admin-row" data-idx="${i}" style="cursor:pointer">
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted)">${esc(String(r.destinationID))}</td>
+      <td><strong>${esc(r.destinationName      ?? '')}</strong></td>
+      <td>${esc(r.destinationCity              ?? '')}</td>
+      <td>${esc(r.destinationCountry           ?? '')}</td>
+      <td>${esc(r.destinationZone              ?? '')}</td>
+      <td>${esc(r.defaultDeliveryService       ?? '')}</td>
+      <td>${esc(r.defaultIncoterms             ?? '')}</td>
+    </tr>`).join('');
+
+    document.getElementById('result-body').innerHTML =
+      `<div style="overflow-x:auto"><table class="pn-batch-table admin-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
+
+    document.querySelectorAll('.admin-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const r = rows[parseInt(tr.dataset.idx, 10)];
+        openAdminEditModal(
+          `Edit Destination — ${r.destinationID}`,
+          r.destinationName || '',
+          [
+            { key: 'destinationName',        label: 'Name',            wide: true },
+            { key: 'destinationStreet',      label: 'Street',          wide: true },
+            { key: 'destinationCity',        label: 'City' },
+            { key: 'destinationPostCode',    label: 'Post Code' },
+            { key: 'destinationCountry',     label: 'Country' },
+            { key: 'destinationZone',        label: 'Zone' },
+            { key: 'defaultDeliveryService', label: 'Default Service' },
+            { key: 'defaultIncoterms',       label: 'Incoterms' },
+            { key: 'destinationEmail',       label: 'Email',           wide: true },
+            { key: 'destinationComment',     label: 'Comment',         wide: true, multiline: true },
+          ],
+          r,
+          async values => {
+            const res2 = await fetch(`/api/destinations/${encodeURIComponent(r.destinationID)}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(values),
+            });
+            const json = await res2.json();
+            if (!json.success) throw new Error(json.error || 'Save failed');
+            Object.assign(r, values);
+          }
+        );
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
 }
 
 function renderSimpleTable(rows, cols) {

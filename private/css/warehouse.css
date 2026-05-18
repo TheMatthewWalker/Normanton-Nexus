@@ -1140,6 +1140,12 @@ body::before {
 .wc-btn-confirm--danger  { background: #DC2626; }
 .wc-btn-confirm--success { background: #059669; }
 
+/* ── SUPERVISOR SECTION HEADER ───────────────────────────────────────────── */
+.pn-section-hdr--supervisor {
+  color: var(--accent);
+  border-bottom-color: rgba(124,58,237,0.25);
+}
+
 /* ── FOOTER ──────────────────────────────────────────────────────────────── */
 .footer {
   position: relative; z-index: 1;

@@ -1,15 +1,19 @@
 'use strict';
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let activeDT      = null;
-let currentResult = [];
+let activeDT          = null;
+let currentResult     = [];
+let sessionPermissions = [];
+let pendingCSVRecords  = [];
 
 // ── Session check on load ─────────────────────────────────────────────────────
 (async () => {
   const d = await fetch('/session-check').then(r => r.json());
   if (!d.loggedIn) { window.location.href = '/'; return; }
   document.getElementById('session-user').textContent = d.username;
+  sessionPermissions = d.permissions || [];
   setupTiles();
+  setupSupervisorSection();
 })();
 
 function setupTiles() {
@@ -19,6 +23,9 @@ function setupTiles() {
       if (fn === 'displayStock')   runDisplayStock();
       if (fn === 'transferOrders') showTransferForm();
       if (fn === 'openPicksheets') runOpenPicksheets();
+      if (fn === 'addPicksheet')   showAddPicksheetForm();
+      if (fn === 'csvUpload')      showCSVUpload();
+      if (fn === 'sapSync')        runSAPSync();
     });
   });
 
@@ -1409,6 +1416,450 @@ function closePalletBuilder() {
   const overlay = document.getElementById('pb-overlay');
   if (overlay) overlay.classList.add('hidden');
   pb = null;
+}
+
+// ── Supervisor section ────────────────────────────────────────────────────────
+function setupSupervisorSection() {
+  if (sessionPermissions.includes('LOG_SUPER')) {
+    document.getElementById('supervisor-section').classList.remove('hidden');
+  }
+}
+
+// ── Add Picksheet form ────────────────────────────────────────────────────────
+async function showAddPicksheetForm() {
+  if (!await checkSession()) return;
+  showResultPanel('Add Picksheet', 'Loading customers and services…');
+
+  try {
+    const [destRes, fwdRes] = await Promise.all([
+      fetch('/api/destinations').then(r => r.json()),
+      fetch('/api/forwarders/modes').then(r => r.json()),
+    ]);
+
+    const destinations = Array.isArray(destRes) ? destRes : [];
+    const modes        = Array.isArray(fwdRes)  ? fwdRes  : [];
+
+    destinations.sort((a, b) => (a.destinationName ?? '').localeCompare(b.destinationName ?? ''));
+
+    // Keyed by destinationID for fast lookup in the change handler
+    const destById = Object.fromEntries(destinations.map(d => [String(d.destinationID), d]));
+
+    const destOptions = destinations.map(d =>
+      `<option value="${esc(String(d.destinationID))}">${esc(d.destinationName)}</option>`
+    ).join('');
+
+    const fwdOptions = modes.map(f =>
+      `<option value="${esc(f.forwarderMode)}">${esc(f.forwarderMode)}</option>`
+    ).join('');
+
+    document.getElementById('result-hint').textContent = 'Create a new delivery picksheet';
+    document.getElementById('result-body').innerHTML = `
+      <form class="transfer-form" id="ps-form" onsubmit="submitAddPicksheet(event)">
+
+        <div class="tf-section-label">Delivery Details</div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">SAP Delivery No. <span class="tf-req">*</span></label>
+            <input class="tf-input" id="ps-delivery-id" type="text" inputmode="numeric"
+              pattern="[0-9]+" placeholder="e.g. 1234567890" required>
+          </div>
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Customer <span class="tf-req">*</span></label>
+            <select class="tf-input" id="ps-customer" required>
+              <option value="">— Select customer —</option>
+              ${destOptions}
+            </select>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Due Date <span class="tf-req">*</span></label>
+            <input class="tf-input" id="ps-due-date" type="date" required>
+          </div>
+        </div>
+
+        <div class="tf-section-label">Shipping <span class="tf-optional">(optional)</span></div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Delivery Service</label>
+            <select class="tf-input" id="ps-service">
+              <option value="">— None —</option>
+              ${fwdOptions}
+            </select>
+          </div>
+          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
+            <label class="tf-label">Priority</label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;color:var(--text)">
+              <input type="checkbox" id="ps-priority" style="width:16px;height:16px;cursor:pointer">
+              Mark as Priority
+            </label>
+          </div>
+        </div>
+
+        <div class="tf-section-label">Notes <span class="tf-optional">(optional)</span></div>
+        <div class="tf-row">
+          <div class="tf-field" style="flex:1">
+            <label class="tf-label">Comment</label>
+            <textarea class="tf-input" id="ps-comment" rows="2"
+              placeholder="Any picking instructions or notes…" style="resize:vertical"></textarea>
+          </div>
+        </div>
+
+        <div class="tf-actions">
+          <div id="ps-result"></div>
+          <button type="submit" class="btn-submit" id="ps-submit">Add Picksheet</button>
+        </div>
+      </form>`;
+
+    document.getElementById('ps-customer').addEventListener('change', function () {
+      const dest    = destById[this.value];
+      const svcSel  = document.getElementById('ps-service');
+      const defSvc  = dest?.defaultDeliveryService ?? '';
+      svcSel.value  = defSvc;
+    });
+
+  } catch (err) {
+    document.getElementById('result-body').innerHTML =
+      `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+async function submitAddPicksheet(e) {
+  e.preventDefault();
+  if (!await checkSession()) return;
+
+  const deliveryID      = document.getElementById('ps-delivery-id').value.trim();
+  const customerID      = document.getElementById('ps-customer').value;
+  const dueDate         = document.getElementById('ps-due-date').value;
+  const deliveryService = document.getElementById('ps-service').value || null;
+  const deliveryPriority= document.getElementById('ps-priority').checked ? 1 : 0;
+  const picksheetComment= document.getElementById('ps-comment').value.trim() || null;
+
+  const submitBtn = document.getElementById('ps-submit');
+  const resultEl  = document.getElementById('ps-result');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Saving…';
+  resultEl.innerHTML = '';
+
+  try {
+    const res  = await fetch('/api/deliverymain/', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deliveryID:      parseInt(deliveryID, 10),
+        customerID:      parseInt(customerID, 10),
+        dueDate,
+        deliveryService,
+        deliveryPriority,
+        picksheetComment,
+        completionStatus: 0,
+        deliveryCancelled: 0,
+      }),
+    });
+    const json = await res.json();
+
+    if (!json.success) throw new Error(json.error || 'Failed to create picksheet');
+
+    resultEl.innerHTML = `
+      <div class="tf-success">
+        <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd"
+          d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9
+             10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+          clip-rule="evenodd"/></svg>
+        <div>
+          <div class="tf-success-title">Picksheet Created</div>
+          <div class="tf-success-to">Delivery ${esc(deliveryID)} added to open picksheets</div>
+        </div>
+      </div>`;
+    document.getElementById('ps-form').reset();
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Add Picksheet';
+  }
+}
+
+// ── CSV Bulk Import ───────────────────────────────────────────────────────────
+function showCSVUpload() {
+  if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
+  document.getElementById('tile-section').classList.add('hidden');
+  document.getElementById('result-section').classList.remove('hidden');
+  document.getElementById('result-title').textContent = 'Bulk CSV Import';
+  document.getElementById('result-hint').textContent  = 'Upload picksheets in bulk from a CSV file';
+  document.getElementById('result-row-badge').classList.add('hidden');
+  document.getElementById('btn-export-csv').classList.add('hidden');
+
+  pendingCSVRecords = [];
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="transfer-form">
+      <div class="tf-section-label">Expected Format</div>
+      <div style="margin-bottom:16px">
+        <code style="display:block;background:var(--surface2,#1e1e2e);border:1px solid var(--border,#333);
+          border-radius:6px;padding:10px 14px;font-size:13px;color:var(--text-muted,#aaa);line-height:1.6">
+          deliveryID,customerID,dueDate,deliveryService,deliveryPriority,picksheetComment<br>
+          1234567890,5000,2026-05-20,DHL,0,Rush order
+        </code>
+        <button type="button" onclick="downloadCSVTemplate()"
+          style="margin-top:8px;background:none;border:none;color:var(--accent,#7c3aed);
+            cursor:pointer;font-size:13px;text-decoration:underline;padding:0">
+          Download blank template
+        </button>
+      </div>
+
+      <div class="tf-section-label">Select File</div>
+      <div id="csv-drop-zone" style="border:2px dashed var(--border,#444);border-radius:8px;
+        padding:32px;text-align:center;cursor:pointer;color:var(--text-muted,#888);
+        transition:border-color .2s"
+        onclick="document.getElementById('csv-file-input').click()"
+        ondragover="event.preventDefault();this.style.borderColor='var(--accent,#7c3aed)'"
+        ondragleave="this.style.borderColor=''"
+        ondrop="handleCSVDrop(event)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+          stroke-linecap="round" stroke-linejoin="round"
+          style="width:36px;height:36px;margin:0 auto 8px;display:block">
+          <polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/>
+          <path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/>
+        </svg>
+        Drop CSV here or click to browse
+        <input type="file" id="csv-file-input" accept=".csv,.txt"
+          style="display:none" onchange="handleCSVFile(this)">
+      </div>
+
+      <div id="csv-preview" style="margin-top:20px"></div>
+    </div>`;
+}
+
+function downloadCSVTemplate() {
+  const csv = 'deliveryID,customerID,dueDate,deliveryService,deliveryPriority,picksheetComment\r\n1234567890,5000,2026-05-20,DHL,0,Sample comment\r\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = 'picksheet-template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function handleCSVDrop(e) {
+  e.preventDefault();
+  document.getElementById('csv-drop-zone').style.borderColor = '';
+  const file = e.dataTransfer?.files?.[0];
+  if (file) parseCSVFile(file);
+}
+
+function handleCSVFile(input) {
+  const file = input.files?.[0];
+  if (file) parseCSVFile(file);
+  input.value = '';
+}
+
+function parseCSVFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => renderCSVPreview(e.target.result);
+  reader.readAsText(file);
+}
+
+function parseCSVLine(line) {
+  // Basic CSV parser — handles quoted fields
+  const fields = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (ch === ',' && !inQuote) {
+      fields.push(cur.trim()); cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  fields.push(cur.trim());
+  return fields;
+}
+
+function renderCSVPreview(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) {
+    document.getElementById('csv-preview').innerHTML =
+      '<div class="sap-error">✕ File must have a header row and at least one data row</div>';
+    return;
+  }
+
+  const EXPECTED_HEADERS = ['deliveryID','customerID','dueDate','deliveryService','deliveryPriority','picksheetComment'];
+  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
+  const missing = EXPECTED_HEADERS.filter(h => !headers.includes(h));
+  if (missing.length) {
+    document.getElementById('csv-preview').innerHTML =
+      `<div class="sap-error">✕ Missing columns: ${esc(missing.join(', '))}</div>`;
+    return;
+  }
+
+  const idx = {};
+  EXPECTED_HEADERS.forEach(h => { idx[h] = headers.indexOf(h); });
+
+  const records = [], rowErrors = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    const raw  = {
+      deliveryID:       cols[idx.deliveryID]       ?? '',
+      customerID:       cols[idx.customerID]        ?? '',
+      dueDate:          cols[idx.dueDate]           ?? '',
+      deliveryService:  cols[idx.deliveryService]   ?? '',
+      deliveryPriority: cols[idx.deliveryPriority]  ?? '0',
+      picksheetComment: cols[idx.picksheetComment]  ?? '',
+    };
+
+    const errs = [];
+    if (!/^\d+$/.test(raw.deliveryID.replace(/\s/g,''))) errs.push('deliveryID must be numeric');
+    if (!/^\d+$/.test(raw.customerID.replace(/\s/g,''))) errs.push('customerID must be numeric');
+    if (!raw.dueDate || isNaN(Date.parse(raw.dueDate)))  errs.push('dueDate must be a valid date (YYYY-MM-DD)');
+
+    if (errs.length) {
+      rowErrors.push({ row: i, errors: errs, raw });
+    } else {
+      records.push({
+        deliveryID:       parseInt(raw.deliveryID, 10),
+        customerID:       parseInt(raw.customerID, 10),
+        dueDate:          raw.dueDate,
+        deliveryService:  raw.deliveryService || null,
+        deliveryPriority: parseInt(raw.deliveryPriority, 10) || 0,
+        picksheetComment: raw.picksheetComment || null,
+      });
+    }
+  }
+
+  pendingCSVRecords = records;
+
+  const previewEl = document.getElementById('csv-preview');
+  let html = `<div class="tf-section-label" style="margin-top:0">
+    Preview — ${records.length} valid row${records.length !== 1 ? 's' : ''}, ${rowErrors.length} error${rowErrors.length !== 1 ? 's' : ''}
+  </div>`;
+
+  if (rowErrors.length) {
+    html += `<div class="sap-error" style="margin-bottom:12px">
+      ${rowErrors.map(e => `Row ${e.row}: ${esc(e.errors.join(', '))}`).join('<br>')}
+    </div>`;
+  }
+
+  if (records.length) {
+    html += `<div style="overflow-x:auto;margin-bottom:16px">
+      <table class="ps-table">
+        <thead><tr>
+          <th>Delivery ID</th><th>Customer ID</th><th>Due Date</th>
+          <th>Service</th><th>Priority</th><th>Comment</th>
+        </tr></thead>
+        <tbody>
+          ${records.map(r => `<tr>
+            <td>${esc(String(r.deliveryID))}</td>
+            <td>${esc(String(r.customerID))}</td>
+            <td>${esc(r.dueDate)}</td>
+            <td>${esc(r.deliveryService ?? '—')}</td>
+            <td>${r.deliveryPriority ? 'Priority' : 'Normal'}</td>
+            <td>${esc(r.picksheetComment ?? '')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="tf-actions" style="padding-top:0">
+      <div id="csv-submit-result"></div>
+      <button type="button" class="btn-submit" id="csv-submit-btn"
+        onclick="submitCSVBulk()">
+        Import ${records.length} picksheet${records.length !== 1 ? 's' : ''}
+      </button>
+    </div>`;
+  }
+
+  previewEl.innerHTML = html;
+}
+
+async function submitCSVBulk() {
+  if (!pendingCSVRecords.length) return;
+  if (!await checkSession()) return;
+
+  const btn      = document.getElementById('csv-submit-btn');
+  const resultEl = document.getElementById('csv-submit-result');
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  resultEl.innerHTML = '';
+
+  try {
+    const res  = await fetch('/api/deliverymain/bulk', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records: pendingCSVRecords }),
+    });
+    const json = await res.json();
+
+    if (!json.success) throw new Error(json.error || 'Bulk import failed');
+
+    const errLines = (json.errors || []).map(e =>
+      `Delivery ${esc(String(e.deliveryID))}: ${esc(e.error)}`
+    ).join('<br>');
+
+    resultEl.innerHTML = `
+      <div class="tf-success" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <svg viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0"><path fill-rule="evenodd"
+            d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9
+               10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+            clip-rule="evenodd"/></svg>
+          <div class="tf-success-title">Import Complete</div>
+        </div>
+        <div style="font-size:13px;color:var(--text-muted,#aaa);padding-left:28px">
+          ${json.inserted} inserted &nbsp;·&nbsp; ${json.skipped} already existed
+          ${errLines ? `<br><span style="color:var(--danger,#ef4444)">${errLines}</span>` : ''}
+        </div>
+      </div>`;
+    pendingCSVRecords = [];
+    btn.textContent = 'Import complete';
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = 'Retry import';
+  }
+}
+
+// ── SAP Sync ──────────────────────────────────────────────────────────────────
+async function runSAPSync() {
+  if (!await checkSession()) return;
+  showResultPanel('SAP Sync', 'Fetching open deliveries from SAP server…');
+
+  try {
+    const res  = await fetch('/api/deliverymain/sap-sync', { method: 'POST' });
+    const json = await res.json();
+
+    if (!json.success) throw new Error(json.error || 'SAP sync failed');
+
+    const errLines = (json.errors || []).map(e =>
+      `Delivery ${esc(String(e.deliveryID))}: ${esc(e.error)}`
+    ).join('<br>');
+
+    document.getElementById('result-hint').textContent =
+      `SAP returned ${json.total} open deliveries`;
+
+    document.getElementById('result-body').innerHTML = `
+      <div class="transfer-form">
+        <div class="tf-success" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <svg viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0"><path fill-rule="evenodd"
+              d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9
+                 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+              clip-rule="evenodd"/></svg>
+            <div class="tf-success-title">Sync Complete</div>
+          </div>
+          <div style="font-size:14px;color:var(--text-muted,#aaa);padding-left:28px;line-height:1.8">
+            <strong style="color:var(--text)">${json.total}</strong> deliveries from SAP<br>
+            <strong style="color:var(--text)">${json.inserted}</strong> new picksheets added<br>
+            <strong style="color:var(--text)">${json.skipped}</strong> already existed (skipped)
+            ${errLines ? `<br><span style="color:var(--danger,#ef4444)">${errLines}</span>` : ''}
+          </div>
+        </div>
+      </div>`;
+  } catch (err) {
+    document.getElementById('result-body').innerHTML =
+      `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
 }
 
 // ── CSV export ────────────────────────────────────────────────────────────────

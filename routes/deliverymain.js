@@ -1,6 +1,8 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../server.js';
+import axios from 'axios';
+import { sqlConfig, sapConfig } from '../server.js';
+import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -72,12 +74,13 @@ router.get('/daterange', async (req, res) => {
 });
 
 // ── Create new record ──
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
     try {
         const {
             deliveryID, customerID, dueDate, completionDate, completionStatus,
             operatorName, supervisorName, netWeight, grossWeight, palletCount,
-            deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority
+            deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
+            deliveryService
         } = req.body;
 
         const pool = await getPool();
@@ -86,28 +89,31 @@ router.post('/', async (req, res) => {
             .input('customerID', sql.BigInt, customerID)
             .input('dueDate', sql.DateTime, dueDate ? new Date(dueDate) : null)
             .input('completionDate', sql.DateTime, completionDate ? new Date(completionDate) : null)
-            .input('completionStatus', sql.Bit, completionStatus)
-            .input('operatorName', sql.NVarChar, operatorName)
-            .input('supervisorName', sql.NVarChar, supervisorName)
-            .input('netWeight', sql.Decimal, netWeight)
-            .input('grossWeight', sql.Decimal, grossWeight)
-            .input('palletCount', sql.Decimal, palletCount)
-            .input('deliveryVolume', sql.Decimal, deliveryVolume)
-            .input('picksheetComment', sql.NVarChar, picksheetComment)
-            .input('deliveryCancelled', sql.Bit, deliveryCancelled)
-            .input('deliveryPriority', sql.Int, deliveryPriority)
+            .input('completionStatus', sql.Bit, completionStatus ?? 0)
+            .input('operatorName', sql.NVarChar, operatorName ?? null)
+            .input('supervisorName', sql.NVarChar, supervisorName ?? null)
+            .input('netWeight', sql.Decimal, netWeight ?? null)
+            .input('grossWeight', sql.Decimal, grossWeight ?? null)
+            .input('palletCount', sql.Decimal, palletCount ?? null)
+            .input('deliveryVolume', sql.Decimal, deliveryVolume ?? null)
+            .input('picksheetComment', sql.NVarChar, picksheetComment ?? null)
+            .input('deliveryCancelled', sql.Bit, deliveryCancelled ?? 0)
+            .input('deliveryPriority', sql.Int, deliveryPriority ?? 0)
+            .input('deliveryService', sql.NVarChar, deliveryService ?? null)
             .query(`INSERT INTO Logistics.dbo.DeliveryMain
                 (deliveryID, customerID, dueDate, completionDate, completionStatus,
                  operatorName, supervisorName, netWeight, grossWeight, palletCount,
-                 deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority)
+                 deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
+                 deliveryService)
                 VALUES
                 (@deliveryID, @customerID, @dueDate, @completionDate, @completionStatus,
                  @operatorName, @supervisorName, @netWeight, @grossWeight, @palletCount,
-                 @deliveryVolume, @picksheetComment, @deliveryCancelled, @deliveryPriority)`);
+                 @deliveryVolume, @picksheetComment, @deliveryCancelled, @deliveryPriority,
+                 @deliveryService)`);
 
-        res.status(201).json({ message: 'Record created successfully' });
+        res.status(201).json({ success: true, deliveryID });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -232,6 +238,105 @@ router.post('/:deliveryId/pallets', async (req, res) => {
                     VALUES (@deliveryId, @palletId)`);
         res.status(201).json({ success: true });
     } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Bulk insert picksheets (LOG_SUPER only) ───────────────────────────────────
+// Body: { records: [{ deliveryID, customerID, dueDate, deliveryService, deliveryPriority, picksheetComment }] }
+// Skips records whose deliveryID already exists. Returns { inserted, skipped, errors }.
+router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { records } = req.body;
+    if (!Array.isArray(records) || records.length === 0) {
+        return res.status(400).json({ success: false, error: 'records array is required and must not be empty' });
+    }
+
+    const pool = await getPool();
+    let inserted = 0, skipped = 0;
+    const errors = [];
+
+    for (const r of records) {
+        try {
+            const result = await pool.request()
+                .input('deliveryID',      sql.BigInt,   r.deliveryID)
+                .input('customerID',      sql.BigInt,   r.customerID)
+                .input('dueDate',         sql.DateTime, r.dueDate ? new Date(r.dueDate) : null)
+                .input('deliveryService', sql.NVarChar, r.deliveryService  ?? null)
+                .input('deliveryPriority',sql.Int,      r.deliveryPriority ?? 0)
+                .input('picksheetComment',sql.NVarChar, r.picksheetComment ?? null)
+                .query(`INSERT INTO Logistics.dbo.DeliveryMain
+                            (deliveryID, customerID, dueDate, completionStatus, deliveryCancelled,
+                             deliveryService, deliveryPriority, picksheetComment)
+                        SELECT @deliveryID, @customerID, @dueDate, 0, 0,
+                               @deliveryService, @deliveryPriority, @picksheetComment
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
+                        )`);
+            if (result.rowsAffected[0] > 0) inserted++;
+            else skipped++;
+        } catch (err) {
+            errors.push({ deliveryID: r.deliveryID, error: err.message });
+        }
+    }
+
+    res.json({ success: true, inserted, skipped, errors });
+});
+
+// ── SAP sync — pull open picksheets from SAP server, insert any not already present ──
+// The SAP server endpoint returns an array of delivery objects.
+// Expected response shape: { data: [{ deliveryID, customerID, dueDate, deliveryService, deliveryPriority, picksheetComment }] }
+router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
+    const sapSecret = process.env.SAP_SERVER_SECRET;
+    const syncUrl   = `${sapConfig.url}/api/picksheets/open`;
+
+    try {
+        const sapRes = await axios.get(syncUrl, {
+            headers:  sapSecret ? { Authorization: `Bearer ${sapSecret}` } : {},
+            timeout:  30000,
+        });
+
+        const deliveries = sapRes.data?.data ?? sapRes.data;
+        if (!Array.isArray(deliveries)) {
+            return res.status(502).json({ success: false, error: 'Unexpected response format from SAP server' });
+        }
+
+        const pool = await getPool();
+        let inserted = 0, skipped = 0;
+        const errors = [];
+
+        for (const d of deliveries) {
+            try {
+                const result = await pool.request()
+                    .input('deliveryID',      sql.BigInt,   d.deliveryID)
+                    .input('customerID',      sql.BigInt,   d.customerID)
+                    .input('dueDate',         sql.DateTime, d.dueDate ? new Date(d.dueDate) : null)
+                    .input('deliveryService', sql.NVarChar, d.deliveryService  ?? null)
+                    .input('deliveryPriority',sql.Int,      d.deliveryPriority ?? 0)
+                    .input('picksheetComment',sql.NVarChar, d.picksheetComment ?? null)
+                    .query(`INSERT INTO Logistics.dbo.DeliveryMain
+                                (deliveryID, customerID, dueDate, completionStatus, deliveryCancelled,
+                                 deliveryService, deliveryPriority, picksheetComment)
+                            SELECT @deliveryID, @customerID, @dueDate, 0, 0,
+                                   @deliveryService, @deliveryPriority, @picksheetComment
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
+                            )`);
+                if (result.rowsAffected[0] > 0) inserted++;
+                else skipped++;
+            } catch (err) {
+                errors.push({ deliveryID: d.deliveryID, error: err.message });
+            }
+        }
+
+        res.json({ success: true, total: deliveries.length, inserted, skipped, errors });
+
+    } catch (err) {
+        if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
+            return res.status(503).json({ success: false, error: `SAP server unreachable: ${syncUrl}` });
+        }
+        if (err.response) {
+            return res.status(502).json({ success: false, error: `SAP server error ${err.response.status}: ${err.response.data?.error ?? err.message}` });
+        }
         res.status(500).json({ success: false, error: err.message });
     }
 });
