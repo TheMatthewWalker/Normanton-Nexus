@@ -21,10 +21,122 @@ const sendBtn = document.getElementById('gemini-send');
     document.getElementById('session-user').textContent = session.username.split('.')[0].toProperCase(); // Show the first name (username before the dot)
     const heroName = document.getElementById('hero-username');
     if (heroName) heroName.textContent = session.username.split('.')[0].toProperCase(); // Show first name in hero section, properly capitalized
+    loadProductionSparkline();
+    loadSalesSparkline();
   } catch {
     window.location.href = '/';
   }
 })();
+
+async function loadSalesSparkline() {
+  try {
+    const res = await fetch('/api/sap/sales-sparkline').then(r => r.json());
+    if (!res.success || !res.data) return;
+
+    const { thisTotal, pctChange, dailyValues } = res.data;
+
+    const svg     = document.getElementById('sales-spark-svg');
+    const deltaEl = document.getElementById('sales-spark-delta');
+    const valueEl = document.getElementById('sales-spark-value');
+    const wrap    = document.getElementById('sales-spark');
+    if (!svg || !deltaEl || !valueEl || !wrap) return;
+
+    // Format £ value
+    const fmtSales = n => {
+      if (n >= 1000000) return `£${(n / 1000000).toFixed(2)}M`;
+      if (n >= 10000)   return `£${(n / 1000).toFixed(1)}k`;
+      return `£${Math.round(n).toLocaleString('en-GB')}`;
+    };
+    valueEl.textContent = fmtSales(thisTotal) + ' MTD';
+
+    const W = 280, H = 28, padY = 3;
+    const n   = dailyValues.length;
+    const max = Math.max(...dailyValues, 1);
+
+    const pts = dailyValues.map((v, i) => [
+      n < 2 ? W / 2 : (i / (n - 1)) * W,
+      H - padY - ((v / max) * (H - padY * 2)),
+    ]);
+
+    const lineD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' ');
+    const fillD = `${lineD} L${W},${H} L0,${H} Z`;
+
+    const isUp   = pctChange === null || pctChange >= 0;
+    const isFlat = pctChange !== null && Math.abs(pctChange) < 0.1;
+    const col    = isFlat ? '#8DA3BE' : isUp ? '#059669' : '#DC2626';
+
+    svg.innerHTML = `
+      <defs>
+        <linearGradient id="sssg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="${col}" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${fillD}" fill="url(#sssg)"/>
+      <path d="${lineD}" fill="none" stroke="${col}" stroke-width="1.6"
+            stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    const sign   = (!isFlat && isUp && pctChange > 0) ? '+' : '';
+    const pctStr = pctChange === null ? '—' : `${sign}${pctChange}%`;
+    deltaEl.textContent = `${pctStr} vs last month`;
+    deltaEl.className   = `dept-spark-delta dept-spark-delta--${isFlat ? 'flat' : isUp ? 'up' : 'down'}`;
+    deltaEl.style.opacity = '1';
+
+    wrap.style.display = '';   // reveal the spark section now data is ready
+  } catch (_) {}
+}
+
+async function loadProductionSparkline() {
+  try {
+    const res = await fetch('/api/productionnexus/landing-sparkline').then(r => r.json());
+    if (!res.success) return;
+    const { values, thisWeek, pctChange } = res.data;
+
+    const svg     = document.getElementById('pn-spark-svg');
+    const deltaEl = document.getElementById('pn-spark-delta');
+    const valueEl = document.getElementById('pn-spark-value');
+    if (!svg || !deltaEl || !valueEl) return;
+
+    // Format metres: 1,234 M or 12.4k M
+    const fmtM = n => (n >= 10000
+      ? (n / 1000).toFixed(1) + 'k M'
+      : n.toLocaleString('en-GB') + ' M');
+    valueEl.textContent = fmtM(thisWeek) + ' this week';
+
+    const W = 280, H = 28, padY = 3;
+    const n   = values.length;
+    const max = Math.max(...values, 1);
+
+    const pts = values.map((v, i) => [
+      (i / (n - 1)) * W,
+      H - padY - ((v / max) * (H - padY * 2)),
+    ]);
+
+    const lineD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' ');
+    const fillD = `${lineD} L${W},${H} L0,${H} Z`;
+
+    const isUp   = pctChange === null || pctChange >= 0;
+    const isFlat = pctChange !== null && Math.abs(pctChange) < 0.1;
+    const col    = isFlat ? '#8DA3BE' : isUp ? '#2563EB' : '#DC2626';
+
+    svg.innerHTML = `
+      <defs>
+        <linearGradient id="pnsg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="${col}" stop-opacity="0.15"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${fillD}" fill="url(#pnsg)"/>
+      <path d="${lineD}" fill="none" stroke="${col}" stroke-width="1.6"
+            stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    const sign   = (!isFlat && isUp && pctChange > 0) ? '+' : '';
+    const pctStr = pctChange === null ? '—' : `${sign}${pctChange}%`;
+    deltaEl.textContent = `${pctStr} vs last week`;
+    deltaEl.className = `dept-spark-delta dept-spark-delta--${isFlat ? 'flat' : isUp ? 'up' : 'down'}`;
+    deltaEl.style.opacity = '1';
+  } catch (_) {}
+}
 
 openBtn.addEventListener('click', () => {
   shell.classList.remove('hidden');

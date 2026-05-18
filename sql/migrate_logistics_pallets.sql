@@ -143,3 +143,6 @@ JOIN   sys.objects o ON o.object_id = c.object_id
 WHERE  o.name IN (N'PackagingData', N'PalletData', N'PalletValidation',
                   N'PalletMain', N'DeliveryLink', N'PalletPackages')
 ORDER  BY o.name, c.column_id;
+
+
+ALTER TABLE Logistics.dbo.Destinations ADD defaultDeliveryService NVARCHAR(100) NULL;

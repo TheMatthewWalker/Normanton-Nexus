@@ -116,6 +116,42 @@ function rptBind(req, pool) {
   return { from, to, groupBy: safeBy, r, extra: extras.length ? `AND ${extras.join(' AND ')}` : '' };
 }
 
+// ── Landing page sparkline — auth only, no supervisor gate ───────────────────
+
+router.get('/landing-sparkline', async (req, res) => {
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request().query(`
+      SELECT CONVERT(varchar(10), CompletedAt, 120) AS Day,
+             CAST(SUM(Quantity) AS DECIMAL(14,1)) AS TotalMetres
+      FROM   (${RPT_COMPLETED}) AS B
+      WHERE  UOM = N'M'
+        AND  CompletedAt >= DATEADD(DAY,-13, DATEADD(DAY, DATEDIFF(DAY,0,GETDATE()), 0))
+        AND  CompletedAt <  DATEADD(DAY,  1, DATEADD(DAY, DATEDIFF(DAY,0,GETDATE()), 0))
+      GROUP BY CONVERT(varchar(10), CompletedAt, 120)
+      ORDER BY Day`);
+
+    const today = new Date();
+    const days  = Array.from({ length: 14 }, (_, i) => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - (13 - i));
+      return d.toISOString().slice(0, 10);
+    });
+    const map    = Object.fromEntries(r.recordset.map(row => [row.Day, Number(row.TotalMetres)]));
+    const values = days.map(d => map[d] || 0);
+
+    const lastWeek = values.slice(0, 7).reduce((s, n) => s + n, 0);
+    const thisWeek = values.slice(7).reduce((s, n) => s + n, 0);
+    const pctChange = lastWeek === 0 ? null
+      : Math.round(((thisWeek - lastWeek) / lastWeek) * 1000) / 10;
+
+    res.json({ success: true, data: {
+      days: days.slice(7), values: values.slice(7),
+      thisWeek: Math.round(thisWeek), lastWeek: Math.round(lastWeek), pctChange,
+    }});
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
 // ── Report 1 — Production Output ─────────────────────────────────────────────
 
 router.get('/reports/output', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
@@ -2085,6 +2121,163 @@ router.post('/drumming/entry', async (req, res) => {
 });
 
 
+// ── DRUMMING — Make-to-Stock / Make-to-Order submissions ─────────────────────
+// Both endpoints share the same DB logic; only the SAP endpoint differs.
+
+async function submitDrumming(req, res, entryType) {
+  const {
+    material, shiftID,
+    customerNumber, orderNumber,
+    packagingID, weightKG,
+    parentBatches = [],
+    coilLengths = [],
+    hasScrap, scrapTotalKG, scrapReasons = [],
+    comments,
+  } = req.body;
+
+  if (!material || !coilLengths.length || !packagingID || !weightKG)
+    return res.status(400).json({ success: false, error: 'material, packagingID, weightKG and at least one coilLength are required.' });
+
+  const pool = await getProductionPool();
+  const uid  = userId(req);
+  const sid  = shiftID || currentShiftID();
+  const totalLength = coilLengths.reduce((s, l) => s + Number(l), 0);
+
+  const ins = await pool.request()
+    .input('shift', sql.TinyInt,           sid)
+    .input('mat',   sql.NVarChar(18),      material)
+    .input('len',   sql.Decimal(12,3),     totalLength)
+    .input('wt',    sql.Decimal(12,3),     Number(weightKG))
+    .input('pkg',   sql.NVarChar(10),      packagingID)
+    .input('cust',  sql.NVarChar(50),      customerNumber || null)
+    .input('so',    sql.NVarChar(20),      orderNumber    || null)
+    .input('etype', sql.NVarChar(10),      entryType)
+    .input('uid',   sql.Int,               uid)
+    .input('notes', sql.NVarChar(sql.MAX), comments || null)
+    .query(`INSERT INTO prod.Drumming
+              (ShiftID,Material,LengthMetres,WeightKG,PackagingType,CustomerID,SalesOrderSAP,
+               EntryType,Status,StartedAt,CompletedAt,CreatedByUserID,Notes)
+            OUTPUT INSERTED.DrummingID
+            VALUES (@shift,@mat,@len,@wt,@pkg,@cust,@so,@etype,4,GETDATE(),GETDATE(),@uid,@notes)`);
+
+  const drummingID = ins.recordset[0].DrummingID;
+
+  for (let i = 0; i < coilLengths.length; i++) {
+    await pool.request()
+      .input('did', sql.Int,           drummingID)
+      .input('seq', sql.Int,           i + 1)
+      .input('len', sql.Decimal(10,3), Number(coilLengths[i]))
+      .query(`INSERT INTO prod.DrummingCoils (DrummingID,CoilSeq,LengthM) VALUES (@did,@seq,@len)`);
+  }
+
+  await pool.request()
+    .input('rid', sql.Int, drummingID).input('uid', sql.Int, uid)
+    .query(`INSERT INTO prod.BatchOperators (ProcessCode,ProcessRecordID,UserID,IsPrimary,AssignedByUserID) VALUES ('DR',@rid,@uid,1,@uid)`);
+
+  for (const pb of parentBatches) {
+    if (!pb.processCode || !pb.recordID) continue;
+    await pool.request()
+      .input('cc', sql.NVarChar(5), 'DR').input('cr', sql.Int, drummingID)
+      .input('pc', sql.NVarChar(5), pb.processCode.toUpperCase()).input('pr', sql.Int, Number(pb.recordID))
+      .input('uid', sql.Int, uid)
+      .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
+  }
+
+  if (hasScrap && scrapTotalKG && scrapReasons.length) {
+    const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+    for (const { reasonID, occurrences } of scrapReasons) {
+      const share    = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+      const scrapQty = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+      await pool.request()
+        .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
+        .input('rid2',sql.Int,           Number(reasonID))
+        .input('qty', sql.Decimal(12,3), scrapQty)
+        .input('uid', sql.Int,           uid)
+        .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@rid2,@qty,'KG',@uid)`);
+    }
+    await writeEvent(pool, 'DR', drummingID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+  }
+
+  await writeEvent(pool, 'DR', drummingID, 'STARTED', `Drumming (${entryType}) created: ${material} ${totalLength.toFixed(3)} M ${Number(weightKG)} KG`, 0, uid);
+
+  const drumRef = `DR-${String(drummingID).padStart(8, '0')}`;
+
+  try {
+    const sapRaw = await sapPost(`/drumming/${entryType}`, {
+      Material:    material,
+      TotalLength: totalLength,
+      WeightKG:    Number(weightKG),
+      Header:      drumRef,
+      Packaging:   packagingID,
+      Customer:    customerNumber || '',
+      Order:       orderNumber    || '',
+    });
+
+    const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+    audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+
+    if (messageNumber === '190') {
+      await logBackflushAlert(pool, 'DR', drummingID, drumRef, sapMatDoc, messageNumber, message);
+      await writeEvent(pool, 'DR', drummingID, 'NOTE',
+        `SAP 190: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+    }
+
+    await pool.request()
+      .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
+      .input('type',sql.NVarChar(20),  'BACKFLUSH')
+      .input('qty', sql.Decimal(12,3), totalLength)
+      .input('doc', sql.NVarChar(10),  sapMatDoc)
+      .input('uid', sql.Int,           uid)
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+    await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
+      `Backflush posted — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
+
+    try {
+      await sapPost('/api/production/label', {
+        processCode: 'DR', recordID: drummingID,
+        materialDocument: sapMatDoc, material,
+        quantity: totalLength, unitOfMeasure: 'M',
+        coilLengths, packagingType: packagingID, customerID: customerNumber,
+      });
+    } catch (_) {}
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        drummingID, materialDocument: sapMatDoc, status: 'COMPLETE',
+        ...(messageNumber === '190' ? { warning: 'SAP 190: posted but no components consumed — flagged for data review.' } : {}),
+      },
+    });
+
+  } catch (sapErr) {
+    await pool.request()
+      .input('rid', sql.Int, drummingID)
+      .query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
+
+    const errMsg = sapErr.response?.data?.error || sapErr.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${drumRef}' FAILED - Message = "${errMsg}"`, req);
+
+    await pool.request()
+      .input('pc',  sql.NVarChar(5),'DR').input('rid',sql.Int,drummingID)
+      .input('type',sql.NVarChar(20),'BACKFLUSH').input('qty',sql.Decimal(12,3),totalLength)
+      .input('err', sql.NVarChar(sql.MAX),errMsg).input('uid',sql.Int,uid)
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
+
+    await writeEvent(pool, 'DR', drummingID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+    return res.status(201).json({
+      success: true,
+      data: { drummingID, status: 'SAP_FAILED', error: errMsg },
+      warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
+    });
+  }
+}
+
+router.post('/drumming/stock',    async (req, res) => { try { await submitDrumming(req, res, 'stock');    } catch (err) { res.status(500).json({ success: false, error: err.message }); } });
+router.post('/drumming/customer', async (req, res) => { try { await submitDrumming(req, res, 'customer'); } catch (err) { res.status(500).json({ success: false, error: err.message }); } });
+
+
 // ── Mixing — get tub weights and SAP postings for a record ───────────────────
 
 router.get('/mixing/:mixingId/tubs', async (req, res) => {
@@ -2255,42 +2448,44 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       return res.json({ success: true, data: { status: 'COMPLETE', tubs: results } });
     }
 
-    // DR — re-post via ZF40N backflush
+    // DR — re-post to /drumming/stock or /drumming/customer based on EntryType
     if (code === 'DR') {
-      const { material, packagingType, testPressurePSI, customerID, salesOrderSAP, notes } = req.body;
+      const { material, packagingID, weightKG, customerNumber, orderNumber, comments } = req.body;
 
-      // Apply any corrections before re-reading
       await pool.request()
-        .input('rid',  sql.Int,              id)
-        .input('mat',  sql.NVarChar(18),     material      || null)
-        .input('pkg',  sql.NVarChar(3),      packagingType || null)
-        .input('psi',  sql.Decimal(6,2),     testPressurePSI ? Number(testPressurePSI) : null)
-        .input('cust', sql.NVarChar(50),     customerID    || null)
-        .input('so',   sql.NVarChar(12),     salesOrderSAP || null)
-        .input('notes',sql.NVarChar(sql.MAX), notes        || null)
+        .input('rid',  sql.Int,               id)
+        .input('mat',  sql.NVarChar(18),      material       || null)
+        .input('pkg',  sql.NVarChar(10),      packagingID    || null)
+        .input('wt',   sql.Decimal(12,3),     weightKG != null ? Number(weightKG) : null)
+        .input('cust', sql.NVarChar(50),      customerNumber || null)
+        .input('so',   sql.NVarChar(20),      orderNumber    || null)
+        .input('notes',sql.NVarChar(sql.MAX), comments       || null)
         .query(`UPDATE prod.Drumming SET
-          Material        = COALESCE(@mat,  Material),
-          PackagingType   = COALESCE(@pkg,  PackagingType),
-          TestPressurePSI = COALESCE(@psi,  TestPressurePSI),
-          CustomerID      = COALESCE(@cust, CustomerID),
-          SalesOrderSAP   = COALESCE(@so,   SalesOrderSAP),
-          Notes           = COALESCE(@notes,Notes)
+          Material      = COALESCE(@mat,  Material),
+          PackagingType = COALESCE(@pkg,  PackagingType),
+          WeightKG      = COALESCE(@wt,   WeightKG),
+          CustomerID    = COALESCE(@cust, CustomerID),
+          SalesOrderSAP = COALESCE(@so,   SalesOrderSAP),
+          Notes         = COALESCE(@notes,Notes)
           WHERE DrummingID = @rid`);
 
       const cur = await pool.request().input('id', sql.Int, id)
-        .query(`SELECT DrumRef, Material, LengthMetres, PackagingType, CustomerID FROM prod.Drumming WHERE DrummingID=@id`);
+        .query(`SELECT DrumRef, Material, LengthMetres, WeightKG, PackagingType,
+                       CustomerID, SalesOrderSAP, EntryType FROM prod.Drumming WHERE DrummingID=@id`);
       if (!cur.recordset.length) return res.status(404).json({ success: false, error: 'Record not found.' });
       const d = cur.recordset[0];
 
       await writeEvent(pool, 'DR', id, 'NOTE', `Retry by supervisor ${uid}`, 0, uid);
 
-      const sapRaw = await sapPost('/api/production/backflush', {
-        Material:  d.Material,
-        Quantity:  d.LengthMetres,
-        Header:    d.DrumRef,
-        Packaging: d.PackagingType || '',
-        Charge:    '',
-        Customer:  d.CustomerID || '',
+      const entryType = d.EntryType || 'stock';
+      const sapRaw = await sapPost(`/drumming/${entryType}`, {
+        Material:    d.Material,
+        TotalLength: d.LengthMetres,
+        WeightKG:    d.WeightKG    || 0,
+        Header:      d.DrumRef,
+        Packaging:   d.PackagingType  || '',
+        Customer:    d.CustomerID     || '',
+        Order:       d.SalesOrderSAP  || '',
       });
 
       const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
@@ -2303,9 +2498,9 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       }
 
       await pool.request()
-        .input('pc', sql.NVarChar(5), 'DR').input('rid', sql.Int, id)
-        .input('type', sql.NVarChar(20), 'BACKFLUSH').input('qty', sql.Decimal(12,3), d.LengthMetres)
-        .input('doc', sql.NVarChar(10), sapMatDoc).input('uid', sql.Int, uid)
+        .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, id)
+        .input('type',sql.NVarChar(20),  'BACKFLUSH').input('qty', sql.Decimal(12,3), d.LengthMetres)
+        .input('doc', sql.NVarChar(10),  sapMatDoc).input('uid', sql.Int, uid)
         .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
 
       await pool.request().input('id', sql.Int, id)

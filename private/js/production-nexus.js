@@ -3689,77 +3689,172 @@ async function runMixingEntry() {
 
 // ── DRUMMING WIZARD ───────────────────────────────────────────────────────────
 
-const PACKAGING_TYPES = ['SB','MB','LB','XB','SD','MD','LD','XD'];
-const PACKAGING_LABELS = {
-  SB:'Small Box', MB:'Medium Box', LB:'Large Box', XB:'Pizza Box',
-  SD:'Small Drum', MD:'Medium Drum', LD:'Large Drum', XD:'Extra Large Drum',
-};
+function dwShiftFromHour() {
+  const h = new Date().getHours();
+  if (h >= 6  && h < 14) return { id: 1, name: 'Days (06:00–14:00)' };
+  if (h >= 14 && h < 22) return { id: 2, name: 'Afternoons (14:00–22:00)' };
+  return { id: 3, name: 'Nights (22:00–06:00)' };
+}
+
+function dwStepName(state) {
+  const stockSteps    = ['details', 'traceability', 'coils', 'scrap', 'review'];
+  const customerSteps = ['customer', 'details', 'traceability', 'coils', 'scrap', 'review'];
+  const steps = state.type === 'customer' ? customerSteps : stockSteps;
+  return steps[state.phase - 1] || null;
+}
 
 async function runDrummingEntry() {
-  // Wizard state
+  document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
+
+  const [reasonsRes, packagingRes, sessionRes] = await Promise.all([
+    api('/scrap-reasons?pc=DR'),
+    fetch('/api/packagingdata').then(r => r.json()),
+    fetch('/session-check').then(r => r.json()),
+  ]);
+
+  const reasons         = reasonsRes.data || [];
+  const packagingOptions = Array.isArray(packagingRes) ? packagingRes : [];
+  const shift           = dwShiftFromHour();
+
   const state = {
-    phase: 1,
-    material: '', bomComponents: [],
+    type: null,
+    phase: 0,
+    customerNumber: '',
+    orderNumber: '',
+    material: '',
+    operatorName: sessionRes.username || '',
+    shiftID:   shift.id,
+    shiftName: shift.name,
+    packagingID: '',
+    weightKG: '',
     parentBatches: [],
-    additionalOperators: [],
-    packagingType: '', testPressurePSI: null,
     coilLengths: [],
-    hasScrap: false, scrapTotalKG: 0, scrapReasons: [],
-    salesOrderSAP: '', customerID: '', notes: '',
+    hasScrap: false, scrapTotalKG: '', scrapReasons: [],
+    comments: '',
   };
 
-  const reasons = (await api('/scrap-reasons?pc=DR')).data || [];
+  renderDrummingWizard(state, reasons, packagingOptions);
+}
 
-  const render = () => {
-    document.getElementById('result-body').innerHTML = `
+function renderDrummingWizard(state, reasons, packagingOptions) {
+  const body     = document.getElementById('result-body');
+  const maxPhase = state.type === 'customer' ? 6 : 5;
+
+  if (state.phase === 0) {
+    body.innerHTML = `
       <div style="padding:20px;max-width:600px">
-        <div class="pn-wizard-steps" id="dw-steps"></div>
-        <div id="dw-phase-body"></div>
-        <div style="display:flex;gap:8px;margin-top:16px">
-          ${state.phase > 1 ? `<button class="btn-secondary" id="dw-back">← Back</button>` : ''}
-          <button class="btn-submit" id="dw-next">${state.phase === 6 ? 'Submit & Post to SAP' : 'Next →'}</button>
-          <span id="dw-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Select the production type for this drumming entry.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <button class="dw-type-btn" data-type="stock"
+            style="padding:24px 16px;border:2px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;transition:border-color 0.15s">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Make-to-Stock</div>
+            <div style="font-size:12px;color:var(--text-muted)">Standard production run for inventory</div>
+          </button>
+          <button class="dw-type-btn" data-type="customer"
+            style="padding:24px 16px;border:2px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;transition:border-color 0.15s">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Make-to-Order</div>
+            <div style="font-size:12px;color:var(--text-muted)">Production against a specific customer order</div>
+          </button>
         </div>
       </div>`;
 
-    renderDrummingPhase(state, reasons);
+    document.querySelectorAll('.dw-type-btn').forEach(btn => {
+      btn.addEventListener('mouseenter', () => { btn.style.borderColor = 'var(--accent)'; });
+      btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'var(--border)'; });
+      btn.addEventListener('click', () => {
+        state.type  = btn.dataset.type;
+        state.phase = 1;
+        renderDrummingWizard(state, reasons, packagingOptions);
+      });
+    });
+    return;
+  }
 
-    document.getElementById('dw-next')?.addEventListener('click', () => advanceDrumming(state, reasons, render));
-    document.getElementById('dw-back')?.addEventListener('click', () => { state.phase--; render(); });
-  };
+  const steps      = state.type === 'customer'
+    ? ['Customer', 'Details', 'Traceability', 'Coil Lengths', 'Scrap', 'Review']
+    : ['Details', 'Traceability', 'Coil Lengths', 'Scrap', 'Review'];
+  const isLast = state.phase === maxPhase;
 
-  render();
-}
+  body.innerHTML = `
+    <div style="padding:20px;max-width:600px">
+      <div class="pn-wizard-steps" id="dw-steps"></div>
+      <div id="dw-phase-body"></div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn-secondary" id="dw-back">← Back</button>
+        <button class="btn-submit" id="dw-next">${isLast ? 'Submit & Post to SAP' : 'Next →'}</button>
+        <span id="dw-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
+      </div>
+    </div>`;
 
-function renderDrummingPhase(state, reasons) {
-  const steps = ['Material','Traceability & Operators','Packaging','Coil Lengths','Scrap','Review & Submit'];
   document.getElementById('dw-steps').innerHTML = steps.map((s, i) => `
     <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;border-radius:20px;
       background:${i+1===state.phase?'var(--accent)':i+1<state.phase?'rgba(13,148,136,0.15)':'var(--surface2)'};
       color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
       border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
 
-  const body = document.getElementById('dw-phase-body');
+  renderDrummingPhaseBody(state, reasons, packagingOptions);
 
-  if (state.phase === 1) {
+  document.getElementById('dw-back').addEventListener('click', () => {
+    state.phase = state.phase === 1 ? 0 : state.phase - 1;
+    renderDrummingWizard(state, reasons, packagingOptions);
+  });
+  document.getElementById('dw-next').addEventListener('click', () => {
+    advanceDrummingWizard(state, reasons, packagingOptions);
+  });
+}
+
+function renderDrummingPhaseBody(state, reasons, packagingOptions) {
+  const body = document.getElementById('dw-phase-body');
+  const step = dwStepName(state);
+
+  if (step === 'customer') {
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 1 — Material</div>
+        <div class="bm-section-title">Customer Information</div>
         <div class="tf-field" style="margin-bottom:12px">
-          <label class="tf-label">SAP Material Number</label>
-          <input class="tf-input" id="dw-material" value="${esc(state.material)}" placeholder="e.g. TSHV3-4B01">
+          <label class="tf-label">Customer Number <span style="color:var(--error)">*</span></label>
+          <input class="tf-input" id="dw-cust-num" value="${esc(state.customerNumber)}" placeholder="e.g. 10001234">
         </div>
-        <div id="dw-bom-result" style="font-size:12px;color:var(--text-muted)">
-          ${state.bomComponents.length ? `BOM loaded: ${state.bomComponents.length} component(s)` : ''}
+        <div class="tf-field">
+          <label class="tf-label">Order Number <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
+          <input class="tf-input" id="dw-order-num" value="${esc(state.orderNumber)}" placeholder="e.g. ORD-0012345">
         </div>
       </div>`;
 
-  } else if (state.phase === 2) {
-    const opTags = state.additionalOperators.map(u =>
-      `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
-        ${esc(u.username)} <button class="dw-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-       </span>`).join(' ');
+  } else if (step === 'details') {
+    body.innerHTML = `
+      <div class="bm-section" style="margin-bottom:0">
+        <div class="bm-section-title">Batch Details</div>
+        <div class="tf-field" style="margin-bottom:12px">
+          <label class="tf-label">Material Number <span style="color:var(--error)">*</span></label>
+          <input class="tf-input" id="dw-material" value="${esc(state.material)}" placeholder="e.g. TSHV3-4B01">
+        </div>
+        <div class="tf-row" style="margin-bottom:12px">
+          <div class="tf-field">
+            <label class="tf-label">Operator</label>
+            <div class="tf-input" style="background:var(--surface2);color:var(--text-muted);cursor:default;user-select:none">${esc(state.operatorName)}</div>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Shift</label>
+            <div class="tf-input" style="background:var(--surface2);color:var(--text-muted);cursor:default;user-select:none">${esc(state.shiftName)}</div>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Packaging <span style="color:var(--error)">*</span></label>
+            <select class="tf-input" id="dw-pkg">
+              <option value="">Select…</option>
+              ${packagingOptions.map(p=>`<option value="${esc(p.packID)}" ${state.packagingID===p.packID?'selected':''}>${esc(p.packID)}${p.packDescription?' — '+esc(p.packDescription):''}</option>`).join('')}
+            </select>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Weight (KG) <span style="color:var(--error)">*</span></label>
+            <input class="tf-input" id="dw-weight" type="number" min="0.001" step="0.001" value="${state.weightKG||''}" placeholder="e.g. 125.5">
+          </div>
+        </div>
+      </div>`;
 
+  } else if (step === 'traceability') {
     const batchTags = state.parentBatches.length
       ? state.parentBatches.map((pb, i) =>
           `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
@@ -3768,115 +3863,37 @@ function renderDrummingPhase(state, reasons) {
            </span>`).join(' ')
       : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
 
-    const bomInfo = state.bomComponents.length
-      ? `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;margin-bottom:12px">
-          <div style="font-weight:700;margin-bottom:4px">BOM for ${esc(state.material)}</div>
-          ${state.bomComponents.map(c=>`<div class="pn-batch-mono">${esc(c.material || c.componentMaterial || '')} — ${c.quantityPer} per unit</div>`).join('')}
-         </div>` : '';
-
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 2 — Traceability &amp; Operators</div>
-        ${bomInfo}
-        <div style="margin-bottom:12px">
-          <label class="tf-label">Previous Stage Batches</label>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Add each input batch — a drum can consume multiple upstream records.</div>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
-            <select class="tf-input" id="dw-parent-pc" style="width:140px">
-              ${Object.entries(PROCESS_LABELS).filter(([k])=>k!=='DR').map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-            </select>
-            <input class="tf-input" id="dw-parent-rid" type="number" placeholder="Record ID" style="width:130px">
-            <button class="btn-secondary" id="dw-add-batch">+ Add</button>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">${batchTags}</div>
+        <div class="bm-section-title">Traceability — Previous Process Batches</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add each upstream batch that fed into this drum. Leave empty if not applicable.</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <select class="tf-input" id="dw-parent-pc" style="width:150px">
+            ${Object.entries(PROCESS_LABELS).filter(([k])=>k!=='DR').map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+          </select>
+          <input class="tf-input" id="dw-parent-rid" type="number" placeholder="Record ID" style="width:130px">
+          <button class="btn-secondary" id="dw-add-batch">+ Add</button>
         </div>
-        <div style="margin-bottom:10px">
-          <label class="tf-label">Additional Operators</label>
-          <div style="display:flex;gap:6px;margin-top:4px">
-            <input class="tf-input" id="dw-op-q" placeholder="Search username…" style="flex:1">
-            <button class="btn-secondary" id="dw-op-search">Search</button>
-          </div>
-          <div id="dw-op-results" style="margin-top:6px"></div>
-          <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${opTags}</div>
-        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px" id="dw-batch-tags">${batchTags}</div>
       </div>`;
 
-    document.getElementById('dw-add-batch')?.addEventListener('click', () => {
+    document.getElementById('dw-add-batch').addEventListener('click', () => {
       const pc  = document.getElementById('dw-parent-pc')?.value;
       const rid = Number(document.getElementById('dw-parent-rid')?.value);
       if (!pc || !rid) return;
-      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid)) {
+      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
         state.parentBatches.push({ processCode: pc, recordID: rid });
-      }
-      renderDrummingPhase(state, reasons);
+      renderDrummingPhaseBody(state, reasons, packagingOptions);
     });
 
     document.querySelectorAll('.dw-remove-batch').forEach(btn => {
       btn.addEventListener('click', () => {
         state.parentBatches.splice(Number(btn.dataset.idx), 1);
-        renderDrummingPhase(state, reasons);
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
       });
     });
 
-    document.querySelectorAll('.dw-remove-op').forEach(btn => {
-      btn.addEventListener('click', () => {
-        state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
-        renderDrummingPhase(state, reasons);
-      });
-    });
-
-    document.getElementById('dw-op-search')?.addEventListener('click', async () => {
-      const q = document.getElementById('dw-op-q').value.trim();
-      const el = document.getElementById('dw-op-results');
-      const r = await api(`/users?q=${encodeURIComponent(q)}`);
-      el.innerHTML = (r.data||[]).map(u => `
-        <div style="display:flex;justify-content:space-between;padding:3px 0">
-          <span style="font-size:13px">${esc(u.DisplayName||u.Username)}</span>
-          <button class="btn-secondary dw-add-op" data-uid="${u.UserID}" data-name="${esc(u.DisplayName||u.Username)}" style="padding:2px 8px;font-size:11px">Add</button>
-        </div>`).join('');
-      el.querySelectorAll('.dw-add-op').forEach(btn => {
-        btn.addEventListener('click', () => {
-          if (!state.additionalOperators.find(u => u.uid === Number(btn.dataset.uid))) {
-            state.additionalOperators.push({ uid: Number(btn.dataset.uid), username: btn.dataset.name });
-          }
-          renderDrummingPhase(state, reasons);
-        });
-      });
-    });
-
-  } else if (state.phase === 3) {
-    body.innerHTML = `
-      <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 3 — Packaging &amp; Test Pressure</div>
-        <div class="tf-row">
-          <div class="tf-field">
-            <label class="tf-label">Packaging Type</label>
-            <select class="tf-input" id="dw-pkg">
-              <option value="">Select…</option>
-              ${PACKAGING_TYPES.map(t=>`<option value="${t}" ${state.packagingType===t?'selected':''}>${t} — ${PACKAGING_LABELS[t]}</option>`).join('')}
-            </select>
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Pressure Test</label>
-            <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px">
-              <input type="checkbox" id="dw-test-chk" ${state.testPressurePSI!==null?'checked':''}> Apply pressure test
-            </label>
-          </div>
-        </div>
-        <div id="dw-psi-row" style="display:${state.testPressurePSI!==null?'block':'none'}">
-          <div class="tf-field">
-            <label class="tf-label">Test Pressure (PSI)</label>
-            <input class="tf-input" id="dw-psi" type="number" min="0" step="0.1" value="${state.testPressurePSI||''}" style="width:160px">
-          </div>
-        </div>
-      </div>`;
-
-    document.getElementById('dw-test-chk')?.addEventListener('change', e => {
-      document.getElementById('dw-psi-row').style.display = e.target.checked ? 'block' : 'none';
-      if (!e.target.checked) state.testPressurePSI = null;
-    });
-
-  } else if (state.phase === 4) {
+  } else if (step === 'coils') {
     const coilRows = state.coilLengths.map((l, i) => `
       <div style="display:flex;align-items:center;gap:8px;padding:4px 0">
         <span class="pn-batch-mono" style="width:28px;text-align:right;color:var(--text-muted)">${i+1}.</span>
@@ -3884,12 +3901,11 @@ function renderDrummingPhase(state, reasons) {
         <span style="font-size:12px;color:var(--text-muted)">M</span>
         <button class="dw-remove-coil btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>
       </div>`).join('');
-
     const total = state.coilLengths.reduce((s, l) => s + Number(l), 0);
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 4 — Coil Lengths</div>
+        <div class="bm-section-title">Coil Lengths in Drum</div>
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Enter each coil length in metres. The total is calculated automatically.</div>
         <div id="dw-coil-list">${coilRows}</div>
         <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
@@ -3899,18 +3915,21 @@ function renderDrummingPhase(state, reasons) {
         </div>
       </div>`;
 
-    document.getElementById('dw-add-coil')?.addEventListener('click', () => {
+    document.getElementById('dw-add-coil').addEventListener('click', () => {
       const v = Number(document.getElementById('dw-new-coil').value);
-      if (v > 0) { state.coilLengths.push(v); renderDrummingPhase(state, reasons); }
+      if (v > 0) { state.coilLengths.push(v); renderDrummingPhaseBody(state, reasons, packagingOptions); }
     });
     document.querySelectorAll('.dw-coil-input').forEach(inp => {
       inp.addEventListener('change', e => { state.coilLengths[Number(e.target.dataset.idx)] = Number(e.target.value); });
     });
     document.querySelectorAll('.dw-remove-coil').forEach(btn => {
-      btn.addEventListener('click', () => { state.coilLengths.splice(Number(btn.dataset.idx), 1); renderDrummingPhase(state, reasons); });
+      btn.addEventListener('click', () => {
+        state.coilLengths.splice(Number(btn.dataset.idx), 1);
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
+      });
     });
 
-  } else if (state.phase === 5) {
+  } else if (step === 'scrap') {
     const reasonRows = state.scrapReasons.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
         <select class="tf-input dw-scrap-reason" data-idx="${i}" style="flex:1">
@@ -3923,7 +3942,7 @@ function renderDrummingPhase(state, reasons) {
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 5 — Scrap</div>
+        <div class="bm-section-title">Scrap</div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
           <input type="checkbox" id="dw-has-scrap" ${state.hasScrap?'checked':''}> Scrap to record for this drum
         </label>
@@ -3938,16 +3957,19 @@ function renderDrummingPhase(state, reasons) {
         </div>
       </div>`;
 
-    document.getElementById('dw-has-scrap')?.addEventListener('change', e => {
+    document.getElementById('dw-has-scrap').addEventListener('change', e => {
       state.hasScrap = e.target.checked;
       document.getElementById('dw-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
     });
     document.getElementById('dw-add-reason')?.addEventListener('click', () => {
       state.scrapReasons.push({ reasonID: '', occurrences: 1 });
-      renderDrummingPhase(state, reasons);
+      renderDrummingPhaseBody(state, reasons, packagingOptions);
     });
     document.querySelectorAll('.dw-remove-reason').forEach(btn => {
-      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderDrummingPhase(state, reasons); });
+      btn.addEventListener('click', () => {
+        state.scrapReasons.splice(Number(btn.dataset.idx), 1);
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
+      });
     });
     document.querySelectorAll('.dw-scrap-reason').forEach(sel => {
       sel.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].reasonID = Number(e.target.value); });
@@ -3956,114 +3978,103 @@ function renderDrummingPhase(state, reasons) {
       inp.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].occurrences = Number(e.target.value); });
     });
 
-  } else if (state.phase === 6) {
-    const total = state.coilLengths.reduce((s,l) => s+Number(l), 0);
+  } else if (step === 'review') {
+    const total = state.coilLengths.reduce((s, l) => s + Number(l), 0);
+    const typeLine = state.type === 'customer'
+      ? `<div class="pn-batch-mono">Customer: ${esc(state.customerNumber)}${state.orderNumber ? ' / Order: '+esc(state.orderNumber) : ''}</div>`
+      : `<div class="pn-batch-mono">Type: Make-to-Stock</div>`;
+
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 6 — Sales Order, Customer &amp; Comments</div>
-        <div class="tf-row" style="margin-bottom:10px">
-          <div class="tf-field">
-            <label class="tf-label">Sales Order (optional)</label>
-            <input class="tf-input" id="dw-salesorder" value="${esc(state.salesOrderSAP)}" placeholder="e.g. 4500012345">
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Customer (optional)</label>
-            <input class="tf-input" id="dw-customer" value="${esc(state.customerID)}" placeholder="Customer name or ID">
-          </div>
-        </div>
-        <div class="tf-field" style="margin-bottom:14px">
-          <label class="tf-label">Comments (optional)</label>
-          <input class="tf-input" id="dw-comments" value="${esc(state.notes)}" placeholder="Any notes for this drum…">
-        </div>
-        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px">
+        <div class="bm-section-title">Review</div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;margin-bottom:14px">
           <div style="font-weight:700;margin-bottom:8px">Summary</div>
+          ${typeLine}
           <div class="pn-batch-mono">Material: ${esc(state.material)}</div>
-          <div class="pn-batch-mono">Packaging: ${esc(state.packagingType)} (${esc(PACKAGING_LABELS[state.packagingType]||'—')})</div>
-          <div class="pn-batch-mono">Test Pressure: ${state.testPressurePSI ? state.testPressurePSI+' PSI' : 'None'}</div>
-          <div class="pn-batch-mono">Coils: ${state.coilLengths.length} — Total: ${total.toFixed(3)} M</div>
+          <div class="pn-batch-mono">Operator: ${esc(state.operatorName)} &nbsp;·&nbsp; Shift: ${esc(state.shiftName)}</div>
+          <div class="pn-batch-mono">Packaging: ${esc(state.packagingID)} &nbsp;·&nbsp; Weight: ${state.weightKG} KG</div>
+          <div class="pn-batch-mono">Coils: ${state.coilLengths.length} — Total Length: ${total.toFixed(3)} M</div>
+          <div class="pn-batch-mono">Traceability: ${state.parentBatches.length ? state.parentBatches.map(pb=>`${pb.processCode}${String(pb.recordID).padStart(8,'0')}`).join(', ') : 'None'}</div>
           <div class="pn-batch-mono">Scrap: ${state.hasScrap ? state.scrapTotalKG+' KG across '+state.scrapReasons.length+' reason(s)' : 'None'}</div>
-          <div class="pn-batch-mono">Prev batches: ${state.parentBatches.length ? state.parentBatches.map(pb=>`${pb.processCode}${String(pb.recordID).padStart(8,'0')}`).join(', ') : 'None'}</div>
-          <div class="pn-batch-mono">Sales Order: ${esc(state.salesOrderSAP || '—')}</div>
-          <div class="pn-batch-mono">Customer: ${esc(state.customerID || '—')}</div>
         </div>
-        <div id="dw-submit-result" style="margin-top:10px;font-size:13px"></div>
+        <div class="tf-field" style="margin-bottom:10px">
+          <label class="tf-label">Comments <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
+          <input class="tf-input" id="dw-comments" value="${esc(state.comments)}" placeholder="Any notes for this drum…">
+        </div>
+        <div id="dw-submit-result" style="font-size:13px"></div>
       </div>`;
   }
 }
 
-async function advanceDrumming(state, reasons, render) {
-  const msg = document.getElementById('dw-msg');
+async function advanceDrummingWizard(state, reasons, packagingOptions) {
+  const msg  = document.getElementById('dw-msg');
+  const step = dwStepName(state);
   if (msg) msg.textContent = '';
 
-  if (state.phase === 1) {
+  if (step === 'customer') {
+    const custNum = document.getElementById('dw-cust-num')?.value.trim();
+    if (!custNum) { if (msg) msg.textContent = 'Customer number is required.'; return; }
+    state.customerNumber = custNum;
+    state.orderNumber    = document.getElementById('dw-order-num')?.value.trim() || '';
+
+  } else if (step === 'details') {
     const mat = document.getElementById('dw-material')?.value.trim();
-    if (!mat) { if(msg) msg.textContent = 'Material number is required.'; return; }
-    state.material = mat;
-    // Fetch BOM
-    const bomEl = document.getElementById('dw-bom-result');
-    if (bomEl) bomEl.textContent = 'Fetching BOM…';
-    try {
-      const bomJson = await api('/drumming/bom', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ material: mat }),
-      });
-      state.bomComponents = bomJson.data || [];
-      if (bomEl) bomEl.textContent = state.bomComponents.length
-        ? `BOM loaded: ${state.bomComponents.map(c=>`${c.material||c.componentMaterial||''} (${c.quantityPer}/unit)`).join(', ')}`
-        : 'No BOM components returned — proceeding.';
-    } catch (_) {
-      if (bomEl) bomEl.textContent = 'BOM lookup unavailable — proceeding without validation.';
-    }
-
-  } else if (state.phase === 2) {
-    // parentBatches already maintained in state via add/remove buttons — nothing to read here
-
-  } else if (state.phase === 3) {
     const pkg = document.getElementById('dw-pkg')?.value;
-    if (!pkg) { if(msg) msg.textContent = 'Please select a packaging type.'; return; }
-    state.packagingType = pkg;
-    const psiChecked = document.getElementById('dw-test-chk')?.checked;
-    state.testPressurePSI = psiChecked ? (Number(document.getElementById('dw-psi')?.value) || null) : null;
+    const wt  = Number(document.getElementById('dw-weight')?.value);
+    if (!mat) { if (msg) msg.textContent = 'Material number is required.'; return; }
+    if (!pkg) { if (msg) msg.textContent = 'Please select a packaging type.'; return; }
+    if (!wt || wt <= 0) { if (msg) msg.textContent = 'Weight must be greater than zero.'; return; }
+    state.material    = mat;
+    state.packagingID = pkg;
+    state.weightKG    = wt;
 
-  } else if (state.phase === 4) {
-    // Collect latest values from inputs before advancing
+  } else if (step === 'traceability') {
+    // optional — nothing to validate
+
+  } else if (step === 'coils') {
     document.querySelectorAll('.dw-coil-input').forEach(inp => {
       state.coilLengths[Number(inp.dataset.idx)] = Number(inp.value);
     });
-    if (!state.coilLengths.length) { if(msg) msg.textContent = 'At least one coil length is required.'; return; }
+    if (!state.coilLengths.length) { if (msg) msg.textContent = 'At least one coil length is required.'; return; }
 
-  } else if (state.phase === 5) {
+  } else if (step === 'scrap') {
     state.hasScrap = document.getElementById('dw-has-scrap')?.checked || false;
     if (state.hasScrap) {
       state.scrapTotalKG = Number(document.getElementById('dw-scrap-kg')?.value) || 0;
-      if (!state.scrapTotalKG) { if(msg) msg.textContent = 'Enter total scrap weight.'; return; }
+      if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Enter total scrap weight.'; return; }
+      document.querySelectorAll('.dw-scrap-reason').forEach(sel => {
+        state.scrapReasons[Number(sel.dataset.idx)].reasonID = Number(sel.value);
+      });
+      document.querySelectorAll('.dw-scrap-occ').forEach(inp => {
+        state.scrapReasons[Number(inp.dataset.idx)].occurrences = Number(inp.value);
+      });
     }
 
-  } else if (state.phase === 6) {
-    // Final submission
-    state.salesOrderSAP = document.getElementById('dw-salesorder')?.value.trim() || '';
-    state.customerID    = document.getElementById('dw-customer')?.value.trim() || '';
-    state.notes         = document.getElementById('dw-comments')?.value.trim() || '';
+  } else if (step === 'review') {
+    state.comments = document.getElementById('dw-comments')?.value.trim() || '';
 
     const submitBtn = document.getElementById('dw-next');
     const resultEl  = document.getElementById('dw-submit-result');
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
+    const endpoint = state.type === 'customer' ? '/drumming/customer' : '/drumming/stock';
+
     try {
-      const json = await api('/drumming/entry', {
-        method:'POST', headers:{'Content-Type':'application/json'},
+      const json = await api(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          material:             state.material,
-          parentBatches:        state.parentBatches,
-          additionalOperatorIDs: state.additionalOperators.map(u => u.uid),
-          packagingType:        state.packagingType,
-          testPressurePSI:      state.testPressurePSI,
-          coilLengths:          state.coilLengths,
-          hasScrap:             state.hasScrap,
-          scrapTotalKG:         state.hasScrap ? state.scrapTotalKG : 0,
-          scrapReasons:         state.hasScrap ? state.scrapReasons : [],
-          salesOrderSAP:        state.salesOrderSAP || undefined,
-          customerID:           state.customerID    || undefined,
-          notes:                state.notes,
+          material:       state.material,
+          shiftID:        state.shiftID,
+          customerNumber: state.customerNumber || undefined,
+          orderNumber:    state.orderNumber    || undefined,
+          packagingID:    state.packagingID,
+          weightKG:       state.weightKG,
+          parentBatches:  state.parentBatches,
+          coilLengths:    state.coilLengths,
+          hasScrap:       state.hasScrap,
+          scrapTotalKG:   state.hasScrap ? state.scrapTotalKG : 0,
+          scrapReasons:   state.hasScrap ? state.scrapReasons : [],
+          comments:       state.comments,
         }),
       });
 
@@ -4084,11 +4095,11 @@ async function advanceDrumming(state, reasons, render) {
       resultEl.textContent = err.message;
       submitBtn.disabled = false; submitBtn.textContent = 'Submit & Post to SAP';
     }
-    return; // don't advance phase
+    return;
   }
 
   state.phase++;
-  render();
+  renderDrummingWizard(state, reasons, packagingOptions);
 }
 
 // ── FAILED BACKFLUSH QUEUE ────────────────────────────────────────────────────
@@ -4173,32 +4184,38 @@ async function openRetryModal(processCode, recordId, batchRef) {
     });
 
   } else if (pc === 'DR') {
+    const entryLabel = b.EntryType === 'customer' ? 'Make-to-Order' : 'Make-to-Stock';
+    const isMto     = b.EntryType === 'customer';
     editFields = `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+        SAP endpoint: <strong>${esc(entryLabel)}</strong> — will retry via <code>/drumming/${esc(b.EntryType || 'stock')}</code>
+      </div>
       <div class="tf-row">
         <div class="tf-field tf-field--wide"><label class="tf-label">Material</label>
           <input class="tf-input" id="rt-material" value="${esc(b.Material||'')}"></div>
-        <div class="tf-field"><label class="tf-label">Packaging Type</label>
-          <input class="tf-input" id="rt-pkg" value="${esc(b.PackagingType||'')}" placeholder="e.g. MD" style="width:90px"></div>
+        <div class="tf-field"><label class="tf-label">Packaging ID</label>
+          <input class="tf-input" id="rt-pkg" value="${esc(b.PackagingType||'')}" style="width:90px"></div>
       </div>
       <div class="tf-row">
-        <div class="tf-field"><label class="tf-label">Test Pressure (PSI)</label>
-          <input class="tf-input" id="rt-psi" type="number" step="0.1" value="${b.TestPressurePSI!=null?b.TestPressurePSI:''}" placeholder="—"></div>
-        <div class="tf-field"><label class="tf-label">Sales Order</label>
-          <input class="tf-input" id="rt-so" value="${esc(b.SalesOrderSAP||'')}"></div>
-        <div class="tf-field"><label class="tf-label">Customer</label>
-          <input class="tf-input" id="rt-customer" value="${esc(b.CustomerID||'')}"></div>
+        <div class="tf-field"><label class="tf-label">Weight (KG)</label>
+          <input class="tf-input" id="rt-wt" type="number" step="0.001" min="0" value="${b.WeightKG!=null?b.WeightKG:''}"></div>
+        ${isMto ? `
+        <div class="tf-field"><label class="tf-label">Customer Number</label>
+          <input class="tf-input" id="rt-cust" value="${esc(b.CustomerID||'')}"></div>
+        <div class="tf-field"><label class="tf-label">Order Number</label>
+          <input class="tf-input" id="rt-order" value="${esc(b.SalesOrderSAP||'')}"></div>` : ''}
       </div>
       <div class="tf-row">
-        <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
+        <div class="tf-field tf-field--wide"><label class="tf-label">Comments</label>
           <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
       </div>`;
     collectBody = () => ({
-      material:       document.getElementById('rt-material')?.value.trim() || undefined,
-      packagingType:  document.getElementById('rt-pkg')?.value.trim()      || undefined,
-      testPressurePSI:document.getElementById('rt-psi')?.value             ? Number(document.getElementById('rt-psi').value) : undefined,
-      salesOrderSAP:  document.getElementById('rt-so')?.value.trim()       || undefined,
-      customerID:     document.getElementById('rt-customer')?.value.trim() || undefined,
-      notes:          document.getElementById('rt-notes')?.value.trim()    || undefined,
+      material:       document.getElementById('rt-material')?.value.trim()  || undefined,
+      packagingID:    document.getElementById('rt-pkg')?.value.trim()       || undefined,
+      weightKG:       document.getElementById('rt-wt')?.value               ? Number(document.getElementById('rt-wt').value) : undefined,
+      customerNumber: document.getElementById('rt-cust')?.value?.trim()    || undefined,
+      orderNumber:    document.getElementById('rt-order')?.value?.trim()   || undefined,
+      comments:       document.getElementById('rt-notes')?.value.trim()    || undefined,
     });
 
   } else if (METRE_PCS.has(pc)) {

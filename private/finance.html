@@ -58,26 +58,39 @@
           <div class="tile-desc">SAP standard cost sheet per material via costing BAPI</div>
         </div>
 
-        <div class="sap-tile sap-tile--placeholder" data-fn="budgetOverview">
+        <div class="sap-tile sap-tile--live" data-fn="actualCosts">
           <div class="tile-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
             </svg>
           </div>
-          <span class="tile-badge tile-badge--soon">SOON</span>
-          <div class="tile-title">Budget Overview</div>
-          <div class="tile-desc">Department budget vs actual spend comparison</div>
+          <span class="tile-badge tile-badge--live">LIVE</span>
+          <div class="tile-title">Actual Costs</div>
+          <div class="tile-desc">GL account period balances with trend visualisation</div>
         </div>
 
-        <div class="sap-tile sap-tile--placeholder" data-fn="profitCentre">
+        <div class="sap-tile sap-tile--live" data-fn="glGroupConfig">
           <div class="tile-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
             </svg>
           </div>
-          <span class="tile-badge tile-badge--soon">SOON</span>
-          <div class="tile-title">Profit Centre</div>
-          <div class="tile-desc">Profit centre reporting and allocation analysis</div>
+          <span class="tile-badge tile-badge--live">LIVE</span>
+          <div class="tile-title">GL Account Groups</div>
+          <div class="tile-desc">Configure named GL account groups for use in Actual Costs</div>
+        </div>
+
+        <div class="sap-tile sap-tile--live" data-fn="profitCenterData">
+          <div class="tile-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/>
+              <line x1="7" y1="11.5" x2="17" y2="6.5"/><line x1="7" y1="12.5" x2="17" y2="17.5"/>
+            </svg>
+          </div>
+          <span class="tile-badge tile-badge--live">LIVE</span>
+          <div class="tile-title">Profit Center Data</div>
+          <div class="tile-desc">GL postings by profit center, invoice &amp; material · date range</div>
         </div>
 
         <div class="sap-tile sap-tile--placeholder" data-fn="costCentre">
@@ -142,6 +155,7 @@
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
   <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="./js/finance.js"></script>
 </body>
 </html>
