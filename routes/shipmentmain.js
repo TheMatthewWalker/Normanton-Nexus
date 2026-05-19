@@ -1986,6 +1986,8 @@ router.get('/:shipmentId/details', async (req, res) => {
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
         SELECT sm.*,
+          sm.PlannedDelivery   AS plannedDelivery,
+          sm.ActualDelivery    AS actualDelivery,
           CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
           CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
           CAST(ISNULL(sm.deliveryStatus,   0) AS bit) AS deliveryStatus,
@@ -2277,6 +2279,8 @@ router.get('/search', async (req, res) => {
 
     const result = await request.query(`
       SELECT sm.*,
+        sm.PlannedDelivery   AS plannedDelivery,
+        sm.ActualDelivery    AS actualDelivery,
         CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
         CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
         CAST(ISNULL(sm.deliveryStatus,   0) AS bit) AS deliveryStatus,
