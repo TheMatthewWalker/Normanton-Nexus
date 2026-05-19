@@ -148,12 +148,17 @@ router.get('/completed-unshipped', async (req, res) => {
                            CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount,
                            CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
                            d.destinationName, d.destinationStreet, d.destinationCity,
-                           d.destinationPostCode, d.destinationCountry, e.address,
-                           d.defaultIncoterms, d.defaultForwarder, dm.incoterms
+                           d.destinationPostCode, d.destinationCountry,
+                           d.defaultIncoterms, d.defaultForwarder, dm.incoterms,
+                           STUFF((
+                               SELECT '; ' + e.address
+                               FROM Logistics.dbo.Email e
+                               WHERE e.ID = dm.customerID
+                               FOR XML PATH('')
+                           ), 1, 2, '') AS address
                     FROM Logistics.dbo.DeliveryMain dm
                     LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
                     LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
-                    LEFT JOIN Logistics.dbo.Email e ON e.ID = dm.customerID
                     WHERE dm.completionStatus = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
                       AND sl.deliveryID IS NULL
@@ -212,14 +217,39 @@ router.get('/:deliveryId/pallets', async (req, res) => {
     }
 });
 
-// ── Mark delivery as complete ──
+// ── Mark delivery as complete — rolls up pallet weights/volume/count ──
 router.patch('/:deliveryId/complete', async (req, res) => {
     try {
         const pool = await getPool();
         await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .query(`UPDATE Logistics.dbo.DeliveryMain
-                    SET completionStatus = 1, completionDate = GETDATE()
+                    SET completionStatus = 1,
+                        completionDate   = GETDATE(),
+                        palletCount = (
+                            SELECT COUNT(*)
+                            FROM Logistics.dbo.PalletMain pm
+                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                        ),
+                        grossWeight = (
+                            SELECT ISNULL(SUM(pm.grossWeight), 0)
+                            FROM Logistics.dbo.PalletMain pm
+                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                        ),
+                        netWeight = (
+                            SELECT ISNULL(SUM(pm.grossWeight - ISNULL(pm.packagingWeight, 0)), 0)
+                            FROM Logistics.dbo.PalletMain pm
+                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                        ),
+                        deliveryVolume = (
+                            SELECT ISNULL(SUM(pm.palletVolume), 0)
+                            FROM Logistics.dbo.PalletMain pm
+                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                        )
                     WHERE deliveryID = @deliveryId`);
         res.json({ success: true });
     } catch (err) {

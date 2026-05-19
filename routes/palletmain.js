@@ -99,10 +99,11 @@ router.post('/', async (req, res) => {
     }
 });
 
-// ── Update pallet fields (finish, location, weights) ──
+// ── Update pallet fields ──
 router.patch('/:palletId', async (req, res) => {
     const { palletFinish, palletLocation, palletCategory,
-            grossWeight, packagingWeight, palletVolume, palletRemoved, palletHeight } = req.body;
+            grossWeight, packagingWeight, palletVolume, palletRemoved,
+            palletType, palletLength, palletWidth, palletHeight } = req.body;
     try {
         const pool    = await getPool();
         const request = pool.request().input('palletId', sql.Int, req.params.palletId);
@@ -140,6 +141,18 @@ router.patch('/:palletId', async (req, res) => {
         if (palletRemoved !== undefined) {
             request.input('palletRemoved', sql.Bit, palletRemoved ? 1 : 0);
             sets.push('palletRemoved = @palletRemoved');
+        }
+        if (palletType !== undefined) {
+            request.input('palletType', sql.NVarChar, palletType);
+            sets.push('palletType = @palletType');
+        }
+        if (palletLength !== undefined) {
+            request.input('palletLength', sql.Int, palletLength);
+            sets.push('palletLength = @palletLength');
+        }
+        if (palletWidth !== undefined) {
+            request.input('palletWidth', sql.Int, palletWidth);
+            sets.push('palletWidth = @palletWidth');
         }
 
         if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });

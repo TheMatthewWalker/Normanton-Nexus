@@ -582,7 +582,7 @@ async function submitCustomsDocuments() {
 async function cancelSelectedShipments() {
   const rows = getSelectedBookingRows();
   if (!rows.length) return;
-  if (!window.confirm(`Cancel ${rows.length} shipment(s)? This will unlink the deliveries and return them to Open Deliveries.`)) return;
+  if (!await wConfirmLg({ title: 'Cancel Shipments', message: `Cancel ${rows.length} shipment(s)? This will unlink the deliveries and return them to Open Deliveries.`, confirmText: 'Cancel Shipments', variant: 'danger' })) return;
   const button = document.getElementById('booking-cancel-btn');
   const msg = document.getElementById('booking-selection-msg');
   const originalText = button.textContent;
@@ -959,18 +959,400 @@ async function runShipmentAction(action, resultId, showLinks = false) {
     if (showLinks) { result.textContent = json.data.folderPath; document.getElementById('lg-doc-links').innerHTML = (json.data.files || []).map(file => `<a class="lg-doc-link" target="_blank" href="${esc(file.downloadUrl)}">${esc(file.fileName)}</a>`).join(''); }
   } catch (err) { result.textContent = err.message; }
 }
+// ── Pallet management ─────────────────────────────────────────────────────────
+let _lgPalletCtx   = null;
+let _lgPalletTypes = [];
+let _lgSelPType    = null;
+
 async function showPickedPallets(deliveryId, destName) {
   if (!await checkSession()) return;
-  openModal(`<div class="ps-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">Picked Pallets</div><div class="ps-modal-sub">Delivery #${esc(deliveryId)} - ${esc(destName)}</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="sap-loading"><div class="spinner"></div>Fetching pallets...</div></div><div class="ps-modal-actions"><button class="btn-submit" onclick="closePickModal()">Close</button></div></div>`);
+  _lgPalletCtx   = { deliveryId, destName };
+  _lgPalletTypes = [];
+  _lgSelPType    = null;
+  await showLgPalletList();
+}
+
+async function showLgPalletList() {
+  const { deliveryId, destName } = _lgPalletCtx || {};
+  openModal(`<div class="ps-modal" style="max-width:800px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Picked Pallets</div>
+        <div class="ps-modal-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">✕</button>
+    </div>
+    <div class="ps-modal-body" id="lg-pallet-body"
+      style="padding:0;max-height:480px;overflow-y:auto">
+      <div class="sap-loading"><div class="spinner"></div>Loading pallets…</div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closePickModal()">Close</button>
+      <button class="btn-submit" onclick="openLgAddPalletView()">+ Add Pallet</button>
+    </div>
+  </div>`);
+  await refreshLgPallets();
+}
+
+async function refreshLgPallets() {
+  const body = document.getElementById('lg-pallet-body');
+  if (!body) return;
+  const { deliveryId } = _lgPalletCtx || {};
   try {
-    const res = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/pallets`); const json = await res.json(); if (!json.success) throw new Error(json.error || 'Failed to load pallets');
-    const body = document.querySelector('#ps-modal-overlay .ps-modal-body'); const pallets = json.data || [];
-    if (!pallets.length) { body.innerHTML = '<div class="sap-error" style="padding:24px">No pallets picked for this delivery yet.</div>'; return; }
-    body.innerHTML = `<table class="ps-pallet-table"><thead><tr><th>Type</th><th>Finished</th><th>Length</th><th>Width</th><th>Height</th><th>Gross Wt.</th><th>Location</th></tr></thead><tbody>${pallets.map(p => `<tr><td>${esc(p.palletType || '')}</td><td>${p.palletFinish ? 'Yes' : 'No'}</td><td>${esc(String(p.palletLength || ''))}</td><td>${esc(String(p.palletWidth || ''))}</td><td>${esc(String(p.palletHeight || ''))}</td><td>${esc(String(p.grossWeight || ''))}</td><td>${esc(p.palletLocation || '')}</td></tr>`).join('')}</tbody></table>`;
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/pallets`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load pallets');
+    const pallets = json.data || [];
+    if (!pallets.length) {
+      body.innerHTML = `<div class="ps-pcard-empty" style="padding:32px;text-align:center">
+        No pallets yet — click <strong>+ Add Pallet</strong> to create one.</div>`;
+      return;
+    }
+    body.innerHTML = `<div class="ps-pcard-list">${pallets.map(renderLgPalletCard).join('')}</div>`;
+    body.querySelectorAll('.ps-pcard-hdr').forEach(hdr =>
+      hdr.addEventListener('click', () => toggleLgPalletCard(hdr.closest('.ps-pcard')))
+    );
   } catch (err) {
-    document.querySelector('#ps-modal-overlay .ps-modal-body').innerHTML = `<div class="sap-error" style="padding:24px">${esc(err.message)}</div>`;
+    body.innerHTML = `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
   }
 }
+
+function renderLgPalletCard(p) {
+  const dims   = [p.palletLength, p.palletWidth, p.palletHeight].filter(Boolean).join('×');
+  const wt     = p.grossWeight != null ? `${Number(p.grossWeight).toFixed(1)} kg` : '—';
+  const status = p.palletFinish
+    ? `<span class="ps-pcard-badge ps-pcard-badge--done">Finished</span>`
+    : `<span class="ps-pcard-badge ps-pcard-badge--wip">In Progress</span>`;
+  return `
+    <div class="ps-pcard" data-palletid="${p.palletID}">
+      <div class="ps-pcard-hdr">
+        <span class="ps-pcard-type">${esc(p.palletType ?? '—')}</span>
+        ${dims ? `<span class="ps-pcard-dims">${dims} cm</span>` : ''}
+        <span class="ps-pcard-wt">${wt}</span>
+        ${p.palletLocation ? `<span class="ps-pcard-loc">${esc(p.palletLocation)}</span>` : ''}
+        ${status}
+        <button class="ps-pcard-btn" onclick="event.stopPropagation();openLgEditPalletView(${p.palletID})">Edit</button>
+        <button class="ps-pcard-btn ps-pcard-btn--delete" onclick="event.stopPropagation();deleteLgPallet(${p.palletID})">Delete</button>
+        <span class="ps-pcard-chevron">▼</span>
+      </div>
+      <div class="ps-pcard-body" id="lg-pcard-body-${p.palletID}" style="display:none"></div>
+    </div>`;
+}
+
+async function toggleLgPalletCard(card) {
+  const palletId = card.dataset.palletid;
+  const body     = document.getElementById(`lg-pcard-body-${palletId}`);
+  const isOpen   = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  card.querySelector('.ps-pcard-chevron').textContent = isOpen ? '▼' : '▲';
+  if (!isOpen && body.dataset.loaded !== '1') {
+    body.innerHTML = `<div class="ps-pcard-empty"><div class="spinner" style="width:12px;height:12px;display:inline-block;margin-right:6px"></div>Loading…</div>`;
+    await loadLgPalletPackages(palletId, body);
+    body.dataset.loaded = '1';
+  }
+}
+
+async function loadLgPalletPackages(palletId, bodyEl) {
+  try {
+    const res  = await fetch(`/api/palletpackages/pallet/${encodeURIComponent(palletId)}`);
+    const json = await res.json();
+    const pkgs = json.data || [];
+    if (!pkgs.length) {
+      bodyEl.innerHTML = `<div class="ps-pcard-empty">No packages on this pallet.</div>`;
+      return;
+    }
+    bodyEl.innerHTML = `
+      <table class="ps-pcard-tbl">
+        <thead><tr>
+          <th>Layer</th><th>Type</th><th>Material</th>
+          <th>Qty</th><th>Batch</th><th>SAP Delivery</th><th></th>
+        </tr></thead>
+        <tbody>${pkgs.map(pkg => `<tr>
+          <td>${esc(String(pkg.palletLayer ?? '—'))}</td>
+          <td>${esc(pkg.packDescription || pkg.packagingID || '—')}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapMaterial || '—')}</td>
+          <td class="ps-pcard-mono">${pkg.sapQuantity != null ? Number(pkg.sapQuantity).toFixed(3) : '—'}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapBatch || '—')}</td>
+          <td class="ps-pcard-mono">${esc(pkg.sapDelivery || '—')}</td>
+          <td><button class="ps-pcard-del" title="Remove"
+            onclick="removeLgPackage(${pkg.palletItemID}, ${palletId})">✕</button></td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+  } catch (err) {
+    bodyEl.innerHTML = `<div class="ps-pcard-empty" style="color:var(--error)">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+async function removeLgPackage(palletItemId, palletId) {
+  if (!await wConfirmLg({ title: 'Remove Package', message: 'Remove this package from the pallet?', confirmText: 'Remove', variant: 'danger' })) return;
+  try {
+    const res  = await fetch(`/api/palletpackages/${palletItemId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
+    const bodyEl = document.getElementById(`lg-pcard-body-${palletId}`);
+    if (bodyEl) { bodyEl.dataset.loaded = '0'; await loadLgPalletPackages(palletId, bodyEl); bodyEl.dataset.loaded = '1'; }
+  } catch (err) { wAlertLg(err.message); }
+}
+
+async function deleteLgPallet(palletId) {
+  if (!await wConfirmLg({ title: 'Delete Pallet', message: 'Delete this pallet and all its packages?\nThis cannot be undone.', confirmText: 'Delete', variant: 'danger' })) return;
+  try {
+    const res  = await fetch(`/api/palletmain/${palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletRemoved: 1 }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
+    await showLgPalletList();
+  } catch (err) { wAlertLg(err.message); }
+}
+
+async function openLgEditPalletView(palletId) {
+  const { deliveryId, destName } = _lgPalletCtx || {};
+  openModal(`<div class="ps-modal" style="max-width:560px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Edit Pallet <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent)">#${palletId}</span></div>
+        <div class="ps-modal-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">✕</button>
+    </div>
+    <div class="ps-modal-body" id="lg-edit-pallet-body">
+      <div class="sap-loading"><div class="spinner"></div>Loading…</div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="showLgPalletList()">← Back</button>
+      <button class="btn-submit" id="lg-edit-pallet-save" disabled>Save Changes</button>
+    </div>
+  </div>`);
+  try {
+    if (!_lgPalletTypes.length) {
+      const ptRes = await fetch('/api/palletdata').then(r => r.json());
+      _lgPalletTypes = ptRes.data || ptRes;
+    }
+    const palRes = await fetch(`/api/palletmain/id/${palletId}`).then(r => r.json());
+    const pallet = (palRes.data || palRes)[0];
+    if (!pallet) throw new Error('Pallet not found');
+
+    const typeOptions = _lgPalletTypes.map(t =>
+      `<option value="${esc(t.palletID)}" ${t.palletID === pallet.palletType ? 'selected' : ''}
+        data-l="${t.palletLength ?? ''}" data-w="${t.palletWidth ?? ''}" data-h="${t.palletHeight ?? ''}"
+      >${esc(t.palletID)} — ${esc(t.palletDescription || '')}</option>`
+    ).join('');
+
+    document.getElementById('lg-edit-pallet-body').innerHTML = `
+      <form class="transfer-form" style="padding:0">
+        <div class="tf-section-label">Pallet Properties</div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Type <span class="tf-req">*</span></label>
+            <select class="tf-input" id="lg-ep-type">
+              <option value="">— Select —</option>${typeOptions}
+            </select>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Location</label>
+            <input class="tf-input" id="lg-ep-location" type="text" maxlength="50"
+              placeholder="e.g. WH-A1" value="${esc(pallet.palletLocation ?? '')}">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Gross Weight (kg)</label>
+            <input class="tf-input" id="lg-ep-weight" type="number" step="0.001" min="0"
+              value="${pallet.grossWeight ?? ''}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Length (cm)</label>
+            <input class="tf-input" id="lg-ep-length" type="number" step="1" min="0"
+              value="${pallet.palletLength ?? ''}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Width (cm)</label>
+            <input class="tf-input" id="lg-ep-width" type="number" step="1" min="0"
+              value="${pallet.palletWidth ?? ''}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Height (cm)</label>
+            <input class="tf-input" id="lg-ep-height" type="number" step="1" min="0"
+              value="${pallet.palletHeight ?? ''}">
+          </div>
+        </div>
+        <div class="tf-row">
+          <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
+            <input type="checkbox" id="lg-ep-finished" style="width:16px;height:16px"
+              ${pallet.palletFinish ? 'checked' : ''}>
+            Mark as Finished
+          </label>
+        </div>
+        <div id="lg-ep-result" style="margin-top:10px"></div>
+      </form>`;
+
+    document.getElementById('lg-ep-type').addEventListener('change', function () {
+      const opt = this.options[this.selectedIndex];
+      if (opt.dataset.l) document.getElementById('lg-ep-length').value = opt.dataset.l;
+      if (opt.dataset.w) document.getElementById('lg-ep-width').value  = opt.dataset.w;
+      if (opt.dataset.h) document.getElementById('lg-ep-height').value = opt.dataset.h;
+    });
+
+    const saveBtn = document.getElementById('lg-edit-pallet-save');
+    saveBtn.disabled = false;
+    saveBtn.addEventListener('click', async () => {
+      const payload = {
+        palletType:     document.getElementById('lg-ep-type').value || undefined,
+        palletLocation: document.getElementById('lg-ep-location').value.trim() || null,
+        grossWeight:    parseFloat(document.getElementById('lg-ep-weight').value)  || undefined,
+        palletLength:   parseInt(document.getElementById('lg-ep-length').value, 10) || undefined,
+        palletWidth:    parseInt(document.getElementById('lg-ep-width').value,  10) || undefined,
+        palletHeight:   parseInt(document.getElementById('lg-ep-height').value, 10) || undefined,
+        palletFinish:   document.getElementById('lg-ep-finished').checked ? 1 : 0,
+      };
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+      try {
+        const res  = await fetch(`/api/palletmain/${palletId}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error || 'Save failed');
+        await showLgPalletList();
+      } catch (err) {
+        document.getElementById('lg-ep-result').innerHTML =
+          `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+        saveBtn.disabled = false; saveBtn.textContent = 'Save Changes';
+      }
+    });
+  } catch (err) {
+    document.getElementById('lg-edit-pallet-body').innerHTML =
+      `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+async function openLgAddPalletView() {
+  const { deliveryId, destName } = _lgPalletCtx || {};
+  openModal(`<div class="ps-modal" style="max-width:640px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Add Pallet</div>
+        <div class="ps-modal-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">✕</button>
+    </div>
+    <div class="ps-modal-body" id="lg-add-pallet-body">
+      <div class="sap-loading"><div class="spinner"></div>Loading pallet types…</div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="showLgPalletList()">← Back</button>
+      <button class="btn-submit" id="lg-add-create-btn" disabled onclick="createLgPallet()">Create Pallet →</button>
+    </div>
+  </div>`);
+  try {
+    if (!_lgPalletTypes.length) {
+      const ptRes    = await fetch('/api/palletdata').then(r => r.json());
+      _lgPalletTypes = ptRes.data || ptRes;
+    }
+    _lgSelPType = null;
+    const typeCards = _lgPalletTypes.map(t => {
+      const dims = [t.palletLength, t.palletWidth, t.palletHeight].filter(Boolean).join('×');
+      return `<div class="lg-ptype-card" data-id="${esc(t.palletID)}"
+        onclick="selectLgPalletType('${esc(t.palletID)}')">
+        <div class="lg-ptype-code">${esc(t.palletID)}</div>
+        <div class="lg-ptype-desc">${esc(t.palletDescription || '')}</div>
+        ${dims ? `<div class="lg-ptype-dims">${dims} cm</div>` : ''}
+        ${t.palletWeight != null ? `<div class="lg-ptype-dims">${t.palletWeight} kg</div>` : ''}
+      </div>`;
+    }).join('');
+    document.getElementById('lg-add-pallet-body').innerHTML = `
+      <div style="padding:16px 16px 0">
+        <div class="tf-section-label" style="margin-bottom:12px">Select Pallet Type</div>
+        <div class="lg-ptype-grid">${typeCards}</div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Location <span class="tf-optional">(optional)</span></label>
+            <input class="tf-input" id="lg-add-location" type="text"
+              maxlength="50" placeholder="e.g. WH-A1" autocomplete="off">
+          </div>
+        </div>
+        <div id="lg-add-result" style="margin-top:8px"></div>
+      </div>`;
+  } catch (err) {
+    document.getElementById('lg-add-pallet-body').innerHTML =
+      `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function selectLgPalletType(typeId) {
+  _lgSelPType = typeId;
+  document.querySelectorAll('.lg-ptype-card').forEach(c =>
+    c.classList.toggle('selected', c.dataset.id === typeId)
+  );
+  const btn = document.getElementById('lg-add-create-btn');
+  if (btn) btn.disabled = false;
+}
+
+async function createLgPallet() {
+  if (!_lgSelPType) return;
+  const { deliveryId } = _lgPalletCtx || {};
+  const td       = _lgPalletTypes.find(t => t.palletID === _lgSelPType);
+  const location = document.getElementById('lg-add-location')?.value.trim() || null;
+  const btn      = document.getElementById('lg-add-create-btn');
+  const resultEl = document.getElementById('lg-add-result');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const palRes  = await fetch('/api/palletmain', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        palletType: _lgSelPType, palletFinish: 0,
+        packagingWeight: Number(td?.palletWeight || 0), grossWeight: 0, palletVolume: 0,
+        palletLength: td?.palletLength ?? null, palletWidth: td?.palletWidth ?? null,
+        palletHeight: td?.palletHeight ?? null, palletRemoved: 0, palletCategory: null,
+        palletLocation: location, palletCreationDate: new Date().toISOString(), palletFinishDate: null,
+      }),
+    });
+    const palJson = await palRes.json();
+    if (!palRes.ok) throw new Error(palJson.error || 'Failed to create pallet');
+
+    const linkRes  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/pallets`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletId: palJson.palletID }),
+    });
+    const linkJson = await linkRes.json();
+    if (!linkRes.ok) throw new Error(linkJson.error || 'Failed to link pallet');
+    await showLgPalletList();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    btn.disabled = false; btn.textContent = 'Create Pallet →';
+  }
+}
+
+function wAlertLg(message, title = 'Error') {
+  return wConfirmLg({ title, message, confirmText: 'OK', variant: 'danger' });
+}
+
+function wConfirmLg({ title, message, confirmText = 'Confirm', variant = '' }) {
+  return new Promise(resolve => {
+    document.getElementById('wc-lg-modal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'wc-lg-modal'; overlay.className = 'wc-overlay';
+    const icon = variant === 'danger' ? '⚠' : variant === 'success' ? '✓' : '?';
+    overlay.innerHTML = `
+      <div class="wc-modal">
+        <div class="wc-icon">${icon}</div>
+        <div class="wc-title">${esc(title)}</div>
+        <div class="wc-message">${esc(message).replace(/\n/g, '<br>')}</div>
+        <div class="wc-actions">
+          <button class="wc-btn-cancel">Cancel</button>
+          <button class="wc-btn-confirm${variant ? ' wc-btn-confirm--' + variant : ''}">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = r => { overlay.remove(); resolve(r); };
+    overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => close(false));
+    overlay.querySelector('.wc-btn-confirm').addEventListener('click', () => close(true));
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+  });
+}
+
 // ── Awaiting Collection — grouped/sorted renderer ─────────────────────────────
 
 function renderAwaitingCollection() {
@@ -1361,7 +1743,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
 
   // Packing list
   document.getElementById('sd-packing-list-btn').addEventListener('click', async () => {
-    if (!window.confirm('This will overwrite any existing packing list files for this shipment. Continue?')) return;
+    if (!await wConfirmLg({ title: 'Generate Packing List', message: 'This will overwrite any existing packing list files for this shipment. Continue?', confirmText: 'Generate', variant: '' })) return;
     const result = document.getElementById('sd-packing-list-result');
     result.textContent = 'Generating…';
     try {
@@ -1504,7 +1886,7 @@ function renderShipmentDeliveriesPanel(shipmentId, shipment, deliveries, availab
         ? 'This is the last delivery — removing it will cancel the entire shipment. Continue?'
         : 'Remove this delivery from the shipment?';
       if (customsComplete) msg = 'Warning: customs is already complete for this shipment. Removing this delivery may require re-submission.\n\n' + msg;
-      if (!window.confirm(msg)) return;
+      if (!await wConfirmLg({ title: 'Remove Delivery', message: msg, confirmText: 'Remove', variant: 'danger' })) return;
       btn.disabled = true;
       const result = document.getElementById('sd-remove-result');
       try {
@@ -1926,7 +2308,7 @@ async function runUpdateDestinations() {
           setTimeout(() => { btn.disabled = false; btn.textContent = original; }, 1200);
         } catch (err) {
           btn.disabled = false; btn.textContent = original;
-          alert(`✕ ${err.message}`);
+          wAlertLg(err.message);
         }
       });
     });
@@ -1934,7 +2316,7 @@ async function runUpdateDestinations() {
     // ── Bulk delete ───────────────────────────────────────────────────────────
     document.getElementById('dest-bulk-delete').addEventListener('click', async () => {
       if (!selectedIds.size) return;
-      if (!confirm(`Permanently delete ${selectedIds.size} destination${selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.`)) return;
+      if (!await wConfirmLg({ title: 'Delete Destinations', message: `Permanently delete ${selectedIds.size} destination${selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.`, confirmText: 'Delete', variant: 'danger' })) return;
       const btn = document.getElementById('dest-bulk-delete');
       btn.disabled = true; btn.textContent = 'Deleting…';
       try {
@@ -1948,7 +2330,7 @@ async function runUpdateDestinations() {
         runUpdateDestinations();
       } catch (err) {
         btn.disabled = false; btn.textContent = 'Delete Selected';
-        alert(`✕ ${err.message}`);
+        wAlertLg(err.message);
       }
     });
 
