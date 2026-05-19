@@ -35,7 +35,7 @@ router.get('/approved', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT DISTINCT forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1');
+            .query('SELECT forwarderID, forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1 ORDER BY forwarderName');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
