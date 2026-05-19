@@ -1656,7 +1656,7 @@ router.post('/:shipmentId/mark-delivered', requirePermission('LOG_PLANNING'), as
       .input('actualDelivery', sql.DateTime, actualDelivery)
       .query(`
         UPDATE Logistics.dbo.ShipmentMain
-        SET deliveryStatus = 1, actualDelivery = @actualDelivery
+        SET deliveryStatus = 1, actualDelivery = COALESCE(@actualDelivery, GETDATE())
         WHERE shipmentID = @shipmentId
           AND ISNULL(shipmentCancelled, 0) = 0
           AND ISNULL(collectionStatus,  0) = 1
@@ -1672,7 +1672,7 @@ router.post('/:shipmentId/mark-delivered', requirePermission('LOG_PLANNING'), as
 
     const username = req.session?.user?.username || 'unknown';
     await writeShipmentEvent(pool, shipmentId, 'DELIVERED',
-      `Delivered on ${actualDelivery.toLocaleDateString('en-GB')} â€” confirmed by ${username}`);
+      `Delivered on ${actualDelivery.toLocaleDateString('en-GB')} - confirmed by ${username}`);
     res.json({ success: true });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
@@ -2164,13 +2164,21 @@ router.patch('/:shipmentId/status-dates', requirePermission('LOG_PLANNING'), asy
       sets.push(`${col} = @${key}`);
     };
 
-    addDate('plannedCollection', 'plannedCollection');
-    addDate('actualCollection',  'actualCollection');
-    addBit ('collectionStatus',  'collectionStatus');
-    addDate('plannedDelivery',   'plannedDelivery');
-    addDate('actualDelivery',    'actualDelivery');
-    addBit ('deliveryStatus',    'deliveryStatus');
     addBit ('bookingStatus',     'bookingStatus');
+    addDate('plannedCollection', 'plannedCollection');
+    addBit ('collectionStatus',  'collectionStatus');
+    addDate('actualCollection',  'actualCollection');
+    // If marking collected but no actual date given, default to now
+    if (req.body.collectionStatus && !req.body.actualCollection) {
+      sets.push('actualCollection = COALESCE(actualCollection, GETDATE())');
+    }
+    addDate('plannedDelivery',   'plannedDelivery');
+    addBit ('deliveryStatus',    'deliveryStatus');
+    addDate('actualDelivery',    'actualDelivery');
+    // If marking delivered but no actual date given, default to now
+    if (req.body.deliveryStatus && !req.body.actualDelivery) {
+      sets.push('actualDelivery = COALESCE(actualDelivery, GETDATE())');
+    }
 
     if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
 

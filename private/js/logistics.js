@@ -2659,6 +2659,16 @@ async function openShipmentStatusEdit(shipmentId, shipmentRef) {
         <div id="sse-result" style="margin-top:10px;font-size:13px"></div>
       </form>`;
 
+    // Auto-fill actual dates when status checkboxes are ticked and date is empty
+    document.getElementById('sse-col-status').addEventListener('change', function () {
+      const actCol = document.getElementById('sse-act-col');
+      if (this.checked && !actCol.value) actCol.value = new Date().toISOString().slice(0, 10);
+    });
+    document.getElementById('sse-del-status').addEventListener('change', function () {
+      const actDel = document.getElementById('sse-act-del');
+      if (this.checked && !actDel.value) actDel.value = new Date().toISOString().slice(0, 10);
+    });
+
     const saveBtn = document.getElementById('sse-save');
     saveBtn.disabled = false;
     saveBtn.addEventListener('click', async () => {
