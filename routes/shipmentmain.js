@@ -1986,8 +1986,11 @@ router.get('/:shipmentId/details', async (req, res) => {
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
         SELECT sm.*,
-          CAST(ISNULL(sm.customsRequired, 0) AS bit) AS customsRequired,
-          CAST(ISNULL(sm.customsComplete, 0)  AS bit) AS customsComplete,
+          CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
+          CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
+          CAST(ISNULL(sm.deliveryStatus,   0) AS bit) AS deliveryStatus,
+          CAST(ISNULL(sm.customsRequired,  0) AS bit) AS customsRequired,
+          CAST(ISNULL(sm.customsComplete,  0) AS bit) AS customsComplete,
           fa.forwarderName
         FROM Logistics.dbo.ShipmentMain sm
         OUTER APPLY (

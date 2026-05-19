@@ -2598,10 +2598,10 @@ async function openShipmentStatusEdit(shipmentId, shipmentRef) {
   </div>`);
 
   try {
-    const res  = await fetch(`/api/shipmentmain/id/${encodeURIComponent(shipmentId)}`);
+    const res  = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/details`);
     const json = await res.json();
-    const s    = Array.isArray(json) ? json[0] : json;
-    if (!s) throw new Error('Shipment not found');
+    if (!json.success) throw new Error(json.error || 'Shipment not found');
+    const s = json.data.shipment;
 
     const fmt = d => d ? new Date(d).toISOString().slice(0, 10) : '';
 
