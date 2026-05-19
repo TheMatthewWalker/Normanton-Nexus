@@ -15,6 +15,7 @@ let allForwarders = null;
 let customsBatchNotice = null;
 let userPermissions = [];
 let sessionRole     = '';
+let sessionUsername = '';
 
 
 const BUCKETS = [
@@ -63,6 +64,7 @@ const SHIPMENT_VIEWS = {
   document.getElementById('session-user').textContent = d.username;
   sessionRole     = d.role        || '';
   userPermissions = d.permissions || [];
+  sessionUsername = d.username    || '';
   applyPermissionVisibility();
   setupTiles();
 })();
@@ -86,6 +88,7 @@ function setupTiles() {
       if (fn === 'customsDocs')         runCustomsDocuments();
       if (fn === 'completedShipments')  runCompletedShipments();
       if (fn === 'customerSpecifics')   runCustomerSpecifics();
+      if (fn === 'shipmentSearch')      runShipmentSearch();
       if (fn === 'updatePalletData')    runUpdatePalletData();
       if (fn === 'updatePackagingData') runUpdatePackagingData();
       if (fn === 'updateDestinations')  runUpdateDestinations();
@@ -416,26 +419,79 @@ function bindCustomsDocumentsEvents() {
 
 
 async function updateShipmentQueueStatus(mode, button) {
-  const view = SHIPMENT_VIEWS[mode];
+  const view       = SHIPMENT_VIEWS[mode];
   const shipmentId = button.dataset.id;
+
+  // Mark-delivered always prompts for the actual delivery date first
+  if (view.actionRoute === 'mark-delivered') {
+    openMarkDeliveredModal(shipmentId, mode);
+    return;
+  }
+
   const originalText = button.textContent;
   const msg = document.getElementById('shipment-queue-msg');
   button.disabled = true;
   button.textContent = 'Working...';
   if (msg) msg.classList.add('hidden');
   try {
-    const res = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/${view.actionRoute}`, { method: 'POST' });
+    const res  = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/${view.actionRoute}`, { method: 'POST' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
     await runShipmentQueue(mode);
   } catch (err) {
     button.disabled = false;
     button.textContent = originalText;
-    if (msg) {
-      msg.textContent = err.message;
-      msg.classList.remove('hidden');
-    }
+    if (msg) { msg.textContent = err.message; msg.classList.remove('hidden'); }
   }
+}
+
+function openMarkDeliveredModal(shipmentId, mode) {
+  const today = new Date().toISOString().slice(0, 10);
+  openModal(`<div class="ps-modal" style="max-width:420px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Mark as Delivered</div>
+        <div class="ps-modal-sub">Shipment #${String(shipmentId).padStart(8, '0')}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="transfer-form" style="padding:0">
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Actual Delivery Date <span class="tf-req">*</span></label>
+            <input class="tf-input" id="md-date" type="date" value="${today}" required>
+          </div>
+        </div>
+        <div id="md-result" style="margin-top:8px;font-size:13px;color:var(--error)"></div>
+      </div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button class="btn-submit" id="md-confirm">Confirm Delivered</button>
+    </div>
+  </div>`);
+
+  document.getElementById('md-confirm').addEventListener('click', async () => {
+    const date    = document.getElementById('md-date').value;
+    const resultEl= document.getElementById('md-result');
+    const btn     = document.getElementById('md-confirm');
+    if (!date) { resultEl.textContent = 'Please select a date.'; return; }
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res  = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/mark-delivered`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actualDelivery: date }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Update failed');
+      closePickModal();
+      await runShipmentQueue(mode);
+    } catch (err) {
+      resultEl.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Confirm Delivered';
+    }
+  });
 }
 
 
@@ -718,10 +774,11 @@ function getBookingRowsWithInputs() {
     shipmentID: row.shipmentID,
     shipmentRef: String(row.shipmentID || '').padStart(8, '0'),
     destinationName: row.destinationName || row.originName || '-',
-    plannedCollection: document.getElementById(`booking-date-${row.shipmentID}`)?.value || '',
-    trackingNumber: document.getElementById(`booking-track-${row.shipmentID}`)?.value.trim() || '',
-    forwarderID: document.getElementById(`booking-forwarder-${row.shipmentID}`)?.value || row.forwarderID || '',
-    forwarderName: document.getElementById(`booking-forwarder-${row.shipmentID}`)?.selectedOptions?.[0]?.textContent?.trim() || row.forwarderName || '',
+    plannedCollection: document.getElementById(`booking-date-${row.shipmentID}`)?.value     || '',
+    plannedDelivery:   document.getElementById(`booking-delivery-${row.shipmentID}`)?.value  || '',
+    trackingNumber:    document.getElementById(`booking-track-${row.shipmentID}`)?.value.trim() || '',
+    forwarderID:       document.getElementById(`booking-forwarder-${row.shipmentID}`)?.value || row.forwarderID || '',
+    forwarderName:     document.getElementById(`booking-forwarder-${row.shipmentID}`)?.selectedOptions?.[0]?.textContent?.trim() || row.forwarderName || '',
   }));
 }
 
@@ -744,15 +801,63 @@ async function openBookingModal(rows, haulier) {
     const forwarderField = row.forwarderID && hasAssignedHaulier(row)
       ? `${esc(row.forwarderName || '')}`
       : `<select class="tf-input booking-inline-input" id="booking-forwarder-${esc(String(row.shipmentID))}"><option value="">Select haulier</option>${forwarders.map(item => `<option value="${esc(String(item.forwarderID))}">${esc(item.forwarderName || '')}</option>`).join('')}</select>`;
-    return `<tr><td>${esc(shipmentRef)}</td><td>${esc(row.destinationName || row.originName || '-')}</td><td>${forwarderField}</td><td><input class="tf-input booking-inline-input" type="date" id="booking-date-${esc(String(row.shipmentID))}" value="${esc(plannedDate ? new Date(plannedDate).toISOString().slice(0, 10) : '')}"></td><td><input class="tf-input booking-inline-input" type="text" id="booking-track-${esc(String(row.shipmentID))}" value="${esc(row.trackingNumber || '')}"></td></tr>`;
+    const collectionVal = plannedDate ? new Date(plannedDate).toISOString().slice(0, 10) : '';
+    const deliveryVal   = row.plannedDelivery ? new Date(row.plannedDelivery).toISOString().slice(0, 10) : '';
+    return `<tr>
+      <td>${esc(shipmentRef)}</td>
+      <td>${esc(row.destinationName || row.originName || '-')}</td>
+      <td>${forwarderField}</td>
+      <td><input class="tf-input booking-inline-input" type="date" id="booking-date-${esc(String(row.shipmentID))}"
+            value="${esc(collectionVal)}"
+            data-shipment="${esc(String(row.shipmentID))}"
+            data-country="${esc(row.destinationCountry || '')}"
+            data-postcode="${esc(row.destinationPostCode || '')}"></td>
+      <td><input class="tf-input booking-inline-input" type="date" id="booking-delivery-${esc(String(row.shipmentID))}"
+            value="${esc(deliveryVal)}" placeholder="Auto from route"></td>
+      <td><input class="tf-input booking-inline-input" type="text" id="booking-track-${esc(String(row.shipmentID))}"
+            value="${esc(row.trackingNumber || '')}"></td>
+    </tr>`;
   }).join('');
   const trackingHelp = isCustomerCollect
     ? 'Tracking number is optional for customer collect shipments.'
     : isKn
       ? 'Tracking will be taken from the Kuehne & Nagel API response where available.'
       : 'Tracking number is required for each shipment before booking can be confirmed.';
-  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Tracking Number</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
+  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
   document.getElementById('booking-submit-btn').addEventListener('click', submitBookingModal);
+
+  // Auto-populate planned delivery from route table, and update when collection date changes
+  rows.forEach(row => {
+    const collectionEl = document.getElementById(`booking-date-${row.shipmentID}`);
+    const deliveryEl   = document.getElementById(`booking-delivery-${row.shipmentID}`);
+    if (!collectionEl || !deliveryEl) return;
+
+    async function calcDelivery() {
+      const collectionDate = collectionEl.value;
+      if (!collectionDate) return;
+      try {
+        const country  = collectionEl.dataset.country;
+        const postcode = collectionEl.dataset.postcode;
+        if (!country) return;
+        const res  = await fetch(`/api/deliveryroutes/lookup?country=${encodeURIComponent(country)}&postcode=${encodeURIComponent(postcode)}`);
+        const json = await res.json();
+        if (!json.success || json.transitDays == null) return;
+        const base = new Date(collectionDate);
+        base.setDate(base.getDate() + json.transitDays);
+        // Only auto-fill if the delivery field is empty or hasn't been manually changed
+        if (!deliveryEl.dataset.userEdited) {
+          deliveryEl.value = base.toISOString().slice(0, 10);
+        }
+      } catch (_) {}
+    }
+
+    deliveryEl.addEventListener('change', () => { deliveryEl.dataset.userEdited = '1'; });
+    collectionEl.addEventListener('change', () => {
+      deliveryEl.dataset.userEdited = '';
+      calcDelivery();
+    });
+    calcDelivery(); // initial calculation
+  });
 }
 
 
@@ -1533,7 +1638,7 @@ function markCollectedBulk() {
       ${mixed ? `<div class="lg-selection-msg lg-selection-msg--warning" style="margin-bottom:16px">These shipments are assigned to different hauliers. Please confirm they are being collected together on the same vehicle.</div>` : ''}
       <div class="transfer-form">
         <div class="tf-row">
-          <div class="tf-field"><label class="tf-label">Operator Name</label><input class="tf-input" id="cl-operator" type="text" placeholder="e.g. Jim Smith"></div>
+          <div class="tf-field"><label class="tf-label">Operator Name</label><input class="tf-input" id="cl-operator" type="text" placeholder="e.g. Jim Smith" value="${esc(sessionUsername)}"></div>
           <div class="tf-field"><label class="tf-label">Driver Name</label><input class="tf-input" id="cl-driver" type="text" placeholder="e.g. Dave Jones"></div>
         </div>
         <div class="tf-row">
@@ -1691,7 +1796,10 @@ function renderShipmentDetailModal(shipment, deliveries) {
         </div>
       </div>
     </div>
-    <div class="ps-modal-actions"><button class="btn-secondary" onclick="closePickModal()">Close</button></div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="openShipmentEventLog(${shipment.shipmentID}, '${esc(shipmentRef)}')">Event Log</button>
+      <button class="btn-secondary" onclick="closePickModal()">Close</button>
+    </div>
   </div>`;
 
   // Load hauliers
@@ -2391,6 +2499,243 @@ async function runUpdateDestinations() {
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
   }
+}
+
+// ── Shipment Event Log ────────────────────────────────────────────────────────
+async function openShipmentEventLog(shipmentId, shipmentRef) {
+  openModal(`<div class="ps-modal" style="max-width:700px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Event Log</div>
+        <div class="ps-modal-sub">Shipment ${esc(String(shipmentRef))}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body" id="sd-events-body"
+      style="padding:0;max-height:500px;overflow-y:auto">
+      <div class="sap-loading"><div class="spinner"></div>Loading events…</div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">← Back</button>
+      <button class="btn-secondary" onclick="closePickModal()">Close</button>
+    </div>
+  </div>`);
+
+  const body = document.getElementById('sd-events-body');
+  try {
+    const res    = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/events`);
+    const json   = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load events');
+    const events = json.data || [];
+
+    if (!events.length) {
+      body.innerHTML = `<div class="ps-pcard-empty" style="padding:40px;text-align:center">
+        No events recorded for this shipment.</div>`;
+      return;
+    }
+
+    body.innerHTML = events.map(e => {
+      const ts   = new Date(e.timeStamp);
+      const date = ts.toLocaleDateString('en-GB');
+      const time = ts.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      return `<div style="display:flex;gap:14px;padding:12px 16px;border-bottom:1px solid var(--border)">
+        <div style="flex-shrink:0;text-align:right;min-width:80px;padding-top:1px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted)">${date}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-muted)">${time}</div>
+        </div>
+        <div style="flex-shrink:0;padding-top:2px">
+          <span class="ps-pcard-badge" style="${shipmentEventCategoryStyle(e.eventCategory)}">${esc(e.eventCategory)}</span>
+        </div>
+        <div style="font-size:13px;color:var(--text);line-height:1.5;word-break:break-word">
+          ${esc(e.eventDescription)}
+        </div>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function shipmentEventCategoryStyle(category) {
+  const c = String(category || '').toUpperCase();
+  if (c.includes('COLLECT') || c.includes('DISPATCH') || c.includes('CREAT'))
+    return 'background:rgba(124,58,237,.1);color:var(--accent);border-color:rgba(124,58,237,.25)';
+  if (c.includes('DELIVER') || c.includes('COMPLET') || c.includes('ARRIV'))
+    return 'background:rgba(5,150,105,.1);color:#059669;border-color:rgba(5,150,105,.25)';
+  if (c.includes('CANCEL') || c.includes('ERROR') || c.includes('FAIL'))
+    return 'background:rgba(220,38,38,.1);color:var(--error);border-color:rgba(220,38,38,.25)';
+  if (c.includes('CUSTOMS') || c.includes('DOCUMENT') || c.includes('BOOKING'))
+    return 'background:rgba(217,119,6,.1);color:#D97706;border-color:rgba(217,119,6,.25)';
+  return 'background:var(--surface2);color:var(--text-muted);border-color:var(--border2)';
+}
+
+// ── Shipment Search ───────────────────────────────────────────────────────────
+function runShipmentSearch() {
+  showResultPanel('Search', 'Find shipments across all statuses');
+
+  document.getElementById('result-body').innerHTML = `
+    <form class="transfer-form" id="ss-form" onsubmit="submitShipmentSearch(event)">
+
+      <div class="tf-section-label">Identifiers</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Shipment Ref</label>
+          <input class="tf-input" id="ss-ref" type="text" inputmode="numeric"
+            placeholder="e.g. 00000042" autocomplete="off">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Delivery Number</label>
+          <input class="tf-input" id="ss-delivery" type="text" inputmode="numeric"
+            placeholder="e.g. 82888798" autocomplete="off">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Tracking Number</label>
+          <input class="tf-input" id="ss-tracking" type="text"
+            placeholder="Partial match" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="tf-section-label">Parties</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Customer / Destination</label>
+          <input class="tf-input" id="ss-customer" type="text"
+            placeholder="Partial name match" autocomplete="off">
+        </div>
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Forwarder</label>
+          <input class="tf-input" id="ss-forwarder" type="text"
+            placeholder="Partial name match" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="tf-section-label">Date Range <span class="tf-optional">(optional)</span></div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Date Type</label>
+          <select class="tf-input" id="ss-date-field">
+            <option value="">— Select date type —</option>
+            <option value="plannedCollection">Planned Collection</option>
+            <option value="actualCollection">Actual Collection</option>
+            <option value="plannedDelivery">Planned Delivery</option>
+            <option value="actualDelivery">Actual Delivery</option>
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">From</label>
+          <input class="tf-input" id="ss-date-from" type="date">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">To</label>
+          <input class="tf-input" id="ss-date-to" type="date">
+        </div>
+      </div>
+
+      <div class="tf-actions">
+        <div id="ss-error" style="font-size:13px;color:var(--error)"></div>
+        <button type="submit" class="btn-submit" id="ss-submit">Search →</button>
+      </div>
+    </form>
+
+    <div id="ss-results" style="margin-top:4px"></div>`;
+}
+
+async function submitShipmentSearch(e) {
+  e.preventDefault();
+  if (!await checkSession()) return;
+
+  const params = new URLSearchParams();
+  const ref      = document.getElementById('ss-ref').value.trim();
+  const delivery = document.getElementById('ss-delivery').value.trim();
+  const tracking = document.getElementById('ss-tracking').value.trim();
+  const customer = document.getElementById('ss-customer').value.trim();
+  const forwarder= document.getElementById('ss-forwarder').value.trim();
+  const dateField= document.getElementById('ss-date-field').value;
+  const dateFrom = document.getElementById('ss-date-from').value;
+  const dateTo   = document.getElementById('ss-date-to').value;
+
+  if (ref)       params.set('shipmentRef',    ref);
+  if (delivery)  params.set('deliveryNumber', delivery);
+  if (tracking)  params.set('tracking',       tracking);
+  if (customer)  params.set('customer',       customer);
+  if (forwarder) params.set('forwarder',      forwarder);
+  if (dateField) params.set('dateField',      dateField);
+  if (dateFrom)  params.set('dateFrom',       dateFrom);
+  if (dateTo)    params.set('dateTo',         dateTo);
+
+  const errorEl  = document.getElementById('ss-error');
+  const resultsEl= document.getElementById('ss-results');
+  const btn      = document.getElementById('ss-submit');
+  errorEl.textContent = '';
+  resultsEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
+  btn.disabled = true; btn.textContent = 'Searching…';
+
+  try {
+    const res  = await fetch(`/api/shipmentmain/search?${params}`);
+    const json = await res.json();
+
+    if (!json.success) {
+      errorEl.textContent = json.error || 'Search failed';
+      resultsEl.innerHTML = '';
+    } else {
+      renderShipmentSearchResults(json.data);
+      document.getElementById('result-row-badge').textContent = `${json.data.length} result${json.data.length !== 1 ? 's' : ''}`;
+      document.getElementById('result-row-badge').classList.remove('hidden');
+    }
+  } catch (err) {
+    errorEl.textContent = `✕ ${err.message}`;
+    resultsEl.innerHTML = '';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Search →';
+  }
+}
+
+function renderShipmentSearchResults(rows) {
+  const resultsEl = document.getElementById('ss-results');
+  if (!rows.length) {
+    resultsEl.innerHTML = `<div class="sap-error" style="color:var(--text-muted)">No shipments matched your search.</div>`;
+    return;
+  }
+
+  function statusBadge(row) {
+    if (row.shipmentCancelled) return `<span class="ps-pcard-badge" style="background:rgba(220,38,38,.1);color:var(--error);border-color:rgba(220,38,38,.25)">Cancelled</span>`;
+    if (row.deliveryStatus)    return `<span class="ps-pcard-badge ps-pcard-badge--done">Delivered</span>`;
+    if (row.collectionStatus)  return `<span class="ps-pcard-badge ps-pcard-badge--wip">In Transit</span>`;
+    return `<span class="ps-pcard-badge" style="background:rgba(124,58,237,.1);color:var(--accent);border-color:rgba(124,58,237,.25)">Awaiting</span>`;
+  }
+
+  function fmt(d) { return d ? new Date(d).toLocaleDateString('en-GB') : '—'; }
+
+  const thead = `<tr>
+    <th>Ref</th><th>Customer</th><th>Forwarder</th><th>Incoterms</th>
+    <th>Planned Coll.</th><th>Actual Coll.</th><th>Planned Del.</th><th>Actual Del.</th>
+    <th>Tracking</th><th>Status</th>
+  </tr>`;
+
+  const tbody = rows.map(r => `
+    <tr class="ps-row" style="cursor:pointer" data-id="${r.shipmentID}"
+      onclick="openShipmentDetailModal(${r.shipmentID})">
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">
+        ${String(r.shipmentID).padStart(8, '0')}
+      </td>
+      <td>${esc(r.destinationName || '—')}</td>
+      <td>${esc(r.forwarderName   || '—')}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.incoTerms || '—')}</td>
+      <td>${fmt(r.plannedCollection)}</td>
+      <td>${fmt(r.actualCollection)}</td>
+      <td>${fmt(r.plannedDelivery)}</td>
+      <td>${fmt(r.actualDelivery)}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.trackingNumber || '—')}</td>
+      <td>${statusBadge(r)}</td>
+    </tr>`).join('');
+
+  resultsEl.innerHTML = `
+    <div style="overflow-x:auto;margin-top:8px">
+      <table class="pn-batch-table">
+        <thead>${thead}</thead>
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
 }
 
 function renderSimpleTable(rows, cols) {
