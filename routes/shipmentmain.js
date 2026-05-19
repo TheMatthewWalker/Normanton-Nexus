@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
 import fs from 'fs';
@@ -7,6 +7,7 @@ import path from 'path';
 import net from 'net';
 import tls from 'tls';
 import { sqlConfig, stampDbChange } from '../server.js';
+import { requirePermission } from '../middleware/auth.js';
 import e from 'express';
 
 const router = express.Router();
@@ -476,23 +477,23 @@ function createLoadingListPdfBuffer(shipmentsData) {
   };
   const drawPageHeader = (parts, pageNum) => {
     drawRect(parts, 0, 800, 595, 42, palette.navy, true);
-    drawText(parts, 36, 820, 'Kongsberg Automotive — Loading List', 13, 'F2', palette.white);
+    drawText(parts, 36, 820, 'Kongsberg Automotive â€” Loading List', 13, 'F2', palette.white);
     drawText(parts, 36, 804, `Generated: ${dateStr} ${timeStr}`, 8.5, 'F1', palette.white);
     drawText(parts, 500, 812, `Page ${pageNum}`, 8.5, 'F1', palette.white);
   };
   const drawShipmentBand = (parts, y, shipment) => {
     const ref = formatShipmentRef(shipment.shipmentID);
-    const planned = shipment.plannedCollection ? new Date(shipment.plannedCollection).toLocaleDateString('en-GB') : '—';
+    const planned = shipment.plannedCollection ? new Date(shipment.plannedCollection).toLocaleDateString('en-GB') : 'â€”';
     drawRect(parts, 36, y, 523, 20, palette.light, true);
     drawLine(parts, 36, y, 559, y, palette.navy, 1);
     drawText(parts, 42, y + 7,  `Shipment ${ref}`,                                              9, 'F2', palette.navy);
-    drawText(parts, 155, y + 7, `Dest: ${String(shipment.destinationName || '—').slice(0, 28)}`, 8, 'F1', palette.steel);
-    drawText(parts, 355, y + 7, `Haulier: ${String(shipment.forwarderName || '—').slice(0, 18)}`, 8, 'F1', palette.steel);
+    drawText(parts, 155, y + 7, `Dest: ${String(shipment.destinationName || 'â€”').slice(0, 28)}`, 8, 'F1', palette.steel);
+    drawText(parts, 355, y + 7, `Haulier: ${String(shipment.forwarderName || 'â€”').slice(0, 18)}`, 8, 'F1', palette.steel);
     drawText(parts, 475, y + 7, `Planned: ${planned}`,                                           8, 'F1', palette.steel);
   };
   const drawColHeaders = (parts, y) => {
     drawRect(parts, 36, y, 523, 16, palette.navy, true);
-    [['Pallet ID', 42], ['Type', 120], ['Location', 195], ['Gross Wt', 305], ['Dimensions (L×W×H mm)', 385]].forEach(([label, x]) =>
+    [['Pallet ID', 42], ['Type', 120], ['Location', 195], ['Gross Wt', 305], ['Dimensions (LÃ—WÃ—H mm)', 385]].forEach(([label, x]) =>
       drawText(parts, x, y + 5, label, 7.5, 'F2', palette.white));
   };
 
@@ -542,15 +543,15 @@ function createLoadingListPdfBuffer(shipmentsData) {
       if ((rowIndex % 2) === 0) drawRect(parts, 36, y, 523, 15, palette.soft, true);
       drawText(parts, 42,  y + 4, String(pallet.palletID    || ''),  8);
       drawText(parts, 120, y + 4, String(pallet.palletType  || ''),  8);
-      drawText(parts, 195, y + 4, String(pallet.palletLocation || '—'), 8);
+      drawText(parts, 195, y + 4, String(pallet.palletLocation || 'â€”'), 8);
       drawText(parts, 305, y + 4, `${formatDecimal(pallet.grossWeight)} kg`, 8);
-      drawText(parts, 385, y + 4, `${pallet.palletLength || 0} × ${pallet.palletWidth || 0} × ${pallet.palletHeight || 0}`, 8);
+      drawText(parts, 385, y + 4, `${pallet.palletLength || 0} Ã— ${pallet.palletWidth || 0} Ã— ${pallet.palletHeight || 0}`, 8);
       drawLine(parts, 36, y, 559, y);
       rowIndex++;
     } else if (item.kind === 'empty') {
       drawText(parts, 42, y + 4, 'No pallets linked to this shipment.', 8.5, 'F1', palette.steel);
     }
-    // 'gap' is just space — nothing drawn
+    // 'gap' is just space â€” nothing drawn
   }
 
   pageStreams.push(parts.join('\n'));
@@ -822,7 +823,7 @@ async function fetchSapCustomsData(deliveries, req) {
 
   const sapDeliveryNumbers = deliveries.map(d => String(d.deliveryID));
 
-  // Round 1 — parallel: LIPS (line items) + LIKP (delivery header: incoterms, consignee code)
+  // Round 1 â€” parallel: LIPS (line items) + LIKP (delivery header: incoterms, consignee code)
   const [lipsBody, likpBody] = await Promise.all([
     sapPost('/api/sap/lips', { deliveries: sapDeliveryNumbers }),
     sapPost('/api/sap/likp', { deliveries: sapDeliveryNumbers }),
@@ -853,7 +854,7 @@ async function fetchSapCustomsData(deliveries, req) {
     throw err;
   }
 
-  // Round 2 — parallel: VBFA (invoice/stat value per line) + MARC (commodity/origin per material) + KNA1 (customer country)
+  // Round 2 â€” parallel: VBFA (invoice/stat value per line) + MARC (commodity/origin per material) + KNA1 (customer country)
   const lineItems = lipsData.map(r => ({ delivery: r.deliveryNumber, item: r.itemNumber }));
   const materials = [...new Set(lipsData.map(r => String(r.materialNumber || '').trim()).filter(Boolean))];
   const customers = [...new Set(likpData.map(r => String(r.consigneeCode || '').trim()).filter(Boolean))];
@@ -905,7 +906,7 @@ async function createClearPortExport(payload) {
         'X-API-Key': clearPort.apiToken,
       },
       validateStatus: () => true,
-      transformResponse: [(data) => data],  // skip auto-parse — keep raw text
+      transformResponse: [(data) => data],  // skip auto-parse â€” keep raw text
     });
 
     // Parse manually so we capture the body regardless of Content-Type
@@ -1429,7 +1430,7 @@ router.get('/', async (req, res) => {
 });
 
 
-// ── Shipment queues ──
+// â”€â”€ Shipment queues â”€â”€
 router.get('/queue/:mode', async (req, res) => {
   try {
     const settings = getLogisticsSettings();
@@ -1460,8 +1461,8 @@ router.get('/queue/:mode', async (req, res) => {
 });
 
 
-// ── Bulk mark collected ───────────────────────────────────────────────────────
-router.post('/mark-collected-bulk', async (req, res) => {
+// â”€â”€ Bulk mark collected â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
 
@@ -1496,7 +1497,7 @@ router.post('/mark-collected-bulk', async (req, res) => {
 });
 
 
-// ── Loading list PDF (streams directly to browser) ────────────────────────────
+// â”€â”€ Loading list PDF (streams directly to browser) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.post('/loading-list', async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
@@ -1540,8 +1541,8 @@ router.post('/loading-list', async (req, res) => {
 });
 
 
-// ── Update planned collection date for multiple shipments ─────────────────────
-router.post('/update-planned-collection', async (req, res) => {
+// â”€â”€ Update planned collection date for multiple shipments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.post('/update-planned-collection', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   const date        = req.body.date;
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
@@ -1562,7 +1563,7 @@ router.post('/update-planned-collection', async (req, res) => {
 });
 
 
-// ── Write ShipmentEvents entries ──────────────────────────────────────────────
+// â”€â”€ Write ShipmentEvents entries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.post('/events', async (req, res) => {
   const events = req.body.events;
   if (!Array.isArray(events) || !events.length) return res.status(400).json({ success: false, error: 'events array required.' });
@@ -1576,7 +1577,7 @@ router.post('/events', async (req, res) => {
 });
 
 
-router.post('/cancel', async (req, res) => {
+router.post('/cancel', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) {
     return res.status(400).json({ success: false, error: 'Select at least one shipment before cancelling.' });
@@ -1615,7 +1616,7 @@ router.post('/cancel', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/mark-collected', async (req, res) => {
+router.post('/:shipmentId/mark-collected', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -1644,7 +1645,7 @@ router.post('/:shipmentId/mark-collected', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/mark-delivered', async (req, res) => {
+router.post('/:shipmentId/mark-delivered', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool         = await getPool();
     const shipmentId   = Number(req.params.shipmentId);
@@ -1670,7 +1671,7 @@ router.post('/:shipmentId/mark-delivered', async (req, res) => {
 
     const username = req.session?.user?.username || 'unknown';
     await writeShipmentEvent(pool, shipmentId, 'DELIVERED',
-      `Delivered on ${actualDelivery.toLocaleDateString('en-GB')} — confirmed by ${username}`);
+      `Delivered on ${actualDelivery.toLocaleDateString('en-GB')} â€” confirmed by ${username}`);
     res.json({ success: true });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
@@ -1678,7 +1679,7 @@ router.post('/:shipmentId/mark-delivered', async (req, res) => {
 });
 
 
-router.post('/mark-booked', async (req, res) => {
+router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentUpdates = normalizeShipmentUpdates(req.body.shipments);
   const shipmentIds = shipmentUpdates.length ? shipmentUpdates.map(item => item.shipmentID) : normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) {
@@ -1740,7 +1741,7 @@ router.post('/mark-booked', async (req, res) => {
 });
 
 
-router.post('/create-from-deliveries', async (req, res) => {
+router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async (req, res) => {
   const deliveryIDs = normalizeDeliveryIds(req.body.deliveryIDs);
   if (!deliveryIDs.length) 
     return res.status(400).json({ success: false, error: 'Select at least one delivery before creating a shipment.' });
@@ -1778,14 +1779,14 @@ router.post('/create-from-deliveries', async (req, res) => {
     if (customerIds.length !== 1)
       throw new Error('Selected deliveries must all belong to the same customer.');
 
-    // Enforce incoterms consistency — delivery-level incoterms take priority over destination default
+    // Enforce incoterms consistency â€” delivery-level incoterms take priority over destination default
     const effectiveIncoterms = deliveries.map(row =>
       String(row.incoterms || row.defaultIncoterms || '').trim().toUpperCase()
     );
     const uniqueIncoterms = [...new Set(effectiveIncoterms.filter(Boolean))];
     if (uniqueIncoterms.length > 1) {
       const detail = deliveries.map(row =>
-        `#${row.deliveryID} → ${String(row.incoterms || row.defaultIncoterms || '?').toUpperCase()}`
+        `#${row.deliveryID} â†’ ${String(row.incoterms || row.defaultIncoterms || '?').toUpperCase()}`
       ).join(', ');
       const err = new Error(`Deliveries have conflicting incoterms (${uniqueIncoterms.join(' vs ')}): ${detail}. All deliveries in a shipment must share the same incoterms.`);
       err.statusCode = 400;
@@ -1843,7 +1844,7 @@ router.post('/:shipmentId/create-folder', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/generate-packing-list', async (req, res) => {
+router.post('/:shipmentId/generate-packing-list', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const context = await getShipmentContext(req.params.shipmentId); 
     const generated = await generateShipmentDocuments(context);
@@ -1873,7 +1874,7 @@ router.get('/:shipmentId/documents/:fileName', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/send-collection-email', async (req, res) => {
+router.post('/:shipmentId/send-collection-email', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const context = await getShipmentContext(req.params.shipmentId);
     if (!isExWorks(context.shipment.incoTerms)) 
@@ -1894,7 +1895,7 @@ router.post('/:shipmentId/send-collection-email', async (req, res) => {
 });
 
 
-router.post('/customs/create', async (req, res) => {
+router.post('/customs/create', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) {
     return res.status(400).json({ success: false, error: 'Select at least one shipment before creating customs entries.' });
@@ -1974,7 +1975,7 @@ router.post('/customs/create', async (req, res) => {
 });
 
 
-// ── Shipment detail (standard modal) ─────────────────────────────────────────
+// â”€â”€ Shipment detail (standard modal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.get('/:shipmentId/details', async (req, res) => {
   try {
     const pool = await getPool();
@@ -2017,8 +2018,8 @@ router.get('/:shipmentId/details', async (req, res) => {
 });
 
 
-// ── Toggle customsRequired (blocked if customsComplete) ───────────────────────
-router.patch('/:shipmentId/customs-required', async (req, res) => {
+// â”€â”€ Toggle customsRequired (blocked if customsComplete) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2043,8 +2044,8 @@ router.patch('/:shipmentId/customs-required', async (req, res) => {
 });
 
 
-// ── Remove a delivery from a shipment ────────────────────────────────────────
-router.delete('/:shipmentId/deliveries/:deliveryId', async (req, res) => {
+// â”€â”€ Remove a delivery from a shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.delete('/:shipmentId/deliveries/:deliveryId', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2072,8 +2073,8 @@ router.delete('/:shipmentId/deliveries/:deliveryId', async (req, res) => {
 });
 
 
-// ── Add deliveries to an existing shipment ────────────────────────────────────
-router.post('/:shipmentId/deliveries', async (req, res) => {
+// â”€â”€ Add deliveries to an existing shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2141,8 +2142,8 @@ router.post('/:shipmentId/deliveries', async (req, res) => {
 });
 
 
-// ── Update haulier ────────────────────────────────────────────────────────────
-router.patch('/:shipmentId/forwarder', async (req, res) => {
+// â”€â”€ Update haulier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2159,7 +2160,7 @@ router.patch('/:shipmentId/forwarder', async (req, res) => {
 });
 
 
-// ── Shipment search ───────────────────────────────────────────────────────────
+// â”€â”€ Shipment search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Query params: shipmentRef, deliveryNumber, forwarder, customer,
 //               dateField (plannedCollection|actualCollection|plannedDelivery|actualDelivery),
 //               dateFrom, dateTo
@@ -2233,7 +2234,7 @@ router.get('/search', async (req, res) => {
 });
 
 
-// ── Events for a shipment ─────────────────────────────────────────────────────
+// â”€â”€ Events for a shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.get('/:shipmentId/events', async (req, res) => {
   try {
     const pool   = await getPool();

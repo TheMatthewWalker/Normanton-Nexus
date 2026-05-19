@@ -181,6 +181,11 @@ function getSelectedBookingHaulierName() {
 }
 
 
+function hasPlanning() {
+  return sessionRole === 'superadmin' || userPermissions.includes('LOG_PLANNING');
+}
+
+
 function hasAssignedHaulier(row) {
   return Boolean(String(row?.forwarderName || '').trim());
 }
@@ -314,7 +319,10 @@ function renderShipmentQueue(mode) {
     const shipmentRef = String(row.shipmentID || '').padStart(8, '0');
     const locationValue = row[view.locationField] || '-';
     const plannedDate = getShipmentPlannedDate(row, mode);
-    return `<tr class="ps-row shipment-row" data-id="${esc(String(row.shipmentID))}"><td>${esc(shipmentRef)}</td><td>${esc(formatDisplayDate(plannedDate))}</td><td>${esc(row.trackingNumber || '')}</td><td>${esc(row.forwarderName || '')}</td><td>${esc(locationValue)}</td><td class="shipment-action-cell"><button type="button" class="btn-submit shipment-action-btn" data-id="${esc(String(row.shipmentID))}">${esc(view.actionLabel)}</button></td></tr>`;
+    const actionCell = hasPlanning()
+      ? `<button type="button" class="btn-submit shipment-action-btn" data-id="${esc(String(row.shipmentID))}">${esc(view.actionLabel)}</button>`
+      : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)">View only</span>`;
+    return `<tr class="ps-row shipment-row" data-id="${esc(String(row.shipmentID))}"><td>${esc(shipmentRef)}</td><td>${esc(formatDisplayDate(plannedDate))}</td><td>${esc(row.trackingNumber || '')}</td><td>${esc(row.forwarderName || '')}</td><td>${esc(locationValue)}</td><td class="shipment-action-cell">${actionCell}</td></tr>`;
   }).join('');
 
   document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">${esc(view.title)}</div><div class="toolbar-hint">${esc(view.hint)}</div></div></div><div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">${esc(view.title)}</span><span class="ps-section-count">${shipmentRows.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th>Shipment</th><th>${esc(view.dateLabel)}</th><th>Tracking</th><th>Forwarder</th><th>${esc(view.locationLabel)}</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div></div></div><div id="shipment-queue-msg" class="lg-selection-msg hidden"></div>`;
@@ -347,7 +355,10 @@ function renderShipmentBooking() {
     return `<div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">${esc(name)}</span><span class="ps-section-count">${grouped[name].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Movement</th><th>Tracking</th><th>Destination</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }).join('');
 
-  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Awaiting Booking</div><div class="toolbar-hint" id="booking-selection-hint">Select one or more shipments for the same haulier, then book them.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="booking-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-secondary" id="booking-cancel-btn" disabled>Cancel Shipment</button><button type="button" class="btn-submit" id="booking-confirm-btn" disabled>Book</button></div><div id="booking-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
+  const bookingWriteBtns = hasPlanning()
+    ? `<button type="button" class="btn-secondary" id="booking-cancel-btn" disabled>Cancel Shipment</button><button type="button" class="btn-submit" id="booking-confirm-btn" disabled>Book</button>`
+    : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`;
+  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Awaiting Booking</div><div class="toolbar-hint" id="booking-selection-hint">Select one or more shipments for the same haulier, then book them.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="booking-clear-btn" disabled>Clear Selection</button>${bookingWriteBtns}</div><div id="booking-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
   bindShipmentBookingEvents();
   updateShipmentBookingUI();
 }
@@ -372,7 +383,10 @@ function renderCustomsDocuments() {
     ? `<div id="customs-selection-msg" class="lg-selection-msg${noticeClass}">${esc(customsBatchNotice.text)}</div>`
     : '<div id="customs-selection-msg" class="lg-selection-msg hidden"></div>';
 
-  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Customs Documents</div><div class="toolbar-hint" id="customs-selection-hint">Select one or more shipments, then create the customs entries in ClearPort.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="customs-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="customs-create-btn" disabled>Create Customs Entry</button></div>${noticeHtml}<div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--week"></span><span class="ps-section-title">Awaiting Customs</span><span class="ps-section-count">${shipmentRows.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Movement</th><th>Forwarder</th><th>Destination</th><th>Customs ID</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`;
+  const customsWriteBtn = hasPlanning()
+    ? `<button type="button" class="btn-submit" id="customs-create-btn" disabled>Create Customs Entry</button>`
+    : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`;
+  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Customs Documents</div><div class="toolbar-hint" id="customs-selection-hint">Select one or more shipments, then create the customs entries in ClearPort.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="customs-clear-btn" disabled>Clear Selection</button>${customsWriteBtn}</div>${noticeHtml}<div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--week"></span><span class="ps-section-title">Awaiting Customs</span><span class="ps-section-count">${shipmentRows.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Movement</th><th>Forwarder</th><th>Destination</th><th>Customs ID</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`;
   bindCustomsDocumentsEvents();
   updateCustomsDocumentsUI();
 }
@@ -536,9 +550,9 @@ function updateShipmentBookingUI() {
   const clearBtn = document.getElementById('booking-clear-btn');
   if (clearBtn) clearBtn.disabled = selectedBookingShipmentIds.size === 0;
   const cancelBtn = document.getElementById('booking-cancel-btn');
-  if (cancelBtn) cancelBtn.disabled = selectedBookingShipmentIds.size === 0;
+  if (cancelBtn) cancelBtn.disabled = selectedBookingShipmentIds.size === 0 || !hasPlanning();
   const confirmBtn = document.getElementById('booking-confirm-btn');
-  if (confirmBtn) confirmBtn.disabled = selectedBookingShipmentIds.size === 0;
+  if (confirmBtn) confirmBtn.disabled = selectedBookingShipmentIds.size === 0 || !hasPlanning();
 }
 
 
@@ -764,7 +778,11 @@ function updateSelectionUI() {
     row.classList.toggle('lg-row--disabled', Boolean(differentCustomer));
     const checkbox = row.querySelector('.lg-check'); if (checkbox) checkbox.disabled = Boolean(differentCustomer);
   });
-  const createBtn = document.getElementById('lg-create-btn'); if (createBtn) createBtn.disabled = rows.length === 0;
+  const createBtn = document.getElementById('lg-create-btn');
+  if (createBtn) {
+    createBtn.disabled = rows.length === 0 || !hasPlanning();
+    createBtn.title    = !hasPlanning() ? 'Requires LOG_PLANNING permission' : '';
+  }
   const clearBtn = document.getElementById('lg-clear-btn'); if (clearBtn) clearBtn.disabled = rows.length === 0;
 }
 
@@ -1496,10 +1514,12 @@ function renderAwaitingCollection() {
       <div><div class="lg-selection-title">Awaiting Collection</div>
       <div class="toolbar-hint" id="collection-hint">Select shipments, then use the actions below.</div></div>
       <div class="toolbar-spacer"></div>
-      <button class="btn-secondary" id="col-clear-btn"    disabled>Clear</button>
-      <button class="btn-secondary" id="col-date-btn"     disabled>Update Date</button>
-      <button class="btn-secondary" id="col-loading-btn"  disabled>Loading List</button>
-      <button class="btn-submit"    id="col-collect-btn"  disabled>Mark Collected</button>
+      <button class="btn-secondary" id="col-clear-btn" disabled>Clear</button>
+      ${hasPlanning() ? `
+        <button class="btn-secondary" id="col-date-btn"    disabled>Update Date</button>
+        <button class="btn-secondary" id="col-loading-btn" disabled>Loading List</button>
+        <button class="btn-submit"    id="col-collect-btn" disabled>Mark Collected</button>
+      ` : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`}
     </div>
     <div id="collection-msg" class="lg-selection-msg hidden"></div>
     <div class="ps-sections">${sections}</div>`;
@@ -1542,9 +1562,10 @@ function updateCollectionUI() {
   const msg     = document.getElementById('collection-msg');
   if (hint) hint.textContent = count ? `${count} shipment(s) selected.` : 'Select shipments, then use the actions below.';
   if (msg && !count) msg.classList.add('hidden');
-  ['col-clear-btn', 'col-date-btn', 'col-loading-btn', 'col-collect-btn'].forEach(id => {
+  document.getElementById('col-clear-btn')?.toggleAttribute('disabled', count === 0);
+  ['col-date-btn', 'col-loading-btn', 'col-collect-btn'].forEach(id => {
     const btn = document.getElementById(id);
-    if (btn) btn.disabled = count === 0;
+    if (btn) btn.disabled = count === 0 || !hasPlanning();
   });
 }
 
