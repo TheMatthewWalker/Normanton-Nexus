@@ -1985,14 +1985,22 @@ router.get('/:shipmentId/details', async (req, res) => {
     const shipmentResult = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
-        SELECT sm.*,
-          sm.PlannedDelivery   AS plannedDelivery,
-          sm.ActualDelivery    AS actualDelivery,
+        SELECT
+          sm.shipmentID,
+          sm.originID, sm.originName, sm.originStreet, sm.originCity, sm.originPostCode, sm.originCountry,
+          sm.destinationID, sm.destinationName, sm.destinationStreet, sm.destinationCity, sm.destinationPostCode, sm.destinationCountry,
+          sm.netWeight, sm.grossWeight, sm.palletCount, sm.shipmentVolume,
+          sm.plannedCollection, sm.actualCollection,
+          sm.PlannedDelivery  AS plannedDelivery,
+          sm.ActualDelivery   AS actualDelivery,
+          sm.forwarderID, sm.trackingNumber, sm.incoTerms,
+          sm.customsID,
           CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
           CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
-          CAST(ISNULL(sm.deliveryStatus,   0) AS bit) AS deliveryStatus,
+          CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
           CAST(ISNULL(sm.customsRequired,  0) AS bit) AS customsRequired,
           CAST(ISNULL(sm.customsComplete,  0) AS bit) AS customsComplete,
+          CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
           fa.forwarderName
         FROM Logistics.dbo.ShipmentMain sm
         OUTER APPLY (
