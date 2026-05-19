@@ -166,4 +166,57 @@ router.patch('/:palletId', async (req, res) => {
     }
 });
 
+// ── Landing page sparkline — pallets finished per day (last 7 days) + overdue picksheets ──
+router.get('/landing-sparkline', async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        // Pallets finished per day for the last 7 days
+        const sparkResult = await pool.request().query(`
+            WITH days AS (
+                SELECT CAST(DATEADD(day, -n, CAST(GETDATE() AS DATE)) AS DATE) AS day
+                FROM (VALUES (6),(5),(4),(3),(2),(1),(0)) AS t(n)
+            )
+            SELECT d.day, ISNULL(COUNT(pm.palletID), 0) AS cnt
+            FROM days d
+            LEFT JOIN Logistics.dbo.PalletMain pm
+                ON CAST(pm.palletFinishDate AS DATE) = d.day
+               AND pm.palletFinish = 1
+               AND pm.palletRemoved = 0
+            GROUP BY d.day
+            ORDER BY d.day ASC`);
+
+        const dailyValues = sparkResult.recordset.map(r => Number(r.cnt));
+        const thisWeek    = dailyValues.reduce((a, b) => a + b, 0);
+
+        // Previous 7 days for week-over-week
+        const prevResult = await pool.request().query(`
+            SELECT COUNT(*) AS cnt
+            FROM Logistics.dbo.PalletMain
+            WHERE palletFinish = 1
+              AND palletRemoved = 0
+              AND palletFinishDate >= DATEADD(day, -13, CAST(GETDATE() AS DATE))
+              AND palletFinishDate <  DATEADD(day, -6,  CAST(GETDATE() AS DATE))`);
+
+        const prevWeek  = Number(prevResult.recordset[0].cnt);
+        const pctChange = prevWeek === 0
+            ? (thisWeek > 0 ? 100 : 0)
+            : Math.round(((thisWeek - prevWeek) / prevWeek) * 1000) / 10;
+
+        // Overdue picksheets — due date has passed and not yet completed
+        const overdueResult = await pool.request().query(`
+            SELECT COUNT(*) AS cnt
+            FROM Logistics.dbo.DeliveryMain
+            WHERE completionStatus = 0
+              AND ISNULL(deliveryCancelled, 0) = 0
+              AND dueDate < CAST(GETDATE() AS DATE)`);
+
+        const overduePicksheets = Number(overdueResult.recordset[0].cnt);
+
+        res.json({ success: true, data: { dailyValues, thisWeek, pctChange, overduePicksheets } });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 export default router;

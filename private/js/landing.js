@@ -23,6 +23,7 @@ const sendBtn = document.getElementById('gemini-send');
     if (heroName) heroName.textContent = session.username.split('.')[0].toProperCase(); // Show first name in hero section, properly capitalized
     loadProductionSparkline();
     loadSalesSparkline();
+    loadWarehouseSparkline();
   } catch {
     window.location.href = '/';
   }
@@ -137,6 +138,64 @@ async function loadProductionSparkline() {
     deltaEl.style.opacity = '1';
   } catch (_) {}
 }
+
+async function loadWarehouseSparkline() {
+  try {
+    const res = await fetch('/api/palletmain/landing-sparkline').then(r => r.json());
+    if (!res.success || !res.data) return;
+
+    const { dailyValues, thisWeek, pctChange, overduePicksheets } = res.data;
+
+    const svg     = document.getElementById('wh-spark-svg');
+    const deltaEl = document.getElementById('wh-spark-delta');
+    const valueEl = document.getElementById('wh-spark-value');
+    const wrap    = document.getElementById('wh-spark');
+    if (!svg || !deltaEl || !valueEl || !wrap) return;
+
+    valueEl.textContent = `${thisWeek} pallet${thisWeek !== 1 ? 's' : ''} this week`;
+
+    const W = 280, H = 28, padY = 3;
+    const n   = dailyValues.length;
+    const max = Math.max(...dailyValues, 1);
+
+    const pts = dailyValues.map((v, i) => [
+      n < 2 ? W / 2 : (i / (n - 1)) * W,
+      H - padY - ((v / max) * (H - padY * 2)),
+    ]);
+
+    const lineD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' ');
+    const fillD = `${lineD} L${W},${H} L0,${H} Z`;
+
+    const isFlat = pctChange !== null && Math.abs(pctChange) < 0.1;
+    const isUp   = pctChange === null || pctChange >= 0;
+    const col    = isFlat ? '#8DA3BE' : isUp ? '#7C3AED' : '#DC2626';
+
+    svg.innerHTML = `
+      <defs>
+        <linearGradient id="whsg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="${col}" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${fillD}" fill="url(#whsg)"/>
+      <path d="${lineD}" fill="none" stroke="${col}" stroke-width="1.6"
+            stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    if (overduePicksheets > 0) {
+      deltaEl.textContent = `⚠ ${overduePicksheets} overdue`;
+      deltaEl.className   = 'dept-spark-delta dept-spark-delta--down';
+    } else {
+      const sign   = (!isFlat && isUp && pctChange > 0) ? '+' : '';
+      const pctStr = pctChange === null ? '—' : `${sign}${pctChange}%`;
+      deltaEl.textContent = `${pctStr} vs last week`;
+      deltaEl.className   = `dept-spark-delta dept-spark-delta--${isFlat ? 'flat' : isUp ? 'up' : 'down'}`;
+    }
+    deltaEl.style.opacity = '1';
+
+    wrap.style.display = '';
+  } catch (_) {}
+}
+
 
 openBtn.addEventListener('click', () => {
   shell.classList.remove('hidden');
