@@ -2278,12 +2278,22 @@ router.get('/search', async (req, res) => {
     }
 
     const result = await request.query(`
-      SELECT sm.*,
-        sm.PlannedDelivery   AS plannedDelivery,
-        sm.ActualDelivery    AS actualDelivery,
+      SELECT
+        sm.shipmentID,
+        sm.destinationID,
+        sm.destinationName,
+        sm.plannedCollection,
+        sm.actualCollection,
+        sm.PlannedDelivery    AS plannedDelivery,
+        sm.ActualDelivery     AS actualDelivery,
+        sm.trackingNumber,
+        sm.incoTerms,
+        sm.forwarderID,
+        sm.customsID,
         CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
         CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
-        CAST(ISNULL(sm.deliveryStatus,   0) AS bit) AS deliveryStatus,
+        CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
+        CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
         (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
       FROM Logistics.dbo.ShipmentMain sm
       WHERE ${where.join(' AND ')}
