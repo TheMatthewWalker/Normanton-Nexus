@@ -797,6 +797,10 @@ function getBookingRowsWithInputs() {
     trackingNumber:    document.getElementById(`booking-track-${row.shipmentID}`)?.value.trim() || '',
     forwarderID:       document.getElementById(`booking-forwarder-${row.shipmentID}`)?.value || row.forwarderID || '',
     forwarderName:     document.getElementById(`booking-forwarder-${row.shipmentID}`)?.selectedOptions?.[0]?.textContent?.trim() || row.forwarderName || '',
+    expectedCost:      document.getElementById(`booking-cost-${row.shipmentID}`)?.value.trim() || null,
+    skipCost:          Boolean(document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.skipCost),
+    elementCode:       document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.elementCode || null,
+    costCenter:        document.getElementById('booking-cost-center')?.value || null,
   }));
 }
 
@@ -821,19 +825,34 @@ async function openBookingModal(rows, haulier) {
       : `<select class="tf-input booking-inline-input" id="booking-forwarder-${esc(String(row.shipmentID))}"><option value="">Select haulier</option>${forwarders.map(item => `<option value="${esc(String(item.forwarderID))}">${esc(item.forwarderName || '')}</option>`).join('')}</select>`;
     const collectionVal = plannedDate ? new Date(plannedDate).toISOString().slice(0, 10) : '';
     const deliveryVal   = row.plannedDelivery ? new Date(row.plannedDelivery).toISOString().slice(0, 10) : '';
+    const sid           = esc(String(row.shipmentID));
+    const isRowKH       = isKnHaulier ? false : normalizeHaulierName(row.forwarderName || '').includes('howley');
+    // Cost cell — KN gets auto-filled after render; others get manual input
+    const costCell = isKnHaulier
+      ? `<td>
+           <div id="booking-cost-loading-${sid}" style="font-size:11px;color:var(--text-muted)">Calculating…</div>
+           <input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
+             step="0.01" min="0" style="display:none;width:90px" placeholder="£">
+           <div id="booking-cost-detail-${sid}" style="font-size:10px;color:var(--text-muted);margin-top:2px"></div>
+         </td>`
+      : isRowKH
+        ? `<td><span id="booking-cost-${sid}" data-skip-cost="1" style="font-size:11px;color:var(--text-muted)">TPN — manual</span></td>`
+        : `<td><input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
+             step="0.01" min="0" style="width:90px" placeholder="£ required"></td>`;
     return `<tr>
       <td>${esc(shipmentRef)}</td>
       <td>${esc(row.destinationName || row.originName || '-')}</td>
       <td>${forwarderField}</td>
-      <td><input class="tf-input booking-inline-input" type="date" id="booking-date-${esc(String(row.shipmentID))}"
+      <td><input class="tf-input booking-inline-input" type="date" id="booking-date-${sid}"
             value="${esc(collectionVal)}"
-            data-shipment="${esc(String(row.shipmentID))}"
+            data-shipment="${sid}"
             data-country="${esc(row.destinationCountry || '')}"
             data-postcode="${esc(row.destinationPostCode || '')}"></td>
-      <td><input class="tf-input booking-inline-input" type="date" id="booking-delivery-${esc(String(row.shipmentID))}"
+      <td><input class="tf-input booking-inline-input" type="date" id="booking-delivery-${sid}"
             value="${esc(deliveryVal)}" placeholder="Auto from route"></td>
-      <td><input class="tf-input booking-inline-input" type="text" id="booking-track-${esc(String(row.shipmentID))}"
+      <td><input class="tf-input booking-inline-input" type="text" id="booking-track-${sid}"
             value="${esc(row.trackingNumber || '')}"></td>
+      ${costCell}
     </tr>`;
   }).join('');
   const trackingHelp = isCustomerCollect
@@ -841,8 +860,55 @@ async function openBookingModal(rows, haulier) {
     : isKn
       ? 'Tracking will be taken from the Kuehne & Nagel API response where available.'
       : 'Tracking number is required for each shipment before booking can be confirmed.';
-  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
+  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th><th>Expected Cost</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted)">Cost Centre</label><select class="tf-input" id="booking-cost-center" style="max-width:280px"><option value="">Loading…</option></select></div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
   document.getElementById('booking-submit-btn').addEventListener('click', submitBookingModal);
+
+  // Load cost centres into dropdown
+  fetch('/api/costcenters').then(r => r.json()).then(data => {
+    const centres = Array.isArray(data) ? data : (data.data || []);
+    const sel = document.getElementById('booking-cost-center');
+    if (!sel) return;
+    sel.innerHTML = centres.map(c =>
+      `<option value="${esc(c.centerCode || '')}">${esc(c.centerCode || '')} — ${esc(c.centerDescription || '')}</option>`
+    ).join('');
+    // Default to 0000002004 if present
+    const def = centres.find(c => c.centerCode === '0000002004');
+    if (def) sel.value = '0000002004';
+  }).catch(() => {});
+
+  // For KN shipments: auto-fetch cost estimate and populate each row
+  if (isKnHaulier) {
+    rows.forEach(async row => {
+      const sid = String(row.shipmentID);
+      try {
+        const res  = await fetch(`/api/shipmentcost/estimate/${encodeURIComponent(row.shipmentID)}`);
+        const json = await res.json();
+        const loadEl   = document.getElementById(`booking-cost-loading-${sid}`);
+        const inputEl  = document.getElementById(`booking-cost-${sid}`);
+        const detailEl = document.getElementById(`booking-cost-detail-${sid}`);
+        if (!inputEl) return;
+        if (json.success && json.data) {
+          const d = json.data;
+          if (d.rateFound) {
+            inputEl.value = d.expectedCost;
+            inputEl.dataset.elementCode = d.elementCode || '';
+            if (detailEl) detailEl.textContent =
+              `${d.chargeableWeight} kg × £${d.agreedRate}/kg (min £${d.minimumCharge})`;
+          } else {
+            inputEl.placeholder = '£ — no rate found';
+            if (detailEl) detailEl.textContent = json.data.message || 'No rate found';
+            if (detailEl) detailEl.style.color = 'var(--error)';
+          }
+          if (d.elementCode) inputEl.dataset.elementCode = d.elementCode;
+        }
+        if (loadEl) loadEl.style.display = 'none';
+        inputEl.style.display = '';
+      } catch (_) {
+        const loadEl = document.getElementById(`booking-cost-loading-${sid}`);
+        if (loadEl) loadEl.textContent = 'Rate lookup failed';
+      }
+    });
+  }
 
   // Auto-populate planned delivery from route table, and update when collection date changes
   rows.forEach(row => {
@@ -889,6 +955,16 @@ async function submitBookingModal() {
   try {
     const missingForwarder = updates.find(item => !item.forwarderID);
     if (missingForwarder) throw new Error(`Haulier is required for shipment ${missingForwarder.shipmentRef}.`);
+
+    // Validate cost: non-KN, non-KH shipments require a price
+    for (const item of updates) {
+      if (item.skipCost) continue;
+      if (isKnHaulier(item.forwarderName)) continue;
+      if (normalizeHaulierName(item.forwarderName).includes('howley')) { item.skipCost = true; continue; }
+      if (!item.expectedCost || isNaN(Number(item.expectedCost)) || Number(item.expectedCost) <= 0) {
+        throw new Error(`Expected cost is required for shipment ${item.shipmentRef}.`);
+      }
+    }
     const successfulUpdates = [];
     const failedRefs = [];
 
@@ -926,10 +1002,15 @@ async function submitBookingModal() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         shipments: successfulUpdates.map(item => ({
-          shipmentID: item.shipmentID,
-          plannedCollection: item.plannedCollection || null,
-          trackingNumber: item.trackingNumber || '',
-          forwarderID: item.forwarderID || null,
+          shipmentID:        item.shipmentID,
+          plannedCollection: item.plannedCollection  || null,
+          plannedDelivery:   item.plannedDelivery    || null,
+          trackingNumber:    item.trackingNumber     || '',
+          forwarderID:       item.forwarderID        || null,
+          expectedCost:      item.expectedCost != null ? Number(item.expectedCost) : null,
+          costCenter:        item.costCenter         || null,
+          elementCode:       item.elementCode        || null,
+          skipCost:          Boolean(item.skipCost),
         })),
       }),
     });

@@ -87,11 +87,17 @@ function normalizeShipmentUpdates(input) {
     const shipmentID = Number.parseInt(String(item?.shipmentID), 10);
     if (!Number.isFinite(shipmentID) || shipmentID <= 0 || seen.has(shipmentID)) return acc;
     seen.add(shipmentID);
+    const cost = item?.expectedCost != null && String(item.expectedCost).trim() !== ''
+      ? Number(item.expectedCost) : null;
     acc.push({
       shipmentID,
-      trackingNumber: String(item?.trackingNumber || '').trim(),
+      trackingNumber:    String(item?.trackingNumber || '').trim(),
       plannedCollection: item?.plannedCollection ? new Date(item.plannedCollection) : null,
-      forwarderID: item?.forwarderID === '' || item?.forwarderID == null ? null : Number.parseInt(String(item.forwarderID), 10),
+      forwarderID:       item?.forwarderID === '' || item?.forwarderID == null ? null : Number.parseInt(String(item.forwarderID), 10),
+      expectedCost:      Number.isFinite(cost) ? cost : null,
+      costCenter:        String(item?.costCenter  || '').trim() || null,
+      elementCode:       String(item?.elementCode || '').trim() || null,
+      skipCost:          Boolean(item?.skipCost),  // Kenneth Howley — TPN later
     });
     return acc;
   }, []);
@@ -1734,6 +1740,27 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
     }
 
     await tx.commit();
+
+    // Insert ShipmentCost rows for each booked shipment that has a cost
+    const pool2 = await getPool();
+    for (const item of shipmentUpdates) {
+      if (item.skipCost || item.expectedCost == null) continue;
+      try {
+        await pool2.request()
+          .input('shipmentID',   sql.BigInt,           item.shipmentID)
+          .input('costType',     sql.NVarChar(3),       '1')
+          .input('costElement',  sql.NVarChar(6),       item.elementCode || null)
+          .input('costCenter',   sql.NVarChar(20),      item.costCenter  || null)
+          .input('expectedCost', sql.Decimal(18, 2),    item.expectedCost)
+          .input('actualCost',   sql.Decimal(18, 2),    0)
+          .input('migoStatus',   sql.Bit,               0)
+          .query(`INSERT INTO Logistics.dbo.ShipmentCost
+                    (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                  VALUES
+                    (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+      } catch (_) { /* non-fatal — booking already confirmed */ }
+    }
+
     res.json({ success: true, data: { updated } });
   } catch (err) {
     try { if (tx) await tx.rollback(); } catch (_) {}
