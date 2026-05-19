@@ -174,8 +174,13 @@ router.get('/landing-sparkline', async (req, res) => {
         // Pallets finished per day for the last 7 days
         const sparkResult = await pool.request().query(`
             WITH days AS (
-                SELECT CAST(DATEADD(day, -n, CAST(GETDATE() AS DATE)) AS DATE) AS day
-                FROM (VALUES (6),(5),(4),(3),(2),(1),(0)) AS t(n)
+                SELECT CAST(DATEADD(day, -6, CAST(GETDATE() AS DATE)) AS DATE) AS day UNION ALL
+                SELECT CAST(DATEADD(day, -5, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
+                SELECT CAST(DATEADD(day, -4, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
+                SELECT CAST(DATEADD(day, -3, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
+                SELECT CAST(DATEADD(day, -2, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
+                SELECT CAST(DATEADD(day, -1, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
+                SELECT CAST(DATEADD(day,  0, CAST(GETDATE() AS DATE)) AS DATE)
             )
             SELECT d.day, ISNULL(COUNT(pm.palletID), 0) AS cnt
             FROM days d
