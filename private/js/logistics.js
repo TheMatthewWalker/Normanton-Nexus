@@ -16,6 +16,8 @@ let customsBatchNotice = null;
 let userPermissions = [];
 let sessionRole     = '';
 let sessionUsername = '';
+let freightSpendMonths = 12;
+let freightCharts = [];
 
 
 const BUCKETS = [
@@ -92,6 +94,8 @@ function setupTiles() {
       if (fn === 'updatePalletData')    runUpdatePalletData();
       if (fn === 'updatePackagingData') runUpdatePackagingData();
       if (fn === 'updateDestinations')  runUpdateDestinations();
+      if (fn === 'freightSpend')        runFreightSpend();
+      if (fn === 'unprocessedCosts')    runUnprocessedCosts();
     });
   });
 
@@ -129,6 +133,7 @@ function showResultPanel(title, hint) {
 
 
 function backToTiles() {
+  destroyFreightCharts();
   document.getElementById('result-section').classList.add('hidden');
   document.getElementById('tile-section').classList.remove('hidden');
   document.getElementById('result-body').innerHTML = '';
@@ -2982,4 +2987,261 @@ function renderSimpleTable(rows, cols) {
   const head = cols.map(c => `<th>${esc(c)}</th>`).join('');
   const body = rows.map(r => `<tr>${cols.map(c => `<td>${esc(String(r[c] ?? ''))}</td>`).join('')}</tr>`).join('');
   return `<div style="overflow-x:auto"><table class="pn-batch-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+
+// ── Unprocessed Freight Costs ─────────────────────────────────────────────────
+async function runUnprocessedCosts() {
+  showResultPanel('Unprocessed Freight Costs', 'Cost lines with migoStatus = 0 — awaiting MIGO posting in SAP');
+  const body = document.getElementById('result-body');
+
+  try {
+    const resp = await fetch('/api/shipmentcost/unprocessed');
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error);
+
+    const rows = json.data;
+    if (!rows.length) {
+      body.innerHTML = '<div class="sap-empty">No unprocessed cost lines found.</div>';
+      return;
+    }
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} record${rows.length !== 1 ? 's' : ''}`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const fmt  = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
+    const gbp  = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
+    const post = r => {
+      const cc = (r.destinationCountry || '').slice(0, 2).toUpperCase();
+      const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
+      return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
+    };
+
+    const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
+
+    const thead = `<tr>
+      <th>Shipment Ref</th>
+      <th>Type</th>
+      <th>Planned Collection</th>
+      <th>Actual Collection</th>
+      <th>Haulier</th>
+      <th>Cost Center</th>
+      <th>Cost Element</th>
+      <th>Expected</th>
+      <th>Actual</th>
+      <th>Country / Post</th>
+      <th>Tracking</th>
+    </tr>`;
+
+    const tbody = rows.map(r => `<tr>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.shipmentRef || String(r.shipmentID))}</td>
+      <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
+      <td>${fmt(r.plannedCollection)}</td>
+      <td>${fmt(r.actualCollection)}</td>
+      <td>${esc(r.forwarderName || '—')}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.costCenter || '—')}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.costElement || '—')}</td>
+      <td style="text-align:right">${gbp(r.expectedCost)}</td>
+      <td style="text-align:right">${gbp(r.actualCost)}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${post(r)}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.trackingNumber || '—')}</td>
+    </tr>`).join('');
+
+    body.innerHTML = `<div style="overflow-x:auto;margin-top:8px">
+      <table class="pn-batch-table">
+        <thead>${thead}</thead>
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">Error loading unprocessed costs: ${esc(err.message)}</div>`;
+  }
+}
+
+
+// ── Freight Spend Analytics ───────────────────────────────────────────────────
+function destroyFreightCharts() {
+  freightCharts.forEach(c => { try { c.destroy(); } catch (_) {} });
+  freightCharts = [];
+}
+
+async function runFreightSpend(months) {
+  months = months || freightSpendMonths;
+  freightSpendMonths = months;
+  showResultPanel('Freight Spend Analytics', `Last ${months} months — spend by forwarder, country, month and direction`);
+  destroyFreightCharts();
+
+  const body = document.getElementById('result-body');
+
+  try {
+    const resp = await fetch(`/api/shipmentcost/analytics?months=${months}`);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error);
+
+    const d = json.data;
+    const gbp = v => v != null ? `£${Number(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '£0.00';
+
+    const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthLabel = (yr, mo) => `${MONTH_NAMES[mo - 1]} ${yr}`;
+
+    const CHART_COLOURS = [
+      '#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6',
+      '#06B6D4','#F97316','#84CC16','#EC4899','#6366F1',
+    ];
+
+    const periodOptions = [3,6,12,24].map(m =>
+      `<option value="${m}"${m === months ? ' selected' : ''}>${m} months</option>`
+    ).join('');
+
+    const totals = d.totals || {};
+    const kpiHtml = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+        ${[
+          { label: 'Total Spend',       value: gbp(totals.totalSpend) },
+          { label: 'Processed',         value: gbp(totals.processedSpend) },
+          { label: 'Unprocessed',       value: gbp(totals.unprocessedSpend) },
+          { label: 'Shipments',         value: totals.shipments ?? '—' },
+          { label: 'Cost Records',      value: totals.costRecords ?? '—' },
+        ].map(k => `
+          <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:14px 20px;min-width:140px;flex:1">
+            <div style="font-size:11px;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${k.label}</div>
+            <div style="font-size:20px;font-weight:700;color:var(--text,#e5e7eb)">${k.value}</div>
+          </div>`).join('')}
+      </div>`;
+
+    const makeCanvas = id => `<canvas id="${id}" style="max-height:260px"></canvas>`;
+
+    body.innerHTML = `
+      <div style="padding:4px 0 16px;display:flex;align-items:center;gap:10px">
+        <label style="font-size:13px;color:var(--muted,#6b7280)">Period:</label>
+        <select id="spend-period-sel" style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);color:var(--text,#e5e7eb);border-radius:6px;padding:4px 10px;font-size:13px">
+          ${periodOptions}
+        </select>
+      </div>
+      ${kpiHtml}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
+          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Spend by Forwarder</div>
+          ${makeCanvas('chart-forwarder')}
+        </div>
+        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
+          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Spend by Country</div>
+          ${makeCanvas('chart-country')}
+        </div>
+      </div>
+      <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Monthly Spend</div>
+        ${makeCanvas('chart-monthly')}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
+          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Inbound vs Outbound</div>
+          ${makeCanvas('chart-direction')}
+        </div>
+        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
+          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Spend by Cost Center</div>
+          ${makeCanvas('chart-costcenter')}
+        </div>
+      </div>`;
+
+    document.getElementById('spend-period-sel').addEventListener('change', e => {
+      runFreightSpend(Number(e.target.value));
+    });
+
+    const chartDefaults = {
+      plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        y: { ticks: { color: '#9ca3af', font: { size: 10 }, callback: v => `£${Number(v).toLocaleString()}` }, grid: { color: 'rgba(255,255,255,0.05)' } },
+      },
+    };
+
+    // Forwarder doughnut
+    if (d.byForwarder.length) {
+      const c = new Chart(document.getElementById('chart-forwarder'), {
+        type: 'doughnut',
+        data: {
+          labels: d.byForwarder.map(r => r.forwarderName || 'Unassigned'),
+          datasets: [{ data: d.byForwarder.map(r => Number(r.totalCost)), backgroundColor: CHART_COLOURS }],
+        },
+        options: {
+          plugins: {
+            legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+            tooltip: { callbacks: { label: ctx => ` £${Number(ctx.parsed).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` } },
+          },
+        },
+      });
+      freightCharts.push(c);
+    }
+
+    // Country bar
+    if (d.byCountry.length) {
+      const c = new Chart(document.getElementById('chart-country'), {
+        type: 'bar',
+        data: {
+          labels: d.byCountry.map(r => r.country || '?'),
+          datasets: [{ label: 'Spend', data: d.byCountry.map(r => Number(r.totalCost)), backgroundColor: '#3B82F6' }],
+        },
+        options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } },
+      });
+      freightCharts.push(c);
+    }
+
+    // Monthly line
+    if (d.byMonth.length) {
+      const c = new Chart(document.getElementById('chart-monthly'), {
+        type: 'line',
+        data: {
+          labels: d.byMonth.map(r => monthLabel(r.yr, r.mo)),
+          datasets: [{
+            label: 'Monthly Spend',
+            data: d.byMonth.map(r => Number(r.totalCost)),
+            borderColor: '#10B981',
+            backgroundColor: 'rgba(16,185,129,0.1)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 4,
+            pointBackgroundColor: '#10B981',
+          }],
+        },
+        options: chartDefaults,
+      });
+      freightCharts.push(c);
+    }
+
+    // Direction doughnut
+    if (d.byDirection.length) {
+      const c = new Chart(document.getElementById('chart-direction'), {
+        type: 'doughnut',
+        data: {
+          labels: d.byDirection.map(r => r.direction),
+          datasets: [{ data: d.byDirection.map(r => Number(r.totalCost)), backgroundColor: ['#3B82F6','#F59E0B'] }],
+        },
+        options: {
+          plugins: {
+            legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+            tooltip: { callbacks: { label: ctx => ` £${Number(ctx.parsed).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` } },
+          },
+        },
+      });
+      freightCharts.push(c);
+    }
+
+    // Cost center bar
+    if (d.byCostCenter.length) {
+      const c = new Chart(document.getElementById('chart-costcenter'), {
+        type: 'bar',
+        data: {
+          labels: d.byCostCenter.map(r => r.costCenter || 'Unassigned'),
+          datasets: [{ label: 'Spend', data: d.byCostCenter.map(r => Number(r.totalCost)), backgroundColor: '#8B5CF6' }],
+        },
+        options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } },
+      });
+      freightCharts.push(c);
+    }
+
+  } catch (err) {
+    destroyFreightCharts();
+    body.innerHTML = `<div class="sap-error">Error loading analytics: ${esc(err.message)}</div>`;
+  }
 }

@@ -181,4 +181,139 @@ router.get('/estimate/:shipmentId', async (req, res) => {
     }
 });
 
+// ── Unprocessed costs (migoStatus = 0) ───────────────────────────────────────
+router.get('/unprocessed', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query(`SELECT
+                sc.costID,
+                sm.shipmentID,
+                sm.shipmentRef,
+                sm.plannedCollection,
+                sm.actualCollection,
+                f.forwarderName,
+                cc.centerCode  AS costCenter,
+                ce.elementCode AS costElement,
+                sc.expectedCost,
+                sc.actualCost,
+                sc.costType,
+                sm.destinationCountry,
+                sm.destinationPostCode,
+                sm.trackingNumber
+            FROM Logistics.dbo.ShipmentCost sc
+            INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+            LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
+            LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.costCenterID = sc.costCenter
+            LEFT  JOIN Logistics.dbo.CostElements ce ON ce.costElementID = sc.costElement
+            WHERE sc.migoStatus = 0
+            ORDER BY sm.plannedCollection ASC, sm.shipmentRef ASC`);
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Freight spend analytics ───────────────────────────────────────────────────
+router.get('/analytics', async (req, res) => {
+    try {
+        const pool   = await getPool();
+        const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 60);
+
+        // By forwarder
+        const byForwarder = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT f.forwarderName,
+                           SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                           COUNT(*)                                      AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY f.forwarderName
+                    ORDER BY totalCost DESC`);
+
+        // By destination country
+        const byCountry = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT sm.destinationCountry AS country,
+                           SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                           COUNT(*)                                      AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                      AND sm.destinationCountry IS NOT NULL
+                    GROUP BY sm.destinationCountry
+                    ORDER BY totalCost DESC`);
+
+        // By month
+        const byMonth = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT
+                        YEAR(sm.plannedCollection)  AS yr,
+                        MONTH(sm.plannedCollection) AS mo,
+                        SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                        COUNT(*) AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                      AND sm.plannedCollection IS NOT NULL
+                    GROUP BY YEAR(sm.plannedCollection), MONTH(sm.plannedCollection)
+                    ORDER BY yr ASC, mo ASC`);
+
+        // By direction
+        const byDirection = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT
+                        CASE WHEN sm.originID = 0 OR sm.originID IS NULL THEN 'Outbound' ELSE 'Inbound' END AS direction,
+                        SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                        COUNT(*) AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY CASE WHEN sm.originID = 0 OR sm.originID IS NULL THEN 'Outbound' ELSE 'Inbound' END`);
+
+        // By cost center
+        const byCostCenter = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT cc.centerCode AS costCenter,
+                           SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                           COUNT(*) AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.costCenterID = sc.costCenter
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY cc.centerCode
+                    ORDER BY totalCost DESC`);
+
+        // Totals
+        const totals = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT
+                        COUNT(DISTINCT sc.shipmentID)                       AS shipments,
+                        COUNT(*)                                             AS costRecords,
+                        SUM(ISNULL(sc.actualCost, sc.expectedCost))         AS totalSpend,
+                        SUM(CASE WHEN sc.migoStatus = 0 THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS unprocessedSpend,
+                        SUM(CASE WHEN sc.migoStatus = 1 THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS processedSpend
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())`);
+
+        res.json({
+            success: true,
+            months,
+            data: {
+                totals:      totals.recordset[0],
+                byForwarder: byForwarder.recordset,
+                byCountry:   byCountry.recordset,
+                byMonth:     byMonth.recordset,
+                byDirection: byDirection.recordset,
+                byCostCenter: byCostCenter.recordset,
+            },
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 export default router;
