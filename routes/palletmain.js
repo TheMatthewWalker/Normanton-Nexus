@@ -172,20 +172,21 @@ router.get('/landing-sparkline', async (req, res) => {
         const pool = await getPool();
 
         // Pallets finished per day for the last 7 days
+        const today = 'DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)';
         const sparkResult = await pool.request().query(`
             WITH days AS (
-                SELECT CAST(DATEADD(day, -6, CAST(GETDATE() AS DATE)) AS DATE) AS day UNION ALL
-                SELECT CAST(DATEADD(day, -5, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
-                SELECT CAST(DATEADD(day, -4, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
-                SELECT CAST(DATEADD(day, -3, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
-                SELECT CAST(DATEADD(day, -2, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
-                SELECT CAST(DATEADD(day, -1, CAST(GETDATE() AS DATE)) AS DATE) UNION ALL
-                SELECT CAST(DATEADD(day,  0, CAST(GETDATE() AS DATE)) AS DATE)
+                SELECT DATEADD(day, -6, ${today}) AS day UNION ALL
+                SELECT DATEADD(day, -5, ${today}) UNION ALL
+                SELECT DATEADD(day, -4, ${today}) UNION ALL
+                SELECT DATEADD(day, -3, ${today}) UNION ALL
+                SELECT DATEADD(day, -2, ${today}) UNION ALL
+                SELECT DATEADD(day, -1, ${today}) UNION ALL
+                SELECT ${today}
             )
             SELECT d.day, ISNULL(COUNT(pm.palletID), 0) AS cnt
             FROM days d
             LEFT JOIN Logistics.dbo.PalletMain pm
-                ON CAST(pm.palletFinishDate AS DATE) = d.day
+                ON DATEADD(day, DATEDIFF(day, 0, pm.palletFinishDate), 0) = d.day
                AND pm.palletFinish = 1
                AND pm.palletRemoved = 0
             GROUP BY d.day
@@ -200,8 +201,8 @@ router.get('/landing-sparkline', async (req, res) => {
             FROM Logistics.dbo.PalletMain
             WHERE palletFinish = 1
               AND palletRemoved = 0
-              AND palletFinishDate >= DATEADD(day, -13, CAST(GETDATE() AS DATE))
-              AND palletFinishDate <  DATEADD(day, -6,  CAST(GETDATE() AS DATE))`);
+              AND palletFinishDate >= DATEADD(day, -13, DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0))
+              AND palletFinishDate <  DATEADD(day,  -6, DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0))`);
 
         const prevWeek  = Number(prevResult.recordset[0].cnt);
         const pctChange = prevWeek === 0
@@ -214,7 +215,7 @@ router.get('/landing-sparkline', async (req, res) => {
             FROM Logistics.dbo.DeliveryMain
             WHERE completionStatus = 0
               AND ISNULL(deliveryCancelled, 0) = 0
-              AND dueDate < CAST(GETDATE() AS DATE)`);
+              AND dueDate < DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)`);
 
         const overduePicksheets = Number(overdueResult.recordset[0].cnt);
 
