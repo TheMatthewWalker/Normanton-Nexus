@@ -1819,6 +1819,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
     </div>
     <div class="ps-modal-actions">
       <button class="btn-secondary" onclick="openShipmentEventLog(${shipment.shipmentID}, '${esc(shipmentRef)}')">Event Log</button>
+      ${hasPlanning() ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`;
@@ -2576,6 +2577,127 @@ async function openShipmentEventLog(shipmentId, shipmentRef) {
     body.innerHTML = `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
   }
 }
+
+// ── Edit Dates & Status ───────────────────────────────────────────────────────
+async function openShipmentStatusEdit(shipmentId, shipmentRef) {
+  openModal(`<div class="ps-modal" style="max-width:600px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Edit Dates &amp; Status</div>
+        <div class="ps-modal-sub">Shipment ${esc(String(shipmentRef))}</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body" id="sse-body">
+      <div class="sap-loading"><div class="spinner"></div>Loading…</div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">← Back</button>
+      <button class="btn-submit" id="sse-save" disabled>Save Corrections</button>
+    </div>
+  </div>`);
+
+  try {
+    const res  = await fetch(`/api/shipmentmain/id/${encodeURIComponent(shipmentId)}`);
+    const json = await res.json();
+    const s    = Array.isArray(json) ? json[0] : json;
+    if (!s) throw new Error('Shipment not found');
+
+    const fmt = d => d ? new Date(d).toISOString().slice(0, 10) : '';
+
+    document.getElementById('sse-body').innerHTML = `
+      <form class="transfer-form" style="padding:0">
+        <div class="tf-section-label">Booking</div>
+        <div class="tf-row">
+          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
+            <label class="tf-label">Booking Status</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
+              <input type="checkbox" id="sse-booking" style="width:16px;height:16px" ${s.bookingStatus ? 'checked' : ''}>
+              Booked
+            </label>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Planned Collection</label>
+            <input class="tf-input" id="sse-plan-col" type="date" value="${fmt(s.plannedCollection)}">
+          </div>
+        </div>
+
+        <div class="tf-section-label">Collection</div>
+        <div class="tf-row">
+          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
+            <label class="tf-label">Collection Status</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
+              <input type="checkbox" id="sse-col-status" style="width:16px;height:16px" ${s.collectionStatus ? 'checked' : ''}>
+              Collected
+            </label>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Actual Collection Date</label>
+            <input class="tf-input" id="sse-act-col" type="date" value="${fmt(s.actualCollection)}">
+          </div>
+        </div>
+
+        <div class="tf-section-label">Delivery</div>
+        <div class="tf-row">
+          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
+            <label class="tf-label">Delivery Status</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
+              <input type="checkbox" id="sse-del-status" style="width:16px;height:16px" ${s.deliveryStatus ? 'checked' : ''}>
+              Delivered
+            </label>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Planned Delivery</label>
+            <input class="tf-input" id="sse-plan-del" type="date" value="${fmt(s.plannedDelivery)}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Actual Delivery Date</label>
+            <input class="tf-input" id="sse-act-del" type="date" value="${fmt(s.actualDelivery)}">
+          </div>
+        </div>
+
+        <div id="sse-result" style="margin-top:10px;font-size:13px"></div>
+      </form>`;
+
+    const saveBtn = document.getElementById('sse-save');
+    saveBtn.disabled = false;
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+      const resultEl = document.getElementById('sse-result');
+      const val = id => document.getElementById(id)?.value || null;
+      const chk = id => document.getElementById(id)?.checked ? 1 : 0;
+
+      try {
+        const res2 = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/status-dates`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bookingStatus:     chk('sse-booking'),
+            plannedCollection: val('sse-plan-col'),
+            collectionStatus:  chk('sse-col-status'),
+            actualCollection:  val('sse-act-col'),
+            plannedDelivery:   val('sse-plan-del'),
+            deliveryStatus:    chk('sse-del-status'),
+            actualDelivery:    val('sse-act-del'),
+          }),
+        });
+        const json2 = await res2.json();
+        if (!json2.success) throw new Error(json2.error || 'Save failed');
+        resultEl.style.color = 'var(--success,#059669)';
+        resultEl.textContent  = 'Saved. Returning to detail…';
+        setTimeout(() => openShipmentDetailModal(shipmentId), 800);
+      } catch (err) {
+        resultEl.style.color = 'var(--error,#DC2626)';
+        resultEl.textContent  = `✕ ${err.message}`;
+        saveBtn.disabled = false; saveBtn.textContent = 'Save Corrections';
+      }
+    });
+  } catch (err) {
+    document.getElementById('sse-body').innerHTML =
+      `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
+  }
+}
+
 
 function shipmentEventCategoryStyle(category) {
   const c = String(category || '').toUpperCase();

@@ -2144,6 +2144,51 @@ router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async 
 
 
 // â”€â”€ Update haulier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Correct dates and status flags (admin correction) ────────────────────────
+router.patch('/:shipmentId/status-dates', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const pool       = await getPool();
+    const shipmentId = Number(req.params.shipmentId);
+    const request    = pool.request().input('shipmentId', sql.BigInt, shipmentId);
+    const sets       = [];
+
+    const addDate = (key, col) => {
+      const raw = req.body[key];
+      if (raw === undefined) return;
+      request.input(key, sql.DateTime, raw ? new Date(raw) : null);
+      sets.push(`${col} = @${key}`);
+    };
+    const addBit = (key, col) => {
+      if (req.body[key] === undefined) return;
+      request.input(key, sql.Bit, req.body[key] ? 1 : 0);
+      sets.push(`${col} = @${key}`);
+    };
+
+    addDate('plannedCollection', 'plannedCollection');
+    addDate('actualCollection',  'actualCollection');
+    addBit ('collectionStatus',  'collectionStatus');
+    addDate('plannedDelivery',   'plannedDelivery');
+    addDate('actualDelivery',    'actualDelivery');
+    addBit ('deliveryStatus',    'deliveryStatus');
+    addBit ('bookingStatus',     'bookingStatus');
+
+    if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
+
+    await request.query(
+      `UPDATE Logistics.dbo.ShipmentMain SET ${sets.join(', ')} WHERE shipmentID = @shipmentId`
+    );
+
+    const username = req.session?.user?.username || 'unknown';
+    await writeShipmentEvent(pool, shipmentId, 'CORRECTION',
+      `Dates/status corrected by ${username}: ${sets.map(s => s.split(' = ')[0]).join(', ')}`);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
