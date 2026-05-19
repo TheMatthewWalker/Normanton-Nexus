@@ -1162,6 +1162,7 @@ function buildShipmentQueueFilter(mode, request, settings) {
   if (mode === 'awaiting-collection') {
     return `
       ISNULL(sm.shipmentCancelled, 0) = 0
+      AND ISNULL(sm.bookingStatus,    0) = 1
       AND ISNULL(sm.collectionStatus, 0) = 0
       AND ${applySiteMatch(request, 'sm.origin', settings, 'originSiteId', 'originSiteName')}
     `;
@@ -2220,6 +2221,7 @@ router.get('/search', async (req, res) => {
 
     const result = await request.query(`
       SELECT sm.*,
+        CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
         CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
         CAST(ISNULL(sm.deliveryStatus,   0) AS bit) AS deliveryStatus,
         (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
