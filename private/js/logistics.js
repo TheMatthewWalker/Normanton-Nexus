@@ -801,6 +801,7 @@ function getBookingRowsWithInputs() {
     skipCost:          Boolean(document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.skipCost),
     elementCode:       document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.elementCode || null,
     costCenter:        document.getElementById('booking-cost-center')?.value || null,
+    customsCost:       (() => { const v = document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.customsCost; return v != null && v !== '' ? Number(v) : null; })(),
   }));
 }
 
@@ -892,14 +893,16 @@ async function openBookingModal(rows, haulier) {
           if (d.rateFound) {
             inputEl.value = d.expectedCost;
             inputEl.dataset.elementCode = d.elementCode || '';
+            const customsLabel = d.customsCost > 0 ? ` + £${d.customsCost} customs (DDP)` : ` + £0 customs (${d.incoTerms || 'DAP'})`;
             if (detailEl) detailEl.textContent =
-              `${d.chargeableWeight} kg × £${d.agreedRate}/kg (min £${d.minimumCharge})`;
+              `${d.chargeableWeight} kg × £${d.agreedRate}/kg (min £${d.minimumCharge})${customsLabel}`;
           } else {
             inputEl.placeholder = '£ — no rate found';
             if (detailEl) detailEl.textContent = json.data.message || 'No rate found';
             if (detailEl) detailEl.style.color = 'var(--error)';
           }
           if (d.elementCode) inputEl.dataset.elementCode = d.elementCode;
+          inputEl.dataset.customsCost = d.customsCost != null ? String(d.customsCost) : '';
         }
         if (loadEl) loadEl.style.display = 'none';
         inputEl.style.display = '';
@@ -1011,6 +1014,7 @@ async function submitBookingModal() {
           costCenter:        item.costCenter         || null,
           elementCode:       item.elementCode        || null,
           skipCost:          Boolean(item.skipCost),
+          customsCost:       item.customsCost        != null ? Number(item.customsCost) : null,
         })),
       }),
     });

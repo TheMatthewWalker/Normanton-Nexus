@@ -103,7 +103,7 @@ router.get('/estimate/:shipmentId', async (req, res) => {
             .input('shipmentId', sql.BigInt, shipmentId)
             .query(`SELECT sm.shipmentID, sm.grossWeight, sm.shipmentVolume,
                            sm.destinationCountry, sm.destinationPostCode,
-                           sm.originID, sm.destinationID,
+                           sm.originID, sm.destinationID, sm.incoTerms,
                            f.forwarderName, f.forwarderMode
                     FROM Logistics.dbo.ShipmentMain sm
                     LEFT JOIN Logistics.dbo.Forwarders f ON f.forwarderID = sm.forwarderID
@@ -131,6 +131,10 @@ router.get('/estimate/:shipmentId', async (req, res) => {
                     WHERE direction = @direction AND tier = @tier`);
         const elementCode = elemResult.recordset[0]?.elementCode ?? null;
 
+        // Customs cost (KN only): DDP = £50, DAP = £0
+        const incoNorm    = (s.incoTerms || '').toUpperCase().replace(/\s/g, '');
+        const customsCost = isKN ? (incoNorm === 'DDP' ? 50 : 0) : null;
+
         if (!isKN) {
             return res.json({ success: true, data: { isKN, isKennethHowley: isKH, direction, tier, elementCode } });
         }
@@ -156,6 +160,7 @@ router.get('/estimate/:shipmentId', async (req, res) => {
             return res.json({ success: true, data: {
                 isKN, isKennethHowley: false, direction, tier, elementCode,
                 rateFound: false, chargeableWeight, grossWeight, volumetricWeight,
+                customsCost, incoTerms: s.incoTerms,
                 message: `No KN rate found for ${s.destinationCountry} / postcode prefix ${postcodePrefix} at ${chargeableWeight} kg`,
             }});
         }
@@ -169,6 +174,7 @@ router.get('/estimate/:shipmentId', async (req, res) => {
             isKN, isKennethHowley: false, direction, tier, elementCode,
             rateFound: true, chargeableWeight, grossWeight, volumetricWeight,
             agreedRate: rate.agreedRate, minimumCharge: rate.minimumCharge, expectedCost,
+            customsCost, incoTerms: s.incoTerms,
         }});
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });

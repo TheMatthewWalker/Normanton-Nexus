@@ -97,7 +97,8 @@ function normalizeShipmentUpdates(input) {
       expectedCost:      Number.isFinite(cost) ? cost : null,
       costCenter:        String(item?.costCenter  || '').trim() || null,
       elementCode:       String(item?.elementCode || '').trim() || null,
-      skipCost:          Boolean(item?.skipCost),  // Kenneth Howley — TPN later
+      skipCost:          Boolean(item?.skipCost),
+      customsCost:       item?.customsCost != null ? Number(item.customsCost) : null,
     });
     return acc;
   }, []);
@@ -1744,21 +1745,43 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
     // Insert ShipmentCost rows for each booked shipment that has a cost
     const pool2 = await getPool();
     for (const item of shipmentUpdates) {
-      if (item.skipCost || item.expectedCost == null) continue;
-      try {
-        await pool2.request()
-          .input('shipmentID',   sql.BigInt,           item.shipmentID)
-          .input('costType',     sql.NVarChar(3),       '1')
-          .input('costElement',  sql.NVarChar(6),       item.elementCode || null)
-          .input('costCenter',   sql.NVarChar(20),      item.costCenter  || null)
-          .input('expectedCost', sql.Decimal(18, 2),    item.expectedCost)
-          .input('actualCost',   sql.Decimal(18, 2),    0)
-          .input('migoStatus',   sql.Bit,               0)
-          .query(`INSERT INTO Logistics.dbo.ShipmentCost
-                    (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
-                  VALUES
-                    (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
-      } catch (_) { /* non-fatal — booking already confirmed */ }
+      if (item.skipCost) continue;
+
+      // Freight cost (costType 1)
+      if (item.expectedCost != null) {
+        try {
+          await pool2.request()
+            .input('shipmentID',   sql.BigInt,        item.shipmentID)
+            .input('costType',     sql.NVarChar(3),   '1')
+            .input('costElement',  sql.NVarChar(6),   item.elementCode || null)
+            .input('costCenter',   sql.NVarChar(20),  item.costCenter  || null)
+            .input('expectedCost', sql.Decimal(18,2), item.expectedCost)
+            .input('actualCost',   sql.Decimal(18,2), 0)
+            .input('migoStatus',   sql.Bit,           0)
+            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                    VALUES
+                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+        } catch (_) {}
+      }
+
+      // Customs cost (costType 2) — KN only, £50 DDP / £0 DAP
+      if (item.customsCost != null) {
+        try {
+          await pool2.request()
+            .input('shipmentID',   sql.BigInt,        item.shipmentID)
+            .input('costType',     sql.NVarChar(3),   '2')
+            .input('costElement',  sql.NVarChar(6),   '603120')
+            .input('costCenter',   sql.NVarChar(20),  item.costCenter || null)
+            .input('expectedCost', sql.Decimal(18,2), item.customsCost)
+            .input('actualCost',   sql.Decimal(18,2), 0)
+            .input('migoStatus',   sql.Bit,           0)
+            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                    VALUES
+                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+        } catch (_) {}
+      }
     }
 
     res.json({ success: true, data: { updated } });
