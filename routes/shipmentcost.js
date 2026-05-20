@@ -206,7 +206,7 @@ router.get('/unprocessed', async (req, res) => {
             LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
             WHERE sc.migoStatus = 0
-            ORDER BY sm.plannedCollection ASC, sm.shipmentRef ASC`);
+            ORDER BY sm.plannedCollection ASC, sm.shipmentID ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
