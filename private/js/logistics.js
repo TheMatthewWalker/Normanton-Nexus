@@ -3128,7 +3128,9 @@ async function runFreightSpend(months) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
         ${card('Inbound vs Outbound', 'chart-direction')}
         ${card('Spend by Cost Centre', 'chart-costcenter')}
-      </div>`;
+      </div>
+      <div style="margin-bottom:14px">${card('Spend by Customer', 'chart-customer')}</div>
+      <div style="margin-bottom:14px">${card('Spend by Service', 'chart-service')}</div>`;
 
     document.getElementById('spend-period-sel').addEventListener('change', e => {
       runFreightSpend(Number(e.target.value));
@@ -3198,6 +3200,35 @@ async function runFreightSpend(months) {
         type: 'bar',
         data: { labels: d.byCostCenter.map(r => r.costCenter || 'Unassigned'), datasets: [{ data: d.byCostCenter.map(r => Number(r.totalCost)), backgroundColor: '#8B5CF6', borderRadius: 4 }] },
         options: barDefaults,
+      }));
+    }
+
+    if (d.byCustomer.length) {
+      freightCharts.push(new Chart(document.getElementById('chart-customer'), {
+        type: 'bar',
+        data: {
+          labels: d.byCustomer.map(r => r.customer || '?'),
+          datasets: [{ data: d.byCustomer.map(r => Number(r.totalCost)), backgroundColor: '#10B981', borderRadius: 4 }],
+        },
+        options: {
+          ...barDefaults,
+          indexAxis: 'y',
+          scales: {
+            x: { ticks: { color: TICK, font: { size: 10 }, callback: gbpY }, grid: { color: GRID } },
+            y: { ticks: { color: TICK, font: { size: 10 } }, grid: { color: GRID } },
+          },
+        },
+      }));
+    }
+
+    if (d.byService.length) {
+      freightCharts.push(new Chart(document.getElementById('chart-service'), {
+        type: 'doughnut',
+        data: {
+          labels: d.byService.map(r => r.service),
+          datasets: [{ data: d.byService.map(r => Number(r.totalCost)), backgroundColor: CHART_COLOURS, borderWidth: 2, borderColor: '#fff' }],
+        },
+        options: doughnutDefaults(),
       }));
     }
 

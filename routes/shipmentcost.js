@@ -286,6 +286,32 @@ router.get('/analytics', async (req, res) => {
                     GROUP BY cc.centerCode
                     ORDER BY totalCost DESC`);
 
+        // By customer (destination name)
+        const byCustomer = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT sm.destinationName AS customer,
+                           SUM(sc.expectedCost) AS totalCost,
+                           COUNT(*)             AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                      AND sm.destinationName IS NOT NULL
+                    GROUP BY sm.destinationName
+                    ORDER BY totalCost DESC`);
+
+        // By service mode (forwarderMode from Forwarders table)
+        const byService = await pool.request()
+            .input('months', sql.Int, months)
+            .query(`SELECT ISNULL(f.forwarderMode, 'Unassigned') AS service,
+                           SUM(sc.expectedCost) AS totalCost,
+                           COUNT(*)             AS records
+                    FROM Logistics.dbo.ShipmentCost sc
+                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+                    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
+                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY f.forwarderMode
+                    ORDER BY totalCost DESC`);
+
         // Totals
         const totals = await pool.request()
             .input('months', sql.Int, months)
@@ -307,8 +333,10 @@ router.get('/analytics', async (req, res) => {
                 byForwarder: byForwarder.recordset,
                 byCountry:   byCountry.recordset,
                 byMonth:     byMonth.recordset,
-                byDirection: byDirection.recordset,
+                byDirection:  byDirection.recordset,
                 byCostCenter: byCostCenter.recordset,
+                byCustomer:   byCustomer.recordset,
+                byService:    byService.recordset,
             },
         });
     } catch (err) {
