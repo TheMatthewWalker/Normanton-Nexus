@@ -3120,17 +3120,17 @@ async function runFreightSpend(months) {
         </select>
       </div>
       ${kpiHtml}
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
-        ${card('Spend by Forwarder', 'chart-forwarder')}
-        ${card('Spend by Country',   'chart-country')}
-      </div>
       <div style="margin-bottom:14px">${card('Monthly Spend', 'chart-monthly')}</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px">
+        ${card('Spend by Forwarder',  'chart-forwarder')}
         ${card('Inbound vs Outbound', 'chart-direction')}
-        ${card('Spend by Cost Centre', 'chart-costcenter')}
+        ${card('Spend by Service',    'chart-service')}
       </div>
-      <div style="margin-bottom:14px">${card('Spend by Customer', 'chart-customer')}</div>
-      <div style="margin-bottom:14px">${card('Spend by Service', 'chart-service')}</div>`;
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        ${card('Spend by Country',    'chart-country')}
+        ${card('Spend by Cost Centre','chart-costcenter')}
+      </div>
+      <div style="margin-bottom:14px">${card('Spend by Customer', 'chart-customer')}</div>`;
 
     document.getElementById('spend-period-sel').addEventListener('change', e => {
       runFreightSpend(Number(e.target.value));
