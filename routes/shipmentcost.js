@@ -74,7 +74,7 @@ router.post('/', async (req, res) => {
             .input('costCenter', sql.NVarChar, costCenter)
             .input('expectedCost', sql.Decimal, expectedCost)
             .input('actualCost', sql.Decimal, actualCost)
-            .input('migoStatus', sql.Bit, migoStatus)
+            .input('migoStatus', sql.Bit, migoStatus ?? 0)
             .input('materialDocument', sql.NVarChar, materialDocument)
             .query(`INSERT INTO Logistics.dbo.ShipmentCost
                 (shipmentID, costType, costElement, costCenter,
@@ -205,7 +205,7 @@ router.get('/unprocessed', async (req, res) => {
             LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
             LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
-            WHERE sc.migoStatus = 0
+            WHERE ISNULL(sc.migoStatus, 0) = 0
             ORDER BY sm.plannedCollection ASC, sm.shipmentID ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
@@ -292,8 +292,8 @@ router.get('/analytics', async (req, res) => {
                         COUNT(DISTINCT sc.shipmentID)                       AS shipments,
                         COUNT(*)                                             AS costRecords,
                         SUM(ISNULL(sc.actualCost, sc.expectedCost))         AS totalSpend,
-                        SUM(CASE WHEN sc.migoStatus = 0 THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS unprocessedSpend,
-                        SUM(CASE WHEN sc.migoStatus = 1 THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS processedSpend
+                        SUM(CASE WHEN ISNULL(sc.migoStatus,0) = 0 THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS unprocessedSpend,
+                        SUM(CASE WHEN sc.migoStatus = 1               THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS processedSpend
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
                     WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())`);
