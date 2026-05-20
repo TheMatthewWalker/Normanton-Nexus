@@ -118,7 +118,8 @@ router.get('/estimate/:shipmentId', async (req, res) => {
         const isKH    = fwdNorm.includes('howley') || fwdNorm.includes('kennethhowley');
 
         // Direction: originID=0 → outbound (Kongsberg is shipping out)
-        const direction = (s.originID === 0 || s.originID === null) ? 'outbound' : 'inbound';
+        // Use loose coercion: mssql may return BigInt cols as string '0'
+        const direction = (s.originID == null || Number(s.originID) === 0) ? 'outbound' : 'inbound';
 
         // Tier: Premium if forwarder mode contains 'premium'
         const tier = (s.forwarderMode || '').toLowerCase().includes('premium') ? 'premium' : 'standard';
