@@ -2992,8 +2992,9 @@ function renderSimpleTable(rows, cols) {
 
 // ── Unprocessed Freight Costs ─────────────────────────────────────────────────
 async function runUnprocessedCosts() {
-  showResultPanel('Unprocessed Freight Costs', 'Cost lines with migoStatus = 0 — awaiting MIGO posting in SAP');
+  showResultPanel('Unprocessed Freight Costs', 'Cost lines awaiting MIGO posting — tick rows and press Post to SAP');
   const body = document.getElementById('result-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
 
   try {
     const resp = await fetch('/api/shipmentcost/unprocessed');
@@ -3006,55 +3007,158 @@ async function runUnprocessedCosts() {
       return;
     }
 
-    document.getElementById('result-row-badge').textContent = `${rows.length} record${rows.length !== 1 ? 's' : ''}`;
+    document.getElementById('result-row-badge').textContent = `${rows.length} line${rows.length !== 1 ? 's' : ''}`;
     document.getElementById('result-row-badge').classList.remove('hidden');
 
-    const fmt  = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
-    const gbp  = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
-    const post = r => {
-      const cc = (r.destinationCountry || '').slice(0, 2).toUpperCase();
+    const fmt        = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
+    const gbp        = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
+    const location   = r => {
+      const cc = (r.destinationCountry  || '').slice(0, 2).toUpperCase();
       const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
       return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
     };
-
     const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
+    const MONO       = 'font-family:\'JetBrains Mono\',monospace;font-size:11px';
 
     const thead = `<tr>
-      <th>Shipment Ref</th>
+      <th style="width:32px"><input type="checkbox" id="migo-check-all" title="Select all"></th>
+      <th>Shipment</th>
       <th>Type</th>
-      <th>Planned Collection</th>
-      <th>Actual Collection</th>
+      <th>Planned</th>
+      <th>Collected</th>
       <th>Haulier</th>
-      <th>Cost Center</th>
+      <th>Cost Centre</th>
       <th>Cost Element</th>
-      <th>Expected</th>
-      <th>Actual</th>
-      <th>Country / Post</th>
+      <th style="text-align:right">Expected</th>
+      <th>Location</th>
       <th>Tracking</th>
+      <th>Result</th>
     </tr>`;
 
-    const tbody = rows.map(r => `<tr>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.shipmentRef || String(r.shipmentID))}</td>
-      <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
-      <td>${fmt(r.plannedCollection)}</td>
-      <td>${fmt(r.actualCollection)}</td>
-      <td>${esc(r.forwarderName || '—')}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.costCenter || '—')}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.costElement || '—')}</td>
-      <td style="text-align:right">${gbp(r.expectedCost)}</td>
-      <td style="text-align:right">${gbp(r.actualCost)}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${post(r)}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.trackingNumber || '—')}</td>
-    </tr>`).join('');
+    const tbody = rows.map(r => `
+      <tr data-cost-id="${r.costID}" class="migo-row">
+        <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}"></td>
+        <td style="${MONO}">${String(r.shipmentID).padStart(6,'0')}</td>
+        <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
+        <td>${fmt(r.plannedCollection)}</td>
+        <td>${fmt(r.actualCollection)}</td>
+        <td>${esc(r.forwarderName || '—')}</td>
+        <td style="${MONO}">${esc(r.costCenter  || '—')}</td>
+        <td style="${MONO}">${esc(r.costElement || '—')}</td>
+        <td style="text-align:right">${gbp(r.expectedCost)}</td>
+        <td style="${MONO}">${location(r)}</td>
+        <td style="${MONO}">${esc(r.trackingNumber || '—')}</td>
+        <td class="migo-result-cell"></td>
+      </tr>`).join('');
 
-    body.innerHTML = `<div style="overflow-x:auto;margin-top:8px">
-      <table class="pn-batch-table">
-        <thead>${thead}</thead>
-        <tbody>${tbody}</tbody>
-      </table>
-    </div>`;
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 0 12px;border-bottom:1px solid var(--border);margin-bottom:12px">
+        <span id="migo-sel-count" style="font-size:13px;color:var(--text-dim)">0 selected</span>
+        <button id="migo-post-btn" class="btn-primary" disabled style="margin-left:auto">Post to SAP</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead>${thead}</thead>
+          <tbody id="migo-tbody">${tbody}</tbody>
+        </table>
+      </div>`;
+
+    // Select-all toggle
+    document.getElementById('migo-check-all').addEventListener('change', function () {
+      document.querySelectorAll('.migo-check').forEach(cb => { cb.checked = this.checked; });
+      updateMigoSelection();
+    });
+
+    // Individual checkbox changes
+    document.getElementById('migo-tbody').addEventListener('change', e => {
+      if (e.target.classList.contains('migo-check')) {
+        updateMigoSelection();
+        const all = document.querySelectorAll('.migo-check');
+        document.getElementById('migo-check-all').checked = [...all].every(cb => cb.checked);
+      }
+    });
+
+    document.getElementById('migo-post-btn').addEventListener('click', postMigoSelected);
+
   } catch (err) {
     body.innerHTML = `<div class="sap-error">Error loading unprocessed costs: ${esc(err.message)}</div>`;
+  }
+}
+
+function updateMigoSelection() {
+  const checked = document.querySelectorAll('.migo-check:checked');
+  const countEl = document.getElementById('migo-sel-count');
+  const btn     = document.getElementById('migo-post-btn');
+  if (!countEl || !btn) return;
+  countEl.textContent = `${checked.length} selected`;
+  btn.disabled = checked.length === 0;
+}
+
+async function postMigoSelected() {
+  const checked = [...document.querySelectorAll('.migo-check:checked')];
+  if (!checked.length) return;
+
+  const costIDs = checked.map(cb => Number(cb.dataset.costId));
+  const btn     = document.getElementById('migo-post-btn');
+  const countEl = document.getElementById('migo-sel-count');
+
+  btn.disabled    = true;
+  btn.textContent = 'Posting…';
+  countEl.textContent = 'Sending to SAP…';
+
+  // Clear previous results on selected rows
+  checked.forEach(cb => {
+    const cell = cb.closest('tr')?.querySelector('.migo-result-cell');
+    if (cell) cell.innerHTML = '<span style="color:var(--text-muted);font-size:11px">Pending…</span>';
+  });
+
+  try {
+    const resp = await fetch('/api/shipmentcost/post-migo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ costIDs }),
+    });
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error);
+
+    let okCount = 0;
+    let failCount = 0;
+
+    for (const result of json.results) {
+      for (const costID of result.costIDs) {
+        const row  = document.querySelector(`tr[data-cost-id="${costID}"]`);
+        const cell = row?.querySelector('.migo-result-cell');
+        const cb   = row?.querySelector('.migo-check');
+        if (!row || !cell) continue;
+
+        if (result.success) {
+          cell.innerHTML = `<span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;border-radius:4px;padding:2px 7px;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap">${esc(result.materialDocument)}</span>`;
+          row.style.opacity = '0.45';
+          if (cb) { cb.checked = false; cb.disabled = true; }
+          okCount++;
+        } else {
+          cell.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(result.error || '')}">${esc(result.error || 'Failed')}</span>`;
+          failCount++;
+        }
+      }
+    }
+
+    updateMigoSelection();
+    btn.textContent = 'Post to SAP';
+
+    const parts = [];
+    if (okCount)   parts.push(`${okCount} posted`);
+    if (failCount) parts.push(`${failCount} failed`);
+    countEl.textContent = parts.join(' · ') || 'Done';
+
+  } catch (err) {
+    btn.disabled    = false;
+    btn.textContent = 'Post to SAP';
+    countEl.textContent = `Error: ${err.message}`;
+    checked.forEach(cb => {
+      const cell = cb.closest('tr')?.querySelector('.migo-result-cell');
+      if (cell) cell.innerHTML = '';
+    });
   }
 }
 

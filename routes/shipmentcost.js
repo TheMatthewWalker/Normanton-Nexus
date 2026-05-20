@@ -1,6 +1,20 @@
 import express from 'express';
-import sql from 'mssql';
-import { sqlConfig } from '../server.js';
+import sql    from 'mssql';
+import axios  from 'axios';
+import https  from 'https';
+import jwt    from 'jsonwebtoken';
+import fs     from 'fs';
+import { sqlConfig, sapConfig, sapServerSecret } from '../server.js';
+
+const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
+const sapAgent = fs.existsSync(certPath)
+    ? new https.Agent({ ca: fs.readFileSync(certPath), rejectUnauthorized: true })
+    : null;
+
+function makeSapToken() {
+    return jwt.sign({ userId: 0 }, sapServerSecret,
+        { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' });
+}
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -190,6 +204,7 @@ router.get('/unprocessed', async (req, res) => {
             .query(`SELECT
                 sc.costID,
                 sm.shipmentID,
+                sm.forwarderID,
                 sm.plannedCollection,
                 sm.actualCollection,
                 f.forwarderName,
@@ -341,6 +356,99 @@ router.get('/analytics', async (req, res) => {
         });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Post selected costs to SAP (MIGO) ────────────────────────────────────────
+// Body: { costIDs: [1, 2, 3, ...] }
+// Groups by shipmentID, sends to SapServer, marks successful lines migoStatus=1.
+router.post('/post-migo', async (req, res) => {
+    const { costIDs } = req.body;
+    if (!Array.isArray(costIDs) || !costIDs.length)
+        return res.status(400).json({ success: false, error: 'costIDs array is required.' });
+
+    try {
+        const pool = await getPool();
+
+        // Build parameterised IN clause
+        const req2 = pool.request();
+        costIDs.forEach((id, i) => req2.input(`id${i}`, sql.BigInt, Number(id)));
+        const inClause = costIDs.map((_, i) => `@id${i}`).join(',');
+
+        const fetched = await req2.query(`
+            SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost,
+                   sm.shipmentID, sm.forwarderID, sm.actualCollection, sm.trackingNumber,
+                   sm.destinationCountry, sm.destinationPostCode
+            FROM Logistics.dbo.ShipmentCost sc
+            INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+            WHERE sc.costID IN (${inClause})
+              AND ISNULL(sc.migoStatus, 0) = 0`);
+
+        if (!fetched.recordset.length)
+            return res.status(404).json({ success: false, error: 'No unprocessed records found for the given IDs.' });
+
+        // Group cost lines by shipmentID
+        const groups = {};
+        for (const r of fetched.recordset) {
+            const key = String(r.shipmentID);
+            if (!groups[key]) {
+                groups[key] = {
+                    shipmentID:           r.shipmentID,
+                    actualCollectionDate: r.actualCollection,
+                    forwarderID:          r.forwarderID,
+                    location:             `${(r.destinationCountry  || '').slice(0, 2).toUpperCase()}` +
+                                          `${(r.destinationPostCode || '').slice(0, 2).toUpperCase()}`,
+                    trackingNumber:       r.trackingNumber || null,
+                    costLines:            [],
+                    _costIDs:             [],
+                };
+            }
+            groups[key].costLines.push({
+                costCenter:   r.costCenter   || null,
+                costElement:  r.costElement  || null,
+                expectedCost: r.expectedCost != null ? Number(r.expectedCost) : null,
+            });
+            groups[key]._costIDs.push(r.costID);
+        }
+
+        const payload = Object.values(groups).map(({ _costIDs, ...g }) => g);
+
+        // Call SapServer
+        const sapResp = await axios.post(
+            `${sapConfig.url}/api/logistics/post-freight`,
+            { shipments: payload },
+            { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+
+        const sapBody = sapResp.data;
+        if (!sapBody.success) throw new Error(sapBody.error ?? 'SapServer returned success=false');
+
+        const sapResults = Array.isArray(sapBody.data) ? sapBody.data : [];
+        const results    = [];
+
+        for (const sr of sapResults) {
+            const group = groups[String(sr.shipmentID)];
+            if (!group) continue;
+
+            if (sr.success && sr.materialDocument) {
+                for (const costID of group._costIDs) {
+                    await pool.request()
+                        .input('costID',           sql.BigInt,     costID)
+                        .input('materialDocument', sql.NVarChar(20), sr.materialDocument)
+                        .query(`UPDATE Logistics.dbo.ShipmentCost
+                                SET migoStatus = 1, materialDocument = @materialDocument
+                                WHERE costID = @costID`);
+                }
+                results.push({ shipmentID: sr.shipmentID, success: true,  materialDocument: sr.materialDocument, costIDs: group._costIDs });
+            } else {
+                results.push({ shipmentID: sr.shipmentID, success: false, error: sr.error || 'No material document returned', costIDs: group._costIDs });
+            }
+        }
+
+        res.json({ success: true, results });
+    } catch (err) {
+        const message = err.response?.data?.error ?? err.message;
+        res.status(500).json({ success: false, error: message });
     }
 });
 
