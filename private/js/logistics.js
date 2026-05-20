@@ -3018,7 +3018,6 @@ async function runUnprocessedCosts() {
       return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
     };
     const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
-    const MONO       = 'font-family:\'JetBrains Mono\',monospace;font-size:11px';
 
     const thead = `<tr>
       <th style="width:32px"><input type="checkbox" id="migo-check-all" title="Select all"></th>
@@ -3038,23 +3037,23 @@ async function runUnprocessedCosts() {
     const tbody = rows.map(r => `
       <tr data-cost-id="${r.costID}" class="migo-row">
         <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}"></td>
-        <td style="${MONO}">${String(r.shipmentID).padStart(6,'0')}</td>
+        <td>${String(r.shipmentID).padStart(6,'0')}</td>
         <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
         <td>${fmt(r.plannedCollection)}</td>
         <td>${fmt(r.actualCollection)}</td>
         <td>${esc(r.forwarderName || '—')}</td>
-        <td style="${MONO}">${esc(r.costCenter  || '—')}</td>
-        <td style="${MONO}">${esc(r.costElement || '—')}</td>
+        <td class="pn-batch-mono">${esc(r.costCenter  || '—')}</td>
+        <td class="pn-batch-mono">${esc(r.costElement || '—')}</td>
         <td style="text-align:right">${gbp(r.expectedCost)}</td>
-        <td style="${MONO}">${location(r)}</td>
-        <td style="${MONO}">${esc(r.trackingNumber || '—')}</td>
+        <td class="pn-batch-mono">${location(r)}</td>
+        <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
         <td class="migo-result-cell"></td>
       </tr>`).join('');
 
     body.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;padding:10px 0 12px;border-bottom:1px solid var(--border);margin-bottom:12px">
         <span id="migo-sel-count" style="font-size:13px;color:var(--text-dim)">0 selected</span>
-        <button id="migo-post-btn" class="btn-primary" disabled style="margin-left:auto">Post to SAP</button>
+        <button id="migo-post-btn" class="btn-export" disabled style="margin-left:auto">Post to SAP</button>
       </div>
       <div style="overflow-x:auto">
         <table class="pn-batch-table">
