@@ -3082,12 +3082,9 @@ async function runFreightSpend(months) {
     const gbp = v => v != null ? `£${Number(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '£0.00';
 
     const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const monthLabel = (yr, mo) => `${MONTH_NAMES[mo - 1]} ${yr}`;
+    const monthLabel  = (yr, mo) => `${MONTH_NAMES[mo - 1]} ${String(yr).slice(-2)}`;
 
-    const CHART_COLOURS = [
-      '#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6',
-      '#06B6D4','#F97316','#84CC16','#EC4899','#6366F1',
-    ];
+    const CHART_COLOURS = ['#0891B2','#10B981','#F59E0B','#EF4444','#8B5CF6','#F97316','#84CC16','#EC4899','#6366F1','#06B6D4'];
 
     const periodOptions = [3,6,12,24].map(m =>
       `<option value="${m}"${m === months ? ' selected' : ''}>${m} months</option>`
@@ -3095,149 +3092,113 @@ async function runFreightSpend(months) {
 
     const totals = d.totals || {};
     const kpiHtml = `
-      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px">
         ${[
-          { label: 'Total Spend',       value: gbp(totals.totalSpend) },
-          { label: 'Processed',         value: gbp(totals.processedSpend) },
-          { label: 'Unprocessed',       value: gbp(totals.unprocessedSpend) },
-          { label: 'Shipments',         value: totals.shipments ?? '—' },
-          { label: 'Cost Records',      value: totals.costRecords ?? '—' },
+          { label: 'Total Expected Spend', value: gbp(totals.totalSpend),        accent: false },
+          { label: 'MIGO Processed',       value: gbp(totals.processedSpend),    accent: false },
+          { label: 'Awaiting MIGO',        value: gbp(totals.unprocessedSpend),  accent: true  },
+          { label: 'Shipments',            value: totals.shipments  ?? '—',      accent: false },
+          { label: 'Cost Lines',           value: totals.costRecords ?? '—',     accent: false },
         ].map(k => `
-          <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:14px 20px;min-width:140px;flex:1">
-            <div style="font-size:11px;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${k.label}</div>
-            <div style="font-size:20px;font-weight:700;color:var(--text,#e5e7eb)">${k.value}</div>
+          <div style="background:var(--surface);border:1px solid ${k.accent ? 'var(--accent)' : 'var(--border)'};border-radius:8px;padding:14px 18px;min-width:130px;flex:1">
+            <div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${k.label}</div>
+            <div style="font-size:22px;font-weight:800;color:${k.accent ? 'var(--accent)' : 'var(--text)'};font-family:'JetBrains Mono',monospace">${k.value}</div>
           </div>`).join('')}
       </div>`;
 
-    const makeCanvas = id => `<canvas id="${id}" style="max-height:260px"></canvas>`;
+    const card  = (title, canvasId) => `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">${title}</div>
+        <canvas id="${canvasId}" style="max-height:240px"></canvas>
+      </div>`;
 
     body.innerHTML = `
-      <div style="padding:4px 0 16px;display:flex;align-items:center;gap:10px">
-        <label style="font-size:13px;color:var(--muted,#6b7280)">Period:</label>
-        <select id="spend-period-sel" style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);color:var(--text,#e5e7eb);border-radius:6px;padding:4px 10px;font-size:13px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <label style="font-size:13px;color:var(--text-dim);font-weight:600">Period:</label>
+        <select id="spend-period-sel" style="background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:13px">
           ${periodOptions}
         </select>
       </div>
       ${kpiHtml}
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
-        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
-          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Spend by Forwarder</div>
-          ${makeCanvas('chart-forwarder')}
-        </div>
-        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
-          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Spend by Country</div>
-          ${makeCanvas('chart-country')}
-        </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        ${card('Spend by Forwarder', 'chart-forwarder')}
+        ${card('Spend by Country',   'chart-country')}
       </div>
-      <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px;margin-bottom:16px">
-        <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Monthly Spend</div>
-        ${makeCanvas('chart-monthly')}
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
-        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
-          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Inbound vs Outbound</div>
-          ${makeCanvas('chart-direction')}
-        </div>
-        <div style="background:var(--surface-2,#1e2129);border:1px solid var(--border,#2a2f3d);border-radius:8px;padding:16px">
-          <div style="font-size:12px;font-weight:600;color:var(--muted,#6b7280);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">Spend by Cost Center</div>
-          ${makeCanvas('chart-costcenter')}
-        </div>
+      <div style="margin-bottom:14px">${card('Monthly Spend', 'chart-monthly')}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        ${card('Inbound vs Outbound', 'chart-direction')}
+        ${card('Spend by Cost Centre', 'chart-costcenter')}
       </div>`;
 
     document.getElementById('spend-period-sel').addEventListener('change', e => {
       runFreightSpend(Number(e.target.value));
     });
 
-    const chartDefaults = {
-      plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+    const TICK   = '#8DA3BE';
+    const GRID   = 'rgba(0,0,0,0.06)';
+    const gbpTip = ctx => ` £${Number(ctx.parsed).toLocaleString('en-GB', { minimumFractionDigits: 2 })}`;
+    const gbpY   = v   => `£${Number(v).toLocaleString('en-GB')}`;
+
+    const barDefaults = {
+      plugins: { legend: { display: false } },
       scales: {
-        x: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
-        y: { ticks: { color: '#9ca3af', font: { size: 10 }, callback: v => `£${Number(v).toLocaleString()}` }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        x: { ticks: { color: TICK, font: { size: 10 } }, grid: { color: GRID } },
+        y: { ticks: { color: TICK, font: { size: 10 }, callback: gbpY }, grid: { color: GRID } },
       },
     };
 
-    // Forwarder doughnut
+    const doughnutDefaults = opts => ({
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 }, padding: 12 } },
+        tooltip: { callbacks: { label: gbpTip } },
+        ...opts,
+      },
+    });
+
     if (d.byForwarder.length) {
-      const c = new Chart(document.getElementById('chart-forwarder'), {
+      freightCharts.push(new Chart(document.getElementById('chart-forwarder'), {
         type: 'doughnut',
-        data: {
-          labels: d.byForwarder.map(r => r.forwarderName || 'Unassigned'),
-          datasets: [{ data: d.byForwarder.map(r => Number(r.totalCost)), backgroundColor: CHART_COLOURS }],
-        },
-        options: {
-          plugins: {
-            legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
-            tooltip: { callbacks: { label: ctx => ` £${Number(ctx.parsed).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` } },
-          },
-        },
-      });
-      freightCharts.push(c);
+        data: { labels: d.byForwarder.map(r => r.forwarderName || 'Unassigned'), datasets: [{ data: d.byForwarder.map(r => Number(r.totalCost)), backgroundColor: CHART_COLOURS, borderWidth: 2, borderColor: '#fff' }] },
+        options: doughnutDefaults(),
+      }));
     }
 
-    // Country bar
     if (d.byCountry.length) {
-      const c = new Chart(document.getElementById('chart-country'), {
+      freightCharts.push(new Chart(document.getElementById('chart-country'), {
         type: 'bar',
-        data: {
-          labels: d.byCountry.map(r => r.country || '?'),
-          datasets: [{ label: 'Spend', data: d.byCountry.map(r => Number(r.totalCost)), backgroundColor: '#3B82F6' }],
-        },
-        options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } },
-      });
-      freightCharts.push(c);
+        data: { labels: d.byCountry.map(r => r.country || '?'), datasets: [{ data: d.byCountry.map(r => Number(r.totalCost)), backgroundColor: '#0891B2', borderRadius: 4 }] },
+        options: barDefaults,
+      }));
     }
 
-    // Monthly line
     if (d.byMonth.length) {
-      const c = new Chart(document.getElementById('chart-monthly'), {
+      freightCharts.push(new Chart(document.getElementById('chart-monthly'), {
         type: 'line',
         data: {
           labels: d.byMonth.map(r => monthLabel(r.yr, r.mo)),
-          datasets: [{
-            label: 'Monthly Spend',
-            data: d.byMonth.map(r => Number(r.totalCost)),
-            borderColor: '#10B981',
-            backgroundColor: 'rgba(16,185,129,0.1)',
-            fill: true,
-            tension: 0.3,
-            pointRadius: 4,
-            pointBackgroundColor: '#10B981',
-          }],
-        },
-        options: chartDefaults,
-      });
-      freightCharts.push(c);
-    }
-
-    // Direction doughnut
-    if (d.byDirection.length) {
-      const c = new Chart(document.getElementById('chart-direction'), {
-        type: 'doughnut',
-        data: {
-          labels: d.byDirection.map(r => r.direction),
-          datasets: [{ data: d.byDirection.map(r => Number(r.totalCost)), backgroundColor: ['#3B82F6','#F59E0B'] }],
+          datasets: [{ label: 'Expected Spend', data: d.byMonth.map(r => Number(r.totalCost)), borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.35, pointRadius: 4, pointBackgroundColor: '#0891B2', pointBorderColor: '#fff', pointBorderWidth: 2 }],
         },
         options: {
-          plugins: {
-            legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
-            tooltip: { callbacks: { label: ctx => ` £${Number(ctx.parsed).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` } },
-          },
+          plugins: { legend: { display: false } },
+          scales: barDefaults.scales,
         },
-      });
-      freightCharts.push(c);
+      }));
     }
 
-    // Cost center bar
+    if (d.byDirection.length) {
+      freightCharts.push(new Chart(document.getElementById('chart-direction'), {
+        type: 'doughnut',
+        data: { labels: d.byDirection.map(r => r.direction), datasets: [{ data: d.byDirection.map(r => Number(r.totalCost)), backgroundColor: ['#0891B2','#F59E0B'], borderWidth: 2, borderColor: '#fff' }] },
+        options: doughnutDefaults(),
+      }));
+    }
+
     if (d.byCostCenter.length) {
-      const c = new Chart(document.getElementById('chart-costcenter'), {
+      freightCharts.push(new Chart(document.getElementById('chart-costcenter'), {
         type: 'bar',
-        data: {
-          labels: d.byCostCenter.map(r => r.costCenter || 'Unassigned'),
-          datasets: [{ label: 'Spend', data: d.byCostCenter.map(r => Number(r.totalCost)), backgroundColor: '#8B5CF6' }],
-        },
-        options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } },
-      });
-      freightCharts.push(c);
+        data: { labels: d.byCostCenter.map(r => r.costCenter || 'Unassigned'), datasets: [{ data: d.byCostCenter.map(r => Number(r.totalCost)), backgroundColor: '#8B5CF6', borderRadius: 4 }] },
+        options: barDefaults,
+      }));
     }
 
   } catch (err) {

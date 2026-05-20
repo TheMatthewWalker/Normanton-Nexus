@@ -224,7 +224,7 @@ router.get('/analytics', async (req, res) => {
         const byForwarder = await pool.request()
             .input('months', sql.Int, months)
             .query(`SELECT f.forwarderName,
-                           SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                           SUM(sc.expectedCost) AS totalCost,
                            COUNT(*)                                      AS records
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
@@ -237,7 +237,7 @@ router.get('/analytics', async (req, res) => {
         const byCountry = await pool.request()
             .input('months', sql.Int, months)
             .query(`SELECT sm.destinationCountry AS country,
-                           SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                           SUM(sc.expectedCost) AS totalCost,
                            COUNT(*)                                      AS records
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
@@ -252,7 +252,7 @@ router.get('/analytics', async (req, res) => {
             .query(`SELECT
                         YEAR(sm.plannedCollection)  AS yr,
                         MONTH(sm.plannedCollection) AS mo,
-                        SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                        SUM(sc.expectedCost) AS totalCost,
                         COUNT(*) AS records
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
@@ -266,7 +266,7 @@ router.get('/analytics', async (req, res) => {
             .input('months', sql.Int, months)
             .query(`SELECT
                         CASE WHEN sm.originID = 0 OR sm.originID IS NULL THEN 'Outbound' ELSE 'Inbound' END AS direction,
-                        SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                        SUM(sc.expectedCost) AS totalCost,
                         COUNT(*) AS records
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
@@ -277,7 +277,7 @@ router.get('/analytics', async (req, res) => {
         const byCostCenter = await pool.request()
             .input('months', sql.Int, months)
             .query(`SELECT cc.centerCode AS costCenter,
-                           SUM(ISNULL(sc.actualCost, sc.expectedCost)) AS totalCost,
+                           SUM(sc.expectedCost) AS totalCost,
                            COUNT(*) AS records
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
@@ -292,9 +292,9 @@ router.get('/analytics', async (req, res) => {
             .query(`SELECT
                         COUNT(DISTINCT sc.shipmentID)                       AS shipments,
                         COUNT(*)                                             AS costRecords,
-                        SUM(ISNULL(sc.actualCost, sc.expectedCost))         AS totalSpend,
-                        SUM(CASE WHEN ISNULL(sc.migoStatus,0) = 0 THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS unprocessedSpend,
-                        SUM(CASE WHEN sc.migoStatus = 1               THEN ISNULL(sc.actualCost,sc.expectedCost) ELSE 0 END) AS processedSpend
+                        SUM(sc.expectedCost)         AS totalSpend,
+                        SUM(CASE WHEN ISNULL(sc.migoStatus,0) = 0 THEN sc.expectedCost ELSE 0 END) AS unprocessedSpend,
+                        SUM(CASE WHEN sc.migoStatus = 1               THEN sc.expectedCost ELSE 0 END) AS processedSpend
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
                     WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())`);
