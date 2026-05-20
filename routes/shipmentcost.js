@@ -189,7 +189,6 @@ router.get('/unprocessed', async (req, res) => {
             .query(`SELECT
                 sc.costID,
                 sm.shipmentID,
-                sm.shipmentRef,
                 sm.plannedCollection,
                 sm.actualCollection,
                 f.forwarderName,
