@@ -204,8 +204,8 @@ router.get('/unprocessed', async (req, res) => {
             FROM Logistics.dbo.ShipmentCost sc
             INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
             LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
-            LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.costCenterID = sc.costCenter
-            LEFT  JOIN Logistics.dbo.CostElements ce ON ce.costElementID = sc.costElement
+            LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
+            LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
             WHERE sc.migoStatus = 0
             ORDER BY sm.plannedCollection ASC, sm.shipmentRef ASC`);
         res.json({ success: true, data: result.recordset });
@@ -281,7 +281,7 @@ router.get('/analytics', async (req, res) => {
                            COUNT(*) AS records
                     FROM Logistics.dbo.ShipmentCost sc
                     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.costCenterID = sc.costCenter
+                    LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode = sc.costCenter
                     WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
                     GROUP BY cc.centerCode
                     ORDER BY totalCost DESC`);
