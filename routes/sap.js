@@ -555,4 +555,21 @@ router.post('/kna1', async (req, res) => {
 });
 
 
+// ---------------------------------------------------------------------------
+// GET /api/sap/availability
+// Lightweight reachability check — any HTTP response means the server is up.
+// ---------------------------------------------------------------------------
+router.get('/availability', async (req, res) => {
+  try {
+    await axios.get(`${sapConfig.url}/health`, {
+      timeout: 4000,
+      httpsAgent: sapAgent,
+      validateStatus: () => true,
+    });
+    res.json({ reachable: true });
+  } catch {
+    res.json({ reachable: false });
+  }
+});
+
 export default router;

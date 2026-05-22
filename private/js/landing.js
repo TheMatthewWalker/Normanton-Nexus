@@ -24,10 +24,23 @@ const sendBtn = document.getElementById('gemini-send');
     loadProductionSparkline();
     loadSalesSparkline();
     loadWarehouseSparkline();
+    checkSapAvailability();
+    setInterval(checkSapAvailability, 60000);
   } catch {
     window.location.href = '/';
   }
 })();
+
+async function checkSapAvailability() {
+  const dot = document.getElementById('sap-dot');
+  if (!dot) return;
+  try {
+    const res = await fetch('/api/sap/availability').then(r => r.json());
+    dot.className = 'hero-pill-dot ' + (res.reachable ? 'hero-pill-dot--ok' : 'hero-pill-dot--error');
+  } catch {
+    dot.className = 'hero-pill-dot hero-pill-dot--error';
+  }
+}
 
 async function loadSalesSparkline() {
   try {

@@ -17,6 +17,30 @@ function api(path, opts) {
   return fetch('/api/productionnexus' + path, opts).then(r => r.json());
 }
 
+function wConfirm({ title, message, confirmText = 'Confirm', variant = '' }) {
+  return new Promise(resolve => {
+    document.getElementById('wc-pn-modal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'wc-pn-modal'; overlay.className = 'wc-overlay';
+    const icon = variant === 'danger' ? '⚠' : variant === 'success' ? '✓' : '?';
+    overlay.innerHTML = `
+      <div class="wc-modal">
+        <div class="wc-icon">${icon}</div>
+        <div class="wc-title">${esc(title)}</div>
+        <div class="wc-message">${esc(message).replace(/\n/g, '<br>')}</div>
+        <div class="wc-actions">
+          <button class="wc-btn-cancel">Cancel</button>
+          <button class="wc-btn-confirm${variant ? ' wc-btn-confirm--' + variant : ''}">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = r => { overlay.remove(); resolve(r); };
+    overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => close(false));
+    overlay.querySelector('.wc-btn-confirm').addEventListener('click', () => close(true));
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+  });
+}
+
 function fmt(dt) {
   if (!dt) return '—';
   return new Date(dt).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
@@ -67,6 +91,11 @@ function stateColor(s) {
     if (!session.loggedIn) { window.location.href = '/'; return; }
     document.getElementById('session-user').textContent = session.username;
     applyRoleVisibility(session.role, session.permissions || []);
+    const perms = session.permissions || [];
+    if (session.role === 'superadmin' || perms.includes('PROD_SUPERVISOR')) {
+      pollFailedBackflushCount();
+      setInterval(pollFailedBackflushCount, 60000);
+    }
   } catch { window.location.href = '/'; }
 })();
 
@@ -3502,7 +3531,7 @@ function renderBatchModal(batch, pc, recordId, operators, scrapEntries, reasons)
   // Remove operator buttons
   document.querySelectorAll('.bm-remove-op').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Remove this operator from the batch?')) return;
+      if (!await wConfirm({ title: 'Remove Operator', message: 'Remove this operator from the batch?', confirmText: 'Remove', variant: 'danger' })) return;
       btn.disabled = true;
       try {
         const r = await api(`/batch/${pc}/${recordId}/operators/${btn.dataset.uid}`, { method: 'DELETE' });
@@ -4104,11 +4133,35 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
 
 // ── FAILED BACKFLUSH QUEUE ────────────────────────────────────────────────────
 
+function setFailedBackflushBadge(count) {
+  const badge = document.getElementById('fbf-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.style.background    = 'rgba(220,38,38,0.12)';
+    badge.style.color         = '#DC2626';
+    badge.style.borderColor   = 'rgba(220,38,38,0.3)';
+  } else {
+    badge.textContent = '✓';
+    badge.style.background    = 'rgba(5,150,105,0.10)';
+    badge.style.color         = 'var(--success)';
+    badge.style.borderColor   = 'rgba(5,150,105,0.3)';
+  }
+}
+
+async function pollFailedBackflushCount() {
+  try {
+    const json = await api('/failed-backflush');
+    setFailedBackflushBadge((json.data || []).length);
+  } catch { }
+}
+
 async function runFailedBackflush() {
   document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
   try {
     const json = await api('/failed-backflush');
     const rows = json.data || [];
+    setFailedBackflushBadge(rows.length);
 
     const badge = document.getElementById('result-row-badge');
     badge.textContent = `${rows.length} failed`;
@@ -4325,7 +4378,7 @@ async function openRetryModal(processCode, recordId, batchRef) {
   });
 
   document.getElementById('rt-cancel-record').addEventListener('click', async () => {
-    if (!confirm(`Cancel this record (${batchRef})? This will set its status to Cancelled and remove it from the queue.`)) return;
+    if (!await wConfirm({ title: 'Cancel Record', message: `Cancel ${batchRef}? This will set its status to Cancelled and remove it from the queue.`, confirmText: 'Cancel Record', variant: 'danger' })) return;
     const btn    = document.getElementById('rt-cancel-record');
     const result = document.getElementById('rt-result');
     btn.disabled = true; btn.textContent = 'Cancelling…';
