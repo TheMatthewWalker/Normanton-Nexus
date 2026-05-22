@@ -215,7 +215,7 @@ router.get('/landing-sparkline', async (req, res) => {
             FROM Logistics.dbo.DeliveryMain
             WHERE completionStatus = 0
               AND ISNULL(deliveryCancelled, 0) = 0
-              AND dueDate < DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)`);
+              AND dispatchDate < DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)`);
 
         const overduePicksheets = Number(overdueResult.recordset[0].cnt);
 

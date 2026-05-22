@@ -618,8 +618,8 @@ async function getShipmentContext(shipmentId) {
     shipment.forwarderName = '';
   }
   const deliveries = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
-    SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, 
-      CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, 
+    SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.completionDate, dm.deliveryService, dm.picksheetComment,
+      CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
       CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume, 
       d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, 
     STUFF((
@@ -1804,7 +1804,7 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
     const inClause = createInClause(request, deliveryIDs, 'deliveryId');
 
     const deliveriesResult = await request.query(`
-      SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, dm.incoterms,
+      SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, dm.incoterms,
         CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
         CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
         d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, d.defaultIncoterms,

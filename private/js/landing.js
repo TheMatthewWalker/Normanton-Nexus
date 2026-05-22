@@ -24,6 +24,7 @@ const sendBtn = document.getElementById('gemini-send');
     loadProductionSparkline();
     loadSalesSparkline();
     loadWarehouseSparkline();
+    loadLogisticsSparkline();
     checkSapAvailability();
     setInterval(checkSapAvailability, 60000);
   } catch {
@@ -203,6 +204,66 @@ async function loadWarehouseSparkline() {
       deltaEl.textContent = `${pctStr} vs last week`;
       deltaEl.className   = `dept-spark-delta dept-spark-delta--${isFlat ? 'flat' : isUp ? 'up' : 'down'}`;
     }
+    deltaEl.style.opacity = '1';
+
+    wrap.style.display = '';
+  } catch (_) {}
+}
+
+async function loadLogisticsSparkline() {
+  try {
+    const res = await fetch('/api/deliverymain/landing-sparkline').then(r => r.json());
+    if (!res.success || !res.data) return;
+
+    const { dailyValues, onTimeRate, pctChange } = res.data;
+
+    const svg     = document.getElementById('log-spark-svg');
+    const deltaEl = document.getElementById('log-spark-delta');
+    const valueEl = document.getElementById('log-spark-value');
+    const wrap    = document.getElementById('log-spark');
+    if (!svg || !deltaEl || !valueEl || !wrap) return;
+
+    if (onTimeRate === null || dailyValues.length < 2) {
+      valueEl.textContent = 'No data yet';
+      wrap.style.display = '';
+      return;
+    }
+
+    valueEl.textContent = `${onTimeRate}% on time`;
+
+    const W = 280, H = 28, padY = 3;
+    const n = dailyValues.length;
+
+    const pts = dailyValues.map((v, i) => [
+      (i / (n - 1)) * W,
+      H - padY - ((v / 100) * (H - padY * 2)),
+    ]);
+
+    const lineD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' ');
+    const fillD = `${lineD} L${W},${H} L0,${H} Z`;
+
+    const isFlat = pctChange !== null && Math.abs(pctChange) < 1;
+    const isUp   = pctChange === null || pctChange >= 0;
+    const col    = isFlat ? '#8DA3BE' : isUp ? '#0891B2' : '#DC2626';
+
+    svg.innerHTML = `
+      <defs>
+        <linearGradient id="logsg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="${col}" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="${fillD}" fill="url(#logsg)"/>
+      <path d="${lineD}" fill="none" stroke="${col}" stroke-width="1.6"
+            stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    if (pctChange !== null && !isFlat) {
+      const sign = isUp ? '+' : '';
+      deltaEl.textContent = `${sign}${pctChange}pp vs last week`;
+    } else {
+      deltaEl.textContent = isFlat ? 'stable vs last week' : '';
+    }
+    deltaEl.className   = `dept-spark-delta dept-spark-delta--${isFlat ? 'flat' : isUp ? 'up' : 'down'}`;
     deltaEl.style.opacity = '1';
 
     wrap.style.display = '';

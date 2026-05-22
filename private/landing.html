@@ -7,6 +7,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/landing.css">
   <link rel="icon" href="/images/logo16.png">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <script src="./js/notifications.js" defer></script>
 </head>
 <body>
 
@@ -103,6 +105,13 @@
             <div class="dept-desc">Shipments, routes &amp; carrier management</div>
           </div>
           <span class="dept-status-dot dept-status-dot--live"></span>
+        </div>
+        <div class="dept-spark" id="log-spark" style="display:none">
+          <div class="dept-spark-meta">
+            <span class="dept-spark-value" id="log-spark-value">—</span>
+            <span class="dept-spark-delta" id="log-spark-delta"></span>
+          </div>
+          <svg class="dept-spark-svg" id="log-spark-svg" viewBox="0 0 280 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
         <div class="dept-card-foot">
           <span class="dept-tag dept-tag--live">Active</span>

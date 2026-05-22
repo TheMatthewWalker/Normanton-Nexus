@@ -710,11 +710,11 @@ async function runOpenDeliveries() {
 
 function renderOpenDeliveries() {
   const bucketMap = {}; BUCKETS.forEach(b => { bucketMap[b.key] = []; });
-  deliveryRows.forEach(r => { const key = r.deliveryPriority === 1 ? 'priority' : getDateBucket(r.dueDate); bucketMap[key].push(r); });
+  deliveryRows.forEach(r => { const key = r.deliveryPriority === 1 ? 'priority' : getDateBucket(r.dispatchDate); bucketMap[key].push(r); });
   const sections = BUCKETS.filter(b => bucketMap[b.key].length).map(b => {
     const collapsed = b.defaultOpen ? '' : ' ps-section--collapsed';
     const rows = bucketMap[b.key].map(r => {
-      const due = r.dueDate ? new Date(r.dueDate).toLocaleDateString('en-GB') : '-';
+      const due = r.dispatchDate ? new Date(r.dispatchDate).toLocaleDateString('en-GB') : '-';
       const completed = r.completionDate ? new Date(r.completionDate).toLocaleDateString('en-GB') : '-';
       const flag = b.key === 'priority' ? '<span class="ps-priority-flag"></span>' : '';
       return `<tr class="ps-row lg-row" data-id="${esc(String(r.deliveryID))}" data-customer="${esc(String(r.customerID))}"><td class="lg-check-cell"><input type="checkbox" class="lg-check" data-id="${esc(String(r.deliveryID))}"></td><td>${flag}${esc(String(r.deliveryID))}</td><td>${esc(r.destinationName || '-')}</td><td>${esc(completed)}</td><td>${esc(due)}</td><td>${esc(r.deliveryService || '')}</td><td>${esc(String(r.palletCount ?? 0))}</td><td>${esc(String(r.grossWeight ?? 0))}</td><td>${esc(String(r.deliveryVolume ?? 0))}</td></tr>`;

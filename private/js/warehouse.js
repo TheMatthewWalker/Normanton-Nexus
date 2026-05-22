@@ -578,7 +578,7 @@ function renderPicksheets(rows) {
   const bucketMap = {};
   BUCKETS.forEach(b => { bucketMap[b.key] = []; });
   rows.forEach(r => {
-    const key = r.deliveryPriority === 1 ? 'priority' : getDateBucket(r.dueDate);
+    const key = r.deliveryPriority === 1 ? 'priority' : getDateBucket(r.dispatchDate);
     bucketMap[key].push(r);
   });
 
@@ -588,7 +588,7 @@ function renderPicksheets(rows) {
       const collapsed = b.defaultOpen ? '' : ' ps-section--collapsed';
       const thead = `<tr><th>Delivery ID</th><th>Destination</th><th>Due Date</th><th>Service</th><th>Comment</th></tr>`;
       const tbody = bucketMap[b.key].map(r => {
-        const due  = r.dueDate ? new Date(r.dueDate).toLocaleDateString('en-GB') : '—';
+        const due  = r.dispatchDate ? new Date(r.dispatchDate).toLocaleDateString('en-GB') : '—';
         const flag = b.key === 'priority' ? '<span class="ps-priority-flag"></span>' : '';
         return `<tr class="ps-row" data-id="${esc(String(r.deliveryID))}" data-dest="${esc(r.destinationName ?? '')}" data-custid="${esc(String(r.customerID ?? ''))}">
           <td>${flag}${esc(String(r.deliveryID))}</td>
@@ -1528,7 +1528,7 @@ async function submitAddPicksheet(e) {
 
   const deliveryID      = document.getElementById('ps-delivery-id').value.trim();
   const customerID      = document.getElementById('ps-customer').value;
-  const dueDate         = document.getElementById('ps-due-date').value;
+  const dispatchDate    = document.getElementById('ps-due-date').value;
   const deliveryService = document.getElementById('ps-service').value || null;
   const deliveryPriority= document.getElementById('ps-priority').checked ? 1 : 0;
   const picksheetComment= document.getElementById('ps-comment').value.trim() || null;
@@ -1546,7 +1546,7 @@ async function submitAddPicksheet(e) {
       body: JSON.stringify({
         deliveryID:      parseInt(deliveryID, 10),
         customerID:      parseInt(customerID, 10),
-        dueDate,
+        dispatchDate,
         deliveryService,
         deliveryPriority,
         picksheetComment,
@@ -1596,7 +1596,7 @@ function showCSVUpload() {
       <div style="margin-bottom:16px">
         <code style="display:block;background:var(--surface2,#1e1e2e);border:1px solid var(--border,#333);
           border-radius:6px;padding:10px 14px;font-size:13px;color:var(--text-muted,#aaa);line-height:1.6">
-          deliveryID,customerID,dueDate,deliveryService,deliveryPriority,picksheetComment<br>
+          deliveryID,customerID,dispatchDate,deliveryService,deliveryPriority,picksheetComment<br>
           1234567890,5000,2026-05-20,DHL,0,Rush order
         </code>
         <button type="button" onclick="downloadCSVTemplate()"
@@ -1630,7 +1630,7 @@ function showCSVUpload() {
 }
 
 function downloadCSVTemplate() {
-  const csv = 'deliveryID,customerID,dueDate,deliveryService,deliveryPriority,picksheetComment\r\n1234567890,5000,2026-05-20,DHL,0,Sample comment\r\n';
+  const csv = 'deliveryID,customerID,dispatchDate,deliveryService,deliveryPriority,picksheetComment\r\n1234567890,5000,2026-05-20,DHL,0,Sample comment\r\n';
   const blob = new Blob([csv], { type: 'text/csv' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
@@ -1686,7 +1686,7 @@ function renderCSVPreview(text) {
     return;
   }
 
-  const EXPECTED_HEADERS = ['deliveryID','customerID','dueDate','deliveryService','deliveryPriority','picksheetComment'];
+  const EXPECTED_HEADERS = ['deliveryID','customerID','dispatchDate','deliveryService','deliveryPriority','picksheetComment'];
   const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
   const missing = EXPECTED_HEADERS.filter(h => !headers.includes(h));
   if (missing.length) {
@@ -1704,7 +1704,7 @@ function renderCSVPreview(text) {
     const raw  = {
       deliveryID:       cols[idx.deliveryID]       ?? '',
       customerID:       cols[idx.customerID]        ?? '',
-      dueDate:          cols[idx.dueDate]           ?? '',
+      dispatchDate:     cols[idx.dispatchDate]       ?? '',
       deliveryService:  cols[idx.deliveryService]   ?? '',
       deliveryPriority: cols[idx.deliveryPriority]  ?? '0',
       picksheetComment: cols[idx.picksheetComment]  ?? '',
@@ -1713,7 +1713,7 @@ function renderCSVPreview(text) {
     const errs = [];
     if (!/^\d+$/.test(raw.deliveryID.replace(/\s/g,''))) errs.push('deliveryID must be numeric');
     if (!/^\d+$/.test(raw.customerID.replace(/\s/g,''))) errs.push('customerID must be numeric');
-    if (!raw.dueDate || isNaN(Date.parse(raw.dueDate)))  errs.push('dueDate must be a valid date (YYYY-MM-DD)');
+    if (!raw.dispatchDate || isNaN(Date.parse(raw.dispatchDate)))  errs.push('dispatchDate must be a valid date (YYYY-MM-DD)');
 
     if (errs.length) {
       rowErrors.push({ row: i, errors: errs, raw });
@@ -1721,7 +1721,7 @@ function renderCSVPreview(text) {
       records.push({
         deliveryID:       parseInt(raw.deliveryID, 10),
         customerID:       parseInt(raw.customerID, 10),
-        dueDate:          raw.dueDate,
+        dispatchDate:     raw.dispatchDate,
         deliveryService:  raw.deliveryService || null,
         deliveryPriority: parseInt(raw.deliveryPriority, 10) || 0,
         picksheetComment: raw.picksheetComment || null,
@@ -1753,7 +1753,7 @@ function renderCSVPreview(text) {
           ${records.map(r => `<tr>
             <td>${esc(String(r.deliveryID))}</td>
             <td>${esc(String(r.customerID))}</td>
-            <td>${esc(r.dueDate)}</td>
+            <td>${esc(r.dispatchDate)}</td>
             <td>${esc(r.deliveryService ?? '—')}</td>
             <td>${r.deliveryPriority ? 'Priority' : 'Normal'}</td>
             <td>${esc(r.picksheetComment ?? '')}</td>

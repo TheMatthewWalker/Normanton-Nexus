@@ -58,7 +58,7 @@ router.get('/operator/:operatorName', async (req, res) => {
     }
 });
 
-// ── Get by due date range ──
+// ── Get by dispatch date range ──
 router.get('/daterange', async (req, res) => {
     try {
         const { dateFrom, dateTo } = req.query;
@@ -66,7 +66,7 @@ router.get('/daterange', async (req, res) => {
         const result = await pool.request()
             .input('dateFrom', sql.DateTime, new Date(dateFrom))
             .input('dateTo', sql.DateTime, new Date(dateTo))
-            .query('SELECT * FROM Logistics.dbo.DeliveryMain WHERE dueDate BETWEEN @dateFrom AND @dateTo');
+            .query('SELECT * FROM Logistics.dbo.DeliveryMain WHERE dispatchDate BETWEEN @dateFrom AND @dateTo');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -77,7 +77,7 @@ router.get('/daterange', async (req, res) => {
 router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
     try {
         const {
-            deliveryID, customerID, dueDate, completionDate, completionStatus,
+            deliveryID, customerID, dispatchDate, deliveryDate, completionDate, completionStatus,
             operatorName, supervisorName, netWeight, grossWeight, palletCount,
             deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
             deliveryService, incoterms
@@ -87,7 +87,8 @@ router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
         await pool.request()
             .input('deliveryID', sql.BigInt, deliveryID)
             .input('customerID', sql.BigInt, customerID)
-            .input('dueDate', sql.DateTime, dueDate ? new Date(dueDate) : null)
+            .input('dispatchDate', sql.DateTime, dispatchDate ? new Date(dispatchDate) : null)
+            .input('deliveryDate', sql.Date, deliveryDate ? new Date(deliveryDate) : null)
             .input('completionDate', sql.DateTime, completionDate ? new Date(completionDate) : null)
             .input('completionStatus', sql.Bit, completionStatus ?? 0)
             .input('operatorName', sql.NVarChar, operatorName ?? null)
@@ -102,12 +103,12 @@ router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
             .input('deliveryService', sql.NVarChar, deliveryService ?? null)
             .input('incoterms', sql.NVarChar(3), incoterms ?? null)
             .query(`INSERT INTO Logistics.dbo.DeliveryMain
-                (deliveryID, customerID, dueDate, completionDate, completionStatus,
+                (deliveryID, customerID, dispatchDate, deliveryDate, completionDate, completionStatus,
                  operatorName, supervisorName, netWeight, grossWeight, palletCount,
                  deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
                  deliveryService, incoterms)
                 VALUES
-                (@deliveryID, @customerID, @dueDate, @completionDate, @completionStatus,
+                (@deliveryID, @customerID, @dispatchDate, @deliveryDate, @completionDate, @completionStatus,
                  @operatorName, @supervisorName, @netWeight, @grossWeight, @palletCount,
                  @deliveryVolume, @picksheetComment, @deliveryCancelled, @deliveryPriority,
                  @deliveryService, @incoterms)`);
@@ -123,13 +124,13 @@ router.get('/open-picksheets', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dueDate,
+            .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dispatchDate,
                            dm.deliveryService, dm.picksheetComment, dm.deliveryPriority,
                            dm.incoterms
                     FROM Logistics.dbo.DeliveryMain dm
                     LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
                     WHERE dm.completionStatus = 0 AND dm.deliveryCancelled = 0
-                    ORDER BY dm.deliveryPriority DESC, dm.dueDate ASC`);
+                    ORDER BY dm.deliveryPriority DESC, dm.dispatchDate ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -141,7 +142,7 @@ router.get('/completed-unshipped', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query(`SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate,
+            .query(`SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.deliveryDate, dm.completionDate,
                            dm.deliveryService, dm.picksheetComment, dm.deliveryPriority,
                            CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight,
                            CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
@@ -162,7 +163,7 @@ router.get('/completed-unshipped', async (req, res) => {
                     WHERE dm.completionStatus = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
                       AND sl.deliveryID IS NULL
-                    ORDER BY dm.deliveryPriority DESC, dm.completionDate DESC, dm.dueDate ASC, dm.deliveryID ASC`);
+                    ORDER BY dm.deliveryPriority DESC, dm.completionDate DESC, dm.dispatchDate ASC, dm.deliveryID ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -175,7 +176,7 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('customerId', sql.BigInt, req.params.customerId)
-            .query(`SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate,
+            .query(`SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.deliveryDate, dm.completionDate,
                            dm.deliveryService, dm.picksheetComment, dm.incoterms,
                            CAST(ISNULL(dm.netWeight,      0) AS decimal(18,3)) AS netWeight,
                            CAST(ISNULL(dm.grossWeight,    0) AS decimal(18,3)) AS grossWeight,
@@ -275,7 +276,7 @@ router.post('/:deliveryId/pallets', async (req, res) => {
 });
 
 // ── Bulk insert picksheets (LOG_SUPER only) ───────────────────────────────────
-// Body: { records: [{ deliveryID, customerID, dueDate, deliveryService, deliveryPriority, picksheetComment }] }
+// Body: { records: [{ deliveryID, customerID, dispatchDate, deliveryService, deliveryPriority, picksheetComment }] }
 // Skips records whose deliveryID already exists. Returns { inserted, skipped, errors }.
 router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
     const { records } = req.body;
@@ -292,15 +293,16 @@ router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
             const result = await pool.request()
                 .input('deliveryID',      sql.BigInt,   r.deliveryID)
                 .input('customerID',      sql.BigInt,   r.customerID)
-                .input('dueDate',         sql.DateTime, r.dueDate ? new Date(r.dueDate) : null)
+                .input('dispatchDate',    sql.DateTime, r.dispatchDate ? new Date(r.dispatchDate) : null)
+                .input('deliveryDate',    sql.Date,     r.deliveryDate ? new Date(r.deliveryDate) : null)
                 .input('deliveryService', sql.NVarChar,    r.deliveryService  ?? null)
                 .input('deliveryPriority',sql.Int,         r.deliveryPriority ?? 0)
                 .input('picksheetComment',sql.NVarChar,    r.picksheetComment ?? null)
                 .input('incoterms',       sql.NVarChar(3), r.incoterms        ?? null)
                 .query(`INSERT INTO Logistics.dbo.DeliveryMain
-                            (deliveryID, customerID, dueDate, completionStatus, deliveryCancelled,
+                            (deliveryID, customerID, dispatchDate, deliveryDate, completionStatus, deliveryCancelled,
                              deliveryService, deliveryPriority, picksheetComment, incoterms)
-                        SELECT @deliveryID, @customerID, @dueDate, 0, 0,
+                        SELECT @deliveryID, @customerID, @dispatchDate, @deliveryDate, 0, 0,
                                @deliveryService, @deliveryPriority, @picksheetComment, @incoterms
                         WHERE NOT EXISTS (
                             SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
@@ -316,8 +318,7 @@ router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
 });
 
 // ── SAP sync — pull open picksheets from SAP server, insert any not already present ──
-// The SAP server endpoint returns an array of delivery objects.
-// Expected response shape: { data: [{ deliveryID, customerID, dueDate, deliveryService, deliveryPriority, picksheetComment }] }
+// Expected response shape: { data: [{ deliveryID, customerID, dispatchDate, deliveryService, deliveryPriority, picksheetComment }] }
 router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
     const sapSecret = process.env.SAP_SERVER_SECRET;
     const syncUrl   = `${sapConfig.url}/api/logistics/picksheets/open`;
@@ -354,10 +355,10 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
 
         for (const d of deliveries) {
             try {
-                const deliveryID = parseInt(d.deliveryNumber, 10);
-                const customerID = parseInt(d.customerNumber, 10);
-                const dueDate    = parseSapDate(d.dueDate);
-                const incoterms  = d.incoterms ?? null;
+                const deliveryID    = parseInt(d.deliveryNumber, 10);
+                const customerID    = parseInt(d.customerNumber, 10);
+                const dispatchDate  = parseSapDate(d.dueDate ?? d.dispatchDate);
+                const incoterms     = d.incoterms ?? null;
 
                 const dest = destMap[String(customerID)];
                 if (!dest) {
@@ -375,15 +376,15 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
                 const result = await pool.request()
                     .input('deliveryID',       sql.BigInt,      deliveryID)
                     .input('customerID',       sql.BigInt,      customerID)
-                    .input('dueDate',          sql.DateTime,    dueDate)
+                    .input('dispatchDate',     sql.DateTime,    dispatchDate)
                     .input('deliveryService',  sql.NVarChar,    deliveryService)
                     .input('deliveryPriority', sql.Int,         0)
                     .input('picksheetComment', sql.NVarChar,    picksheetComment)
                     .input('incoterms',        sql.NVarChar(3), incoterms)
                     .query(`INSERT INTO Logistics.dbo.DeliveryMain
-                                (deliveryID, customerID, dueDate, completionStatus, deliveryCancelled,
+                                (deliveryID, customerID, dispatchDate, completionStatus, deliveryCancelled,
                                  deliveryService, deliveryPriority, picksheetComment, incoterms)
-                            SELECT @deliveryID, @customerID, @dueDate, 0, 0,
+                            SELECT @deliveryID, @customerID, @dispatchDate, 0, 0,
                                    @deliveryService, @deliveryPriority, @picksheetComment, @incoterms
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
@@ -404,6 +405,55 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
         if (err.response) {
             return res.status(502).json({ success: false, error: `SAP server error ${err.response.status}: ${err.response.data?.error ?? err.message}` });
         }
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Landing page sparkline — on-time shipment rate over last 30 days ──────────
+// "On time" = shipment actualCollection date <= delivery dispatchDate
+router.get('/landing-sparkline', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request().query(`
+            SELECT
+                CAST(sm.actualCollection AS DATE)  AS shipDate,
+                COUNT(*)                           AS total,
+                SUM(CASE WHEN CAST(sm.actualCollection AS DATE) <= CAST(dm.dispatchDate AS DATE)
+                         THEN 1 ELSE 0 END)        AS onTime
+            FROM Logistics.dbo.ShipmentMain sm
+            INNER JOIN Logistics.dbo.ShipmentLink sl ON sl.shipmentID = sm.shipmentID
+            INNER JOIN Logistics.dbo.DeliveryMain dm  ON dm.deliveryID  = sl.deliveryID
+            WHERE sm.collectionStatus = 1
+              AND ISNULL(sm.shipmentCancelled, 0) = 0
+              AND dm.dispatchDate IS NOT NULL
+              AND CAST(sm.actualCollection AS DATE) >= CAST(DATEADD(day, -29, GETDATE()) AS DATE)
+            GROUP BY CAST(sm.actualCollection AS DATE)
+            ORDER BY shipDate
+        `);
+
+        const rows = result.recordset;
+
+        // Per-day on-time percentage (only days with collections)
+        const dailyValues = rows.map(r => Math.round((r.onTime / r.total) * 100));
+
+        // Rolling 7-day windows
+        const cutoff7  = new Date(); cutoff7.setDate(cutoff7.getDate() - 7);
+        const cutoff14 = new Date(); cutoff14.setDate(cutoff14.getDate() - 14);
+
+        const thisWeek = rows.filter(r => new Date(r.shipDate) >= cutoff7);
+        const lastWeek = rows.filter(r => new Date(r.shipDate) >= cutoff14 && new Date(r.shipDate) < cutoff7);
+
+        const twTotal  = thisWeek.reduce((s, r) => s + r.total,  0);
+        const twOnTime = thisWeek.reduce((s, r) => s + r.onTime, 0);
+        const lwTotal  = lastWeek.reduce((s, r) => s + r.total,  0);
+        const lwOnTime = lastWeek.reduce((s, r) => s + r.onTime, 0);
+
+        const onTimeRate = twTotal > 0 ? Math.round((twOnTime / twTotal) * 100) : null;
+        const lastRate   = lwTotal > 0 ? Math.round((lwOnTime / lwTotal) * 100) : null;
+        const pctChange  = onTimeRate !== null && lastRate !== null ? onTimeRate - lastRate : null;
+
+        res.json({ success: true, data: { dailyValues, onTimeRate, pctChange, totalShipments: twTotal } });
+    } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
