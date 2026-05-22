@@ -759,7 +759,7 @@ async function submitBlockUnblock(e, direction) {
     StorageLocation:       sloc,
     BinType:               isWM ? document.getElementById('q-bintype').value.trim() : '',
     Bin:                   isWM ? document.getElementById('q-bin').value.trim()     : '',
-    Batch:                 document.getElementById('q-batch').value.trim() || null,
+    Batch:                 document.getElementById('q-batch').value.trim() || '',
     SpecialStockIndicator: document.getElementById('q-sobkz').value.trim() || '',
     SpecialStockNumber:    document.getElementById('q-sonum').value.trim() || '',
     // Username is injected server-side from req.session.user.username
