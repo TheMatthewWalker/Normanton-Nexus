@@ -44,6 +44,8 @@ import qualityRoutes           from './routes/quality.js';
 import labelsRoutes            from './routes/labels.js';
 import financeRoutes           from './routes/finance.js';
 
+import notificationsRoutes     from './routes/notifications.js';
+
 import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
@@ -124,6 +126,7 @@ app.use('/api/clearport',      requireLogin,   clearportExportRoutes);
 app.use('/api/quality',       requireLogin,   qualityRoutes);
 app.use('/api/labels',        requireLogin,   labelsRoutes);
 app.use('/api/finance',       requireLogin,   financeRoutes);
+app.use('/api/notifications', requireLogin,   notificationsRoutes);
 
 
 // Serve static front-end files

@@ -1,13 +1,15 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Normanton Nexus · Finance</title>
+  <title>Normanton Nexus Â· Finance</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
   <link rel="stylesheet" href="./css/finance.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <script src="./js/notifications.js" defer></script>
   <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
@@ -16,7 +18,7 @@
   <header class="header">
     <div class="header-left">
       <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
-      <a href="./landing.html" class="back-link">← Hub</a>
+      <a href="./landing.html" class="back-link">â† Hub</a>
       <div class="brand-sep"></div>
       <div class="dept-badge">
         <svg viewBox="0 0 28 28" fill="none"><polyline points="2,22 9,14 15,18 26,7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="2" y1="26" x2="26" y2="26" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
@@ -36,7 +38,7 @@
   <div class="page-title-bar">
     <div class="page-title-inner">
       <h1 class="page-title">Finance</h1>
-      <p class="page-subtitle">Costs, budgets &amp; financial reporting · Select a function to begin</p>
+      <p class="page-subtitle">Costs, budgets &amp; financial reporting Â· Select a function to begin</p>
     </div>
   </div>
 
@@ -90,7 +92,7 @@
           </div>
           <span class="tile-badge tile-badge--live">LIVE</span>
           <div class="tile-title">Profit Center Data</div>
-          <div class="tile-desc">GL postings by profit center, invoice &amp; material · date range</div>
+          <div class="tile-desc">GL postings by profit center, invoice &amp; material Â· date range</div>
         </div>
 
         <div class="sap-tile sap-tile--placeholder" data-fn="costCentre">
@@ -132,9 +134,9 @@
     <!-- RESULT PANEL -->
     <div class="result-section hidden" id="result-section">
       <div class="result-toolbar">
-        <button type="button" class="btn-back-tiles" onclick="backToTiles()">← Functions</button>
+        <button type="button" class="btn-back-tiles" onclick="backToTiles()">â† Functions</button>
         <div class="result-title-wrap">
-          <div class="toolbar-title" id="result-title">—</div>
+          <div class="toolbar-title" id="result-title">â€”</div>
           <div class="toolbar-hint"  id="result-hint"></div>
         </div>
         <div class="toolbar-spacer"></div>
@@ -142,7 +144,7 @@
         <button type="button" class="btn-export hidden" id="btn-export-csv" onclick="exportResultCSV()">Export CSV</button>
       </div>
       <div class="result-body" id="result-body">
-        <div class="sap-loading"><div class="spinner"></div>Connecting to SAP…</div>
+        <div class="sap-loading"><div class="spinner"></div>Connecting to SAPâ€¦</div>
       </div>
     </div>
 

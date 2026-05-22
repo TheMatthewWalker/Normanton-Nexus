@@ -1,14 +1,16 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Normanton Nexus · Logistics</title>
+  <title>Normanton Nexus Â· Logistics</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
   <link rel="stylesheet" href="./css/production-nexus.css">
   <link rel="stylesheet" href="./css/logistics.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <script src="./js/notifications.js" defer></script>
   <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
@@ -17,7 +19,7 @@
   <header class="header">
     <div class="header-left">
       <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
-      <a href="./landing.html" class="back-link">← Hub</a>
+      <a href="./landing.html" class="back-link">â† Hub</a>
       <div class="brand-sep"></div>
       <div class="dept-badge">
         <svg viewBox="0 0 28 28" fill="none"><path d="M2 10h18M2 10V8a2 2 0 012-2h10l4 4M2 10v8h2m14-8v8m0 0h2a2 2 0 000-4h-2m0 4H4m0 0a2 2 0 100 4 2 2 0 000-4zm14 0a2 2 0 100 4 2 2 0 000-4z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -37,17 +39,17 @@
   <div class="page-title-bar">
     <div class="page-title-inner">
       <h1 class="page-title">Logistics Nexus</h1>
-      <p class="page-subtitle">Transport, customs &amp; shipment planning · Select a function to begin</p>
+      <p class="page-subtitle">Transport, customs &amp; shipment planning Â· Select a function to begin</p>
     </div>
   </div>
 
   <!-- SAP MAIN -->
   <div class="sap-main pn-main">
 
-    <!-- TILE GRID — grouped by section -->
+    <!-- TILE GRID â€” grouped by section -->
     <div class="tile-section" id="tile-section">
 
-      <!-- Shipment Creation — visible to LOG_VIEW, write actions require LOG_PLANNING -->
+      <!-- Shipment Creation â€” visible to LOG_VIEW, write actions require LOG_PLANNING -->
       <div class="pn-section" data-permission="LOG_VIEW">
         <div class="pn-section-hdr">Shipment Creation</div>
         <div class="tile-grid">
@@ -99,7 +101,7 @@
         </div>
       </div>
 
-      <!-- Shipment Monitoring — LOG_VIEW -->
+      <!-- Shipment Monitoring â€” LOG_VIEW -->
       <div class="pn-section" data-permission="LOG_VIEW">
         <div class="pn-section-hdr">Shipment Monitoring</div>
         <div class="tile-grid">
@@ -162,7 +164,7 @@
         </div>
       </div>
 
-      <!-- Material Planning — LOG_MRP -->
+      <!-- Material Planning â€” LOG_MRP -->
       <div class="pn-section" data-permission="LOG_MRP">
         <div class="pn-section-hdr">Material Planning</div>
         <div class="tile-grid">
@@ -203,7 +205,7 @@
         </div>
       </div>
 
-      <!-- Admin — LOG_ADMIN -->
+      <!-- Admin â€” LOG_ADMIN -->
       <div class="pn-section" data-permission="LOG_ADMIN">
         <div class="pn-section-hdr">Admin</div>
         <div class="tile-grid">
@@ -216,7 +218,7 @@
             </div>
             <span class="tile-badge tile-badge--live" style="background:rgba(217,119,6,0.12);color:#D97706;border-color:rgba(217,119,6,0.3)">ADMIN</span>
             <div class="tile-title">Freight Spend</div>
-            <div class="tile-desc">Analytics dashboard — spend by forwarder, country, month and direction</div>
+            <div class="tile-desc">Analytics dashboard â€” spend by forwarder, country, month and direction</div>
           </div>
 
           <div class="sap-tile sap-tile--live" data-fn="unprocessedCosts">
@@ -271,9 +273,9 @@
     <!-- RESULT PANEL -->
     <div class="result-section hidden" id="result-section">
       <div class="result-toolbar">
-        <button type="button" class="btn-back-tiles" onclick="backToTiles()">← Functions</button>
+        <button type="button" class="btn-back-tiles" onclick="backToTiles()">â† Functions</button>
         <div class="result-title-wrap">
-          <div class="toolbar-title" id="result-title">—</div>
+          <div class="toolbar-title" id="result-title">â€”</div>
           <div class="toolbar-hint"  id="result-hint"></div>
         </div>
         <div class="toolbar-spacer"></div>

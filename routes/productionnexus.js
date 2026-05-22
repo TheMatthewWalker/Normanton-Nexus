@@ -6,6 +6,7 @@ import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
 import { getProductionPool, sapConfig, sapServerSecret, sqlConfig } from '../server.js';
 import { requireRole, requirePermission } from '../middleware/auth.js';
+import { notify } from '../lib/notify.js';
 
 // ── SAP caller ────────────────────────────────────────────────────────────────
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
@@ -481,6 +482,16 @@ router.post('/process/:processCode/entry', async (req, res) => {
 
     await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
 
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'SAP Backflush Failed',
+      body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
+      severity:    2,
+      category:    'production',
+      actionLabel: 'Open Queue',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
+
     res.status(201).json({
       success: true,
       data: { recordID, batchRef, status: 'SAP_FAILED', error: errMsg },
@@ -704,6 +715,16 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
         .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
 
       await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+      sql.connect(sqlConfig).then(kPool => notify(kPool, {
+        title:       'SAP Backflush Failed',
+        body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
+        severity:    2,
+        category:    'production',
+        actionLabel: 'Open Queue',
+        actionURL:   '/private/production-nexus.html',
+        target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+      })).catch(() => {});
 
       res.status(200).json({
         success: true,
@@ -1214,6 +1235,16 @@ router.post('/scrap', async (req, res) => {
 
     await writeEvent(pool, processCode.toUpperCase(), processRecordID, 'SCRAP',
       `Scrap: ${quantity} ${unitOfMeasure} — reason ${reasonID}`, 1, uid);
+
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'Scrap Pending Approval',
+      body:        `${quantity} ${unitOfMeasure} scrap logged on ${processCode.toUpperCase()}-${String(processRecordID).padStart(8,'0')} — awaiting supervisor approval.`,
+      severity:    1,
+      category:    'production',
+      actionLabel: 'Approve Scrap',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
 
     res.status(201).json({ success: true });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
@@ -1933,6 +1964,17 @@ router.post('/mixing/entry', async (req, res) => {
     await pool.request()
       .input('rid', sql.Int, mixingID)
       .query(`UPDATE prod.Mixing SET Status=6 WHERE MixingID=@rid`);
+
+    const mixRef = `MX-${String(mixingID).padStart(8, '0')}`;
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'SAP Backflush Failed',
+      body:        `${mixRef} (Mixing) had one or more tubs fail SAP posting.`,
+      severity:    2,
+      category:    'production',
+      actionLabel: 'Open Queue',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
   }
 
   res.status(201).json({
@@ -2265,6 +2307,16 @@ async function submitDrumming(req, res, entryType) {
       .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
 
     await writeEvent(pool, 'DR', drummingID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'SAP Backflush Failed',
+      body:        `${drumRef} (Drumming) failed to post to SAP: ${errMsg}`,
+      severity:    2,
+      category:    'production',
+      actionLabel: 'Open Queue',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
 
     return res.status(201).json({
       success: true,
