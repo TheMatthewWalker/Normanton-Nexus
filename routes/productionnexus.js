@@ -2450,11 +2450,12 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
 
     // DR — re-post to /drumming/stock or /drumming/customer based on EntryType
     if (code === 'DR') {
-      const { material, packagingID, weightKG, customerNumber, orderNumber, comments } = req.body;
+      const { material, packagingID, weightKG, lengthMetres, customerNumber, orderNumber, comments } = req.body;
 
       await pool.request()
         .input('rid',  sql.Int,               id)
         .input('mat',  sql.NVarChar(18),      material       || null)
+        .input('len',  sql.Decimal(12,3),     lengthMetres != null ? Number(lengthMetres) : null)
         .input('pkg',  sql.NVarChar(10),      packagingID    || null)
         .input('wt',   sql.Decimal(12,3),     weightKG != null ? Number(weightKG) : null)
         .input('cust', sql.NVarChar(50),      customerNumber || null)
@@ -2462,6 +2463,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
         .input('notes',sql.NVarChar(sql.MAX), comments       || null)
         .query(`UPDATE prod.Drumming SET
           Material      = COALESCE(@mat,  Material),
+          LengthMetres  = COALESCE(@len,  LengthMetres),
           PackagingType = COALESCE(@pkg,  PackagingType),
           WeightKG      = COALESCE(@wt,   WeightKG),
           CustomerID    = COALESCE(@cust, CustomerID),
@@ -2579,7 +2581,39 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       return res.json({ success: true, data: { materialDocument: sapMatDoc, status: 'COMPLETE' } });
     }
 
-    // Remaining processes (EW, HA, FW) — not yet implemented
+    if (code === 'EW') {
+      const { material, notes } = req.body;
+      await pool.request()
+        .input('rid',  sql.Int,               id)
+        .input('mat',  sql.NVarChar(18),      material || null)
+        .input('notes',sql.NVarChar(sql.MAX), notes    || null)
+        .query(`UPDATE prod.Ewald SET
+          Material = COALESCE(@mat,  Material),
+          Notes    = COALESCE(@notes,Notes),
+          Status   = 4
+          WHERE EwaldID = @rid`);
+      await writeEvent(pool, 'EW', id, 'NOTE', `Supervisor ${uid} reviewed and marked complete from failed-backflush queue`, 0, uid);
+      return res.json({ success: true, data: { status: 'COMPLETE' } });
+    }
+
+    if (code === 'HA') {
+      const { material, salesOrderSAP, notes } = req.body;
+      await pool.request()
+        .input('rid',  sql.Int,               id)
+        .input('mat',  sql.NVarChar(18),      material      || null)
+        .input('so',   sql.NVarChar(12),      salesOrderSAP || null)
+        .input('notes',sql.NVarChar(sql.MAX), notes         || null)
+        .query(`UPDATE prod.HoseAssembly SET
+          Material      = COALESCE(@mat, Material),
+          SalesOrderSAP = COALESCE(@so,  SalesOrderSAP),
+          Notes         = COALESCE(@notes,Notes),
+          Status        = 4
+          WHERE HoseAssemblyID = @rid`);
+      await writeEvent(pool, 'HA', id, 'NOTE', `Supervisor ${uid} reviewed and marked complete from failed-backflush queue`, 0, uid);
+      return res.json({ success: true, data: { status: 'COMPLETE' } });
+    }
+
+    // FW — not yet implemented
     return res.status(400).json({ success: false, error: `Retry not yet implemented for process ${code}.` });
 
   } catch (sapErr) {
@@ -2593,6 +2627,31 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
     await writeEvent(pool2,code,id,'SAP_FAIL',`Retry failed: ${errMsg}`,2,userId(req));
     res.status(502).json({ success: false, error: errMsg });
   }
+});
+
+
+// Cancel a failed backflush record — supervisor action, sets Status=5
+router.patch('/failed-backflush/:processCode/:recordId/cancel', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const code = req.params.processCode.toUpperCase();
+  const id   = Number(req.params.recordId);
+  const uid  = userId(req);
+
+  let table, pk;
+  if (code === 'MX') { table = 'prod.Mixing'; pk = 'MixingID'; }
+  else {
+    const cfg = PROCESS[code];
+    if (!cfg) return res.status(400).json({ success: false, error: `Unknown process code: ${code}.` });
+    table = cfg.table; pk = cfg.pk;
+  }
+
+  try {
+    const pool = await getProductionPool();
+    await pool.request()
+      .input('id', sql.Int, id)
+      .query(`UPDATE ${table} SET Status=5 WHERE ${pk}=@id AND Status=6`);
+    await writeEvent(pool, code, id, 'CANCELLED', `Record cancelled by supervisor ${uid} from failed-backflush queue`, 0, uid);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 

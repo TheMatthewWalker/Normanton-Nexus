@@ -4197,6 +4197,8 @@ async function openRetryModal(processCode, recordId, batchRef) {
           <input class="tf-input" id="rt-pkg" value="${esc(b.PackagingType||'')}" style="width:90px"></div>
       </div>
       <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Total Length (M)</label>
+          <input class="tf-input" id="rt-length" type="number" step="0.001" min="0.001" value="${b.LengthMetres!=null?b.LengthMetres:''}"></div>
         <div class="tf-field"><label class="tf-label">Weight (KG)</label>
           <input class="tf-input" id="rt-wt" type="number" step="0.001" min="0" value="${b.WeightKG!=null?b.WeightKG:''}"></div>
         ${isMto ? `
@@ -4212,6 +4214,7 @@ async function openRetryModal(processCode, recordId, batchRef) {
     collectBody = () => ({
       material:       document.getElementById('rt-material')?.value.trim()  || undefined,
       packagingID:    document.getElementById('rt-pkg')?.value.trim()       || undefined,
+      lengthMetres:   document.getElementById('rt-length')?.value           ? Number(document.getElementById('rt-length').value) : undefined,
       weightKG:       document.getElementById('rt-wt')?.value               ? Number(document.getElementById('rt-wt').value) : undefined,
       customerNumber: document.getElementById('rt-cust')?.value?.trim()    || undefined,
       orderNumber:    document.getElementById('rt-order')?.value?.trim()   || undefined,
@@ -4236,9 +4239,47 @@ async function openRetryModal(processCode, recordId, batchRef) {
       notes:       document.getElementById('rt-notes')?.value.trim()   || undefined,
     });
 
+  } else if (pc === 'EW') {
+    editFields = `
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Material</label>
+          <input class="tf-input" id="rt-material" value="${esc(b.Material||'')}"></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
+          <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Confirming will mark this record complete. Box-level entries are managed from the batch view.</div>`;
+    collectBody = () => ({
+      material: document.getElementById('rt-material')?.value.trim() || undefined,
+      notes:    document.getElementById('rt-notes')?.value.trim()   || undefined,
+    });
+
+  } else if (pc === 'HA') {
+    editFields = `
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Material</label>
+          <input class="tf-input" id="rt-material" value="${esc(b.Material||'')}"></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Sales Order</label>
+          <input class="tf-input" id="rt-so" value="${esc(b.SalesOrderSAP||'')}"></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
+          <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
+      </div>`;
+    collectBody = () => ({
+      material:     document.getElementById('rt-material')?.value.trim() || undefined,
+      salesOrderSAP:document.getElementById('rt-so')?.value.trim()      || undefined,
+      notes:        document.getElementById('rt-notes')?.value.trim()   || undefined,
+    });
+
   } else {
     editFields = `<div style="font-size:13px;color:var(--text-muted)">No editable fields available for this process type yet.</div>`;
   }
+
+  const submitLabel = (pc === 'EW' || pc === 'HA') ? 'Confirm &amp; Mark Complete' : 'Re-submit to SAP';
 
   openModal(`<div class="ps-modal" style="max-width:580px">
     <div class="ps-modal-header">
@@ -4254,8 +4295,9 @@ async function openRetryModal(processCode, recordId, batchRef) {
       <div id="rt-result" style="margin-top:10px;font-size:13px"></div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
-      <button class="btn-submit" id="rt-submit">Re-submit to SAP</button>
+      <button class="btn-secondary" id="rt-cancel-record" style="margin-right:auto;color:var(--error);border-color:rgba(220,38,38,0.4)">Cancel Record</button>
+      <button class="btn-secondary" onclick="closeModal()">Close</button>
+      <button class="btn-submit" id="rt-submit">${submitLabel}</button>
     </div>
   </div>`);
 
@@ -4273,12 +4315,29 @@ async function openRetryModal(processCode, recordId, batchRef) {
       result.style.color = 'var(--accent)';
       const docs = (json.data?.tubs || []).map(t => t.materialDocument).filter(Boolean).join(', ');
       result.textContent = `✓ Re-submission successful${docs ? ' — MatDocs: ' + docs : json.data?.materialDocument ? ' — MatDoc: ' + json.data.materialDocument : ''}`;
-      btn.disabled = false; btn.textContent = 'Re-submit to SAP';
+      btn.disabled = false; btn.textContent = submitLabel;
       setTimeout(() => { closeModal(); runFailedBackflush(); }, 1500);
     } catch (err) {
       result.style.color = 'var(--error)';
       result.textContent = err.message;
-      btn.disabled = false; btn.textContent = 'Re-submit to SAP';
+      btn.disabled = false; btn.textContent = submitLabel;
+    }
+  });
+
+  document.getElementById('rt-cancel-record').addEventListener('click', async () => {
+    if (!confirm(`Cancel this record (${batchRef})? This will set its status to Cancelled and remove it from the queue.`)) return;
+    const btn    = document.getElementById('rt-cancel-record');
+    const result = document.getElementById('rt-result');
+    btn.disabled = true; btn.textContent = 'Cancelling…';
+    try {
+      const json = await api(`/failed-backflush/${pc}/${recordId}/cancel`, { method: 'PATCH' });
+      if (!json.success) throw new Error(json.error);
+      closeModal();
+      runFailedBackflush();
+    } catch (err) {
+      result.style.color = 'var(--error)';
+      result.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Cancel Record';
     }
   });
 }

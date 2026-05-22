@@ -329,9 +329,8 @@ After logging in, users land on the **Hub** page. This shows:
 
 - **ES Modules throughout** — all server files use `import`/`export`, not `require`
 - **Parameterized queries everywhere** — no raw string interpolation in SQL
-- **Two database connections** — `kongsberg` (auth, logistics, finance) and `Production` (shopfloor records)
+- **Three database connections** — `kongsberg` (auth, legacy production data) and `Production` (shopfloor records), `logistics` (transport management system)
 - **Date storage** — legacy Production database stores dates as `nvarchar` in `"dd.mm.yy hh:mm:ss"` format; use `CONVERT(datetime, col, 4)` for comparisons
-- **Logistics DB** is on a newer SQL Server instance; uses standard `DATE`/`DATETIME` types
 - **mssql bit columns** — returned as JS booleans; always `CAST(ISNULL(col, 0) AS bit)` to avoid null vs false ambiguity
 - **Audit logging is non-blocking** — failures in the audit write do not affect the HTTP response
 - **All write routes** in the logistics module require the appropriate `LOG_*` permission, checked via `requirePermission()` middleware

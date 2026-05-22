@@ -779,6 +779,23 @@ INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,ag
 INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','63',2001,2500,0.31,65);
 INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','63',2501,3000,0.3,65);
 INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','63',3001,5000,0.31,65);
+
+
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',0,100,0.75,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',101,200,0.56,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',201,300,0.52,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',301,400,0.46,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',401,500,0.42,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',501,600,0.39,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',601,750,0.37,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',751,1000,0.36,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',1001,1500,0.35,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',1501,2000,0.32,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',2001,2500,0.31,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',2501,3000,0.3,65);
+INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','64',3001,5000,0.31,65);
+
+
 INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','83',0,100,0.81,69);
 INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','83',101,200,0.62,69);
 INSERT INTO Logistics.dbo.RatesKN (countryCode,postalCode,minWeight,maxWeight,agreedRate,minimumCharge) VALUES ('IT','83',201,300,0.59,69);
