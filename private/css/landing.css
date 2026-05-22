@@ -50,7 +50,7 @@ body::before {
 
 /* ── HEADER ──────────────────────────────────────────────────────────────── */
 .header {
-  position: relative; z-index: 100;
+  position: sticky; top: 0; z-index: 100;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   height: 52px;
