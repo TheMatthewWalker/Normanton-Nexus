@@ -14,7 +14,7 @@ const sapAgent = fs.existsSync(certPath)
 
 // Sign a short-lived service token for each SapServer request.
 // Payload matches what SapServer expects: userId (int), issuer, audience.
-function makeSapToken() {
+export function makeSapToken() {
     return jwt.sign(
         { userId: 0 },
         sapServerSecret,

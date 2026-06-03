@@ -3,6 +3,7 @@ import sql from 'mssql';
 import axios from 'axios';
 import { sqlConfig, sapConfig } from '../server.js';
 import { requirePermission } from '../middleware/auth.js';
+import { makeSapToken } from './sap.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -325,7 +326,7 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
 
     try {
         const sapRes = await axios.get(syncUrl, {
-            headers:  sapSecret ? { Authorization: `Bearer ${sapSecret}` } : {},
+            headers:  { Authorization: `Bearer ${makeSapToken()}` },
             timeout:  30000,
         });
 
