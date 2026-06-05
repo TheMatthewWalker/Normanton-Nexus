@@ -1841,13 +1841,39 @@ router.get('/users', async (req, res) => {
 
 router.post('/mixing/entry', async (req, res) => {
   const { mixCode, supplierBatchNo, supplierTubNo, tubs, notes } = req.body;
+  const supplierBatch = String(supplierBatchNo || '').trim();
+  const supplierTub   = String(supplierTubNo   || '').trim();
+
   if (!mixCode || !Array.isArray(tubs) || !tubs.length)
     return res.status(400).json({ success: false, error: 'mixCode and at least one tub are required.' });
+  if (!supplierBatch || !supplierTub)
+    return res.status(400).json({ success: false, error: 'Supplier batch number and supplier tub number are required.' });
+  if (tubs.some(t => {
+    const weightKG = Number(t.weightKG);
+    return !Number.isFinite(weightKG) || weightKG <= 0 || weightKG > 38;
+  }))
+    return res.status(400).json({ success: false, error: 'Each tub weight must be greater than 0 and no more than 38 KG.' });
 
   const pool    = await getProductionPool();
   const uid     = userId(req);
   const shiftID = currentShiftID();
   const totalWeightKG = tubs.reduce((s, t) => s + Number(t.weightKG || 0), 0);
+
+  const dup = await pool.request()
+    .input('sbn', sql.NVarChar(50), supplierBatch)
+    .input('stn', sql.NVarChar(20), supplierTub)
+    .query(`SELECT TOP 1 MixingID, MixRef
+            FROM   prod.Mixing
+            WHERE  LTRIM(RTRIM(SupplierBatchNo)) = @sbn
+              AND  LTRIM(RTRIM(SupplierTubNo))   = @stn
+            ORDER BY MixingID DESC`);
+  if (dup.recordset.length) {
+    const ref = dup.recordset[0].MixRef || `MX${String(dup.recordset[0].MixingID).padStart(8, '0')}`;
+    return res.status(409).json({
+      success: false,
+      error: `Backflush aborted. Supplier batch ${supplierBatch} and tub ${supplierTub} have already been used on ${ref}. Please check the tub details.`,
+    });
+  }
 
   // 1. Insert Mixing parent record — set to SAP_FAILED (6) if any tub fails below
   const ins = await pool.request()
@@ -1855,8 +1881,8 @@ router.post('/mixing/entry', async (req, res) => {
     .input('mat',   sql.NVarChar(18),      mixCode)
     .input('mc',    sql.NVarChar(18),      mixCode)
     .input('wt',    sql.Decimal(12,3),     totalWeightKG)
-    .input('sbn',   sql.NVarChar(50),      supplierBatchNo || '')
-    .input('stn',   sql.NVarChar(20),      supplierTubNo   || '')
+    .input('sbn',   sql.NVarChar(50),      supplierBatch)
+    .input('stn',   sql.NVarChar(20),      supplierTub)
     .input('uid',   sql.Int,               uid)
     .input('notes', sql.NVarChar(sql.MAX), notes || null)
     .query(`INSERT INTO prod.Mixing
@@ -1884,9 +1910,10 @@ router.post('/mixing/entry', async (req, res) => {
     const tubIns = await pool.request()
       .input('mid', sql.Int,           mixingID)
       .input('seq', sql.Int,           i + 1)
+      .input('stn', sql.NVarChar(20),  supplierTub)
       .input('wt',  sql.Decimal(10,3), tubWeightKG)
       .query(`INSERT INTO prod.MixingTubs (MixingID,TubSeq,SupplierTubNo,TubWeightKG)
-              OUTPUT INSERTED.TubID VALUES (@mid,@seq,'',@wt)`);
+              OUTPUT INSERTED.TubID VALUES (@mid,@seq,@stn,@wt)`);
     const tubID = tubIns.recordset[0].TubID;
 
     const mixRef = `MX${String(mixingID).padStart(8, '0')}`;
@@ -1896,7 +1923,7 @@ router.post('/mixing/entry', async (req, res) => {
         Quantity:  tubWeightKG,
         Header:    mixRef,
         Packaging: '',
-        Charge:    supplierBatchNo || '',
+        Charge:    supplierBatch,
         Customer:  '',
       });
       const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
@@ -1926,11 +1953,11 @@ router.post('/mixing/entry', async (req, res) => {
         await sapPost('/api/production/label', {
           processCode: 'MX', recordID: mixingID, tubID, tubSeq: i + 1,
           materialDocument: sapMatDoc, material: mixCode,
-          quantity: tubWeightKG, unitOfMeasure: 'KG', supplierTubNo,
+          quantity: tubWeightKG, unitOfMeasure: 'KG', supplierTubNo: supplierTub,
         });
       } catch (_) {}
 
-      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo, weightKG: tubWeightKG, materialDocument: sapMatDoc, success: true });
+      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo: supplierTub, weightKG: tubWeightKG, materialDocument: sapMatDoc, success: true });
 
     } catch (sapErr) {
       anyFailed = true;
@@ -1953,9 +1980,9 @@ router.post('/mixing/entry', async (req, res) => {
 
       audit('SAP_ERROR', req.session?.user?.username, `'${mixRef}' FAILED - Message = "${errMsg}"`, req);
       await writeEvent(pool, 'MX', mixingID, 'SAP_FAIL',
-        `Tub ${i+1} (${supplierTubNo || 'no ref'}) SAP failed: ${errMsg}`, 2, uid);
+        `Tub ${i+1} (${supplierTub}) SAP failed: ${errMsg}`, 2, uid);
 
-      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo, weightKG: tubWeightKG, error: errMsg, success: false });
+      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo: supplierTub, weightKG: tubWeightKG, error: errMsg, success: false });
     }
   }
 
@@ -1979,7 +2006,14 @@ router.post('/mixing/entry', async (req, res) => {
 
   res.status(201).json({
     success: true,
-    data: { mixingID, status: anyFailed ? 'SAP_FAILED' : 'COMPLETE', totalWeightKG, tubs: tubResults },
+    data: {
+      recordID: mixingID,
+      mixingID,
+      batchRef: `MX${String(mixingID).padStart(8, '0')}`,
+      status: anyFailed ? 'SAP_FAILED' : 'COMPLETE',
+      totalWeightKG,
+      tubs: tubResults,
+    },
     ...(anyFailed ? { warning: 'Some tubs failed SAP posting. See failed backflush queue.' } : {}),
   });
 });

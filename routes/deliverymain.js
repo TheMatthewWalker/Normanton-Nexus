@@ -416,19 +416,29 @@ router.get('/landing-sparkline', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request().query(`
+            WITH DailyShipments AS (
+                SELECT
+                    DATEADD(day, DATEDIFF(day, 0, sm.actualCollection), 0) AS shipDate,
+                    CASE
+                        WHEN DATEADD(day, DATEDIFF(day, 0, sm.actualCollection), 0)
+                          <= DATEADD(day, DATEDIFF(day, 0, dm.dispatchDate), 0)
+                        THEN 1 ELSE 0
+                    END AS isOnTime
+                FROM Logistics.dbo.ShipmentMain sm
+                INNER JOIN Logistics.dbo.ShipmentLink sl ON sl.shipmentID = sm.shipmentID
+                INNER JOIN Logistics.dbo.DeliveryMain dm  ON dm.deliveryID  = sl.deliveryID
+                WHERE sm.collectionStatus = 1
+                  AND ISNULL(sm.shipmentCancelled, 0) = 0
+                  AND sm.actualCollection IS NOT NULL
+                  AND dm.dispatchDate IS NOT NULL
+                  AND sm.actualCollection >= DATEADD(day, -29, DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0))
+            )
             SELECT
-                CAST(sm.actualCollection AS DATE)  AS shipDate,
-                COUNT(*)                           AS total,
-                SUM(CASE WHEN CAST(sm.actualCollection AS DATE) <= CAST(dm.dispatchDate AS DATE)
-                         THEN 1 ELSE 0 END)        AS onTime
-            FROM Logistics.dbo.ShipmentMain sm
-            INNER JOIN Logistics.dbo.ShipmentLink sl ON sl.shipmentID = sm.shipmentID
-            INNER JOIN Logistics.dbo.DeliveryMain dm  ON dm.deliveryID  = sl.deliveryID
-            WHERE sm.collectionStatus = 1
-              AND ISNULL(sm.shipmentCancelled, 0) = 0
-              AND dm.dispatchDate IS NOT NULL
-              AND CAST(sm.actualCollection AS DATE) >= CAST(DATEADD(day, -29, GETDATE()) AS DATE)
-            GROUP BY CAST(sm.actualCollection AS DATE)
+                shipDate,
+                COUNT(*)     AS total,
+                SUM(isOnTime) AS onTime
+            FROM DailyShipments
+            GROUP BY shipDate
             ORDER BY shipDate
         `);
 

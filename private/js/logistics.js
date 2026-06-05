@@ -1334,7 +1334,7 @@ async function openLgEditPalletView(palletId) {
       <div class="sap-loading"><div class="spinner"></div>Loading…</div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="showLgPalletList()">← Back</button>
+      <button class="btn-secondary" onclick="showLgPalletList()">&larr; Back</button>
       <button class="btn-submit" id="lg-edit-pallet-save" disabled>Save Changes</button>
     </div>
   </div>`);
@@ -1455,7 +1455,7 @@ async function openLgAddPalletView() {
       <div class="sap-loading"><div class="spinner"></div>Loading pallet types…</div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="showLgPalletList()">← Back</button>
+      <button class="btn-secondary" onclick="showLgPalletList()">&larr; Back</button>
       <button class="btn-submit" id="lg-add-create-btn" disabled onclick="createLgPallet()">Create Pallet →</button>
     </div>
   </div>`);
@@ -2090,7 +2090,7 @@ function renderShipmentDeliveriesPanel(shipmentId, shipment, deliveries, availab
       </div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" id="sd-back-btn">← Back</button>
+      <button class="btn-secondary" id="sd-back-btn">&larr; Back</button>
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`;
@@ -2628,7 +2628,7 @@ async function openShipmentEventLog(shipmentId, shipmentRef) {
       <div class="sap-loading"><div class="spinner"></div>Loading events…</div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">← Back</button>
+      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">&larr; Back</button>
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`);
@@ -2682,7 +2682,7 @@ async function openShipmentStatusEdit(shipmentId, shipmentRef) {
       <div class="sap-loading"><div class="spinner"></div>Loading…</div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">← Back</button>
+      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">&larr; Back</button>
       <button class="btn-submit" id="sse-save" disabled>Save Corrections</button>
     </div>
   </div>`);

@@ -642,7 +642,7 @@ function renderAcResults(data) {
   document.getElementById('result-body').innerHTML = `
     <div class="ac-results">
       <div>
-        <button class="ac-back" id="ac-back-btn">← Adjust Parameters</button>
+        <button class="ac-back" id="ac-back-btn">&larr; Adjust Parameters</button>
       </div>
       <div class="ac-chart-wrap">
         <div class="ac-section-title">Cumulative Balance by Period</div>
@@ -1037,7 +1037,7 @@ function renderProfitCenterResults(data) {
   document.getElementById('result-body').innerHTML = `
     <div class="ac-results">
       <div>
-        <button class="ac-back" id="pc-back-btn">← Adjust Parameters</button>
+        <button class="ac-back" id="pc-back-btn">&larr; Adjust Parameters</button>
       </div>
       <div class="ac-table-wrap">
         <div class="ac-section-title">Summary by Business Segment</div>

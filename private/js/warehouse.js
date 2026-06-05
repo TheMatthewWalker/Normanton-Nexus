@@ -470,7 +470,7 @@ function showTransferFormFromRow(row) {
 
       <div class="tf-actions">
         <div id="tf-result"></div>
-        <button type="button" class="btn-secondary" onclick="runDisplayStock()">← Back to Stock</button>
+        <button type="button" class="btn-secondary" onclick="runDisplayStock()">&larr; Back to Stock</button>
         <button type="submit" class="btn-submit" id="tf-submit">Create Transfer Order</button>
       </div>
 

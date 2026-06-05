@@ -20,7 +20,24 @@ let qSelectedKeys = new Set();   // rowKey strings of selected rows
 let qStockCols    = [];          // column list — kept for re-renders
 
 function rowKey(row) {
-  return `${row['Material']}|${row['Storage Loc']}|${row['Storage Type']}|${row['Storage Bin']}|${row['Batch']}`;
+  return [
+    row['Material'],
+    row['Storage Loc'],
+    row['Storage Type'],
+    row['Storage Bin'],
+    row['Batch'],
+    row['Stock Cat'],
+    row['Spc Stock'],
+    row['Spc Stock No'],
+    row['Qty'],
+  ].map(v => String(v ?? '').trim()).join('|');
+}
+
+function pruneSelectionToFilteredRows() {
+  const visibleKeys = new Set(qFilteredRows.map(rowKey));
+  qSelectedKeys.forEach(key => {
+    if (!visibleKeys.has(key)) qSelectedKeys.delete(key);
+  });
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -210,8 +227,10 @@ function renderStockTable(rows, cols) {
           String(row[col] ?? '').toLowerCase().includes(val)
         )
       );
+      pruneSelectionToFilteredRows();
       qCurrentPage = 1;
       renderPage(cols);
+      updateSelectionBar();
     });
   });
 
@@ -330,10 +349,10 @@ function syncSelectAll(pageSlice) {
 }
 
 function updateSelectionBar() {
-  const selected   = qAllRows.filter(r => qSelectedKeys.has(rowKey(r)));
+  const selected   = qFilteredRows.filter(r => qSelectedKeys.has(rowKey(r)));
   const unblocked  = selected.filter(r => (r['Stock Cat'] || '').trim() !== 'S');
   const blocked    = selected.filter(r => (r['Stock Cat'] || '').trim() === 'S');
-  const total      = qSelectedKeys.size;
+  const total      = selected.length;
 
   const bar        = document.getElementById('q-selection-bar');
   if (!bar) return;
@@ -361,7 +380,7 @@ function clearSelection() {
 
 // ── Bulk Block / Unblock ──────────────────────────────────────────────────────
 function startBulkOperation(direction) {
-  const allSelected = qAllRows.filter(r => qSelectedKeys.has(rowKey(r)));
+  const allSelected = qFilteredRows.filter(r => qSelectedKeys.has(rowKey(r)));
   const relevant    = direction === 'block'
     ? allSelected.filter(r => (r['Stock Cat'] || '').trim() !== 'S')
     : allSelected.filter(r => (r['Stock Cat'] || '').trim() === 'S');
@@ -541,7 +560,7 @@ function buildPaginationBar(start, end, total, pages, cols) {
   return `
     <span class="q-page-info">${esc(info)}</span>
     <div class="q-page-controls">
-      <button class="q-page-btn" id="q-prev-btn" ${qCurrentPage <= 1 ? 'disabled' : ''}>←</button>
+      <button class="q-page-btn" id="q-prev-btn" ${qCurrentPage <= 1 ? 'disabled' : ''}>&larr;</button>
       ${pageNums}
       <button class="q-page-btn" id="q-next-btn" ${qCurrentPage >= pages ? 'disabled' : ''}>→</button>
     </div>

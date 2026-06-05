@@ -1390,7 +1390,7 @@ function runNewEntry(processCode, machines) {
           <div id="ne-batch-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
-          <button class="btn-secondary" id="ne-back">← Back</button>
+          <button class="btn-secondary" id="ne-back">&larr; Back</button>
           <button class="btn-submit" id="ne-save">Save &amp; Close</button>
           <span id="ne-msg" style="font-size:12px;color:var(--error)"></span>
         </div>
@@ -1486,7 +1486,7 @@ async function runCompleteRun(processCode, machines, reasons) {
         <div style="font-size:14px;color:var(--text-muted);margin-bottom:16px">
           No open ${esc(PROCESS_LABELS[processCode]||processCode)} entries found. Create one first using <strong>New Entry</strong>.
         </div>
-        <button class="btn-secondary" id="cr-back">← Back</button>
+        <button class="btn-secondary" id="cr-back">&larr; Back</button>
       </div>`;
     document.getElementById('cr-back').addEventListener('click', () => runMeterProcessEntry(processCode));
     return;
@@ -1509,7 +1509,7 @@ async function runCompleteRun(processCode, machines, reasons) {
             </tr>`).join('')}
           </tbody>
         </table>
-        <button class="btn-secondary" id="cr-back">← Back</button>
+        <button class="btn-secondary" id="cr-back">&larr; Back</button>
       </div>`;
 
     document.getElementById('cr-back').addEventListener('click', () => runMeterProcessEntry(processCode));
@@ -1545,7 +1545,7 @@ function runCompleteWizard(processCode, entry, machines, reasons) {
         <div class="pn-wizard-steps" id="cr-steps"></div>
         <div id="cr-phase-body"></div>
         <div style="display:flex;gap:8px;margin-top:16px">
-          <button class="btn-secondary" id="cr-back">${state.phase === 1 ? '← Back to list' : '← Back'}</button>
+          <button class="btn-secondary" id="cr-back">${state.phase === 1 ? '&larr; Back to list' : '&larr; Back'}</button>
           <button class="btn-submit" id="cr-next">${state.phase === 4 ? (processCode === 'BR' ? 'Save & Complete' : 'Submit & Post to SAP') : 'Next →'}</button>
           <span id="cr-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
         </div>
@@ -3579,13 +3579,14 @@ function renderBatchModal(batch, pc, recordId, operators, scrapEntries, reasons)
 // ── MIXING ENTRY ──────────────────────────────────────────────────────────────
 
 async function runMixingEntry() {
+  const maxTubWeightKG = 38;
   const tubList = [{ supplierTubNo: '', weightKG: '' }];
 
   function renderTubs() {
     const rows = tubList.map((t, i) => `
       <div style="display:flex;align-items:center;gap:8px;padding:4px 0">
         <span class="pn-batch-mono" style="width:22px;text-align:right;color:var(--text-muted)">${i+1}.</span>
-        <input class="tf-input mx-tub-wt" type="number" placeholder="Weight (KG)" value="${t.weightKG}" data-idx="${i}" step="0.001" min="0.001" style="width:160px">
+        <input class="tf-input mx-tub-wt" type="number" placeholder="Weight (KG)" value="${t.weightKG}" data-idx="${i}" step="0.001" min="0.001" max="${maxTubWeightKG.toFixed(3)}" style="width:160px">
         <span style="font-size:12px;color:var(--text-muted)">KG</span>
         ${tubList.length > 1 ? `<button class="mx-remove-tub btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>` : ''}
       </div>`).join('');
@@ -3633,6 +3634,7 @@ async function runMixingEntry() {
             <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--accent)" id="mx-total">0.000 KG</span>
           </div>
           <div id="mx-tub-list"></div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:6px">Maximum ${maxTubWeightKG} KG per tub.</div>
           <button class="btn-secondary" id="mx-add-tub" style="margin-top:8px">+ Add Tub</button>
         </div>
         <div class="tf-row">
@@ -3660,16 +3662,25 @@ async function runMixingEntry() {
     const btn     = document.getElementById('mx-submit-btn');
     const result  = document.getElementById('mx-result');
     const mixCode = document.getElementById('mx-mixcode').value.trim();
+    const supplierBatchNo = document.getElementById('mx-suppbatch').value.trim();
+    const supplierTubNo   = document.getElementById('mx-supptub').value.trim();
 
     // Collect latest values from DOM before submission
     document.querySelectorAll('.mx-tub-wt').forEach(inp => { tubList[Number(inp.dataset.idx)].weightKG = inp.value; });
     const validTubs = tubList.filter(t => Number(t.weightKG) > 0);
+    const overweightTub = validTubs.findIndex(t => Number(t.weightKG) > maxTubWeightKG);
 
     if (!mixCode) {
       result.style.color = 'var(--error)'; result.textContent = 'Mix Code is required.'; return;
     }
+    if (!supplierBatchNo || !supplierTubNo) {
+      result.style.color = 'var(--error)'; result.textContent = 'Supplier batch number and supplier tub number are required.'; return;
+    }
     if (!validTubs.length) {
       result.style.color = 'var(--error)'; result.textContent = 'At least one tub weight is required.'; return;
+    }
+    if (overweightTub !== -1) {
+      result.style.color = 'var(--error)'; result.textContent = `Tub ${overweightTub + 1} cannot exceed ${maxTubWeightKG} KG.`; return;
     }
 
     btn.disabled = true; btn.textContent = 'Posting to SAP…';
@@ -3681,26 +3692,32 @@ async function runMixingEntry() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mixCode,
-          supplierBatchNo: document.getElementById('mx-suppbatch').value.trim(),
-          supplierTubNo:   document.getElementById('mx-supptub').value.trim(),
+          supplierBatchNo,
+          supplierTubNo,
           tubs: validTubs.map(t => ({ weightKG: Number(t.weightKG) })),
           notes: document.getElementById('mx-notes').value.trim() || undefined,
         }),
       });
 
       const d   = json.data || {};
-      const ref = `MX${String(d.MixingID || 0).padStart(8,'0')}`;
+      const recordID = Number(d.recordID ?? d.mixingID ?? d.MixingID);
+      const ref = d.batchRef || d.MixRef || (recordID ? `MX${String(recordID).padStart(8,'0')}` : 'MX');
+      const printBtn = recordID
+        ? `<br><button class="btn-secondary" onclick="labelPrint('MX',${recordID},this)" style="margin-top:10px;font-size:12px">🖨 Print Label</button>`
+        : '';
 
       if (d.status === 'SAP_FAILED') {
         const failCount = (d.tubs || []).filter(t => !t.success).length;
         result.style.color = '#D97706';
         result.innerHTML = `⚠ ${ref} saved but ${failCount} tub(s) failed SAP.<br>
           <span style="font-size:12px">See Failed Backflush queue for supervisor retry.</span>`;
+        result.insertAdjacentHTML('beforeend', printBtn);
         btn.disabled = false; btn.textContent = 'Post to SAP';
       } else if (json.success) {
         const docs = (d.tubs || []).map(t => t.materialDocument).filter(Boolean).join(', ');
         result.style.color = 'var(--accent)';
         result.innerHTML = `✓ ${ref} — ${validTubs.length} tub(s) posted · MatDocs: ${esc(docs || '—')}`;
+        result.insertAdjacentHTML('beforeend', printBtn);
         tubList.length = 0;
         tubList.push({ weightKG: '' });
         ['mx-mixcode','mx-suppbatch','mx-supptub','mx-notes'].forEach(id => { document.getElementById(id).value = ''; });
@@ -3809,7 +3826,7 @@ function renderDrummingWizard(state, reasons, packagingOptions) {
       <div class="pn-wizard-steps" id="dw-steps"></div>
       <div id="dw-phase-body"></div>
       <div style="display:flex;gap:8px;margin-top:16px">
-        <button class="btn-secondary" id="dw-back">← Back</button>
+        <button class="btn-secondary" id="dw-back">&larr; Back</button>
         <button class="btn-submit" id="dw-next">${isLast ? 'Submit & Post to SAP' : 'Next →'}</button>
         <span id="dw-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
       </div>
