@@ -4,6 +4,8 @@ import session from "express-session";
 import sql from "mssql";
 import path from "path";
 import { fileURLToPath } from "url";
+import https from "https";
+import http from "http";
 import fs from "fs";
 import bcrypt                 from 'bcrypt';
 import rateLimit              from 'express-rate-limit';
@@ -50,7 +52,10 @@ import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
 
-
+const httpsOptions = {
+  key: fs.readFileSync("./certs/key.pem"),
+  cert: fs.readFileSync("./certs/cert.pem")
+};
 
 const config = JSON.parse(fs.readFileSync("./config.json"));
 const __filename = fileURLToPath(import.meta.url);
@@ -61,8 +66,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const limiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 5 minutes
-  max: 1000, // limit each IP to X requests per windowMs
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 500, // limit each IP to X requests per windowMs
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please try again later." }
@@ -77,12 +82,14 @@ app.use(session({
   saveUninitialized: false,
   rolling: true,                          // reset expiry on each request
   cookie: {
-    maxAge:   1000 * 60 * 60,            // 1 hour idle timeout
+    maxAge:   0.5 * 1000 * 60 * 60,            // 0.5 hour idle timeout
     httpOnly: true,                       // JS cannot read cookie
     sameSite: 'strict',                   // CSRF protection
-    // secure: true,                      // uncomment when running HTTPS
+    secure: true,                      // uncomment when running HTTPS
   }
 }));
+
+app.set('trust proxy', 1);
 
 // ── Auth routes (public — no requireLogin) ───────────────────────────────────
 app.use('/', authRoutes);
@@ -378,6 +385,16 @@ app.post("/query-csv", async (req, res) => {
 
 
 
+https.createServer(httpsOptions, app).listen(443, () => {
+  console.log("✅ HTTPS server running on port 443");
+});
 
-app.listen(4000, "0.0.0.0", () => console.log("✅ SQL2005 Bridge accessible on network port 4000"));
+
+http.createServer((req, res) => {
+  res.writeHead(301, { Location: `https://${req.headers.host}${req.url}` });
+  res.end();
+}).listen(80);
+
+
+//app.listen(4000, "0.0.0.0", () => console.log("✅ SQL2005 Bridge accessible on network port 4000"));
 

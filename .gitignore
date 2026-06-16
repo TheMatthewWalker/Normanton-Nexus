@@ -4,3 +4,4 @@ config.json
 hidden
 .env
 manual
+certs
