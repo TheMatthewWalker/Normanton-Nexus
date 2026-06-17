@@ -1366,7 +1366,14 @@ function runNewEntry(processCode, machines) {
           <div class="bm-section-title">Starting Info</div>
           <div class="tf-field" style="margin-bottom:12px">
             <label class="tf-label">SAP Material Number</label>
-            <input class="tf-input" id="ne-material" value="${esc(state.material)}" placeholder="e.g. K-NBR-87-1234" autocomplete="off">
+            <input class="tf-input" id="ne-material" value="${esc(state.material)}" autocomplete="off" placeholder="e.g. 
+              ${processCode === 'MX' ? '10101' : ''}
+              ${processCode === 'EX' ? 'TSHV3-4' : ''}
+              ${processCode === 'CO' ? 'TCEL9-9CBT' : ''}
+              ${processCode === 'TW' ? 'MATWV51-2' : ''}
+              ${processCode === 'BR' ? 'TSAV6-8B01' : ''}
+              ${processCode === 'CL' ? 'TSHV3-4B01C01' : ''}
+              ${processCode === 'DR' ? 'SBC16-0B01' : ''}" >
           </div>
           ${machines.length ? `
           <div class="tf-field" style="margin-bottom:0">
@@ -1633,7 +1640,11 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     });
 
   } else if (state.phase === 3) {
+    const isDrumming = processCode === 'DR';
     const isExtrusion = processCode === 'EX';
+    const isConvoluting = processCode === 'CO';
+    const hasScrapBreakdown = !isDrumming;
+    const alwaysScrap = isExtrusion || isConvoluting;
     const reasonRows = state.scrapReasons.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
         
@@ -1646,7 +1657,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
         </select>
 
         ${
-          isExtrusion
+          hasScrapBreakdown
             ? `<input class="tf-input cr-scrap-kg-row" type="number" min="0" step="0.001"
                 value="${r.kg || ''}" data-idx="${i}" style="width:110px"
                 placeholder="KG">`
@@ -1661,14 +1672,14 @@ function renderCompletePhase(state, entry, reasons, processCode) {
       </div>
     `).join('');
 
-    if (isExtrusion) {
+    if (alwaysScrap) {
       state.hasScrap = true
     }
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
         <div class="bm-section-title">Step 3 — Scrap</div>
-        ${!isExtrusion ?
+        ${!alwaysScrap ?
           `<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
             <input type="checkbox" id="cr-has-scrap" ${state.hasScrap ? 'checked' : ''}> Scrap to record for this run
           </label>`
@@ -1677,7 +1688,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
       <div id="cr-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
         
         ${
-          !isExtrusion
+          !hasScrapBreakdown
           ? `
             <div class="tf-field" style="margin-bottom:8px">
               <label class="tf-label">Total Scrap Weight (KG)</label>
@@ -1703,7 +1714,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     const syncScrapFromDom = () => {
       state.hasScrap = document.getElementById('cr-has-scrap')?.checked ?? state.hasScrap;
 
-      if (!isExtrusion) {
+      if (!hasScrapBreakdown) {
         const kg = document.getElementById('cr-scrap-kg')?.value;
         if (kg !== '' && kg != null) state.scrapTotalKG = Number(kg);
       }
@@ -1715,7 +1726,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
         }
       });
 
-      if (isExtrusion) {
+      if (hasScrapBreakdown) {
         document.querySelectorAll('.cr-scrap-kg-row').forEach(inp => {
           const idx = Number(inp.dataset.idx);
           if (state.scrapReasons[idx]) {
@@ -1739,7 +1750,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     document.getElementById('cr-add-reason')?.addEventListener('click', () => {
       syncScrapFromDom();
       state.scrapReasons.push(
-        isExtrusion
+        hasScrapBreakdown
           ? { reasonID: '', kg: 0 }
           : { reasonID: '', occurrences: 1 }
       );
@@ -1788,7 +1799,11 @@ function renderCompletePhase(state, entry, reasons, processCode) {
 
 async function advanceCompleteWizard(state, entry, reasons, processCode, render) {
   const msg = document.getElementById('cr-msg');
+  const isDrumming = processCode === 'DR';
   const isExtrusion = processCode === 'EX';
+  const isConvoluting = processCode === 'CO';
+  const hasScrapBreakdown = !isDrumming;
+  const alwaysScrap = isExtrusion || isConvoluting;
   if (msg) msg.textContent = '';
 
   if (state.phase === 1) {
@@ -1800,15 +1815,15 @@ async function advanceCompleteWizard(state, entry, reasons, processCode, render)
     // operators maintained via add/remove buttons
 
   } else if (state.phase === 3) {
-    if (isExtrusion) {
+    if (alwaysScrap) {
       state.hasScrap = document.getElementById('cr-has-scrap')?.value || true;
     } else {
       state.hasScrap = document.getElementById('cr-has-scrap')?.checked || false;
     }
     if (state.hasScrap) {
       state.scrapTotalKG = Number(document.getElementById('cr-scrap-kg')?.value) || 0;
-      if (processCode === 'EX') {
-      state.scrapTotalKG = state.scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+      if (hasScrapBreakdown) {
+        state.scrapTotalKG = state.scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
       }
       if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Please ensure scrap weights are entered.'; return; }
     }

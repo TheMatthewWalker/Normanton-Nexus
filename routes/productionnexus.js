@@ -2915,7 +2915,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
       if (matR.recordset[0].IsReversed)
         return { scrapID, success: false, error: 'Cannot approve — the parent backflush has been reversed.' };
 
-      const { Material: material, BatchRef: batchRef } = matR.recordset[0];
+      const { Material: material, BatchRef: scrapID } = matR.recordset[0];
       const reasonCode = s.ReasonCode?.trim();
       const sapPayload = {
         Material:     material,
