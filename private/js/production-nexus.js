@@ -1633,45 +1633,103 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     });
 
   } else if (state.phase === 3) {
+    const isExtrusion = processCode === 'EX';
     const reasonRows = state.scrapReasons.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        
         <select class="tf-input cr-scrap-reason" data-idx="${i}" style="flex:1">
           <option value="">Select reason…</option>
-          ${reasons.map(sr=>`<option value="${sr.ReasonID}" ${Number(r.reasonID)===sr.ReasonID?'selected':''}>${esc(sr.ReasonCode)} — ${esc(sr.ReasonDescription)}</option>`).join('')}
+          ${reasons.map(sr=>`
+            <option value="${sr.ReasonID}" ${Number(r.reasonID)===sr.ReasonID?'selected':''}>
+              ${esc(sr.ReasonCode)} — ${esc(sr.ReasonDescription)}
+            </option>`).join('')}
         </select>
-        <input class="tf-input cr-scrap-occ" type="number" min="1" step="1" value="${r.occurrences||1}" data-idx="${i}" style="width:90px" placeholder="Count">
-        <button class="cr-remove-reason btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>
-      </div>`).join('');
+
+        ${
+          isExtrusion
+            ? `<input class="tf-input cr-scrap-kg-row" type="number" min="0" step="0.001"
+                value="${r.kg || ''}" data-idx="${i}" style="width:110px"
+                placeholder="KG">`
+            : `<input class="tf-input cr-scrap-occ" type="number" min="1" step="1"
+                value="${r.occurrences||1}" data-idx="${i}" style="width:90px"
+                placeholder="Count">`
+        }
+
+        <button class="cr-remove-reason btn-secondary" data-idx="${i}"
+          style="padding:2px 8px;font-size:11px">×</button>
+
+      </div>
+    `).join('');
+
+    if (isExtrusion) {
+      state.hasScrap = true
+    }
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
         <div class="bm-section-title">Step 3 — Scrap</div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
-          <input type="checkbox" id="cr-has-scrap" ${state.hasScrap?'checked':''}> Scrap to record for this run
-        </label>
-        <div id="cr-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
-          <div class="tf-field" style="margin-bottom:8px">
-            <label class="tf-label">Total Scrap Weight (KG)</label>
-            <input class="tf-input" id="cr-scrap-kg" type="number" min="0" step="0.001" value="${state.scrapTotalKG||''}" style="width:160px">
-          </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Weight is split proportionally by occurrence count.</div>
-          <div id="cr-reason-rows">${reasonRows}</div>
-          <button class="btn-secondary" id="cr-add-reason" style="margin-top:8px">+ Add Reason</button>
-        </div>
+        ${!isExtrusion ?
+          `<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
+            <input type="checkbox" id="cr-has-scrap" ${state.hasScrap ? 'checked' : ''}> Scrap to record for this run
+          </label>`
+          : `<input type="hidden" id="cr-has-scrap" value="true">`
+        }
+      <div id="cr-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
+        
+        ${
+          !isExtrusion
+          ? `
+            <div class="tf-field" style="margin-bottom:8px">
+              <label class="tf-label">Total Scrap Weight (KG)</label>
+              <input class="tf-input" id="cr-scrap-kg" type="number"
+                min="0" step="0.001"
+                value="${state.scrapTotalKG||''}" style="width:160px">
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+              Weight is split proportionally by occurrence count.
+            </div>
+          `
+          : `
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+              Enter scrap weight per reason.
+            </div>
+          `
+        }
+
+        <div id="cr-reason-rows">${reasonRows}</div>
+        <button class="btn-secondary" id="cr-add-reason" style="margin-top:8px">+ Add Reason</button>
       </div>`;
 
     const syncScrapFromDom = () => {
-      state.hasScrap    = document.getElementById('cr-has-scrap')?.checked ?? state.hasScrap;
-      const kg          = document.getElementById('cr-scrap-kg')?.value;
-      if (kg !== '' && kg != null) state.scrapTotalKG = Number(kg);
+      state.hasScrap = document.getElementById('cr-has-scrap')?.checked ?? state.hasScrap;
+
+      if (!isExtrusion) {
+        const kg = document.getElementById('cr-scrap-kg')?.value;
+        if (kg !== '' && kg != null) state.scrapTotalKG = Number(kg);
+      }
+
       document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
         const idx = Number(sel.dataset.idx);
-        if (state.scrapReasons[idx]) state.scrapReasons[idx].reasonID = Number(sel.value);
+        if (state.scrapReasons[idx]) {
+          state.scrapReasons[idx].reasonID = Number(sel.value);
+        }
       });
-      document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
-        const idx = Number(inp.dataset.idx);
-        if (state.scrapReasons[idx]) state.scrapReasons[idx].occurrences = Number(inp.value) || 1;
-      });
+
+      if (isExtrusion) {
+        document.querySelectorAll('.cr-scrap-kg-row').forEach(inp => {
+          const idx = Number(inp.dataset.idx);
+          if (state.scrapReasons[idx]) {
+            state.scrapReasons[idx].kg = Number(inp.value) || 0;
+          }
+        });
+      } else {
+        document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
+          const idx = Number(inp.dataset.idx);
+          if (state.scrapReasons[idx]) {
+            state.scrapReasons[idx].occurrences = Number(inp.value) || 1;
+          }
+        });
+      }
     };
 
     document.getElementById('cr-has-scrap').addEventListener('change', e => {
@@ -1680,7 +1738,11 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     });
     document.getElementById('cr-add-reason')?.addEventListener('click', () => {
       syncScrapFromDom();
-      state.scrapReasons.push({ reasonID: '', occurrences: 1 });
+      state.scrapReasons.push(
+        isExtrusion
+          ? { reasonID: '', kg: 0 }
+          : { reasonID: '', occurrences: 1 }
+      );
       renderCompletePhase(state, entry, reasons, processCode);
     });
     document.querySelectorAll('.cr-remove-reason').forEach(btn => {
@@ -1695,6 +1757,11 @@ function renderCompletePhase(state, entry, reasons, processCode) {
     });
     document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
       inp.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].occurrences = Number(e.target.value); });
+    });
+    document.querySelectorAll('.cr-scrap-kg-row').forEach(inp => {
+      inp.addEventListener('change', e => {
+        state.scrapReasons[Number(e.target.dataset.idx)].kg = Number(e.target.value);
+      });
     });
 
   } else if (state.phase === 4) {
@@ -1721,6 +1788,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
 
 async function advanceCompleteWizard(state, entry, reasons, processCode, render) {
   const msg = document.getElementById('cr-msg');
+  const isExtrusion = processCode === 'EX';
   if (msg) msg.textContent = '';
 
   if (state.phase === 1) {
@@ -1732,10 +1800,22 @@ async function advanceCompleteWizard(state, entry, reasons, processCode, render)
     // operators maintained via add/remove buttons
 
   } else if (state.phase === 3) {
-    state.hasScrap = document.getElementById('cr-has-scrap')?.checked || false;
+    if (isExtrusion) {
+      state.hasScrap = document.getElementById('cr-has-scrap')?.value || true;
+    } else {
+      state.hasScrap = document.getElementById('cr-has-scrap')?.checked || false;
+    }
     if (state.hasScrap) {
       state.scrapTotalKG = Number(document.getElementById('cr-scrap-kg')?.value) || 0;
-      if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Enter total scrap weight.'; return; }
+      if (processCode === 'EX') {
+      state.scrapTotalKG = state.scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+      }
+      if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Please ensure scrap weights are entered.'; return; }
+    }
+    const selects = document.querySelectorAll('.cr-scrap-reason');
+    for (const sel of selects) {
+      const value = Number(sel.value);
+      if (!(value > 0)) { if (msg) msg.textContent = 'Select a reason for each scrap entry.'; return; }
     }
 
   } else if (state.phase === 4) {
@@ -1743,6 +1823,10 @@ async function advanceCompleteWizard(state, entry, reasons, processCode, render)
     const submitBtn = document.getElementById('cr-next');
     const resultEl  = document.getElementById('cr-submit-result');
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
+
+    if (processCode === 'EX') {
+      state.scrapTotalKG = state.scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+    }
 
     try {
       const json = await api(`/process/${processCode}/complete/${entry.RecordID}`, {

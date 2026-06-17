@@ -408,20 +408,39 @@ router.post('/process/:processCode/entry', async (req, res) => {
       .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
   }
 
-  if (hasScrap && scrapTotalKG && scrapReasons.length) {
-    const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
-    for (const { reasonID, occurrences } of scrapReasons) {
-      const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
-      const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
-      await pool.request()
-        .input('pc',  sql.NVarChar(5),   code)
-        .input('rid', sql.Int,           recordID)
-        .input('r',   sql.Int,           Number(reasonID))
-        .input('qty', sql.Decimal(12,3), qty)
-        .input('uid', sql.Int,           uid)
-        .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+  if (hasScrap && scrapReasons.length) {
+    if (code === 'EX') {
+      for (const { reasonID, kg } of scrapReasons) {
+        const qty   = Math.round(Number(kg || 0) * 1000) / 1000;
+        if (!reasonID || qty <= 0) continue;
+
+        await pool.request()
+          .input('pc',  sql.NVarChar(5),   code)
+          .input('rid', sql.Int,           recordID)
+          .input('r',   sql.Int,           Number(reasonID))
+          .input('qty', sql.Decimal(12,3), qty)
+          .input('uid', sql.Int,           uid)
+          .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+      }
+      const totalKG = scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+      await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+    } 
+    else {
+      const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+      for (const { reasonID, occurrences } of scrapReasons) {
+        const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+        const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+
+        await pool.request()
+          .input('pc',  sql.NVarChar(5),   code)
+          .input('rid', sql.Int,           recordID)
+          .input('r',   sql.Int,           Number(reasonID))
+          .input('qty', sql.Decimal(12,3), qty)
+          .input('uid', sql.Int,           uid)
+          .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+      }
+      await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
     }
-    await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
   }
 
   await writeEvent(pool, code, recordID, 'STARTED', `${code} record created: ${material} ${length.toFixed(3)} M`, 0, uid);
@@ -638,20 +657,34 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
       } catch { /* ignore duplicate operator */ }
     }
 
-    if (hasScrap && scrapTotalKG && scrapReasons.length) {
-      const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
-      for (const { reasonID, occurrences } of scrapReasons) {
-        const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
-        const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
-        await pool.request()
-          .input('pc',  sql.NVarChar(5),   code)
-          .input('rid', sql.Int,           recordID)
-          .input('r',   sql.Int,           Number(reasonID))
-          .input('qty', sql.Decimal(12,3), qty)
-          .input('uid', sql.Int,           uid)
-          .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+    if (hasScrap && scrapReasons.length) {
+      if (code === 'EX') {
+        for (const { reasonID, kg } of scrapReasons) {
+          const qty   = Math.round(Number(kg) * 1000) / 1000;
+          await pool.request()
+            .input('pc',  sql.NVarChar(5),   code)
+            .input('rid', sql.Int,           recordID)
+            .input('r',   sql.Int,           Number(reasonID))
+            .input('qty', sql.Decimal(12,3), qty)
+            .input('uid', sql.Int,           uid)
+            .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+        }
+        await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+      } else {
+        const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+        for (const { reasonID, occurrences } of scrapReasons) {
+          const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+          const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+          await pool.request()
+            .input('pc',  sql.NVarChar(5),   code)
+            .input('rid', sql.Int,           recordID)
+            .input('r',   sql.Int,           Number(reasonID))
+            .input('qty', sql.Decimal(12,3), qty)
+            .input('uid', sql.Int,           uid)
+            .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+        }
+        await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
       }
-      await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
     }
 
     await writeEvent(pool, code, recordID, 'STARTED', `${code} completed: ${material} ${length.toFixed(3)} M`, 0, uid);
