@@ -19,7 +19,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
 
 const router = express.Router();
 

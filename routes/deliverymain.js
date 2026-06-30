@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
-import { sqlConfig, sapConfig } from '../server.js';
+import { sqlConfig, sapConfig } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import { makeSapToken } from './sap.js';
 

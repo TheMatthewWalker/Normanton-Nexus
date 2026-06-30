@@ -76,7 +76,7 @@ async function runRawSql() {
     '<div class="loading-wrap"><div class="spinner"></div>Running query…</div>';
 
   try {
-    const res  = await fetch('/query', {
+    const res  = await fetch('/sql/query', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ query: sqlText }),

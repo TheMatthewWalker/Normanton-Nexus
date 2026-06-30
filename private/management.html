@@ -6,10 +6,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/management.css">
+  <link rel="stylesheet" href="./css/production-nexus.css">
+  <link rel="stylesheet" href="./css/logistics.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
   <link rel="stylesheet" href="./css/notifications.css">
   <script src="./js/notifications.js" defer></script>
   <link rel="icon" href="/images/logo16.png">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
 </head>
 <body>
 
@@ -44,16 +48,102 @@
   <!-- MAIN CONTENT -->
   <main class="main-content">
 
-    <div class="placeholder-panel">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 28 28" fill="none"><rect x="2" y="2" width="10" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="16" y="2" width="10" height="7" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="2" y="18" width="10" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="16" y="13" width="10" height="13" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg>
+    <div class="dashboard">
+
+      <!-- MTD Cards -->
+      <div class="mgmt-kpis">
+        <div class="mgmt-kpi">
+          <div class="mgmt-kpi-title">PTFE MTD</div>
+          <div id="kpi-ptfe" class="mgmt-kpi-value">£0</div>
+        </div>
+        <div class="mgmt-kpi">
+          <div class="mgmt-kpi-title">PV MTD</div>
+          <div id="kpi-pv" class="mgmt-kpi-value">£0</div>
+        </div>
+        <div class="mgmt-kpi">
+          <div class="mgmt-kpi-title">Total MTD</div>
+          <div id="kpi-total" class="mgmt-kpi-value">£0</div>
+        </div>
       </div>
-      <div class="placeholder-title">Management â€” Coming Soon</div>
-      <div class="placeholder-body">
-        This area is reserved for the Management department.<br>
-        Content, tools and reports will be added here.
+
+      <!-- FILTERS -->
+      <div class="mgmt-filters">
+        <div class="mgmt-filter">
+          <label>From</label>
+          <input type="date" id="dateFrom">
+        </div>
+        <div class="mgmt-filter">
+          <label>To</label>
+          <input type="date" id="dateTo">
+        </div>
+
+        <div class="mgmt-actions">
+          <button id="refreshBtn" class="btn-back">Refresh Data</button>
+          <span id="refreshStatus" class="refresh-status"></span>
+        </div>
       </div>
-      <a href="./landing.html" class="btn-back">&larr; Return to Hub</a>
+
+
+      <!-- CHARTS -->
+      <div class="mgmt-section">
+        <div class="mgmt-section-title">PTFE</div>
+
+        <div class="mgmt-grid">
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">Daily Value</div>
+            <div id="ptfeValueChart"></div>
+          </div>
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">Value Pipeline</div>
+            <div id="ptfeValueExtendedChart"></div>
+          </div>
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">OTIF %</div>
+            <div id="ptfeOtifChart"></div>
+          </div>
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">OTIF Cumulative</div>
+            <div id="ptfeOtifCumulativeChart"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="mgmt-section">
+        <div class="mgmt-section-title">PV</div>
+
+        <div class="mgmt-grid">
+
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">Daily Value</div>
+            <div id="pvValueChart"></div>
+          </div>
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">Value Pipeline</div>
+            <div id="pvValueExtendedChart"></div>
+          </div>
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">OTIF %</div>
+            <div id="pvOtifChart"></div>
+          </div>
+          <div class="mgmt-chart">
+            <div class="mgmt-chart-title">OTIF Cumulative</div>
+            <div id="pvOtifCumulativeChart"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- TABLE -->
+      <div class="mgmt-section">
+        <div class="mgmt-section-title">Daily Table</div>
+
+        <table id="dataTable">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
     </div>
 
   </main>
@@ -62,6 +152,8 @@
     <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
     <span class="footer-right">Management</span>
   </footer>
+
+  <script src="./js/management.js"></script>
 
 </body>
 </html>

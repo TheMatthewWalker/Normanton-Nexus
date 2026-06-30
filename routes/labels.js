@@ -3,7 +3,7 @@ import express     from 'express';
 import sql         from 'mssql';
 import PDFDocument from 'pdfkit';
 import bwipjs      from 'bwip-js';
-import { getProductionPool, printersConfig, sqlConfig } from '../server.js';
+import { getProductionPool, printersConfig, sqlConfig } from '../config.js';
 
 const router = express.Router();
 

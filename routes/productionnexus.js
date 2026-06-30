@@ -4,7 +4,7 @@ import axios   from 'axios';
 import https   from 'https';
 import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
-import { getProductionPool, sapConfig, sapServerSecret, sqlConfig } from '../server.js';
+import { getProductionPool, sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 import { requireRole, requirePermission } from '../middleware/auth.js';
 import { notify } from '../lib/notify.js';
 
@@ -16,6 +16,7 @@ const sapAgent = fs.existsSync(certPath)
 
 function makeSapToken() {
   return jwt.sign(
+    // TODO: include user info in token if needed for SAP logging; currently just a placeholder
     { userId: 0 },
     sapServerSecret,
     { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' }
@@ -2915,7 +2916,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
       if (matR.recordset[0].IsReversed)
         return { scrapID, success: false, error: 'Cannot approve — the parent backflush has been reversed.' };
 
-      const { Material: material, BatchRef: scrapID } = matR.recordset[0];
+      const { Material: material, BatchRef: batchRef } = matR.recordset[0];
       const reasonCode = s.ReasonCode?.trim();
       const sapPayload = {
         Material:     material,
@@ -2939,7 +2940,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
                 WHERE ScrapID=@id`);
 
       const docList = responses.map(r => r.documentNumber).filter(Boolean).join(', ');
-      audit('SAP_OK', req.session?.user?.username, `'${batchRef}' SCRAP POSTED - Material Documents = '${docList}'`, req);
+      audit('SAP_OK', req.session?.user?.username, `'${scrapID}' SCRAP POSTED - Material Documents = '${docList}'`, req);
       await writeEvent(pool, s.ProcessCode, s.ProcessRecordID, 'NOTE',
         `Scrap approved & posted — ScrapID ${scrapID} — MatDocs: ${docList}`, 0, uid);
 
@@ -2952,7 +2953,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
         : (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title
           || (d?.errors ? JSON.stringify(d.errors) : null) || err.message;
 
-      audit('SAP_ERROR', req.session?.user?.username, `'${batchRef || scrapID}' SCRAP FAILED - Message = "${errMsg}"`, req);
+      audit('SAP_ERROR', req.session?.user?.username, `'${scrapID}' SCRAP FAILED - Message = "${errMsg}"`, req);
       // Only mark as approved+failed when the SAP server was actually reached.
       // A 404 means the endpoint doesn't exist — leave the entry as pending so
       // it can be retried once the SapServer is updated.

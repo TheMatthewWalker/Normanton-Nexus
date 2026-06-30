@@ -5,3 +5,5 @@ hidden
 .env
 manual
 certs
+test.http
+debug

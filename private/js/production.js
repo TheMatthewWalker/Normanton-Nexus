@@ -124,7 +124,7 @@ async function loadTable(tableName, pkCol, filter = null) {
 
     if (!filter) {
       // ── Unfiltered: plain TOP 500 via existing /query endpoint ──
-      const res  = await fetch('/query', {
+      const res  = await fetch('/sql/query', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ query: `SELECT * FROM dbo.${tableName}` }),
@@ -309,7 +309,7 @@ async function exportCSV() {
   }
 
   const form  = document.createElement('form');
-  form.method = 'POST'; form.action = '/query-csv';
+  form.method = 'POST'; form.action = '/sql/query-csv';
   form.append(hiddenInput('query', query));
   form.append(hiddenInput('key',   'you-will-never-guess-this-ka'));
   document.body.appendChild(form);

@@ -1,6 +1,6 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();

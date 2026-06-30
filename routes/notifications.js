@@ -1,6 +1,6 @@
 import { Router }                from 'express';
 import sql                       from 'mssql';
-import { sqlConfig }             from '../server.js';
+import { sqlConfig }             from '../config.js';
 import { requireRole }           from '../middleware/auth.js';
 import { notify }                from '../lib/notify.js';
 

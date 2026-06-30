@@ -17,7 +17,7 @@ import express      from 'express';
 import bcrypt       from 'bcrypt';
 import sql          from 'mssql';
 import rateLimit    from 'express-rate-limit';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
 import { notify }    from '../lib/notify.js';
 
 const router = express.Router();

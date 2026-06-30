@@ -15,7 +15,7 @@ import axios   from 'axios';
 import https   from 'https';
 import jwt     from 'jsonwebtoken';
 import fs      from 'fs';
-import { sapConfig, sapServerSecret } from '../server.js';
+import { sapConfig, sapServerSecret } from '../config.js';
 import { requirePermission }          from '../middleware/auth.js';
 
 const router = express.Router();

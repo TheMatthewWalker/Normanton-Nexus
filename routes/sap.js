@@ -4,7 +4,7 @@ import jwt     from 'jsonwebtoken';
 import express from 'express';
 import fs      from 'fs';
 import sql     from 'mssql';
-import { sapConfig, sapServerSecret, sqlConfig } from '../server.js';
+import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 
 // Use a pinned certificate when connecting over HTTPS; fall back to no custom agent for HTTP (dev).
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);

@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import rateLimit from 'express-rate-limit';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
 
 const router = express.Router();
 

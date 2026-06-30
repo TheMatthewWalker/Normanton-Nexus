@@ -4,7 +4,7 @@ import axios  from 'axios';
 import https  from 'https';
 import jwt    from 'jsonwebtoken';
 import fs     from 'fs';
-import { sqlConfig, sapConfig, sapServerSecret } from '../server.js';
+import { sqlConfig, sapConfig, sapServerSecret } from '../config.js';
 
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
 const sapAgent = fs.existsSync(certPath)

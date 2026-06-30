@@ -6,7 +6,8 @@ import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
-import { sqlConfig, stampDbChange } from '../server.js';
+import { sqlConfig, stampDbChange } from '../config.js';
+
 import { requirePermission } from '../middleware/auth.js';
 import e from 'express';
 
