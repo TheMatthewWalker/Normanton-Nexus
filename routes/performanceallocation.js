@@ -43,23 +43,6 @@ export function allocateStock(
     (a, b) => new Date(a.requestDate) - new Date(b.requestDate)
   );
 
-
-  
-console.log(
-  'STOCK STAGED KEYS',
-  stockRows.slice(0, 20).map(
-    s => `${s.material}|${s.storageBin}`
-  )
-);
-
-console.log(
-  'AGREEMENT STAGED KEYS',
-  agreementRows.slice(0, 20).map(
-    a => `${a.material}|${stagingBin(a.referenceDocument)}`
-  )
-);
-
-
   for (const row of sorted) {
     const key = agreementKey(row);
 
