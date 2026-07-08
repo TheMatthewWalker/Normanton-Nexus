@@ -3,19 +3,19 @@ import * as db from '../routes/performancesql.js';
 
 import { allocateStock } from './performanceallocation.js';
 import {
-  buildValueStreamLookup,
   enrichWithValueStream,
   computeTodayStockAndPickedTotals
 } from './performancevaluestream.js';
 
-async function syncStockAndAgreements(stockRows, agreementRows, valueStreamByMaterial) {
+async function syncStockAndAgreements(stockRows, agreementRows) {
   const stockRunId = await db.startRefresh('Stock');
   const agreementsRunId = await db.startRefresh('Agreements');
 
   try {
     const allocated = allocateStock(agreementRows, stockRows);
 
-    enrichWithValueStream(stockRows, valueStreamByMaterial);
+    enrichWithValueStream(stockRows);
+    enrichWithValueStream(allocated);
 
     await db.replaceStockSnapshot(stockRows);
     await db.completeRefresh(stockRunId, stockRows.length);
@@ -41,11 +41,11 @@ async function syncStockAndAgreements(stockRows, agreementRows, valueStreamByMat
   }
 }
 
-async function syncInvoicing(rows, valueStreamByMaterial) {
+async function syncInvoicing(rows) {
   const runId = await db.startRefresh('Invoicing');
 
   try {
-    enrichWithValueStream(rows, valueStreamByMaterial);
+    enrichWithValueStream(rows);
     await db.replaceInvoiceSnapshot(rows);
     await db.recomputeDailyInvoiced();
     await db.completeRefresh(runId, rows.length);
@@ -57,11 +57,11 @@ async function syncInvoicing(rows, valueStreamByMaterial) {
   }
 }
 
-async function syncOtif(rows, valueStreamByMaterial) {
+async function syncOtif(rows) {
   const runId = await db.startRefresh('Otif');
 
   try {
-    enrichWithValueStream(rows, valueStreamByMaterial);
+    enrichWithValueStream(rows);
     await db.replaceOtifSnapshot(rows);
     await db.recomputeDailyOtif();
     await db.completeRefresh(runId, rows.length);
@@ -93,17 +93,11 @@ fromDate365.setDate(now.getDate() - 365);
 
   const results = [];
 
-  const agreementRows =
-    agreementsResult.status === 'fulfilled' ? agreementsResult.value : [];
-
-  const valueStreamByMaterial = buildValueStreamLookup(agreementRows);
-
   if (stockResult.status === 'fulfilled' && agreementsResult.status === 'fulfilled') {
     results.push(
       ...(await syncStockAndAgreements(
         stockResult.value,
-        agreementsResult.value,
-        valueStreamByMaterial
+        agreementsResult.value
       ))
     );
   } else {
@@ -125,7 +119,7 @@ fromDate365.setDate(now.getDate() - 365);
   }
 
   if (invoicingResult.status === 'fulfilled') {
-    results.push(await syncInvoicing(invoicingResult.value, valueStreamByMaterial));
+    results.push(await syncInvoicing(invoicingResult.value));
   } else {
     results.push({
       name: 'Invoicing',
@@ -135,7 +129,7 @@ fromDate365.setDate(now.getDate() - 365);
   }
 
   if (otifResult.status === 'fulfilled') {
-    results.push(await syncOtif(otifResult.value, valueStreamByMaterial));
+    results.push(await syncOtif(otifResult.value));
   } else {
     results.push({
       name: 'Otif',

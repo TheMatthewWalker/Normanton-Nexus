@@ -6,7 +6,7 @@ export function packagingCustomer(packagingMaterial) {
 }
 
 export function stagingBin(referenceDocument) {
-  return '00' + String(referenceDocument ?? '').padStart(8, '0');
+  return String(referenceDocument ?? '').padStart(10, '0');
 }
 
 function defaultStockKey(stockRow) {
@@ -26,7 +26,7 @@ export function allocateStock(
   } = {}
 ) {
   const availablePool = new Map();
-
+  
   for (const s of stockRows) {
     const key = stockKey(s);
     availablePool.set(key, (availablePool.get(key) || 0) + (s.availableQty || 0));
@@ -42,6 +42,23 @@ export function allocateStock(
   const sorted = [...agreementRows].sort(
     (a, b) => new Date(a.requestDate) - new Date(b.requestDate)
   );
+
+
+  
+console.log(
+  'STOCK STAGED KEYS',
+  stockRows.slice(0, 20).map(
+    s => `${s.material}|${s.storageBin}`
+  )
+);
+
+console.log(
+  'AGREEMENT STAGED KEYS',
+  agreementRows.slice(0, 20).map(
+    a => `${a.material}|${stagingBin(a.referenceDocument)}`
+  )
+);
+
 
   for (const row of sorted) {
     const key = agreementKey(row);

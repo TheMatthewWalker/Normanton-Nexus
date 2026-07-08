@@ -324,10 +324,11 @@ router.get('/sales-sparkline', async (req, res) => {
                 && d.getDate() <= today;
         });
 
-        // Sales GL accounts post as credits (negative); compare absolute values
-        const sumAbs = arr => arr.reduce((s, r) => s + Math.abs(Number(r.companyCodeValue) || 0), 0);
-        const thisTotal = sumAbs(thisRows);
-        const prevTotal = sumAbs(prevRows);
+        // Match the finance Profit Center card: net companyCodeValue first, then
+        // display sales as a positive magnitude for the landing widget.
+        const sumNet = arr => arr.reduce((s, r) => s + (Number(r.companyCodeValue) || 0), 0);
+        const thisTotal = Math.abs(sumNet(thisRows));
+        const prevTotal = Math.abs(sumNet(prevRows));
 
         const pctChange = prevTotal === 0 ? null
             : Math.round(((thisTotal - prevTotal) / prevTotal) * 1000) / 10;
@@ -338,9 +339,9 @@ router.get('/sales-sparkline', async (req, res) => {
             const d = parseDate(r.postingDate);
             if (!d) continue;
             dailyMap[d.getDate()] = (dailyMap[d.getDate()] || 0)
-                + Math.abs(Number(r.companyCodeValue) || 0);
+                + (Number(r.companyCodeValue) || 0);
         }
-        const dailyValues = Array.from({ length: today }, (_, i) => dailyMap[i + 1] || 0);
+        const dailyValues = Array.from({ length: today }, (_, i) => Math.abs(dailyMap[i + 1] || 0));
 
         _salesSparkCache   = { success: true, data: { thisTotal, prevTotal, pctChange, dailyValues } };
         _salesSparkCachedAt = Date.now();

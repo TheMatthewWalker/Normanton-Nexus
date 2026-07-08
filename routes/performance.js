@@ -26,6 +26,51 @@ router.get('/refresh-log', async (req, res) => {
   `);
   res.json({ success: true, data: recordset });
 });
+
+router.get('/refresh-status', async (req, res) => {
+  try {
+    const datasets = ['Stock', 'Agreements', 'Invoicing', 'Otif'];
+    const pool = await getPool();
+    const { recordset } = await pool.request().query(`
+      SELECT TOP 80 DatasetName, Status, CompletedAtUtc, ErrorMessage, RunId
+      FROM dbo.RefreshLog
+      WHERE DatasetName IN ('Stock', 'Agreements', 'Invoicing', 'Otif')
+      ORDER BY RunId DESC
+    `);
+
+    const latest = {};
+
+    for (const row of recordset) {
+      if (!latest[row.DatasetName]) latest[row.DatasetName] = row;
+    }
+
+    const data = datasets.map(name => ({
+      name,
+      status: latest[name]?.Status || 'Missing',
+      completedAtUtc: latest[name]?.CompletedAtUtc || null,
+      errorMessage: latest[name]?.ErrorMessage || null
+    }));
+
+    const failures = data.filter(row => row.status !== 'Success');
+    const completedTimes = data
+      .filter(row => row.status === 'Success' && row.completedAtUtc)
+      .map(row => new Date(row.completedAtUtc).getTime())
+      .filter(time => !Number.isNaN(time));
+
+    res.json({
+      success: true,
+      data: {
+        lastRefreshUtc: failures.length || completedTimes.length !== datasets.length
+          ? null
+          : new Date(Math.max(...completedTimes)).toISOString(),
+        failures,
+        datasets: data
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
  
 // ── Daily performance — the trend data ────────────────────────────────────
 // This is the table the eventual graphs/metrics views should query. Never query the

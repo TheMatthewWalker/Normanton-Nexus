@@ -64,14 +64,74 @@ async function refreshData() {
 }
 
 
+function formatRefreshAge(value) {
+  if (!value) return 'Refresh status unavailable';
+
+  const refreshedAt = new Date(value);
+  if (Number.isNaN(refreshedAt.getTime())) return 'Refresh status unavailable';
+
+  const diffMinutes = Math.max(0, Math.floor((Date.now() - refreshedAt.getTime()) / 60000));
+
+  if (diffMinutes < 1) return 'Last refresh just now';
+  if (diffMinutes === 1) return 'Last refresh 1 minute ago';
+  if (diffMinutes < 60) return `Last refresh ${diffMinutes} minutes ago`;
+
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours === 1) return 'Last refresh 1 hour ago';
+  if (diffHours < 24) return `Last refresh ${diffHours} hours ago`;
+
+  const diffDays = Math.floor(diffHours / 24);
+  return diffDays === 1 ? 'Last refresh 1 day ago' : `Last refresh ${diffDays} days ago`;
+}
+
+function renderRefreshSummary(summary) {
+  const el = document.getElementById('refreshSummary');
+  if (!el) return;
+
+  const failures = summary?.failures || [];
+
+  el.classList.toggle('has-failure', failures.length > 0);
+
+  if (failures.length) {
+    const names = failures.map(row => row.name).join(', ');
+    el.innerText = `Refresh failed: ${names}`;
+    el.title = failures
+      .map(row => `${row.name}: ${row.status}${row.errorMessage ? ' - ' + row.errorMessage : ''}`)
+      .join('\n');
+    return;
+  }
+
+  el.innerText = formatRefreshAge(summary?.lastRefreshUtc);
+  el.title = summary?.datasets
+    ? summary.datasets.map(row => `${row.name}: ${row.status}`).join('\n')
+    : '';
+}
+
+async function loadRefreshStatus() {
+  try {
+    const res = await fetch(BASE + '/refresh-status');
+    const json = await res.json();
+
+    if (!json.success) throw new Error(json.error?.message || 'Refresh status failed');
+
+    renderRefreshSummary(json.data);
+  } catch (err) {
+    console.error(err);
+    renderRefreshSummary(null);
+  }
+}
+
 async function loadData() {
-  const valueRes = await fetch(BASE + '/value-metrics');
-  const otifRes = await fetch(BASE + '/otif-metrics');
+  const [valueRes, otifRes] = await Promise.all([
+    fetch(BASE + '/value-metrics'),
+    fetch(BASE + '/otif-metrics')
+  ]);
 
   rawValueData = (await valueRes.json()).data;
   rawOtifData = (await otifRes.json()).data;
 
   renderDashboard();
+  await loadRefreshStatus();
 }
 
 function getFilters() {
@@ -461,19 +521,45 @@ function formatCurrency(n) {
   });
 }
 
+function formatPercent(n) {
+  return (n || 0).toLocaleString('en-GB', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  }) + '%';
+}
 
-function renderKpis(data) {
+
+function renderKpis(valueData, otifData) {
   let ptfe = 0;
   let pv = 0;
+  let ptfeOnTime = 0;
+  let ptfeTotal = 0;
+  let pvOnTime = 0;
+  let pvTotal = 0;
 
-  for (const row of data) {
+  for (const row of valueData) {
     ptfe += row.PTFE?.invoiced || 0;
     pv   += row.PV?.invoiced || 0;
   }
 
+  for (const row of otifData) {
+    ptfeOnTime += row.PTFE?.onTime || 0;
+    ptfeTotal  += row.PTFE?.total || 0;
+    pvOnTime   += row.PV?.onTime || 0;
+    pvTotal    += row.PV?.total || 0;
+  }
+
+  const ptfeOtif = ptfeTotal ? (ptfeOnTime / ptfeTotal) * 100 : 0;
+  const pvOtif = pvTotal ? (pvOnTime / pvTotal) * 100 : 0;
+  const totalOtifTotal = ptfeTotal + pvTotal;
+  const totalOtif = totalOtifTotal ? ((ptfeOnTime + pvOnTime) / totalOtifTotal) * 100 : 0;
+
   document.getElementById('kpi-ptfe').innerText = formatCurrency(ptfe);
   document.getElementById('kpi-pv').innerText   = formatCurrency(pv);
   document.getElementById('kpi-total').innerText = formatCurrency(ptfe + pv);
+  document.getElementById('kpi-ptfe-otif').innerText = formatPercent(ptfeOtif);
+  document.getElementById('kpi-pv-otif').innerText = formatPercent(pvOtif);
+  document.getElementById('kpi-total-otif').innerText = formatPercent(totalOtif);
 }
 
 
@@ -492,7 +578,7 @@ function renderDashboard() {
   const pvOtifCum   = buildCumulativeOtifData(pvOtif);
 
   renderTable(valueData);
-  renderKpis(valueData);
+  renderKpis(valueData, otifData);
 
   renderValueChart('ptfeValueChart', ptfe, '#2563EB');
   //renderValueCumulativeChart('ptfeValueCumulativeChart', buildCumulativeValueData(ptfe), '#2563EB');

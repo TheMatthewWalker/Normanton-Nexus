@@ -2,110 +2,25 @@ import sql from 'mssql';
 import { sqlConfig } from '../config.js';
 
 
-const centreToArea = {
-  '2000': 'PTFE',
-  '2001': 'PTFE',
-  '2002': 'PTFE',
-  '2003': 'PTFE',
-  '2004': 'PTFE',
-  '2005': 'PTFE',
-  '2006': 'PTFE',
-  '2007': 'PTFE',
-  '2008': 'PV',
-  '2009': 'PTFE',
-  '2010': 'PV',
-  '2011': 'PV',
-  '2012': 'PTFE',
-  '2013': 'PV',
-  '2014': 'PV',
-  '2015': 'PV',
-  '2016': 'PTFE',
-  '2017': 'PV',
-  '2018': 'PV',
-  '2019': 'PV',
-  '2021': 'PTFE',
-  '2022': 'PTFE',
-  '2023': 'PTFE',
-  '2024': 'PV',
-  '2026': 'PV',
-  '2028': 'PV',
-};
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function resolveRequestDate(value, row) {
-  // ✅ try real SAP date
-  let d = toDate(value);
-  if (d) return d;
 
-  // ✅ derive from Week (YYYYWW)
-  if (row.week && /^\d{6}$/.test(row.week)) {
-    const year = Number(row.week.substring(0, 4));
-    const week = Number(row.week.substring(4, 6));
-
-    // ISO week → Monday
-    const simple = new Date(year, 0, 1 + (week - 1) * 7);
-    const dow = simple.getDay();
-    const result = new Date(simple);
-
-    if (dow <= 4)
-      result.setDate(simple.getDate() - simple.getDay() + 1);
-    else
-      result.setDate(simple.getDate() + 8 - simple.getDay());
-
-    return result;
-  }
-
-  // ✅ fallback to Period (YYYYMM)
-  if (row.period && /^\d{6}$/.test(row.period)) {
-    const year = row.period.substring(0, 4);
-    const month = row.period.substring(4, 6);
-    return new Date(`${year}-${month}-01`);
-  }
-
-  // ❌ This should NEVER happen now
-  console.warn('🚨 NO DATE SOURCE', row);
-
-  return new Date('1900-01-01'); // last resort safety
-}
-
-// ✅ helper: define value stream
-// PTFE or PV
-function mapValueStream(valueStream) {
-  if (!valueStream || valueStream === 'UNKNOWN') return null;
-
-  const centre = String(valueStream).substring(0, 4);
-
-  return centreToArea[centre] || null; // null = exclude
-}
-
-
-// ✅ helper: ensure JS date → SQL DateTime
-// Handles: SAP format "31.05.26 12:00:00 AM", ISO strings, Date objects, SAP null sentinels.
+// Handles: ISO format "2026-06-07T12:00:00"
 function toDate(value) {
-  if (!value) return null;
-  if (
-    value === '00000000' ||
-    value === '0001-01-01T00:00:00' ||
-    value === '0001-01-01'
-  ) return null;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const [datePart] = value.split('T');
+    const [y, m, d] = datePart.split('-').map(Number);
 
-  // SAP date format: "31.05.26 12:00:00 AM"
-  if (typeof value === 'string' && /^\d{2}\.\d{2}\.\d{2}/.test(value)) {
-    const [datePart, timePart] = value.split(' ');
-    const [day, month, year] = datePart.split('.');
-    const fullYear = Number(year) < 50 ? '20' + year : '19' + year;
-    value = `${fullYear}-${month}-${day} ${timePart}`;
+    return new Date(Date.UTC(y, m - 1, d));
   }
-
-  const d = new Date(value);
-  if (isNaN(d.getTime())) return null;
-  if (d < new Date('1753-01-01')) return null;
-  return d;
+  return new Date(value);
 }
 
+
+// UTC midnight, not local: tedious defaults to useUTC=true, so a local-midnight
+// Date during BST would be serialised as 23:00 the previous day in MetricDate.
 function startOfDay(d) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
 }
 
 // ── Pool ──────────────────────────────────────────────────────────────────────
@@ -146,15 +61,17 @@ async function replaceTable(tableName, columns, rows) {
 
 
   // ✅ filter out unmapped ValueStreams FIRST
-  rows = rows.filter(row => {
-    if (!row.valueStream) return false;
+  // valueStream is stamped upstream (performancevaluestream.js) from each
+  // record's own profitCentre — rows without a mapping are excluded here.
+  const beforeCount = rows.length;
+  rows = rows.filter(row => !!row.valueStream);
 
-    const mapped = mapValueStream(row.valueStream);
-    if (!mapped) return false;
-
-    row.valueStream = mapped; // ✅ overwrite here
-    return true;
-  });
+  if (rows.length < beforeCount) {
+    console.warn(
+      `[${tableName}] dropped ${beforeCount - rows.length} of ${beforeCount} row(s) ` +
+      `with no ValueStream mapping (unmapped or missing profitCentre)`
+    );
+  }
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
@@ -249,7 +166,7 @@ export function replaceAgreementSnapshot(rows) {
     ['CustomerMaterial',     'customerMaterial',   sql.VarChar(35), null, 35],
     ['CustomerReference',    'customerReference',  sql.VarChar(30), null, 30],
     ['UnloadingPoint',       'unloadingPoint',     sql.VarChar(25), null, 25],
-    ['RequestDate',          'requestDate',        sql.DateTime,      resolveRequestDate],
+    ['RequestDate',          'requestDate',        sql.DateTime,      toDate],
     ['Week',                 'week',               sql.VarChar(6), null, 6],
     ['Period',               'period',             sql.VarChar(7), null, 7],
     ['OrderQty',             'orderQty',           sql.Decimal(15, 3)],
@@ -264,7 +181,7 @@ export function replaceInvoiceSnapshot(rows) {
   return replaceTable('dbo.InvoiceSnapshot', [
     ['Plant',          'plant',          sql.VarChar(4), null, 4],
     ['SalesOrg',       'salesOrg',       sql.VarChar(4), null, 4],
-    ['InvoiceDate',    'invoiceDate',    sql.DateTime,     resolveRequestDate],
+    ['InvoiceDate',    'invoiceDate',    sql.DateTime,     toDate],
     ['InvoiceType',    'invoiceType',    sql.VarChar(4), null, 4],
     ['InvoiceNumber',  'invoiceNumber',  sql.VarChar(10), null, 10],
     ['DeliveryNote',   'deliveryNote',   sql.VarChar(10), null, 10],
@@ -294,10 +211,10 @@ export function replaceOtifSnapshot(rows) {
     ['Material',     'material',     sql.VarChar(18), null, 18],
     ['MaterialText', 'materialText', sql.VarChar(40), null, 40],
     ['Delivery',     'delivery',     sql.VarChar(10), null, 10],
-    ['DeliveryDate', 'deliveryDate', sql.DateTime,     resolveRequestDate],
+    ['DeliveryDate', 'deliveryDate', sql.DateTime,     toDate],
     ['DeliveryQty',  'deliveryQty',  sql.Decimal(15, 3)],
     ['Uom',          'uom',          sql.VarChar(3), null, 3],
-    ['TargetDate',   'targetDate',   sql.DateTime,     resolveRequestDate],
+    ['TargetDate',   'targetDate',   sql.DateTime,     toDate],
     ['TargetQty',    'targetQty',    sql.Decimal(15, 3)],
     ['QtyClass',     'qtyClass',     sql.VarChar(4), null, 4],
     ['DateClass',    'dateClass',    sql.VarChar(4), null, 4],

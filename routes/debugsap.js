@@ -29,7 +29,8 @@ async function writeCsv(filename, rows) {
 
   const writer = createObjectCsvWriter({
     path: path.join(DEBUG_DIR, filename),
-    header: headers
+    header: headers,
+    fieldDelimiter: ';'
   });
 
   await writer.writeRecords(rows);
@@ -69,8 +70,8 @@ router.post('/debug-sap-dump', async (req, res) => {
 
   await run('stock', sap.getStock);
   await run('agreements', sap.getAgreements);
-  await run('invoices', sap.getInvoicing);
-  await run('otif', sap.getOtif);
+  //await run('invoices', sap.getInvoicing);
+  //await run('otif', sap.getOtif);
 
   res.json({
     success: true,
