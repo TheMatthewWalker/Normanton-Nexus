@@ -73,6 +73,60 @@ async function syncOtif(rows) {
   }
 }
 
+// ── MM Turns / Valuation Class — separate daily 05:45 cron, not part of the
+// 30-min runFullRefresh above. This dataset is a full material-master + 13-month
+// history/forecast pull, heavier than the other four and only needs to reflect
+// yesterday's close, so it runs once a day instead.
+
+async function syncTurnsValClass(rows) {
+  const runId = await db.startRefresh('TurnsValClass');
+
+  try {
+    await db.replaceTurnsValClassSnapshot(rows);
+    await db.completeRefresh(runId, rows.length);
+    return { name: 'TurnsValClass', status: 'success', rowCount: rows.length };
+  } catch (err) {
+    await db.failRefresh(runId, err.message);
+    return { name: 'TurnsValClass', status: 'failed', error: err.message };
+  }
+}
+
+async function syncValuationClasses(rows) {
+  const runId = await db.startRefresh('ValuationClasses');
+
+  try {
+    await db.replaceValuationClassCatalog(rows);
+    await db.completeRefresh(runId, rows.length);
+    return { name: 'ValuationClasses', status: 'success', rowCount: rows.length };
+  } catch (err) {
+    await db.failRefresh(runId, err.message);
+    return { name: 'ValuationClasses', status: 'failed', error: err.message };
+  }
+}
+
+export async function runTurnsValClassRefresh(req) {
+  const [turnsResult, valClassResult] = await Promise.allSettled([
+    sap.getTurnsValClass(req),
+    sap.getValuationClassCatalog(req)
+  ]);
+
+  const results = [];
+
+  if (turnsResult.status === 'fulfilled') {
+    results.push(await syncTurnsValClass(turnsResult.value));
+  } else {
+    results.push({ name: 'TurnsValClass', status: 'failed', error: turnsResult.reason.message });
+  }
+
+  if (valClassResult.status === 'fulfilled') {
+    results.push(await syncValuationClasses(valClassResult.value));
+  } else {
+    results.push({ name: 'ValuationClasses', status: 'failed', error: valClassResult.reason.message });
+  }
+
+  return results;
+}
+
 export async function runFullRefresh(req) {
   
 const now = new Date();

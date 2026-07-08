@@ -231,35 +231,12 @@ function renderValueChart(id, data, colour) {
       {
         name: 'Invoiced',
         type: 'line',
-        stack: 'total',
         areaStyle: { opacity: 0.25 },
         data: data.map(d => {
           const vs = Object.keys(d).find(k => k !== 'date');
           return d[vs]?.invoiced || 0;
         }),
         lineStyle: { width: 3, color: colour }
-      },
-      {
-        name: 'Picked',
-        type: 'line',
-        stack: 'total',
-        areaStyle: { opacity: 0.2 },
-        data: data.map(d => {
-          const vs = Object.keys(d).find(k => k !== 'date');
-          return d[vs]?.picked || 0;
-        }),
-        lineStyle: { width: 2, color: '#84cc16' }
-      },
-      {
-        name: 'Stock',
-        type: 'line',
-        stack: 'total',
-        areaStyle: { opacity: 0.15 },
-        data: data.map(d => {
-          const vs = Object.keys(d).find(k => k !== 'date');
-          return d[vs]?.stock || 0;
-        }),
-        lineStyle: { width: 2, color: '#64748B' }
       }
     ]
   });
@@ -295,7 +272,6 @@ function renderValueCumulativeChart(id, data, colour) {
     ]
   });
 }
-``
 
 // ✅ EXTENDED VALUE
 function renderExtendedChart(id, data, colour) {

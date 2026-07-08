@@ -60,17 +60,21 @@ async function replaceTable(tableName, columns, rows) {
   const colList = columns.map(([colName]) => `[${colName}]`).join(', ');
 
 
-  // ✅ filter out unmapped ValueStreams FIRST
-  // valueStream is stamped upstream (performancevaluestream.js) from each
-  // record's own profitCentre — rows without a mapping are excluded here.
-  const beforeCount = rows.length;
-  rows = rows.filter(row => !!row.valueStream);
+  // ✅ filter out unmapped ValueStreams FIRST — but only for tables that actually
+  // carry a ValueStream column. valueStream is stamped upstream
+  // (performancevaluestream.js) from each record's own profitCentre; tables like
+  // TurnsValClassSnapshot / ValuationClassCatalog have no such column and must
+  // not have every row silently dropped for lacking one.
+  if (columns.some(([colName]) => colName === 'ValueStream')) {
+    const beforeCount = rows.length;
+    rows = rows.filter(row => !!row.valueStream);
 
-  if (rows.length < beforeCount) {
-    console.warn(
-      `[${tableName}] dropped ${beforeCount - rows.length} of ${beforeCount} row(s) ` +
-      `with no ValueStream mapping (unmapped or missing profitCentre)`
-    );
+    if (rows.length < beforeCount) {
+      console.warn(
+        `[${tableName}] dropped ${beforeCount - rows.length} of ${beforeCount} row(s) ` +
+        `with no ValueStream mapping (unmapped or missing profitCentre)`
+      );
+    }
   }
 
   for (let i = 0; i < rows.length; i += batchSize) {
@@ -221,6 +225,127 @@ export function replaceOtifSnapshot(rows) {
     ['OnTime',       'onTime',       sql.Bit],
     ['ValueStream',  'valueStream',  sql.VarChar(8), null, 8]
   ], rows);
+}
+
+// ── MM Turns / Valuation Class ──────────────────────────────────────────────
+// history[n] / forecast[n] are flattened into 13 wide columns each (M12..M00,
+// M12 = oldest/furthest-out, M00 = current partial month) so this can reuse
+// the same TRUNCATE + UNION ALL batch-insert helper as every other snapshot.
+function historyForecastCols(prefix, key) {
+  const cols = [];
+  for (let i = 0; i <= 12; i++) {
+    const suffix = String(12 - i).padStart(2, '0'); // i=0 -> M12 (oldest), i=12 -> M00 (current)
+    cols.push([
+      `${prefix}M${suffix}`,
+      key,
+      sql.Decimal(15, 3),
+      (_v, row) => Array.isArray(row[key]) ? (row[key][i] ?? null) : null
+    ]);
+  }
+  return cols;
+}
+
+export function replaceTurnsValClassSnapshot(rows) {
+  return replaceTable('dbo.TurnsValClassSnapshot', [
+    ['Material',               'material',               sql.VarChar(18), null, 18],
+    ['Plant',                  'plant',                  sql.VarChar(4),  null, 4],
+    ['MaterialText',           'materialText',           sql.VarChar(40), null, 40],
+    ['CreatedDate',            'createdDate',            sql.DateTime,     toDate],
+    ['MaterialType',           'materialType',           sql.VarChar(4),  null, 4],
+    ['Uom',                    'uom',                    sql.VarChar(3),  null, 3],
+    ['ProfitCentre',           'profitCentre',           sql.VarChar(10), null, 10],
+    ['DeletionFlag',           'deletionFlag',           sql.Bit],
+    ['AbcIndicator',           'abcIndicator',           sql.VarChar(1),  null, 1],
+    ['PurchasingGroup',        'purchasingGroup',        sql.VarChar(3),  null, 3],
+    ['MrpController',          'mrpController',          sql.VarChar(3),  null, 3],
+    ['ValuationClass',         'valuationClass',         sql.VarChar(4),  null, 4],
+    ['LotSizeProcedure',       'lotSizeProcedure',       sql.VarChar(2),  null, 2],
+    ['PlanningTimeFence',      'planningTimeFence',      sql.Decimal(9, 0)],
+    ['GrProcessingTime',       'grProcessingTime',       sql.Decimal(9, 2)],
+    ['TotalReplenishmentTime', 'totalReplenishmentTime', sql.Decimal(9, 2)],
+    ['SafetyStock',            'safetyStock',            sql.Decimal(15, 3)],
+    ['MinLotSize',             'minLotSize',             sql.Decimal(15, 3)],
+    ['MaxLotSize',             'maxLotSize',             sql.Decimal(15, 3)],
+    ['FixedLotSize',           'fixedLotSize',           sql.Decimal(15, 3)],
+    ['RoundingValue',          'roundingValue',          sql.Decimal(15, 3)],
+    ['SpecialProcurementType', 'specialProcurementType', sql.VarChar(2),  null, 2],
+    ['PlannedDeliveryTime',    'plannedDeliveryTime',    sql.Decimal(9, 2)],
+
+    ['StockQty',               'stockQty',               sql.Decimal(15, 3)],
+    ['StockValue',             'stockValue',             sql.Decimal(18, 2)],
+    ['UnitPrice',              'unitPrice',              sql.Decimal(15, 4)],
+    ['BookValue',              'bookValue',              sql.Decimal(18, 2)],
+
+    ...historyForecastCols('History', 'consumptionHistory'),
+    ...historyForecastCols('Forecast', 'demandForecast'),
+
+    ['LastReceiptDate',        'lastReceiptDate',        sql.DateTime, toDate],
+    ['LastGoodsIssueDate',     'lastGoodsIssueDate',     sql.DateTime, toDate],
+    ['LastConsumptionDate',    'lastConsumptionDate',    sql.DateTime, toDate],
+    ['LastGoodsMovementDate',  'lastGoodsMovementDate',  sql.DateTime, toDate],
+
+    ['StockTurns',             'stockTurns',             sql.Decimal(15, 4)],
+    ['DaysInStock',            'daysInStock',            sql.Decimal(15, 2)],
+    ['DailyRequirementValue',  'dailyRequirementValue',  sql.Decimal(18, 4)],
+    ['TurnoverCategory',       'turnoverCategory',       sql.VarChar(30), null, 30],
+    ['Warning',                'warning',                sql.VarChar(200), null, 200]
+  ], rows);
+}
+
+export function replaceValuationClassCatalog(rows) {
+  return replaceTable('dbo.ValuationClassCatalog', [
+    ['ValuationClass', 'valuationClass', sql.VarChar(4),  null, 4],
+    ['MaterialType',   'materialType',   sql.VarChar(4),  null, 4],
+    ['AccountRef',     'accountRef',     sql.VarChar(4),  null, 4],
+    ['Description',    'description',    sql.VarChar(40), null, 40]
+  ], rows);
+}
+
+// ── Valuation class change audit ────────────────────────────────────────────
+// Append-only — never truncated. One header row per POST, one detail row per
+// material in that batch. Called from the /change-valuation-class route, not
+// from the daily sync (this only ever has data when a user actually runs it).
+export async function logValuationClassChangeBatch({ orderNumber, plant, userId, userName, success, totalValueChange, errorMessage, results }) {
+  const pool = await getPool();
+
+  const batchResult = await pool.request()
+    .input('order',   sql.VarChar(12),  orderNumber)
+    .input('plant',   sql.VarChar(4),   plant || null)
+    .input('userId',  sql.Int,          userId || null)
+    .input('userName',sql.VarChar(80),  userName || null)
+    .input('success',   sql.Bit,          !!success)
+    .input('totalChange',sql.Decimal(18, 2), totalValueChange || 0)
+    .input('errorMessage', sql.VarChar(4000), errorMessage ? String(errorMessage).slice(0, 4000) : null)
+    .query(`INSERT INTO dbo.ValuationClassChangeBatch
+              (OrderNumber, Plant, RequestedByUserID, RequestedByName, Success, TotalValueChange, ErrorMessage)
+            OUTPUT INSERTED.BatchID
+            VALUES (@order, @plant, @userId, @userName, @success, @totalChange, @errorMessage)`);
+
+  const batchId = batchResult.recordset[0].BatchID;
+
+  for (const r of (results || [])) {
+    await pool.request()
+      .input('batchId',  sql.Int,           batchId)
+      .input('material', sql.VarChar(18),   r.material)
+      .input('materialText', sql.VarChar(40), r.materialText || null)
+      .input('plant',    sql.VarChar(4),    r.plant || null)
+      .input('stockQty', sql.Decimal(15, 3), r.stockQty || 0)
+      .input('oldValClass', sql.VarChar(4), r.oldValuationClass || null)
+      .input('newValClass', sql.VarChar(4), r.newValuationClass || null)
+      .input('oldBookValue', sql.Decimal(18, 2), r.oldBookValue || 0)
+      .input('newBookValue', sql.Decimal(18, 2), r.newBookValue || 0)
+      .input('valueChange',  sql.Decimal(18, 2), r.valueChange  || 0)
+      .input('success',      sql.Bit,            !!r.success)
+      .input('message',      sql.VarChar(500),   (r.message || '').slice(0, 500))
+      .query(`INSERT INTO dbo.ValuationClassChangeDetail
+                (BatchID, Material, MaterialText, Plant, StockQty, OldValuationClass, NewValuationClass,
+                 OldBookValue, NewBookValue, ValueChange, Success, Message)
+              VALUES
+                (@batchId, @material, @materialText, @plant, @stockQty, @oldValClass, @newValClass,
+                 @oldBookValue, @newBookValue, @valueChange, @success, @message)`);
+  }
+
+  return batchId;
 }
 
 // ── Refresh log ───────────────────────────────────────────────────────────────

@@ -97,3 +97,42 @@ export const getOtif = (req, from, to) =>
       console.error('SAP ERROR (Otif):', err.response?.data);
       throw err;
     });
+
+// ── MM Turns / Valuation Class ────────────────────────────────────────────────
+// query may include: plant, profitCentres[], materials[], mrpControllers[],
+// materialTypes[], valuationClasses[], turnMonths, historyMode — all optional,
+// passed straight through as query params (axios serialises arrays as repeated
+// keys, which ASP.NET model-binds into the [FromQuery] TurnsValClassQuery array props).
+export const getTurnsValClass = (req, query = {}) =>
+  client.get('/api/performance/turns-valclass', {
+    ...auth(req), params: query })
+      .then(unwrap)
+      .catch(err => {
+      console.error('SAP ERROR (TurnsValClass):', err.response?.data);
+      throw err;
+    });
+
+export const getValuationClassCatalog = (req) =>
+  client.get('/api/performance/turns-valclass/valuation-classes', auth(req))
+    .then(unwrap)
+    .catch(err => {
+      console.error('SAP ERROR (ValuationClassCatalog):', err.response?.data);
+      throw err;
+    });
+
+// WRITES to SAP — moves stock out/in and runs MM02. A 422 from SapServer means
+// the pre-check rejected the batch (still a structured ChangeValuationClassResponse,
+// not just an error) — surface that body instead of collapsing to a generic axios error.
+export const postChangeValuationClass = (req, body) =>
+  client.post('/api/performance/turns-valclass/change-valuation-class', body, auth(req))
+    .then(unwrap)
+    .catch(err => {
+      console.error('SAP ERROR (ChangeValuationClass):', err.response?.data);
+      const apiBody = err.response?.data;
+      if (apiBody && apiBody.data) {
+        const e = new Error(apiBody.error?.message || 'Valuation class change failed validation.');
+        e.data = apiBody.data;
+        throw e;
+      }
+      throw err;
+    });

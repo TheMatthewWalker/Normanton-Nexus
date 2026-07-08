@@ -51,7 +51,7 @@ import financeRoutes           from './routes/finance.js';
 import notificationsRoutes     from './routes/notifications.js';
 import performanceRoutes       from './routes/performance.js';
 import sqlQueriesRoutes        from './routes/sqlqueries.js';
-import { runFullRefresh }      from './routes/performancesync.js';
+import { runFullRefresh, runTurnsValClassRefresh } from './routes/performancesync.js';
 //import testOtifInsertRoutes     from './routes/test-otif-insert.js';
 import debugRoutes             from './routes/debugsap.js';
 
@@ -106,6 +106,16 @@ cron.schedule('0,30 * * * *', () => {
   runFullRefresh()
     .then(results => console.log('[cron] refresh complete', results))
     .catch(err => console.error('[cron] refresh failed', err));
+});
+
+// MM Turns / Valuation Class — once a day at 05:45. Heavier pull (full material
+// master + 13-month history/forecast) that only needs to reflect yesterday's
+// close, so it's kept off the 30-min cycle above.
+cron.schedule('45 5 * * *', () => {
+  console.log('[cron] starting scheduled turns-valclass refresh');
+  runTurnsValClassRefresh()
+    .then(results => console.log('[cron] turns-valclass refresh complete', results))
+    .catch(err => console.error('[cron] turns-valclass refresh failed', err));
 });
 
 // ── Auth routes (public — no requireLogin) ───────────────────────────────────

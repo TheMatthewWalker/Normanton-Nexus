@@ -18,6 +18,9 @@ let sessionRole     = '';
 let sessionUsername = '';
 let freightSpendMonths = 12;
 let freightCharts = [];
+let turnsCharts = [];
+let valClassCatalogCache = null;
+let cvcSelections = new Map();
 
 
 const BUCKETS = [
@@ -96,6 +99,11 @@ function setupTiles() {
       if (fn === 'updateDestinations')  runUpdateDestinations();
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
+      if (fn === 'turnsValClassTable')  runTurnsValClassTable();
+      if (fn === 'turnsValClassSummary')runTurnsValClassSummary();
+      if (fn === 'stockValueByPrice')   runStockValueByPrice();
+      if (fn === 'changeValuationClass')runChangeValuationClass();
+      if (fn === 'stockHistoryForecast')runStockHistoryForecast();
     });
   });
 
@@ -134,6 +142,7 @@ function showResultPanel(title, hint) {
 
 function backToTiles() {
   destroyFreightCharts();
+  destroyTurnsCharts();
   document.getElementById('result-section').classList.add('hidden');
   document.getElementById('tile-section').classList.remove('hidden');
   document.getElementById('result-body').innerHTML = '';
@@ -145,6 +154,7 @@ function backToTiles() {
   latestShipment = null;
   currentShipmentView = null;
   customsBatchNotice = null;
+  cvcSelections = new Map();
 }
 
 
@@ -3338,5 +3348,614 @@ async function runFreightSpend(months) {
   } catch (err) {
     destroyFreightCharts();
     body.innerHTML = `<div class="sap-error">Error loading analytics: ${esc(err.message)}</div>`;
+  }
+}
+
+
+// ── MM Turns / Valuation Class ────────────────────────────────────────────────
+function destroyTurnsCharts() {
+  turnsCharts.forEach(c => { try { c.destroy(); } catch (_) {} });
+  turnsCharts = [];
+}
+
+function tvcGbp(v) { return v != null ? `£${Number(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'; }
+function tvcNum(v, dp = 1) { return v != null ? Number(v).toLocaleString('en-GB', { maximumFractionDigits: dp }) : '—'; }
+
+async function fetchValClassCatalog() {
+  if (valClassCatalogCache) return valClassCatalogCache;
+  const resp = await fetch('/api/performance/turns-valclass/valuation-classes');
+  const json = await resp.json();
+  valClassCatalogCache = json.success ? json.data : [];
+  return valClassCatalogCache;
+}
+
+// ── Tile 1: full table, filterable ──────────────────────────────────────────
+async function runTurnsValClassTable() {
+  showResultPanel('Stock Turns & Valuation', 'Full material list — stock, valuation class, turns and days-in-stock');
+  const body = document.getElementById('result-body');
+
+  try {
+    const resp = await fetch('/api/performance/turns-valclass');
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load');
+
+    const rows = json.data;
+    if (!rows.length) {
+      body.innerHTML = '<div class="sap-empty">No stock turns data available yet — the daily sync runs at 05:45.</div>';
+      return;
+    }
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} material${rows.length !== 1 ? 's' : ''}`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const COLS = [
+      { key: 'material',         label: 'Material' },
+      { key: 'materialText',     label: 'Description' },
+      { key: 'plant',            label: 'Plant',      filter: true },
+      { key: 'valuationClass',   label: 'Val. Class', filter: true },
+      { key: 'mrpController',    label: 'MRP Ctrl',   filter: true },
+      { key: 'materialType',     label: 'Type',        filter: true },
+      { key: 'stockQty',         label: 'Stock Qty',  render: v => tvcNum(v, 2) },
+      { key: 'stockValue',       label: 'Stock Value',render: tvcGbp },
+      { key: 'unitPrice',        label: 'Unit Price', render: tvcGbp },
+      { key: 'bookValue',        label: 'Book Value', render: tvcGbp },
+      { key: 'stockTurns',       label: 'Turns',       render: v => tvcNum(v, 2) },
+      { key: 'daysInStock',      label: 'Days in Stock', render: v => tvcNum(v, 0) },
+      { key: 'turnoverCategory', label: 'Category',   filter: true },
+      { key: 'warning',          label: 'Warning' },
+    ];
+
+    const uniqueValues = key => [...new Set(rows.map(r => r[key]).filter(v => v != null && v !== ''))].sort();
+
+    const filterBar = COLS
+      .map((c, idx) => ({ ...c, idx }))
+      .filter(c => c.filter)
+      .map(c => `
+        <select class="tf-input tvc-filter" data-col-idx="${c.idx}" style="max-width:150px;display:inline-block;width:auto">
+          <option value="">All ${esc(c.label)}</option>
+          ${uniqueValues(c.key).map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}
+        </select>`)
+      .join(' ');
+
+    const thead = `<tr>${COLS.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr>`;
+    const tbody = rows.map(r => `<tr>${COLS.map(c => `<td>${c.render ? c.render(r[c.key]) : esc(r[c.key] ?? '—')}</td>`).join('')}</tr>`).join('');
+
+    body.innerHTML = `
+      <div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <span style="font-size:12px;color:var(--text-muted);font-weight:600">Filter:</span>
+        ${filterBar}
+      </div>
+      <div style="overflow-x:auto">
+        <table id="tvc-table" class="pn-batch-table" style="width:100%">
+          <thead>${thead}</thead>
+          <tbody>${tbody}</tbody>
+        </table>
+      </div>`;
+
+    activeDT = $('#tvc-table').DataTable({
+      pageLength: 25,
+      lengthMenu: [10, 25, 50, 100, -1],
+      order: [[7, 'desc']],
+    });
+
+    document.querySelectorAll('.tvc-filter').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const idx = Number(sel.dataset.colIdx);
+        const val = sel.value;
+        const search = val ? `^${$.fn.dataTable.util.escapeRegex(val)}$` : '';
+        activeDT.column(idx).search(search, true, false).draw();
+      });
+    });
+
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">Error loading stock turns data: ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Tile 2: aggregate KPIs + breakdown charts ────────────────────────────────
+async function runTurnsValClassSummary() {
+  showResultPanel('Stock Value Overview', 'Aggregate stock & book value by turnover category, valuation class and material type');
+  destroyTurnsCharts();
+  const body = document.getElementById('result-body');
+
+  try {
+    const resp = await fetch('/api/performance/turns-valclass/aggregates');
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load');
+
+    const d = json.data;
+    const t = d.totals || {};
+
+    const CHART_COLOURS = ['#0891B2', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#F97316', '#84CC16', '#EC4899', '#6366F1', '#06B6D4'];
+
+    const kpiHtml = `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px">
+        ${[
+          { label: 'Materials',        value: t.materialCount ?? '—' },
+          { label: 'Total Stock Value',value: tvcGbp(t.totalStockValue) },
+          { label: 'Total Book Value', value: tvcGbp(t.totalBookValue) },
+          { label: 'With Warnings',    value: t.warningCount ?? '—', accent: (t.warningCount ?? 0) > 0 },
+          { label: 'Avg. Turns',       value: tvcNum(t.avgStockTurns, 2) },
+          { label: 'Avg. Days in Stock', value: tvcNum(t.avgDaysInStock, 0) },
+        ].map(k => `
+          <div style="background:var(--surface);border:1px solid ${k.accent ? 'var(--accent)' : 'var(--border)'};border-radius:8px;padding:14px 18px;min-width:130px;flex:1">
+            <div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${k.label}</div>
+            <div style="font-size:22px;font-weight:800;color:${k.accent ? 'var(--accent)' : 'var(--text)'};font-family:'JetBrains Mono',monospace">${k.value}</div>
+          </div>`).join('')}
+      </div>`;
+
+    const card = (title, canvasId) => `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">${title}</div>
+        <canvas id="${canvasId}" style="max-height:260px"></canvas>
+      </div>`;
+
+    body.innerHTML = `
+      ${kpiHtml}
+      <div style="margin-bottom:14px">${card('Stock Value by Turnover Category', 'chart-tvc-category')}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        ${card('Stock Value by Valuation Class', 'chart-tvc-valclass')}
+        ${card('Stock Value by Material Type', 'chart-tvc-mattype')}
+      </div>`;
+
+    const TICK = '#8DA3BE';
+    const GRID = 'rgba(0,0,0,0.06)';
+    const gbpTip = ctx => ` £${Number(ctx.parsed.y ?? ctx.parsed).toLocaleString('en-GB', { minimumFractionDigits: 2 })}`;
+    const gbpY   = v => `£${Number(v).toLocaleString('en-GB')}`;
+
+    const barDefaults = {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: gbpTip } } },
+      scales: {
+        x: { ticks: { color: TICK, font: { size: 10 } }, grid: { color: GRID } },
+        y: { ticks: { color: TICK, font: { size: 10 }, callback: gbpY }, grid: { color: GRID } },
+      },
+    };
+
+    if (d.byTurnoverCategory?.length) {
+      turnsCharts.push(new Chart(document.getElementById('chart-tvc-category'), {
+        type: 'bar',
+        data: {
+          labels: d.byTurnoverCategory.map(r => r.category || 'Unclassified'),
+          datasets: [{ data: d.byTurnoverCategory.map(r => Number(r.stockValue) || 0), backgroundColor: '#0891B2', borderRadius: 4 }],
+        },
+        options: barDefaults,
+      }));
+    }
+
+    if (d.byValuationClass?.length) {
+      turnsCharts.push(new Chart(document.getElementById('chart-tvc-valclass'), {
+        type: 'doughnut',
+        data: {
+          labels: d.byValuationClass.map(r => r.valuationClass || 'Unassigned'),
+          datasets: [{ data: d.byValuationClass.map(r => Number(r.stockValue) || 0), backgroundColor: CHART_COLOURS, borderWidth: 2, borderColor: '#fff' }],
+        },
+        options: {
+          plugins: {
+            legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 }, padding: 10 } },
+            tooltip: { callbacks: { label: gbpTip } },
+          },
+        },
+      }));
+    }
+
+    if (d.byMaterialType?.length) {
+      turnsCharts.push(new Chart(document.getElementById('chart-tvc-mattype'), {
+        type: 'bar',
+        data: {
+          labels: d.byMaterialType.map(r => r.materialType || 'Unassigned'),
+          datasets: [{ data: d.byMaterialType.map(r => Number(r.stockValue) || 0), backgroundColor: '#8B5CF6', borderRadius: 4 }],
+        },
+        options: barDefaults,
+      }));
+    }
+
+  } catch (err) {
+    destroyTurnsCharts();
+    body.innerHTML = `<div class="sap-error">Error loading summary: ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Tile 3: stock value by unit-price band ──────────────────────────────────
+async function runStockValueByPrice() {
+  showResultPanel('Stock Value by Price', 'Breakdown of stock value across unit-price bands');
+  destroyTurnsCharts();
+  const body = document.getElementById('result-body');
+
+  try {
+    const resp = await fetch('/api/performance/turns-valclass/value-by-price');
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load');
+
+    const rows = json.data;
+    if (!rows.length) {
+      body.innerHTML = '<div class="sap-empty">No stock turns data available yet — the daily sync runs at 05:45.</div>';
+      return;
+    }
+
+    body.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">Stock Value by Unit-Price Band</div>
+        <canvas id="chart-price-band" style="max-height:280px"></canvas>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr><th>Price Band</th><th>Materials</th><th>Total Stock Qty</th><th>Total Stock Value</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td style="font-family:'JetBrains Mono',monospace">${esc(r.priceBand)}</td>
+                <td>${tvcNum(r.materialCount, 0)}</td>
+                <td>${tvcNum(r.totalStockQty, 2)}</td>
+                <td>${tvcGbp(r.totalStockValue)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+
+    turnsCharts.push(new Chart(document.getElementById('chart-price-band'), {
+      type: 'bar',
+      data: {
+        labels: rows.map(r => r.priceBand),
+        datasets: [{ label: 'Stock Value', data: rows.map(r => Number(r.totalStockValue) || 0), backgroundColor: '#10B981', borderRadius: 4 }],
+      },
+      options: {
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ` £${Number(ctx.parsed.y).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` } } },
+        scales: {
+          x: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+          y: { ticks: { color: '#8DA3BE', font: { size: 10 }, callback: v => `£${Number(v).toLocaleString('en-GB')}` }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        },
+      },
+    }));
+
+  } catch (err) {
+    destroyTurnsCharts();
+    body.innerHTML = `<div class="sap-error">Error loading breakdown: ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Tile 4: change valuation class ──────────────────────────────────────────
+async function runChangeValuationClass() {
+  showResultPanel('Change Valuation Class', 'Search materials, choose a new valuation class, then submit — SAP moves stock to the order, changes valuation class, and moves stock back');
+  const body = document.getElementById('result-body');
+
+  body.innerHTML = `
+    <form class="transfer-form" id="cvc-form" onsubmit="return false">
+      <div class="tf-section-label">Transit Order</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">SAP Order <span class="tf-req">*</span></label>
+          <input class="tf-input" id="cvc-order" type="text" placeholder="e.g. 000012345678" autocomplete="off">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Plant <span class="tf-optional">(optional)</span></label>
+          <input class="tf-input" id="cvc-plant" type="text" placeholder="defaults to standard plant" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="tf-section-label">Find Materials</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <input class="tf-input" id="cvc-search" type="text" placeholder="Material code or description" autocomplete="off">
+        </div>
+        <div class="tf-field"><button type="button" class="btn-submit" id="cvc-search-btn">Search</button></div>
+      </div>
+
+      <div id="cvc-results" style="margin-top:10px"></div>
+
+      <div class="tf-actions">
+        <span id="cvc-sel-count" style="font-size:13px;color:var(--text-dim)">0 selected</span>
+        <div id="cvc-error" style="font-size:13px;color:var(--error)"></div>
+        <button type="button" class="btn-submit" id="cvc-submit-btn" disabled>Change Valuation Class →</button>
+      </div>
+    </form>
+    <div id="cvc-outcome" style="margin-top:14px"></div>`;
+
+  cvcSelections = new Map();
+  await fetchValClassCatalog();
+
+  document.getElementById('cvc-search-btn').addEventListener('click', cvcSearchMaterials);
+  document.getElementById('cvc-search').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); cvcSearchMaterials(); }
+  });
+  document.getElementById('cvc-submit-btn').addEventListener('click', cvcSubmit);
+}
+
+async function cvcSearchMaterials() {
+  const q = document.getElementById('cvc-search').value.trim();
+  const resultsEl = document.getElementById('cvc-results');
+  if (!q) { resultsEl.innerHTML = ''; return; }
+
+  resultsEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
+
+  try {
+    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}`);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Search failed');
+
+    const rows = json.data.slice(0, 50);
+    if (!rows.length) { resultsEl.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
+
+    const catalog = await fetchValClassCatalog();
+
+    const valClassOptions = (materialType, current) => {
+      const options = catalog.filter(c => !materialType || c.materialType === materialType);
+      return `<option value="">— keep ${esc(current || 'current')} —</option>` +
+        options.map(o => `<option value="${esc(o.valuationClass)}">${esc(o.valuationClass)} — ${esc(o.description || '')}</option>`).join('');
+    };
+
+    resultsEl.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr>
+            <th style="width:32px"></th><th>Material</th><th>Description</th><th>Plant</th>
+            <th>Current Val. Class</th><th>Stock Qty</th><th>Stock Value</th><th>New Val. Class</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr data-material="${esc(r.material)}" data-plant="${esc(r.plant)}" data-mattext="${esc(r.materialText || '')}"
+                  data-valclass="${esc(r.valuationClass || '')}" data-stockqty="${r.stockQty ?? 0}">
+                <td><input type="checkbox" class="cvc-check"></td>
+                <td style="font-family:'JetBrains Mono',monospace">${esc(r.material)}</td>
+                <td>${esc(r.materialText || '—')}</td>
+                <td>${esc(r.plant || '—')}</td>
+                <td>${esc(r.valuationClass || '—')}</td>
+                <td>${tvcNum(r.stockQty, 2)}</td>
+                <td>${tvcGbp(r.stockValue)}</td>
+                <td>
+                  <select class="tf-input cvc-newvalclass" disabled style="font-size:12px;padding:4px 6px">
+                    ${valClassOptions(r.materialType, r.valuationClass)}
+                  </select>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+
+    resultsEl.querySelectorAll('tr[data-material]').forEach(row => {
+      const check  = row.querySelector('.cvc-check');
+      const select = row.querySelector('.cvc-newvalclass');
+
+      check.addEventListener('change', () => {
+        select.disabled = !check.checked;
+        const material = row.dataset.material;
+        if (check.checked) {
+          cvcSelections.set(material, {
+            material,
+            materialText: row.dataset.mattext,
+            plant: row.dataset.plant,
+            newValuationClass: select.value || null,
+          });
+        } else {
+          cvcSelections.delete(material);
+        }
+        cvcUpdateSelectionState();
+      });
+
+      select.addEventListener('change', () => {
+        const entry = cvcSelections.get(row.dataset.material);
+        if (entry) entry.newValuationClass = select.value || null;
+      });
+    });
+
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function cvcUpdateSelectionState() {
+  document.getElementById('cvc-sel-count').textContent = `${cvcSelections.size} selected`;
+  const order = document.getElementById('cvc-order').value.trim();
+  const ready = order.length > 0 && cvcSelections.size > 0 &&
+    [...cvcSelections.values()].every(v => v.newValuationClass);
+  document.getElementById('cvc-submit-btn').disabled = !ready;
+}
+
+async function cvcSubmit() {
+  const errorEl = document.getElementById('cvc-error');
+  const btn     = document.getElementById('cvc-submit-btn');
+  const order   = document.getElementById('cvc-order').value.trim();
+  const plant   = document.getElementById('cvc-plant').value.trim();
+  errorEl.textContent = '';
+
+  const changes = [...cvcSelections.values()].map(v => ({ material: v.material, newValuationClass: v.newValuationClass }));
+
+  if (!order || !changes.length) {
+    errorEl.textContent = 'An order and at least one material with a new valuation class are required.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
+  document.getElementById('cvc-outcome').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Moving stock, changing valuation class, moving stock back…</div>';
+
+  try {
+    const resp = await fetch('/api/performance/turns-valclass/change-valuation-class', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order, plant: plant || undefined, changes }),
+    });
+    const json = await resp.json();
+
+    const data = json.data;
+    if (!data) throw new Error(json.error?.message || 'Change valuation class failed.');
+
+    const results = data.results || [];
+    const okCount = results.filter(r => r.success).length;
+
+    document.getElementById('cvc-outcome').innerHTML = `
+      <div style="font-size:13px;color:var(--text-dim);margin-bottom:8px">
+        ${okCount} of ${results.length} succeeded ${data.totalValueChange ? `· Total book value change: ${tvcGbp(data.totalValueChange)}` : ''}
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr><th>Material</th><th>Old Val. Class</th><th>New Val. Class</th><th>Old Book Value</th><th>New Book Value</th><th>Result</th></tr></thead>
+          <tbody>
+            ${results.map(r => `
+              <tr>
+                <td style="font-family:'JetBrains Mono',monospace">${esc(r.material)}</td>
+                <td>${esc(r.oldValuationClass || '—')}</td>
+                <td>${esc(r.newValuationClass || '—')}</td>
+                <td>${tvcGbp(r.oldBookValue)}</td>
+                <td>${tvcGbp(r.newBookValue)}</td>
+                <td>${r.success
+                  ? `<span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;border-radius:4px;padding:2px 7px;font-size:11px">OK</span>`
+                  : `<span style="color:var(--error);font-size:11px" title="${esc(r.message || '')}">${esc(r.message || 'Failed')}</span>`}
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+
+    if (!json.success && data.errorMessage) errorEl.textContent = data.errorMessage;
+
+    if (json.success) {
+      cvcSelections = new Map();
+      document.getElementById('cvc-results').innerHTML = '';
+      document.getElementById('cvc-sel-count').textContent = '0 selected';
+    }
+
+  } catch (err) {
+    errorEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Change Valuation Class →';
+    cvcUpdateSelectionState();
+  }
+}
+
+// ── Tile 5: history / forecast, by material or combined ─────────────────────
+async function runStockHistoryForecast() {
+  showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast — search for a material, or view the combined trend for all materials');
+  destroyTurnsCharts();
+  const body = document.getElementById('result-body');
+
+  body.innerHTML = `
+    <div class="tf-row">
+      <div class="tf-field tf-field--wide">
+        <label class="tf-label">Material search</label>
+        <input class="tf-input" id="shf-search" type="text" placeholder="Material code or description" autocomplete="off">
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-submit" id="shf-search-btn">Search</button>
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-export" id="shf-all-btn">Show All (combined)</button>
+      </div>
+    </div>
+    <div id="shf-picker" style="margin:10px 0"></div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
+      <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">Select a material or press &ldquo;Show All&rdquo;</div>
+      <canvas id="shf-chart" style="max-height:320px"></canvas>
+    </div>`;
+
+  document.getElementById('shf-search-btn').addEventListener('click', shfSearchMaterials);
+  document.getElementById('shf-search').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); shfSearchMaterials(); }
+  });
+  document.getElementById('shf-all-btn').addEventListener('click', () => shfLoadChart(null, 'All Materials (combined)'));
+}
+
+async function shfSearchMaterials() {
+  const q = document.getElementById('shf-search').value.trim();
+  const picker = document.getElementById('shf-picker');
+  if (!q) { picker.innerHTML = ''; return; }
+
+  picker.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
+
+  try {
+    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}`);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Search failed');
+
+    const rows = json.data.slice(0, 30);
+    if (!rows.length) { picker.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
+
+    picker.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px">
+      ${rows.map(r => `
+        <button type="button" class="shf-pick" data-material="${esc(r.material)}" data-desc="${esc(r.materialText || '')}"
+          style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text)">
+          <strong style="font-family:'JetBrains Mono',monospace">${esc(r.material)}</strong>${r.materialText ? ` — ${esc(r.materialText)}` : ''}
+        </button>`).join('')}
+    </div>`;
+
+    picker.querySelectorAll('.shf-pick').forEach(btn => {
+      btn.addEventListener('click', () => shfLoadChart(btn.dataset.material, `${btn.dataset.material}${btn.dataset.desc ? ' — ' + btn.dataset.desc : ''}`));
+    });
+
+  } catch (err) {
+    picker.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function shfLoadChart(material, title) {
+  destroyTurnsCharts();
+  const titleEl = document.getElementById('shf-chart-title');
+  titleEl.textContent = 'Loading…';
+
+  try {
+    const url = material
+      ? `/api/performance/turns-valclass/history?materials=${encodeURIComponent(material)}`
+      : '/api/performance/turns-valclass/history';
+    const resp = await fetch(url);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load history');
+
+    let history, forecast;
+
+    if (material) {
+      const row = json.data[0];
+      if (!row) throw new Error('No history/forecast data for that material.');
+      history  = row.consumptionHistory.map(v => Number(v) || 0);
+      forecast = row.demandForecast.map(v => Number(v) || 0);
+    } else {
+      history  = new Array(13).fill(0);
+      forecast = new Array(13).fill(0);
+      json.data.forEach(r => {
+        (r.consumptionHistory || []).forEach((v, i) => { history[i]  += Number(v) || 0; });
+        (r.demandForecast     || []).forEach((v, i) => { forecast[i] += Number(v) || 0; });
+      });
+    }
+
+    titleEl.textContent = title;
+
+    const labels = Array.from({ length: 13 }, (_, i) => i === 12 ? 'Current' : `M-${12 - i}`);
+
+    let canvas = document.getElementById('shf-chart');
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.id = 'shf-chart';
+      canvas.style.maxHeight = '320px';
+      titleEl.insertAdjacentElement('afterend', canvas);
+    }
+
+    turnsCharts.push(new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Consumption History', data: history, borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#0891B2' },
+          { label: 'Demand Forecast', data: forecast, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4] },
+        ],
+      },
+      options: {
+        plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+          y: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        },
+      },
+    }));
+
+  } catch (err) {
+    titleEl.textContent = 'Error';
+    const canvas = document.getElementById('shf-chart');
+    if (canvas) {
+      const errDiv = document.createElement('div');
+      errDiv.className = 'sap-error';
+      errDiv.textContent = err.message;
+      canvas.replaceWith(errDiv);
+    }
   }
 }
