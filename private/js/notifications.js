@@ -13,6 +13,7 @@ const API_BASE         = '/api/notifications';
 let trayOpen    = false;
 let pollTimer   = null;
 let _state      = [];   // current deliveries
+let lastUnreadCount = 0;
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
@@ -64,14 +65,43 @@ async function poll() {
 // ── Badge ─────────────────────────────────────────────────────────────────────
 
 function updateBadge(count) {
+
   const badge = document.getElementById('notif-badge');
-  if (!badge) return;
+  const bell = document.getElementById('notif-bell');
+
+  if (!badge || !bell) return;
+
+  const hasNewNotifications =
+    count > lastUnreadCount && lastUnreadCount > 0;
+
   if (count > 0) {
-    badge.textContent = count > 99 ? '99+' : String(count);
+
+    badge.textContent =
+      count > 99
+        ? '99+'
+        : String(count);
+
     badge.style.display = 'flex';
+
+    bell.classList.add('notif-bell--active');
+
+    if (hasNewNotifications) {
+      bell.classList.remove('notif-bell--ring');
+      void bell.offsetWidth; // restart animation
+      bell.classList.add('notif-bell--ring');
+    }
+
   } else {
+
     badge.style.display = 'none';
+
+    bell.classList.remove(
+      'notif-bell--active',
+      'notif-bell--ring'
+    );
   }
+
+  lastUnreadCount = count;
 }
 
 // ── Toggle tray ───────────────────────────────────────────────────────────────

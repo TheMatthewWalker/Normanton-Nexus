@@ -75,6 +75,61 @@ function processConfig(code) {
 // Metre-based linear processes that share a common entry/data pattern
 const METRE_PROCESSES = new Set(['EX','CO','BR','CL','TW']);
 
+// ── Profit-centre validation ──────────────────────────────────────────────────
+// Each process may only post materials belonging to its SAP profit centre(s).
+// MARC-PRCTR is read live via SapServer GET /api/production/check-profit-centre.
+// FW has no material of its own (inspects an Ewald batch) — no entry here, no check.
+const PROFIT_CENTRES = {
+  MX: ['2000'],
+  EX: ['2001', '2021'],
+  CO: ['2002', '2022'],
+  BR: ['2003'],
+  DR: ['2004'],
+  TW: ['2005'],
+  CL: ['2006'],
+  EW: ['2007'],
+  HA: ['2009'],
+};
+
+async function sapGet(path, body, timeout = 30000) {
+  const response = await axios.request({
+    method: 'get',
+    url: `${sapConfig.url}${path}`,
+    data: body,
+    timeout,
+    httpsAgent: sapAgent,
+    headers: { Authorization: `Bearer ${makeSapToken()}`, 'Content-Type': 'application/json' },
+  });
+  return response.data;
+}
+
+// Throws 400 when the material's profit centre doesn't match the process, and
+// 502 when SAP can't confirm it. Fails closed — posting a wrong material into
+// SAP is exactly what this check exists to prevent, so no confirmation = no post.
+async function assertProfitCentre(code, material) {
+  const allowed = PROFIT_CENTRES[code];
+  if (!allowed) return;
+
+  let prctr;
+  try {
+    const raw = await sapGet('/api/production/check-profit-centre', { Material: material });
+    if (raw?.success === false) throw new Error(raw.error?.message || 'SAP profit centre check failed');
+    prctr = String(raw?.data ?? '').trim();
+  } catch (err) {
+    const d   = err.response?.data;
+    const msg = (typeof d === 'string' ? d : null) || d?.error?.message || d?.error || d?.message || err.message;
+    throw Object.assign(
+      new Error(`Unable to verify profit centre for ${material}: ${msg}`),
+      { statusCode: 502 });
+  }
+
+  const prctrShort = prctr.replace(/^0+/, ''); // MARC-PRCTR comes back zero-padded to 10 chars
+  if (!allowed.includes(prctrShort))
+    throw Object.assign(
+      new Error(`Material ${material} belongs to profit centre ${prctrShort || '(none)'} — not valid for ${code} (expects ${allowed.join(' or ')}).`),
+      { statusCode: 400 });
+}
+
 // ── Shared SQL fragments used by reporting endpoints ─────────────────────────
 
 const RPT_COMPLETED = `
@@ -362,6 +417,9 @@ router.post('/process/:processCode/entry', async (req, res) => {
   if (!material || !lengthMetres)
     return res.status(400).json({ success: false, error: 'material and lengthMetres are required.' });
 
+  try { await assertProfitCentre(code, material); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
+
   const pool   = await getProductionPool();
   const uid    = userId(req);
   const cfg    = PROCESS[code];
@@ -639,6 +697,10 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
 
     const material = check.recordset[0].Material;
     const batchRef = `${code}${String(recordID).padStart(8, '0')}`;
+
+    // Batch may predate the profit-centre rule — validate again before posting
+    try { await assertProfitCentre(code, material); }
+    catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
 
     await pool.request()
       .input('rid',   sql.Int,               recordID)
@@ -935,6 +997,7 @@ router.post('/batch', async (req, res) => {
 
   try {
     processConfig(code); // validates code
+    await assertProfitCentre(code, material); // throws 400/502 — caught below
     const pool = await getProductionPool();
     let insertId;
 
@@ -1909,6 +1972,9 @@ router.post('/mixing/entry', async (req, res) => {
     });
   }
 
+  try { await assertProfitCentre('MX', mixCode); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
+
   // 1. Insert Mixing parent record — set to SAP_FAILED (6) if any tub fails below
   const ins = await pool.request()
     .input('shift', sql.TinyInt,           shiftID)
@@ -2084,6 +2150,9 @@ router.post('/drumming/entry', async (req, res) => {
   if (!material || !coilLengths.length)
     return res.status(400).json({ success: false, error: 'material and at least one coilLength are required.' });
 
+  try { await assertProfitCentre('DR', material); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
+
   const pool = await getProductionPool();
   const uid  = userId(req);
   const sid  = shiftID || currentShiftID();
@@ -2247,6 +2316,9 @@ async function submitDrumming(req, res, entryType) {
 
   if (!material || !coilLengths.length || !packagingID || !weightKG)
     return res.status(400).json({ success: false, error: 'material, packagingID, weightKG and at least one coilLength are required.' });
+
+  try { await assertProfitCentre('DR', material); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
 
   const pool = await getProductionPool();
   const uid  = userId(req);
