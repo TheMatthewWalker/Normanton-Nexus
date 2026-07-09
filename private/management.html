@@ -50,122 +50,151 @@
 
     <div class="dashboard">
 
-      <!-- MTD Cards -->
+      <!-- KPI BAR -->
       <div class="mgmt-kpis">
+
         <div class="mgmt-kpi">
           <div class="mgmt-kpi-title">PTFE MTD</div>
           <div id="kpi-ptfe" class="mgmt-kpi-value">£0</div>
         </div>
+
         <div class="mgmt-kpi">
           <div class="mgmt-kpi-title">PV MTD</div>
           <div id="kpi-pv" class="mgmt-kpi-value">£0</div>
         </div>
+
         <div class="mgmt-kpi">
           <div class="mgmt-kpi-title">Total MTD</div>
           <div id="kpi-total" class="mgmt-kpi-value">£0</div>
         </div>
+
         <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">PTFE OTIF MTD</div>
+          <div class="mgmt-kpi-title">PTFE OTIF</div>
           <div id="kpi-ptfe-otif" class="mgmt-kpi-value">0%</div>
         </div>
+
         <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">PV OTIF MTD</div>
+          <div class="mgmt-kpi-title">PV OTIF</div>
           <div id="kpi-pv-otif" class="mgmt-kpi-value">0%</div>
         </div>
+
         <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">Total OTIF MTD</div>
+          <div class="mgmt-kpi-title">Total OTIF</div>
           <div id="kpi-total-otif" class="mgmt-kpi-value">0%</div>
         </div>
+
       </div>
 
       <!-- FILTERS -->
       <div class="mgmt-filters">
+
         <div class="mgmt-filter">
           <label>From</label>
           <input type="date" id="dateFrom">
         </div>
+
         <div class="mgmt-filter">
           <label>To</label>
           <input type="date" id="dateTo">
         </div>
 
         <div class="mgmt-actions">
-          <button id="refreshBtn" class="btn-back">Refresh Data</button>
-          <span id="refreshStatus" class="refresh-status"></span>
+          <button id="refreshBtn" class="btn-back">
+            Refresh Data
+          </button>
+          <span id="refreshStatus"></span>
         </div>
 
-        <div id="refreshSummary" class="mgmt-refresh-summary">Checking refresh status...</div>
+        <div id="refreshSummary" class="mgmt-refresh-summary">
+          Checking refresh status...
+        </div>
+
       </div>
 
+      <!-- ROW 1 : FOUR CHARTS -->
 
-      <!-- CHARTS -->
-      <div class="mgmt-section">
-        <div class="mgmt-section-title">PTFE</div>
-
-        <div class="mgmt-grid">
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">Daily Value</div>
-            <div id="ptfeValueChart"></div>
-          </div>
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">Value Pipeline</div>
-            <div id="ptfeValueExtendedChart"></div>
-          </div>
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">OTIF %</div>
-            <div id="ptfeOtifChart"></div>
-          </div>
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">OTIF Cumulative</div>
-            <div id="ptfeOtifCumulativeChart"></div>
-          </div>
-
+      <div class="mgmt-section tile-quarter">
+        <div class="mgmt-section-title">PTFE Value Pipeline</div>
+        <div class="mgmt-chart">
+          <div id="ptfeValueExtendedChart"></div>
         </div>
       </div>
 
-      <div class="mgmt-section">
-        <div class="mgmt-section-title">PV</div>
-
-        <div class="mgmt-grid">
-
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">Daily Value</div>
-            <div id="pvValueChart"></div>
-          </div>
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">Value Pipeline</div>
-            <div id="pvValueExtendedChart"></div>
-          </div>
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">OTIF %</div>
-            <div id="pvOtifChart"></div>
-          </div>
-          <div class="mgmt-chart">
-            <div class="mgmt-chart-title">OTIF Cumulative</div>
-            <div id="pvOtifCumulativeChart"></div>
-          </div>
-
+      <div class="mgmt-section tile-quarter">
+        <div class="mgmt-section-title">PV Value Pipeline</div>
+        <div class="mgmt-chart">
+          <div id="pvValueExtendedChart"></div>
         </div>
       </div>
 
-      <!-- TABLE -->
-      <div class="mgmt-section">
-        <div class="mgmt-section-title">Daily Table</div>
+      <div class="mgmt-section tile-quarter">
+        <div class="mgmt-section-title">PTFE OTIF</div>
+        <div class="mgmt-chart">
+          <div id="ptfeOtifCumulativeChart"></div>
+        </div>
+      </div>
 
+      <div class="mgmt-section tile-quarter">
+        <div class="mgmt-section-title">PV OTIF</div>
+        <div class="mgmt-chart">
+          <div id="pvOtifCumulativeChart"></div>
+        </div>
+      </div>
+
+      <!-- ROW 2 : TABLES -->
+
+      <!-- ORDERBOOK -->
+      <div class="mgmt-section tile-half">
+        <summary class="mgmt-section-title">
+          Order Book with Saleable Stock &amp; Picked Stock
+        </summary>
+        <div id="orderBookTable"></div>
+      </div>
+
+      <!-- Performance details -->
+      <div class="mgmt-section tile-half">
+        <summary class="mgmt-section-title">
+          Daily Performance Detail
+        </summary>
         <table id="dataTable">
           <thead></thead>
           <tbody></tbody>
         </table>
       </div>
 
-      <!-- ORDERBOOK -->
-      <div class="mgmt-section">
-        <div class="mgmt-section-title">
-          Order Book with Saleable Stock & Picked Stock
+      <!-- OPTIONAL DETAIL -->
+
+      <details class="mgmt-section tile-full">
+
+        <summary class="mgmt-section-title">
+          Additional Detail Charts
+        </summary>
+
+        <div class="mgmt-grid">
+
+          <div class="mgmt-chart">
+            <h4 class="mgmt-chart-title">PTFE Daily Value</h4>
+            <div id="ptfeValueChart"></div>
+          </div>
+
+          <div class="mgmt-chart">
+            <h4 class="mgmt-chart-title">PV Daily Value</h4>
+            <div id="pvValueChart"></div>
+          </div>
+
+          <div class="mgmt-chart">
+            <h4 class="mgmt-chart-title">PTFE Daily OTIF</h4>
+            <div id="ptfeOtifChart"></div>
+          </div>
+
+          <div class="mgmt-chart">
+            <h4 class="mgmt-chart-title">PV Daily OTIF</h4>
+            <div id="pvOtifChart"></div>
+          </div>
+
         </div>
 
-        <div id="orderBookTable"></div>
-      </div>
+      </details>
 
     </div>
 

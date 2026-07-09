@@ -39,6 +39,27 @@ function currencyCell(value) {
     : '£-';
 }
 
+// TOGGLE FOR ORDERBOOK GROUPS
+window.toggleOrderBookGroup = function(groupId) {
+
+  const rows = document.querySelectorAll(
+    `[data-parent="${groupId}"]`
+  );
+
+  rows.forEach(row => {
+    row.classList.toggle('ob-hidden');
+  });
+
+  const icon = document.getElementById(`icon-${groupId}`);
+
+  if (icon) {
+    icon.textContent =
+      icon.textContent === '▶'
+        ? '▼'
+        : '▶';
+  }
+};
+
 
 
 async function refreshData() {
@@ -231,7 +252,13 @@ function renderChart(id, option) {
 // ✅ VALUE DAILY
 function renderValueChart(id, data, colour) {
   renderChart(id, {
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: value =>
+        '£' + Number(value || 0).toLocaleString('en-GB', {
+          maximumFractionDigits: 0
+        })
+    },
 
     grid: { left: 60, right: 20, top: 30, bottom: 40 },
 
@@ -240,11 +267,18 @@ function renderValueChart(id, data, colour) {
       data: data.map(d => d.date)
     },
 
+
     yAxis: {
       type: 'value',
       scale: true,
-      splitLine: { lineStyle: { color: '#E5EAF2' } }
+      axisLabel: {
+        formatter: value =>
+          '£' + value.toLocaleString('en-GB', {
+            maximumFractionDigits: 0
+          })
+      }
     },
+
 
     series: [
       {
@@ -265,7 +299,13 @@ function renderValueChart(id, data, colour) {
 // ✅ VALUE CUMULATIVE
 function renderValueCumulativeChart(id, data, colour) {
   renderChart(id, {
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: value =>
+        '£' + Number(value || 0).toLocaleString('en-GB', {
+          maximumFractionDigits: 0
+        })
+    },
 
     grid: { left: 60, right: 20, top: 30, bottom: 40 },
 
@@ -278,7 +318,12 @@ function renderValueCumulativeChart(id, data, colour) {
       type: 'value',
       scale: true, // ✅ critical
       min: 'dataMin',
-      splitNumber: 5
+      splitNumber: 5,
+      axisLabel: {
+        formatter: value =>
+          '£' + value.toLocaleString('en-GB', {
+            maximumFractionDigits: 0
+          })}
     },
 
     series: [
@@ -295,7 +340,14 @@ function renderValueCumulativeChart(id, data, colour) {
 // ✅ EXTENDED VALUE
 function renderExtendedChart(id, data, colour) {
   renderChart(id, {
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: value =>
+        '£' + Number(value || 0).toLocaleString('en-GB', {
+          maximumFractionDigits: 0
+        })
+    },
+
     legend: { top: 5 },
 
     xAxis: {
@@ -305,7 +357,13 @@ function renderExtendedChart(id, data, colour) {
 
     yAxis: {
       type: 'value',
-      scale: true
+      scale: true,
+      axisLabel: {
+        formatter: value =>
+          '£' + value.toLocaleString('en-GB', {
+            maximumFractionDigits: 0
+          })
+      }
     },
 
     series: [
@@ -564,30 +622,50 @@ let rawOrderBookData = [];
 function renderOrderBookTable(rows) {
 
   const container = document.getElementById('orderBookTable');
+
   if (!container) return;
 
   const grouped = {};
 
   for (const row of rows) {
 
-    grouped[row.year] ??= {};
-    grouped[row.year][row.month] ??= {
-      PTFE: { orders: 0, stock: 0, picked: 0 },
-      PV: { orders: 0, stock: 0, picked: 0 }
+    const year = Number(row.year);
+    const month = Number(row.month);
+    const vs = row.valueStream;
+
+    grouped[year] ??= {};
+
+    grouped[year][month] ??= {
+      PTFE: {
+        orders: 0,
+        stock: 0,
+        picked: 0
+      },
+      PV: {
+        orders: 0,
+        stock: 0,
+        picked: 0
+      }
     };
 
-    const bucket = grouped[row.year][row.month][row.valueStream];
+    if (!grouped[year][month][vs]) continue;
 
-    if (!bucket) continue;
-
-    bucket.orders += row.orders || 0;
-    bucket.stock += row.stock || 0;
-    bucket.picked += row.picked || 0;
+    grouped[year][month][vs].orders += row.orders || 0;
+    grouped[year][month][vs].stock += row.stock || 0;
+    grouped[year][month][vs].picked += row.picked || 0;
   }
 
   const grand = {
-    PTFE: { orders: 0, stock: 0, picked: 0 },
-    PV: { orders: 0, stock: 0, picked: 0 }
+    PTFE: {
+      orders: 0,
+      stock: 0,
+      picked: 0
+    },
+    PV: {
+      orders: 0,
+      stock: 0,
+      picked: 0
+    }
   };
 
   let html = `
@@ -596,8 +674,7 @@ function renderOrderBookTable(rows) {
       <thead>
 
         <tr>
-          <th rowspan="2">Year</th>
-          <th rowspan="2">Month</th>
+          <th rowspan="2">Year / Month</th>
 
           <th colspan="3">PTFE</th>
           <th colspan="3">PV</th>
@@ -628,12 +705,20 @@ function renderOrderBookTable(rows) {
       .map(Number)
       .sort((a, b) => a - b);
 
-    const yearTotal = {
-      PTFE: { orders: 0, stock: 0, picked: 0 },
-      PV: { orders: 0, stock: 0, picked: 0 }
-    };
+    const yearKey = `year-${year}`;
 
-    let firstMonth = true;
+    const yearTotal = {
+      PTFE: {
+        orders: 0,
+        stock: 0,
+        picked: 0
+      },
+      PV: {
+        orders: 0,
+        stock: 0,
+        picked: 0
+      }
+    };
 
     for (const month of months) {
 
@@ -647,25 +732,6 @@ function renderOrderBookTable(rows) {
       yearTotal.PV.orders += pv.orders;
       yearTotal.PV.stock += pv.stock;
       yearTotal.PV.picked += pv.picked;
-
-      html += `
-        <tr>
-
-          <td>${firstMonth ? year : ''}</td>
-          <td>${monthName(month)}</td>
-
-          <td>${currencyCell(ptfe.orders)}</td>
-          <td>${currencyCell(ptfe.stock)}</td>
-          <td>${currencyCell(ptfe.picked)}</td>
-
-          <td>${currencyCell(pv.orders)}</td>
-          <td>${currencyCell(pv.stock)}</td>
-          <td>${currencyCell(pv.picked)}</td>
-
-        </tr>
-      `;
-
-      firstMonth = false;
     }
 
     grand.PTFE.orders += yearTotal.PTFE.orders;
@@ -677,9 +743,16 @@ function renderOrderBookTable(rows) {
     grand.PV.picked += yearTotal.PV.picked;
 
     html += `
-      <tr class="orderbook-total">
+      <tr
+        class="orderbook-year-row"
+        onclick="toggleOrderBookGroup('${yearKey}')">
 
-        <td colspan="2">${year} Total</td>
+        <td>
+
+          <span id="icon-${yearKey}">▶</span>
+          <strong>${year}</strong>
+
+        </td>
 
         <td>${currencyCell(yearTotal.PTFE.orders)}</td>
         <td>${currencyCell(yearTotal.PTFE.stock)}</td>
@@ -691,12 +764,40 @@ function renderOrderBookTable(rows) {
 
       </tr>
     `;
+
+    for (const month of months) {
+
+      const ptfe = grouped[year][month].PTFE;
+      const pv = grouped[year][month].PV;
+
+      html += `
+        <tr
+          data-parent="${yearKey}"
+          class="ob-hidden">
+
+          <td class="orderbook-month">
+            ${monthName(month)}
+          </td>
+
+          <td>${currencyCell(ptfe.orders)}</td>
+          <td>${currencyCell(ptfe.stock)}</td>
+          <td>${currencyCell(ptfe.picked)}</td>
+
+          <td>${currencyCell(pv.orders)}</td>
+          <td>${currencyCell(pv.stock)}</td>
+          <td>${currencyCell(pv.picked)}</td>
+
+        </tr>
+      `;
+    }
   }
 
   html += `
       <tr class="orderbook-grand-total">
 
-        <td colspan="2">Grand Total</td>
+        <td>
+          <strong>Grand Total</strong>
+        </td>
 
         <td>${currencyCell(grand.PTFE.orders)}</td>
         <td>${currencyCell(grand.PTFE.stock)}</td>
@@ -707,8 +808,10 @@ function renderOrderBookTable(rows) {
         <td>${currencyCell(grand.PV.picked)}</td>
 
       </tr>
-    </tbody>
-  </table>
+
+      </tbody>
+
+    </table>
   `;
 
   container.innerHTML = html;
