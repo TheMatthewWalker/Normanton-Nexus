@@ -162,6 +162,29 @@ router.get('/otif-metrics', async (req, res) => {
   });
 });
 
+// ── Order book summary ─────────────────────────────────────────────
+router.get('/orderbook-summary', async (req, res, next) => {
+  try {
+    const rows = await db.getOrderBookSummary();
+
+    res.json({
+      success: true,
+      data: rows.map(r => ({
+        year: Number(r.Year),
+        month: Number(r.Month),
+        valueStream: r.ValueStream,
+
+        orders: Number(r.OrdersValue || 0),
+        stock: Number(r.StockValue || 0),
+        picked: Number(r.PickedValue || 0)
+      }))
+    });
+
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── MM Turns / Valuation Class ───────────────────────────────────────────

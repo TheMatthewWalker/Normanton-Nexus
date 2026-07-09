@@ -485,23 +485,23 @@ function createLoadingListPdfBuffer(shipmentsData) {
   };
   const drawPageHeader = (parts, pageNum) => {
     drawRect(parts, 0, 800, 595, 42, palette.navy, true);
-    drawText(parts, 36, 820, 'Kongsberg Automotive â€” Loading List', 13, 'F2', palette.white);
+    drawText(parts, 36, 820, 'Kongsberg Automotive — Loading List', 13, 'F2', palette.white);
     drawText(parts, 36, 804, `Generated: ${dateStr} ${timeStr}`, 8.5, 'F1', palette.white);
     drawText(parts, 500, 812, `Page ${pageNum}`, 8.5, 'F1', palette.white);
   };
   const drawShipmentBand = (parts, y, shipment) => {
     const ref = formatShipmentRef(shipment.shipmentID);
-    const planned = shipment.plannedCollection ? new Date(shipment.plannedCollection).toLocaleDateString('en-GB') : 'â€”';
+    const planned = shipment.plannedCollection ? new Date(shipment.plannedCollection).toLocaleDateString('en-GB') : '—';
     drawRect(parts, 36, y, 523, 20, palette.light, true);
     drawLine(parts, 36, y, 559, y, palette.navy, 1);
     drawText(parts, 42, y + 7,  `Shipment ${ref}`,                                              9, 'F2', palette.navy);
-    drawText(parts, 155, y + 7, `Dest: ${String(shipment.destinationName || 'â€”').slice(0, 28)}`, 8, 'F1', palette.steel);
-    drawText(parts, 355, y + 7, `Haulier: ${String(shipment.forwarderName || 'â€”').slice(0, 18)}`, 8, 'F1', palette.steel);
+    drawText(parts, 155, y + 7, `Dest: ${String(shipment.destinationName || '—').slice(0, 28)}`, 8, 'F1', palette.steel);
+    drawText(parts, 355, y + 7, `Haulier: ${String(shipment.forwarderName || '—').slice(0, 18)}`, 8, 'F1', palette.steel);
     drawText(parts, 475, y + 7, `Planned: ${planned}`,                                           8, 'F1', palette.steel);
   };
   const drawColHeaders = (parts, y) => {
     drawRect(parts, 36, y, 523, 16, palette.navy, true);
-    [['Pallet ID', 42], ['Type', 120], ['Location', 195], ['Gross Wt', 305], ['Dimensions (LÃ—WÃ—H mm)', 385]].forEach(([label, x]) =>
+    [['Pallet ID', 42], ['Type', 120], ['Location', 195], ['Gross Wt', 305], ['Dimensions (L×W×H mm)', 385]].forEach(([label, x]) =>
       drawText(parts, x, y + 5, label, 7.5, 'F2', palette.white));
   };
 
@@ -551,15 +551,15 @@ function createLoadingListPdfBuffer(shipmentsData) {
       if ((rowIndex % 2) === 0) drawRect(parts, 36, y, 523, 15, palette.soft, true);
       drawText(parts, 42,  y + 4, String(pallet.palletID    || ''),  8);
       drawText(parts, 120, y + 4, String(pallet.palletType  || ''),  8);
-      drawText(parts, 195, y + 4, String(pallet.palletLocation || 'â€”'), 8);
+      drawText(parts, 195, y + 4, String(pallet.palletLocation || '—'), 8);
       drawText(parts, 305, y + 4, `${formatDecimal(pallet.grossWeight)} kg`, 8);
-      drawText(parts, 385, y + 4, `${pallet.palletLength || 0} Ã— ${pallet.palletWidth || 0} Ã— ${pallet.palletHeight || 0}`, 8);
+      drawText(parts, 385, y + 4, `${pallet.palletLength || 0} × ${pallet.palletWidth || 0} × ${pallet.palletHeight || 0}`, 8);
       drawLine(parts, 36, y, 559, y);
       rowIndex++;
     } else if (item.kind === 'empty') {
       drawText(parts, 42, y + 4, 'No pallets linked to this shipment.', 8.5, 'F1', palette.steel);
     }
-    // 'gap' is just space â€” nothing drawn
+    // 'gap' is just space — nothing drawn
   }
 
   pageStreams.push(parts.join('\n'));
@@ -831,7 +831,7 @@ async function fetchSapCustomsData(deliveries, req) {
 
   const sapDeliveryNumbers = deliveries.map(d => String(d.deliveryID));
 
-  // Round 1 â€” parallel: LIPS (line items) + LIKP (delivery header: incoterms, consignee code)
+  // Round 1 — parallel: LIPS (line items) + LIKP (delivery header: incoterms, consignee code)
   const [lipsBody, likpBody] = await Promise.all([
     sapPost('/api/sap/lips', { deliveries: sapDeliveryNumbers }),
     sapPost('/api/sap/likp', { deliveries: sapDeliveryNumbers }),
@@ -862,7 +862,7 @@ async function fetchSapCustomsData(deliveries, req) {
     throw err;
   }
 
-  // Round 2 â€” parallel: VBFA (invoice/stat value per line) + MARC (commodity/origin per material) + KNA1 (customer country)
+  // Round 2 — parallel: VBFA (invoice/stat value per line) + MARC (commodity/origin per material) + KNA1 (customer country)
   const lineItems = lipsData.map(r => ({ delivery: r.deliveryNumber, item: r.itemNumber }));
   const materials = [...new Set(lipsData.map(r => String(r.materialNumber || '').trim()).filter(Boolean))];
   const customers = [...new Set(likpData.map(r => String(r.consigneeCode || '').trim()).filter(Boolean))];
@@ -914,7 +914,7 @@ async function createClearPortExport(payload) {
         'X-API-Key': clearPort.apiToken,
       },
       validateStatus: () => true,
-      transformResponse: [(data) => data],  // skip auto-parse â€” keep raw text
+      transformResponse: [(data) => data],  // skip auto-parse — keep raw text
     });
 
     // Parse manually so we capture the body regardless of Content-Type
@@ -1831,7 +1831,7 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
     if (customerIds.length !== 1)
       throw new Error('Selected deliveries must all belong to the same customer.');
 
-    // Enforce incoterms consistency â€” delivery-level incoterms take priority over destination default
+    // Enforce incoterms consistency — delivery-level incoterms take priority over destination default
     const effectiveIncoterms = deliveries.map(row =>
       String(row.incoterms || row.defaultIncoterms || '').trim().toUpperCase()
     );

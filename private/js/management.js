@@ -24,6 +24,23 @@ function setDefaultDates() {
 }
 
 
+
+function monthName(month) {
+  return [
+    '',
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+  ][month];
+}
+
+function currencyCell(value) {
+  return value
+    ? '£' + Math.round(value).toLocaleString('en-GB')
+    : '£-';
+}
+
+
+
 async function refreshData() {
   const status = document.getElementById('refreshStatus');
   const btn = document.getElementById('refreshBtn');
@@ -122,13 +139,15 @@ async function loadRefreshStatus() {
 }
 
 async function loadData() {
-  const [valueRes, otifRes] = await Promise.all([
+  const [valueRes, otifRes, orderBookRes] = await Promise.all([
     fetch(BASE + '/value-metrics'),
-    fetch(BASE + '/otif-metrics')
+    fetch(BASE + '/otif-metrics'),
+    fetch(BASE + '/orderbook-summary')
   ]);
 
   rawValueData = (await valueRes.json()).data;
   rawOtifData = (await otifRes.json()).data;
+  rawOrderBookData = (await orderBookRes.json()).data;
 
   renderDashboard();
   await loadRefreshStatus();
@@ -539,6 +558,163 @@ function renderKpis(valueData, otifData) {
 }
 
 
+// ORDERBOOK
+let rawOrderBookData = [];
+
+function renderOrderBookTable(rows) {
+
+  const container = document.getElementById('orderBookTable');
+  if (!container) return;
+
+  const grouped = {};
+
+  for (const row of rows) {
+
+    grouped[row.year] ??= {};
+    grouped[row.year][row.month] ??= {
+      PTFE: { orders: 0, stock: 0, picked: 0 },
+      PV: { orders: 0, stock: 0, picked: 0 }
+    };
+
+    const bucket = grouped[row.year][row.month][row.valueStream];
+
+    if (!bucket) continue;
+
+    bucket.orders += row.orders || 0;
+    bucket.stock += row.stock || 0;
+    bucket.picked += row.picked || 0;
+  }
+
+  const grand = {
+    PTFE: { orders: 0, stock: 0, picked: 0 },
+    PV: { orders: 0, stock: 0, picked: 0 }
+  };
+
+  let html = `
+    <table class="orderbook-table">
+
+      <thead>
+
+        <tr>
+          <th rowspan="2">Year</th>
+          <th rowspan="2">Month</th>
+
+          <th colspan="3">PTFE</th>
+          <th colspan="3">PV</th>
+        </tr>
+
+        <tr>
+          <th>Orders</th>
+          <th>Stock</th>
+          <th>Picked</th>
+
+          <th>Orders</th>
+          <th>Stock</th>
+          <th>Picked</th>
+        </tr>
+
+      </thead>
+
+      <tbody>
+  `;
+
+  const years = Object.keys(grouped)
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  for (const year of years) {
+
+    const months = Object.keys(grouped[year])
+      .map(Number)
+      .sort((a, b) => a - b);
+
+    const yearTotal = {
+      PTFE: { orders: 0, stock: 0, picked: 0 },
+      PV: { orders: 0, stock: 0, picked: 0 }
+    };
+
+    let firstMonth = true;
+
+    for (const month of months) {
+
+      const ptfe = grouped[year][month].PTFE;
+      const pv = grouped[year][month].PV;
+
+      yearTotal.PTFE.orders += ptfe.orders;
+      yearTotal.PTFE.stock += ptfe.stock;
+      yearTotal.PTFE.picked += ptfe.picked;
+
+      yearTotal.PV.orders += pv.orders;
+      yearTotal.PV.stock += pv.stock;
+      yearTotal.PV.picked += pv.picked;
+
+      html += `
+        <tr>
+
+          <td>${firstMonth ? year : ''}</td>
+          <td>${monthName(month)}</td>
+
+          <td>${currencyCell(ptfe.orders)}</td>
+          <td>${currencyCell(ptfe.stock)}</td>
+          <td>${currencyCell(ptfe.picked)}</td>
+
+          <td>${currencyCell(pv.orders)}</td>
+          <td>${currencyCell(pv.stock)}</td>
+          <td>${currencyCell(pv.picked)}</td>
+
+        </tr>
+      `;
+
+      firstMonth = false;
+    }
+
+    grand.PTFE.orders += yearTotal.PTFE.orders;
+    grand.PTFE.stock += yearTotal.PTFE.stock;
+    grand.PTFE.picked += yearTotal.PTFE.picked;
+
+    grand.PV.orders += yearTotal.PV.orders;
+    grand.PV.stock += yearTotal.PV.stock;
+    grand.PV.picked += yearTotal.PV.picked;
+
+    html += `
+      <tr class="orderbook-total">
+
+        <td colspan="2">${year} Total</td>
+
+        <td>${currencyCell(yearTotal.PTFE.orders)}</td>
+        <td>${currencyCell(yearTotal.PTFE.stock)}</td>
+        <td>${currencyCell(yearTotal.PTFE.picked)}</td>
+
+        <td>${currencyCell(yearTotal.PV.orders)}</td>
+        <td>${currencyCell(yearTotal.PV.stock)}</td>
+        <td>${currencyCell(yearTotal.PV.picked)}</td>
+
+      </tr>
+    `;
+  }
+
+  html += `
+      <tr class="orderbook-grand-total">
+
+        <td colspan="2">Grand Total</td>
+
+        <td>${currencyCell(grand.PTFE.orders)}</td>
+        <td>${currencyCell(grand.PTFE.stock)}</td>
+        <td>${currencyCell(grand.PTFE.picked)}</td>
+
+        <td>${currencyCell(grand.PV.orders)}</td>
+        <td>${currencyCell(grand.PV.stock)}</td>
+        <td>${currencyCell(grand.PV.picked)}</td>
+
+      </tr>
+    </tbody>
+  </table>
+  `;
+
+  container.innerHTML = html;
+}
+
+
 // ✅ MAIN RENDER
 function renderDashboard() {
   const valueData = filterData(rawValueData);
@@ -555,6 +731,7 @@ function renderDashboard() {
 
   renderTable(valueData);
   renderKpis(valueData, otifData);
+  renderOrderBookTable(rawOrderBookData);
 
   renderValueChart('ptfeValueChart', ptfe, '#2563EB');
   //renderValueCumulativeChart('ptfeValueCumulativeChart', buildCumulativeValueData(ptfe), '#2563EB');

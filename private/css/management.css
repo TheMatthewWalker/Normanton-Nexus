@@ -43,12 +43,13 @@
 
 /* ── DASHBOARD WRAPPER ─────────────────────────────────────────────── */
 
+
 .dashboard {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 16px;
 }
+
 
 
 /* ── KPI CARDS ───────────────────────────────────────────────────── */
@@ -278,4 +279,34 @@
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.orderbook-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.orderbook-table th,
+.orderbook-table td {
+  padding: 8px;
+  border: 1px solid #D8E0EB;
+  text-align: right;
+}
+
+.orderbook-table th:first-child,
+.orderbook-table th:nth-child(2),
+.orderbook-table td:first-child,
+.orderbook-table td:nth-child(2) {
+  text-align: left;
+}
+
+.orderbook-total {
+  font-weight: 700;
+  background: #F3F6FA;
+}
+
+.orderbook-grand-total {
+  font-weight: 700;
+  background: #E8EEF7;
 }

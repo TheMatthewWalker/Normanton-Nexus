@@ -467,3 +467,52 @@ export async function upsertTodayStockAndPicked(totalsByValueStream) {
       `);
   }
 }
+
+// Orderbook: point-in-time only — write today's row on each refresh.
+
+export async function getOrderBookSummary() {
+  const pool = await getPool();
+
+  const { recordset } = await pool.request().query(`
+    SELECT
+      DATEPART(YEAR, RequestDate)  AS [Year],
+      DATEPART(MONTH, RequestDate) AS [Month],
+      ValueStream,
+
+      SUM(Amount) AS OrdersValue,
+
+      SUM(
+        CASE
+          WHEN OrderQty > 0
+          THEN DockStockAllocated * (Amount / OrderQty)
+          ELSE 0
+        END
+      ) AS StockValue,
+
+      SUM(
+        CASE
+          WHEN OrderQty > 0
+          THEN PickedStockAllocated * (Amount / OrderQty)
+          ELSE 0
+        END
+      ) AS PickedValue
+
+    FROM dbo.AgreementSnapshot
+
+    WHERE
+      RequestDate IS NOT NULL
+      AND ValueStream IN ('PTFE','PV')
+
+    GROUP BY
+      YEAR(RequestDate),
+      MONTH(RequestDate),
+      ValueStream
+
+    ORDER BY
+      YEAR(RequestDate),
+      MONTH(RequestDate),
+      ValueStream
+  `);
+
+  return recordset;
+}
