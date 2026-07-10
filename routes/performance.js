@@ -226,17 +226,26 @@ router.get('/turns-valclass', requirePermission('LOG_MRP'), async (req, res) => 
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+    // Aliased to camelCase — mssql returns rows keyed by the raw column name when
+    // there's no AS, and every bit of frontend code here expects camelCase (matching
+    // the /aggregates, /value-by-price and /history routes, which already alias).
     const { recordset } = await request.query(`
       SELECT
-        Material, Plant, MaterialText, CreatedDate, MaterialType, Uom, ProfitCentre,
-        DeletionFlag, AbcIndicator, PurchasingGroup, MrpController, ValuationClass,
-        LotSizeProcedure, PlanningTimeFence, GrProcessingTime, TotalReplenishmentTime,
-        SafetyStock, MinLotSize, MaxLotSize, FixedLotSize, RoundingValue,
-        SpecialProcurementType, PlannedDeliveryTime,
-        StockQty, StockValue, UnitPrice, BookValue,
-        LastReceiptDate, LastGoodsIssueDate, LastConsumptionDate, LastGoodsMovementDate,
-        StockTurns, DaysInStock, DailyRequirementValue, TurnoverCategory, Warning,
-        SnapshotAtUtc
+        Material AS material, Plant AS plant, MaterialText AS materialText, CreatedDate AS createdDate,
+        MaterialType AS materialType, Uom AS uom, ProfitCentre AS profitCentre,
+        DeletionFlag AS deletionFlag, AbcIndicator AS abcIndicator, PurchasingGroup AS purchasingGroup,
+        MrpController AS mrpController, ValuationClass AS valuationClass,
+        LotSizeProcedure AS lotSizeProcedure, PlanningTimeFence AS planningTimeFence,
+        GrProcessingTime AS grProcessingTime, TotalReplenishmentTime AS totalReplenishmentTime,
+        SafetyStock AS safetyStock, MinLotSize AS minLotSize, MaxLotSize AS maxLotSize,
+        FixedLotSize AS fixedLotSize, RoundingValue AS roundingValue,
+        SpecialProcurementType AS specialProcurementType, PlannedDeliveryTime AS plannedDeliveryTime,
+        StockQty AS stockQty, StockValue AS stockValue, UnitPrice AS unitPrice, BookValue AS bookValue,
+        LastReceiptDate AS lastReceiptDate, LastGoodsIssueDate AS lastGoodsIssueDate,
+        LastConsumptionDate AS lastConsumptionDate, LastGoodsMovementDate AS lastGoodsMovementDate,
+        StockTurns AS stockTurns, DaysInStock AS daysInStock, DailyRequirementValue AS dailyRequirementValue,
+        TurnoverCategory AS turnoverCategory, Warning AS warning,
+        SnapshotAtUtc AS snapshotAtUtc
       FROM dbo.TurnsValClassSnapshot
       ${whereSql}
       ORDER BY Material
@@ -420,7 +429,8 @@ router.get('/turns-valclass/valuation-classes', requirePermission('LOG_MRP'), as
     }
 
     const { recordset } = await request.query(`
-      SELECT ValuationClass, MaterialType, AccountRef, Description
+      SELECT ValuationClass AS valuationClass, MaterialType AS materialType,
+             AccountRef AS accountRef, Description AS description
       FROM dbo.ValuationClassCatalog
       ${whereSql}
       ORDER BY ValuationClass

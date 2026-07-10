@@ -590,6 +590,10 @@ router.post('/process/:processCode/draft', async (req, res) => {
     if (!material)
       return res.status(400).json({ success: false, error: 'material is required.' });
 
+    // Reject wrong-profit-centre materials at setup, not just at completion —
+    // otherwise the operator creates an open run they can never complete.
+    await assertProfitCentre(code, material); // throws 400/502 — caught below
+
     const pool = await getProductionPool();
     const uid  = userId(req);
     const cfg  = PROCESS[code];
@@ -629,7 +633,60 @@ router.post('/process/:processCode/draft', async (req, res) => {
 
     res.status(201).json({ success: true, data: { recordID, batchRef } });
   } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Open runs across all processes (supervisor view + cancel) ─────────────────
+// A run stuck at Status=1 (e.g. created before profit-centre validation with a
+// material that can never pass completion) is cancelled here — Status=5.
+
+const OPEN_RUN_PROCESSES = ['MX','EX','CO','BR','CL','TW','DR','EW','HA'];
+const HAS_ISREVERSED     = new Set(['MX','EX','CO','BR','CL','TW','DR']);
+
+router.get('/open-runs', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  try {
+    const pool  = await getProductionPool();
+    const union = OPEN_RUN_PROCESSES.map(code => {
+      const cfg = PROCESS[code];
+      const rev = HAS_ISREVERSED.has(code) ? 'AND t.IsReversed = 0' : '';
+      return `SELECT N'${code}' AS ProcessCode, t.${cfg.pk} AS RecordID, t.${cfg.ref} AS BatchRef,
+                     t.Material, t.CreatedAt, pu.Username AS CreatedBy
+              FROM ${cfg.table} t
+              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+              WHERE t.Status = 1 ${rev}`;
+    }).join('\nUNION ALL\n');
+
+    const result = await pool.request().query(`${union}\nORDER BY CreatedAt DESC`);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/open-runs/:processCode/:recordId/cancel', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const code = req.params.processCode.toUpperCase();
+  const id   = Number(req.params.recordId);
+
+  try {
+    const cfg  = processConfig(code);
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+
+    const upd = await pool.request()
+      .input('id', sql.Int, id)
+      .query(`UPDATE ${cfg.table} SET Status=5 WHERE ${cfg.pk}=@id AND Status=1`);
+
+    if (!upd.rowsAffected[0])
+      return res.status(409).json({ success: false, error: 'Record is not open — it may already be completed or cancelled.' });
+
+    const reason = String(req.body?.reason || '').trim();
+    await writeEvent(pool, code, id, 'CANCELLED',
+      `Open run cancelled by supervisor${reason ? ` — ${reason}` : ''}`, 0, uid);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
   }
 });
 

@@ -245,6 +245,49 @@ function historyForecastCols(prefix, key) {
   return cols;
 }
 
+// SAP's MBEW (valuation) table carries one row per Material+Plant+ValuationType —
+// for split-valuated materials (BWTAR non-blank on more than one valuation type)
+// that's more than one row. BuildMaterialMasterRequest joins MARC to MBEW on
+// WERKS = BWKEY only (no BWTAR filter/field), so a split-valuated material comes
+// back from SAP as two-or-more TurnsValClassRow entries carrying the identical
+// Material+Plant — which collide against PK_TurnsValClassSnapshot (Material, Plant).
+// ConsumptionHistory/DemandForecast are looked up by material only on the SAP side,
+// so duplicates carry identical history/forecast arrays (safe to take from either);
+// StockQty/StockValue/BookValue are per-valuation-type and must be summed to get the
+// true material+plant total, with UnitPrice recomputed from the summed totals.
+export function dedupeTurnsValClassRows(rows) {
+  const map = new Map();
+
+  for (const row of rows) {
+    const key = `${row.material}|${row.plant}`;
+    const existing = map.get(key);
+
+    if (!existing) {
+      map.set(key, { ...row, _dupeCount: 1 });
+      continue;
+    }
+
+    existing.stockQty   = (Number(existing.stockQty)   || 0) + (Number(row.stockQty)   || 0);
+    existing.stockValue = (Number(existing.stockValue) || 0) + (Number(row.stockValue) || 0);
+    existing.bookValue  = (Number(existing.bookValue)  || 0) + (Number(row.bookValue)  || 0);
+    existing.unitPrice  = existing.stockQty > 0 ? existing.stockValue / existing.stockQty : existing.unitPrice;
+    existing._dupeCount += 1;
+  }
+
+  const deduped = [...map.values()];
+  const mergedCount = deduped.filter(r => r._dupeCount > 1).length;
+
+  if (mergedCount > 0) {
+    console.warn(
+      `[TurnsValClassSnapshot] merged ${mergedCount} material(s) with multiple SAP valuation-type ` +
+      `rows (split valuation) into single Material+Plant totals`
+    );
+  }
+
+  deduped.forEach(r => delete r._dupeCount);
+  return deduped;
+}
+
 export function replaceTurnsValClassSnapshot(rows) {
   return replaceTable('dbo.TurnsValClassSnapshot', [
     ['Material',               'material',               sql.VarChar(18), null, 18],
@@ -289,7 +332,7 @@ export function replaceTurnsValClassSnapshot(rows) {
     ['DailyRequirementValue',  'dailyRequirementValue',  sql.Decimal(18, 4)],
     ['TurnoverCategory',       'turnoverCategory',       sql.VarChar(30), null, 30],
     ['Warning',                'warning',                sql.VarChar(200), null, 200]
-  ], rows);
+  ], dedupeTurnsValClassRows(rows));
 }
 
 export function replaceValuationClassCatalog(rows) {

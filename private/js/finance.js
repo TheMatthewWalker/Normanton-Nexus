@@ -210,7 +210,7 @@ function renderResultTable(records, columns) {
     </table>`;
 
   activeDT = new DataTable('#fin-dt', {
-    pageLength:    25,
+    pageLength:    20,
     scrollX:       true,
     orderCellsTop: true,
     layout:        { padding: { bottom: 12 } },
@@ -1059,7 +1059,7 @@ function renderProfitCenterResults(data) {
   document.getElementById('pc-back-btn').addEventListener('click', showProfitCenterForm);
 
   activeDT = new DataTable('#fin-dt', {
-    pageLength: 25, scrollX: true, orderCellsTop: true,
+    pageLength: 20, scrollX: true, orderCellsTop: true,
     order: [[0, 'asc']],
     initComplete: function () {
       const api = this.api();

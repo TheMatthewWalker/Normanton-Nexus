@@ -13,8 +13,17 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function api(path, opts) {
-  return fetch('/api/productionnexus' + path, opts).then(r => r.json());
+// Throws on HTTP errors and on { success: false } bodies so a rejected request
+// can never fall through to a caller's success rendering (e.g. profit-centre
+// 400s previously showed "posted successfully — MatDoc: —").
+async function api(path, opts) {
+  const r = await fetch('/api/productionnexus' + path, opts);
+  let json = null;
+  try { json = await r.json(); } catch { /* non-JSON body */ }
+  if (json?.success === false || !r.ok) {
+    throw new Error(json?.error || `Request failed (HTTP ${r.status})`);
+  }
+  return json;
 }
 
 function wConfirm({ title, message, confirmText = 'Confirm', variant = '' }) {
@@ -199,6 +208,7 @@ function openFunction(fn) {
     coverlineData:   runCoverlineData,
     tapewrapData:    runTapeWrapData,
     batchHistory:    runBatchHistory,
+    openRuns:        runOpenRuns,
     traceability:    runTraceability,
     approveScrap:    runApproveScrap,
     postedScrap:     runPostedScrap,
@@ -4270,6 +4280,78 @@ async function pollFailedBackflushCount() {
     const json = await api('/failed-backflush');
     setFailedBackflushBadge((json.data || []).length);
   } catch { }
+}
+
+// ── OPEN RUNS (supervisor) — view and cancel runs that can't be completed ────
+
+async function runOpenRuns() {
+  document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const json = await api('/open-runs');
+    const rows = json.data || [];
+
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${rows.length} open`;
+    badge.classList.remove('hidden');
+
+    if (!rows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="pn-empty" style="color:var(--accent)">✓ No open runs.</div>';
+      return;
+    }
+
+    const tableRows = rows.map(r => {
+      const ref = r.BatchRef || `${r.ProcessCode}${String(r.RecordID).padStart(8,'0')}`;
+      return `<tr>
+        <td>${esc(PROCESS_LABELS[r.ProcessCode] || r.ProcessCode)}</td>
+        <td class="pn-batch-ref">${esc(ref)}</td>
+        <td class="pn-batch-mono">${esc(r.Material || '—')}</td>
+        <td class="pn-batch-mono">${fmt(r.CreatedAt)}</td>
+        <td>${esc(r.CreatedBy || '—')}</td>
+        <td style="text-align:right">
+          <button class="btn-secondary or-cancel-btn" data-pc="${esc(r.ProcessCode)}" data-rid="${r.RecordID}" data-ref="${esc(ref)}"
+                  style="color:#DC2626;border-color:rgba(220,38,38,.4);font-size:12px">Cancel Run</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('result-body').innerHTML = `
+      <div style="padding:16px 20px">
+        <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr>
+            <th>Process</th><th>Batch</th><th>Material</th><th>Created</th><th>Operator</th><th></th>
+          </tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table></div>
+        <div id="or-msg" style="margin-top:10px;font-size:13px"></div>
+      </div>`;
+
+    document.querySelectorAll('.or-cancel-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const ok = await wConfirm({
+          title: 'Cancel open run?',
+          message: `${btn.dataset.ref} will be marked Cancelled and removed from open runs.\nNothing is posted to SAP — this only closes the portal record.`,
+          confirmText: 'Cancel Run', variant: 'danger',
+        });
+        if (!ok) return;
+
+        btn.disabled = true; btn.textContent = 'Cancelling…';
+        const msg = document.getElementById('or-msg');
+        try {
+          await api(`/open-runs/${btn.dataset.pc}/${btn.dataset.rid}/cancel`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+          });
+          if (msg) { msg.style.color = 'var(--accent)'; msg.textContent = `✓ ${btn.dataset.ref} cancelled.`; }
+          runOpenRuns();
+        } catch (err) {
+          if (msg) { msg.style.color = 'var(--error)'; msg.textContent = err.message; }
+          btn.disabled = false; btn.textContent = 'Cancel Run';
+        }
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
 }
 
 async function runFailedBackflush() {

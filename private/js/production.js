@@ -163,7 +163,7 @@ async function loadTable(tableName, pkCol, filter = null) {
     // Render table with per-column filter inputs
     document.getElementById('data-panel').innerHTML = buildTableHTML(records, 'main-dt', true);
     activeDT = new DataTable('#main-dt', {
-      pageLength:    10,
+      pageLength:    20,
       scrollX:       true,
       orderCellsTop: true,
       initComplete:  function () {
@@ -275,7 +275,7 @@ async function openDrilldown() {
 
   results.forEach(({ rel, data }) => {
     if (data.recordset && data.recordset.length > 0) {
-      try { new DataTable(`#dd-${rel.table}`, { pageLength: 10, scrollX: true }); } catch (_) {}
+      try { new DataTable(`#dd-${rel.table}`, { pageLength: 20, scrollX: true }); } catch (_) {}
     }
   });
 }
@@ -747,7 +747,7 @@ function renderReport(rows, meta, dateFrom, dateTo, chartRows, chartRows1, chart
 
     // Init filterable DataTable
     reportDT = new DataTable('#rpt-dt', {
-      pageLength:    10,
+      pageLength:    20,
       scrollX:       true,
       orderCellsTop: true,
       initComplete:  function () {
@@ -792,7 +792,7 @@ function renderReport(rows, meta, dateFrom, dateTo, chartRows, chartRows1, chart
       </div>`;
 
     reportDT = new DataTable('#rpt-dt', {
-      pageLength:   10,
+      pageLength:   20,
       scrollX:      true,
       orderCellsTop: true,
       initComplete: function () {
@@ -830,7 +830,7 @@ function renderReport(rows, meta, dateFrom, dateTo, chartRows, chartRows1, chart
           </tbody>
         </table>
       </div>`;
-    reportDT = new DataTable('#rpt-dt', { pageLength: 10, scrollX: true });
+    reportDT = new DataTable('#rpt-dt', { pageLength: 20, scrollX: true });
     return;
   }
 
@@ -954,7 +954,7 @@ function renderReport(rows, meta, dateFrom, dateTo, chartRows, chartRows1, chart
         },
       },
     });
-    reportDT = new DataTable('#rpt-dt', { pageLength: 10, scrollX: true });
+    reportDT = new DataTable('#rpt-dt', { pageLength: 20, scrollX: true });
     return;
   }
 }

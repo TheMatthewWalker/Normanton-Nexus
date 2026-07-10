@@ -82,9 +82,14 @@ async function syncTurnsValClass(rows) {
   const runId = await db.startRefresh('TurnsValClass');
 
   try {
-    await db.replaceTurnsValClassSnapshot(rows);
-    await db.completeRefresh(runId, rows.length);
-    return { name: 'TurnsValClass', status: 'success', rowCount: rows.length };
+    // Dedupe/aggregate here (not just inside replaceTurnsValClassSnapshot) so the
+    // rowCount reported below reflects actual Material+Plant rows stored, not the
+    // raw SAP row count (which is inflated for split-valuated materials — see
+    // dedupeTurnsValClassRows in performancesql.js for why duplicates occur).
+    const deduped = db.dedupeTurnsValClassRows(rows);
+    await db.replaceTurnsValClassSnapshot(deduped);
+    await db.completeRefresh(runId, deduped.length);
+    return { name: 'TurnsValClass', status: 'success', rowCount: deduped.length };
   } catch (err) {
     await db.failRefresh(runId, err.message);
     return { name: 'TurnsValClass', status: 'failed', error: err.message };

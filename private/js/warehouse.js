@@ -365,7 +365,7 @@ function renderResultTable(records, columns) {
     </table>`;
 
   activeDT = new DataTable('#sap-dt', {
-    pageLength:    10,
+    pageLength:    20,
     scrollX:       true,
     orderCellsTop: true,
     layout:        { padding: { bottom: 12 } },

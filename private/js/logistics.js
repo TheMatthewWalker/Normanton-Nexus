@@ -3417,13 +3417,20 @@ async function runTurnsValClassTable() {
         </select>`)
       .join(' ');
 
+    // Sorted once up front (highest stock value first) — no DataTables dependency;
+    // filtering below just toggles row visibility, matching every other filtered
+    // list in this app (e.g. Unprocessed Freight Costs, Change Valuation Class search).
+    const sorted = [...rows].sort((a, b) => (Number(b.stockValue) || 0) - (Number(a.stockValue) || 0));
+
     const thead = `<tr>${COLS.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr>`;
-    const tbody = rows.map(r => `<tr>${COLS.map(c => `<td>${c.render ? c.render(r[c.key]) : esc(r[c.key] ?? '—')}</td>`).join('')}</tr>`).join('');
+    const tbody = sorted.map(r => `<tr>${COLS.map((c, idx) => `<td data-col-idx="${idx}">${c.render ? c.render(r[c.key]) : esc(r[c.key] ?? '—')}</td>`).join('')}</tr>`).join('');
 
     body.innerHTML = `
       <div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
         <span style="font-size:12px;color:var(--text-muted);font-weight:600">Filter:</span>
+        <input class="tf-input tvc-search" id="tvc-search" type="text" placeholder="Search material or description…" style="max-width:220px;display:inline-block;width:auto">
         ${filterBar}
+        <span id="tvc-visible-count" style="font-size:12px;color:var(--text-muted);margin-left:auto"></span>
       </div>
       <div style="overflow-x:auto">
         <table id="tvc-table" class="pn-batch-table" style="width:100%">
@@ -3432,20 +3439,31 @@ async function runTurnsValClassTable() {
         </table>
       </div>`;
 
-    activeDT = $('#tvc-table').DataTable({
-      pageLength: 25,
-      lengthMenu: [10, 25, 50, 100, -1],
-      order: [[7, 'desc']],
-    });
+    const tbodyEl = document.querySelector('#tvc-table tbody');
+    const allTrs  = [...tbodyEl.querySelectorAll('tr')];
 
-    document.querySelectorAll('.tvc-filter').forEach(sel => {
-      sel.addEventListener('change', () => {
-        const idx = Number(sel.dataset.colIdx);
-        const val = sel.value;
-        const search = val ? `^${$.fn.dataTable.util.escapeRegex(val)}$` : '';
-        activeDT.column(idx).search(search, true, false).draw();
+    function tvcApplyFilters() {
+      const searchVal = document.getElementById('tvc-search').value.trim().toLowerCase();
+      const active = [...document.querySelectorAll('.tvc-filter')]
+        .map(sel => ({ idx: Number(sel.dataset.colIdx), val: sel.value }))
+        .filter(f => f.val);
+
+      let visible = 0;
+      allTrs.forEach(tr => {
+        const matchesFilters = active.every(f => tr.children[f.idx]?.textContent === f.val);
+        const matchesSearch  = !searchVal || tr.textContent.toLowerCase().includes(searchVal);
+        const show = matchesFilters && matchesSearch;
+        tr.style.display = show ? '' : 'none';
+        if (show) visible++;
       });
-    });
+
+      document.getElementById('tvc-visible-count').textContent = `${visible} of ${allTrs.length} shown`;
+    }
+
+    tvcApplyFilters();
+
+    document.getElementById('tvc-search').addEventListener('input', tvcApplyFilters);
+    document.querySelectorAll('.tvc-filter').forEach(sel => sel.addEventListener('change', tvcApplyFilters));
 
   } catch (err) {
     body.innerHTML = `<div class="sap-error">Error loading stock turns data: ${esc(err.message)}</div>`;
@@ -3872,17 +3890,42 @@ async function shfSearchMaterials() {
     const rows = json.data.slice(0, 30);
     if (!rows.length) { picker.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
 
-    picker.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px">
-      ${rows.map(r => `
-        <button type="button" class="shf-pick" data-material="${esc(r.material)}" data-desc="${esc(r.materialText || '')}"
-          style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text)">
-          <strong style="font-family:'JetBrains Mono',monospace">${esc(r.material)}</strong>${r.materialText ? ` — ${esc(r.materialText)}` : ''}
-        </button>`).join('')}
-    </div>`;
+    picker.innerHTML = `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+        ${rows.length} material${rows.length !== 1 ? 's' : ''} found — click a row to load its chart (showing the first below):
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr><th>Material</th><th>Description</th></tr></thead>
+          <tbody>
+            ${rows.map((r, i) => `
+              <tr class="pn-row shf-pick" style="cursor:pointer" data-idx="${i}"
+                  data-material="${esc(r.material)}" data-desc="${esc(r.materialText || '')}">
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.material)}</td>
+                <td>${esc(r.materialText || '—')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
 
-    picker.querySelectorAll('.shf-pick').forEach(btn => {
-      btn.addEventListener('click', () => shfLoadChart(btn.dataset.material, `${btn.dataset.material}${btn.dataset.desc ? ' — ' + btn.dataset.desc : ''}`));
+    const pickRows = picker.querySelectorAll('.shf-pick');
+    const setActive = tr => {
+      pickRows.forEach(r => { r.style.background = ''; r.style.fontWeight = ''; });
+      tr.style.background = 'var(--surface2)';
+      tr.style.fontWeight = '600';
+    };
+
+    pickRows.forEach(tr => {
+      tr.addEventListener('click', () => {
+        setActive(tr);
+        shfLoadChart(tr.dataset.material, `${tr.dataset.material}${tr.dataset.desc ? ' — ' + tr.dataset.desc : ''}`);
+      });
     });
+
+    // Load the first match immediately so a click isn't required for the common case.
+    if (pickRows[0]) setActive(pickRows[0]);
+    const first = rows[0];
+    shfLoadChart(first.material, `${first.material}${first.materialText ? ' — ' + first.materialText : ''}`);
 
   } catch (err) {
     picker.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
@@ -3920,7 +3963,36 @@ async function shfLoadChart(material, title) {
 
     titleEl.textContent = title;
 
-    const labels = Array.from({ length: 13 }, (_, i) => i === 12 ? 'Current' : `M-${12 - i}`);
+    // MVER (consumption history) is only populated in SAP when a material's
+    // "consumption values" indicator is switched on — plenty of materials
+    // legitimately have none, even when the forecast (live requirements) does.
+    // Flag it explicitly rather than showing a silent flat line at zero.
+    const noHistory = history.every(v => !v);
+    let noteEl = document.getElementById('shf-history-note');
+    if (!noteEl) {
+      noteEl = document.createElement('div');
+      noteEl.id = 'shf-history-note';
+      noteEl.style.cssText = 'font-size:12px;color:var(--text-muted);margin-top:8px';
+      titleEl.parentElement.appendChild(noteEl);
+    }
+    noteEl.textContent = noHistory
+      ? 'No consumption history recorded in SAP (MVER) for this selection — the material\'s consumption-values indicator may not be maintained, or it genuinely has no consumption yet.'
+      : '';
+
+    // history[0..12] runs M-12 -> Current; forecast[0..12] runs Current -> M+12
+    // (see BuildConsumptionHistoryRequest/ParseDemandForecastRows in PerformanceHelpers.cs —
+    // the two arrays share "Current" at opposite ends, not the same position). Plotting both
+    // against one 13-point past-facing label set made the forecast line render backwards
+    // (its Current-month value landing under the "M-12" label). Instead build one continuous
+    // 25-point timeline and pad each series with nulls on the side it doesn't cover, so the
+    // lines visually join at "Current" and the forecast correctly extends into the future.
+    const labels = [
+      ...Array.from({ length: 12 }, (_, i) => `M-${12 - i}`),
+      'Current',
+      ...Array.from({ length: 12 }, (_, i) => `M+${i + 1}`),
+    ];
+    const historySeries  = [...history, ...Array(12).fill(null)];
+    const forecastSeries = [...Array(12).fill(null), ...forecast];
 
     let canvas = document.getElementById('shf-chart');
     if (!canvas) {
@@ -3935,8 +4007,8 @@ async function shfLoadChart(material, title) {
       data: {
         labels,
         datasets: [
-          { label: 'Consumption History', data: history, borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#0891B2' },
-          { label: 'Demand Forecast', data: forecast, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4] },
+          { label: 'Consumption History', data: historySeries, borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#0891B2', spanGaps: false },
+          { label: 'Demand Forecast', data: forecastSeries, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4], spanGaps: false },
         ],
       },
       options: {
