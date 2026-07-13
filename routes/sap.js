@@ -557,6 +557,36 @@ router.post('/kna1', async (req, res) => {
 
 
 // ---------------------------------------------------------------------------
+// POST /api/sap/picksheet-stock
+// Warehouse picksheet stock lookup: LQUA + ZPRODBATCH batches for a given
+// material list, including any delivery a batch is already tagged against
+// (ZPRODBATCH~VBELN) — used by the pallet builder to show what's physically
+// available for a picksheet's required materials.
+// ---------------------------------------------------------------------------
+router.post('/picksheet-stock', async (req, res) => {
+    const { materials } = req.body;
+    if (!Array.isArray(materials) || !materials.length)
+        return res.status(400).json({ success: false, error: 'materials array is required.' });
+    try {
+        const response = await axios.post(
+            `${sapConfig.url}/api/warehouse/picksheet-stock`,
+            { materials },
+            { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Picksheet stock query (${materials.length} materials)`), req);
+        res.json({ success: true, data: body.data });
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Picksheet stock query failed', message), req);
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
 // GET /api/sap/availability
 // Lightweight reachability check — any HTTP response means the server is up.
 // ---------------------------------------------------------------------------

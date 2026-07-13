@@ -836,7 +836,7 @@ body::before {
   border: 1px solid var(--border);
   border-radius: 14px;
   box-shadow: 0 24px 80px rgba(15,25,45,0.45);
-  width: 100%; max-width: 960px;
+  width: 100%; max-width: 1280px;
   max-height: 90vh;
   display: flex; flex-direction: column;
   animation: fadeUp 0.2s ease both;
@@ -863,6 +863,110 @@ body::before {
 .pb-close:hover { color: var(--error); }
 
 .pb-body { flex: 1; overflow: auto; padding: 24px; }
+
+/* ── MERGED LAYOUT: stock panel (left) + pallet builder (right) ─────────── */
+/* Wraps phase 1 and phase 2 alike — see renderStockPanel()/renderBuilderPhase1()/
+   renderBuilderPhase2() in warehouse.js. Left column shows what's required for
+   this picksheet and where it physically is (SAP LIPS + LQUA/ZPRODBATCH); right
+   column is the existing pallet-type / package builder, unchanged in behaviour. */
+.pb-merged {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+.pb-main { min-width: 0; }
+
+.pb-stock-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  position: sticky; top: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.pb-stock-list {
+  display: flex; flex-direction: column; gap: 14px;
+}
+.pb-stock-material {
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.pb-stock-material-hdr {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; margin-bottom: 8px;
+}
+.pb-stock-material-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 700; color: var(--text);
+}
+.pb-stock-material-req {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  white-space: nowrap;
+}
+.pb-stock-batches {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.pb-stock-batch {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.pb-stock-batch--restricted {
+  opacity: 0.55;
+}
+.pb-stock-batch-no {
+  font-weight: 700; color: var(--text);
+  flex-shrink: 0;
+}
+.pb-stock-batch-bin {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pb-stock-batch-qty {
+  color: var(--accent); font-weight: 600; flex-shrink: 0;
+}
+.pb-stock-add {
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--accent);
+  background: rgba(124,58,237,0.1);
+  color: var(--accent);
+  font-size: 13px; font-weight: 700;
+  line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.pb-stock-add:hover { background: rgba(124,58,237,0.22); }
+.pb-stock-restricted-tag {
+  flex-shrink: 0;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--error);
+  border: 1px solid var(--error);
+  border-radius: 5px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.pb-stock-nobatch {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  padding: 4px 0;
+}
+.pb-stock-error, .pb-stock-empty {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  padding: 8px 0;
+}
+.pb-stock-error { color: var(--error); }
 
 /* ── PHASE 1: Pallet type selection ──────────────────────────────────────── */
 .pb-phase1 { max-width: 720px; }

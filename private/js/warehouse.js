@@ -221,15 +221,15 @@ async function runStockTransfer(params) {
   const resultEl = document.getElementById('tf-result');
   const isConsignment = params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA';
 
-  try 
+  try
   {
     var res;
     if (params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA') // Consignment stock to production bin requires different RFC
     {
       res = await fetch('/api/sap/warehouse/consignment-mb1b', {
         method:  'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
+        headers: {
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           'DeliveryNote': '',
@@ -249,8 +249,8 @@ async function runStockTransfer(params) {
     {
       res = await fetch('/api/sap/warehouse/transfer-order', {
         method:  'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
+        headers: {
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify(params),
       });
@@ -403,7 +403,7 @@ function renderResultTable(records, columns) {
 
   ctxTransfer.onclick = () => {
     ctxMenu.classList.add('hidden');
-    if (ctxRowData) 
+    if (ctxRowData)
         showTransferFormFromRow(ctxRowData);
   };
 
@@ -843,7 +843,9 @@ async function openPalletBuilder() {
          packagingWeight: 0,
          phase: 1, palletId: null, palletType: null,
          palletTypeData: null, allPalletTypes: [],
-         allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
+         allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
+         requiredMaterials: [], stockError: null,
+         pendingSapMaterial: null, pendingSapDeliveryItem: null };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -862,15 +864,32 @@ async function openPalletBuilder() {
     </div>`;
 
   try {
-    const [ptRes, pkRes] = await Promise.all([
+    const [ptRes, pkRes, stockRes] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
+      fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
+        .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
     ]);
     pb.allPalletTypes = ptRes.data || ptRes;
     pb.allPackaging   = pkRes.data || pkRes;
+    applyStockResult(stockRes);
     renderBuilderPhase1();
   } catch (err) {
     document.getElementById('pb-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+// Shared by openPalletBuilder / openPalletBuilderOnExisting — stores the
+// picksheet-materials result (or its failure) on pb without ever blocking
+// the builder itself; SAP being briefly unreachable shouldn't stop someone
+// building a pallet, it just means the left-hand stock panel shows an error.
+function applyStockResult(stockRes) {
+  if (stockRes && stockRes.success) {
+    pb.requiredMaterials = stockRes.data?.materials || [];
+    pb.stockError = null;
+  } else {
+    pb.requiredMaterials = [];
+    pb.stockError = stockRes?.error || 'Failed to load required materials from SAP.';
   }
 }
 
@@ -883,7 +902,9 @@ async function openPalletBuilderOnExisting(palletId) {
          packagingWeight: 0,
          phase: 2, palletId, palletType: null,
          palletTypeData: null, allPalletTypes: [],
-         allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1 };
+         allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
+         requiredMaterials: [], stockError: null,
+         pendingSapMaterial: null, pendingSapDeliveryItem: null };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -902,16 +923,19 @@ async function openPalletBuilderOnExisting(palletId) {
     </div>`;
 
   try {
-    const [ptRes, pkRes, palRes, pkgsRes, valRes] = await Promise.all([
+    const [ptRes, pkRes, palRes, pkgsRes, valRes, stockRes] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
       fetch(`/api/palletmain/id/${palletId}`).then(r => r.json()),
       fetch(`/api/palletpackages/pallet/${palletId}`).then(r => r.json()),
       fetch('/api/palletvalidation').then(r => r.json()),
+      fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
+        .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
     ]);
 
     pb.allPalletTypes = ptRes.data || ptRes;
     pb.allPackaging   = pkRes.data || pkRes;
+    applyStockResult(stockRes);
 
     const palletRecord = (palRes.data || palRes)[0];
     if (palletRecord) {
@@ -936,6 +960,99 @@ async function openPalletBuilderOnExisting(palletId) {
   }
 }
 
+// ── Stock panel (left column) — required materials + available batches ──────
+// Sourced from GET /api/deliverymain/:id/picksheet-materials, which orchestrates
+// SAP LIPS (required materials) → LQUA+ZPRODBATCH (batches) → LIKP (customer
+// conflict check) — see routes/deliverymain.js for the full chain. A batch
+// already allocated to a different customer's delivery is shown greyed out
+// with a "restricted" tag instead of an Add button.
+function renderStockPanel() {
+  if (pb.stockError) {
+    return `<div class="pb-stock-panel">
+      <div class="pb-section-label">Required Materials &amp; Stock</div>
+      <div class="pb-stock-error">✕ ${esc(pb.stockError)}</div>
+    </div>`;
+  }
+
+  if (!pb.requiredMaterials || !pb.requiredMaterials.length) {
+    return `<div class="pb-stock-panel">
+      <div class="pb-section-label">Required Materials &amp; Stock</div>
+      <div class="pb-stock-empty">No SAP line items found for this delivery.</div>
+    </div>`;
+  }
+
+  const showAddBtn = pb.phase === 2;
+
+  const groups = pb.requiredMaterials.map(m => {
+    const batchRows = (m.batches || []).length ? m.batches.map(b => {
+      const restrictedCls = b.allowed ? '' : ' pb-stock-batch--restricted';
+      const action = b.allowed
+        ? (showAddBtn
+            ? `<button type="button" class="pb-stock-add" title="Add this batch"
+                 onclick="addPackageFromFoundBatch('${escJs(m.material)}','${escJs(b.batch)}','${escJs(m.deliveryItem || '')}')">+</button>`
+            : '')
+        : `<span class="pb-stock-restricted-tag" title="${esc(b.reason || 'Allocated elsewhere')}">restricted</span>`;
+      return `<div class="pb-stock-batch${restrictedCls}">
+        <span class="pb-stock-batch-no">${esc(b.batch || '—')}</span>
+        <span class="pb-stock-batch-bin">${esc(b.storageType || '')} ${esc(b.bin || '')}</span>
+        <span class="pb-stock-batch-qty">${Number(b.availableQty || 0).toFixed(0)}</span>
+        ${action}
+      </div>`;
+    }).join('') : `<div class="pb-stock-nobatch">No stock found</div>`;
+
+    return `<div class="pb-stock-material">
+      <div class="pb-stock-material-hdr">
+        <span class="pb-stock-material-code">${esc(m.material)}</span>
+        <span class="pb-stock-material-req">req. ${Number(m.requiredQty || 0).toFixed(0)}</span>
+      </div>
+      <div class="pb-stock-batches">${batchRows}</div>
+    </div>`;
+  }).join('');
+
+  return `<div class="pb-stock-panel">
+    <div class="pb-section-label">Required Materials &amp; Stock</div>
+    <div class="pb-stock-list">${groups}</div>
+  </div>`;
+}
+
+// Click handler for a found batch's "+" button — fills the batch field and
+// adds it immediately, same as scanning it in. Also works as the "scan"
+// half of the feature: typing/scanning a batch that matches one listed here
+// (see wireBatchScanInput) sets the same pending fields before Add fires.
+function addPackageFromFoundBatch(material, batch, deliveryItem) {
+  const batchInput = document.getElementById('pb-batch');
+  if (!batchInput) return;
+  batchInput.value = batch;
+  pb.pendingSapMaterial     = material;
+  pb.pendingSapDeliveryItem = deliveryItem || null;
+  addPackage();
+}
+
+// Enter/scan support on the batch field — a barcode scanner types the value
+// then sends Enter, which previously did nothing (the operator had to click
+// "+ Add Package" manually every time). Also auto-matches whatever's typed
+// against the found-batches list so a scanned batch carries its SAP material
+// through to the package record, same as clicking "+" on the left panel.
+function wireBatchScanInput() {
+  const input = document.getElementById('pb-batch');
+  if (!input) return;
+
+  input.addEventListener('input', () => {
+    const val = input.value.trim().toUpperCase();
+    let match = null;
+    for (const m of (pb.requiredMaterials || [])) {
+      const hit = (m.batches || []).find(b => b.allowed && (b.batch || '').toUpperCase() === val);
+      if (hit) { match = { material: m.material, deliveryItem: m.deliveryItem }; break; }
+    }
+    pb.pendingSapMaterial     = match?.material || null;
+    pb.pendingSapDeliveryItem = match?.deliveryItem || null;
+  });
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); addPackage(); }
+  });
+}
+
 // ── Builder Phase 1: create pallet ───────────────────────────────────────────
 function renderBuilderPhase1() {
   const typeCards = pb.allPalletTypes.map(t => {
@@ -950,25 +1067,30 @@ function renderBuilderPhase1() {
   }).join('');
 
   document.getElementById('pb-body').innerHTML = `
-    <div class="pb-phase1">
-      <div class="pb-section-label">Select Pallet Type</div>
-      <div class="pb-type-grid">
-        ${typeCards || '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">No pallet types configured yet.</div>'}
-      </div>
+    <div class="pb-merged">
+      ${renderStockPanel()}
+      <div class="pb-main">
+        <div class="pb-phase1">
+          <div class="pb-section-label">Select Pallet Type</div>
+          <div class="pb-type-grid">
+            ${typeCards || '<div style="color:var(--text-muted);font-size:13px;padding:16px 0">No pallet types configured yet.</div>'}
+          </div>
 
-      <div class="pb-row" style="margin-top:8px">
-        <div class="pb-field">
-          <label class="pb-label">Location <span style="opacity:.5;font-weight:400">(optional — required before finishing)</span></label>
-          <input class="pb-input" id="pb-location" type="text" maxlength="50"
-            placeholder="e.g. WH-A1" autocomplete="off">
+          <div class="pb-row" style="margin-top:8px">
+            <div class="pb-field">
+              <label class="pb-label">Location <span style="opacity:.5;font-weight:400">(optional — required before finishing)</span></label>
+              <input class="pb-input" id="pb-location" type="text" maxlength="50"
+                placeholder="e.g. WH-A1" autocomplete="off">
+            </div>
+          </div>
+
+          <div class="pb-actions">
+            <button class="btn-secondary" onclick="closePalletBuilder()">Cancel</button>
+            <button class="btn-submit" id="pb-create-btn" disabled onclick="createPallet()">
+              Create Pallet →
+            </button>
+          </div>
         </div>
-      </div>
-
-      <div class="pb-actions">
-        <button class="btn-secondary" onclick="closePalletBuilder()">Cancel</button>
-        <button class="btn-submit" id="pb-create-btn" disabled onclick="createPallet()">
-          Create Pallet →
-        </button>
       </div>
     </div>`;
 }
@@ -1074,6 +1196,9 @@ function renderBuilderPhase2() {
   const locRequired  = !pb.palletLocation;
 
   document.getElementById('pb-body').innerHTML = `
+    <div class="pb-merged">
+      ${renderStockPanel()}
+      <div class="pb-main">
     <div class="pb-phase2">
 
       <!-- LEFT: running pallet card -->
@@ -1190,7 +1315,11 @@ function renderBuilderPhase2() {
         </div>
       </div>`}
 
+    </div>
+      </div>
     </div>`;
+
+  wireBatchScanInput();
 
   if (hasPackaging) {
     // Show/hide custom dimension inputs when packaging type changes
@@ -1281,6 +1410,8 @@ async function addPackage() {
         sapBatch:    batch || null,
         sapDelivery: String(pb.deliveryId),
         sapCustomer: pb.customerId ? String(pb.customerId) : null,
+        sapMaterial:     pb.pendingSapMaterial || null,
+        sapDeliveryItem: pb.pendingSapDeliveryItem || null,
         scanTime:    new Date().toISOString(),
       }),
     });
@@ -1312,6 +1443,8 @@ async function addPackage() {
 
     document.getElementById('pb-batch').value = '';
     document.getElementById('pb-layer').value = pb.nextLayer;
+    pb.pendingSapMaterial     = null;
+    pb.pendingSapDeliveryItem = null;
     if (usingCustom) {
       ['pb-dim-l','pb-dim-w','pb-dim-h'].forEach(id => {
         const el = document.getElementById(id);
@@ -1966,4 +2099,15 @@ function esc(str) {
   return String(str)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Escapes a value for safe embedding inside a single-quoted JS string literal
+// within an inline onclick="..." HTML attribute (e.g. addPackageFromFoundBatch
+// calls in renderStockPanel). Distinct from esc(), which only escapes for HTML
+// text/attribute context, not for the JS string embedded inside it.
+function escJs(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

@@ -199,6 +199,107 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
 });
 
 
+// ── Picksheet materials + available stock (SAP-backed) ─────────────────────
+// Orchestrates: LIPS (materials required for this delivery) → picksheet-stock
+// (LQUA+ZPRODBATCH batches for those materials) → LIKP (customer on any
+// delivery a batch is already tagged against). This is the Node-side
+// equivalent of the old Excel staging-tab macro (Get_LIPS_sap_rt_2L /
+// get_lqua / Z_BATCH_INFO_GET), reusing the existing LIPS/LIKP endpoints
+// already proven out by the customs feature. One deliberate deviation from
+// the VBA: a batch already allocated to another delivery is excluded by
+// directly comparing that delivery's own customer (via LIKP~KUNNR) against
+// this picksheet's customer, rather than the VBA's fragile string-position
+// hack on a constructed label.
+router.get('/:deliveryId/picksheet-materials', async (req, res) => {
+    try {
+        const deliveryId = req.params.deliveryId;
+        const pool = await getPool();
+
+        const dmRes = await pool.request()
+            .input('deliveryId', sql.BigInt, deliveryId)
+            .query('SELECT customerID FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId');
+        const customerId = dmRes.recordset[0]?.customerID != null ? String(dmRes.recordset[0].customerID) : null;
+
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const headers = { 'Content-Type': 'application/json', ...(req.headers.cookie ? { Cookie: req.headers.cookie } : {}) };
+        const sapPost = (path, body) => fetch(`${baseUrl}${path}`, { method: 'POST', headers, body: JSON.stringify(body) }).then(r => r.json());
+        const unwrap  = body => Array.isArray(body) ? body : (body?.success && Array.isArray(body.data) ? body.data : []);
+        // SAP returns delivery numbers zero-padded to 10 digits (VBELN); the
+        // portal stores/sends them unpadded — strip leading zeros so the two
+        // can be compared directly.
+        const norm = v => String(v || '').trim().replace(/^0+(?=\d)/, '');
+
+        // 1. What material(s) and quantity does this delivery need?
+        const lipsBody = await sapPost('/api/sap/lips', { deliveries: [String(deliveryId)] });
+        if (lipsBody?.success === false) throw new Error(lipsBody.error || 'SAP LIPS query failed');
+        const lipsRows = unwrap(lipsBody);
+
+        const materials = [...new Set(lipsRows.map(r => String(r.materialNumber || '').trim()).filter(Boolean))];
+        if (!materials.length) {
+            return res.json({ success: true, data: { customerId, materials: [] } });
+        }
+
+        // 2. Where is that material physically sitting, and is any of it
+        //    already tagged against another delivery (ZPRODBATCH~VBELN)?
+        const stockBody = await sapPost('/api/sap/picksheet-stock', { materials });
+        if (stockBody?.success === false) throw new Error(stockBody.error || 'SAP stock query failed');
+        const batchRows = unwrap(stockBody);
+
+        // 3. For any batch allocated elsewhere, whose customer is that delivery?
+        const conflictDeliveries = [...new Set(
+            batchRows.map(b => norm(b.allocatedDelivery)).filter(v => v && v !== norm(deliveryId))
+        )];
+
+        const customerByDelivery = {};
+        if (conflictDeliveries.length) {
+            const likpBody = await sapPost('/api/sap/likp', { deliveries: conflictDeliveries });
+            if (likpBody?.success !== false) {
+                unwrap(likpBody).forEach(r => { customerByDelivery[norm(r.deliveryNumber)] = norm(r.consigneeCode); });
+            }
+        }
+
+        // 4. Assemble: one entry per required material, with its found
+        //    batches flagged allowed/restricted.
+        const byMaterial = {};
+        lipsRows.forEach(r => {
+            const mat = String(r.materialNumber || '').trim();
+            if (!mat) return;
+            if (!byMaterial[mat]) byMaterial[mat] = { material: mat, requiredQty: 0, deliveryItem: r.itemNumber || null, batches: [] };
+            byMaterial[mat].requiredQty += Number(r.quantity || 0);
+        });
+
+        batchRows.forEach(b => {
+            const mat = String(b.material || '').trim();
+            if (!mat) return;
+            if (!byMaterial[mat]) byMaterial[mat] = { material: mat, requiredQty: 0, deliveryItem: null, batches: [] };
+
+            const allocDelivery        = norm(b.allocatedDelivery);
+            const isOwnOrUnassigned    = !allocDelivery || allocDelivery === norm(deliveryId);
+            const allocCustomer        = allocDelivery ? customerByDelivery[allocDelivery] : null;
+            const sameCustomer         = !allocCustomer || allocCustomer === norm(customerId);
+            const allowed              = isOwnOrUnassigned || sameCustomer;
+
+            byMaterial[mat].batches.push({
+                batch:              (b.batch || '').trim(),
+                storageType:        b.storageType,
+                bin:                b.bin,
+                totalQty:           Number(b.totalQty || 0),
+                availableQty:       Number(b.availableQty || 0),
+                stockCategory:      b.stockCategory,
+                packagingMaterial:  b.packagingMaterial,
+                allocatedDelivery:  isOwnOrUnassigned ? null : allocDelivery,
+                allowed,
+                reason: allowed ? null
+                    : `Already allocated to delivery ${allocDelivery}${allocCustomer ? ` (customer ${allocCustomer})` : ''}`,
+            });
+        });
+
+        res.json({ success: true, data: { customerId, materials: Object.values(byMaterial) } });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Pallets picked for a delivery (includes palletID for builder) ──
 router.get('/:deliveryId/pallets', async (req, res) => {
     try {
