@@ -24,21 +24,21 @@
 
     grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 12px;
 }
 .mgmt-kpis-6 {
 
     grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 12px;
 }
 .mgmt-kpis-2 {
 
     grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     gap: 12px;
 }
 
@@ -292,6 +292,159 @@
 }
 
 /* ==============================
+   ORDER BOOK — FULL BREAKDOWN MODAL
+   ============================== */
+
+.mgmt-section-title--flex {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mgmt-breakdown-btn {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 14px;
+  background: #ffffff;
+  border: 1.5px solid #DDE6F1;
+  border-radius: 7px;
+  color: #2563EB;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s;
+}
+
+.mgmt-breakdown-btn:hover {
+  background: #EFF6FF;
+  border-color: #2563EB;
+}
+
+.mgmt-breakdown-overlay {
+  z-index: 9500;
+}
+
+.mgmt-breakdown-modal {
+  background: #ffffff;
+  border: 1px solid #DDE6F1;
+  border-radius: 12px;
+  width: 92vw;
+  max-width: 1400px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.35);
+  overflow: hidden;
+}
+
+.mgmt-breakdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px;
+  border-bottom: 1px solid #DDE6F1;
+  flex-shrink: 0;
+}
+
+.mgmt-breakdown-header h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0F172A;
+  margin: 0;
+}
+
+.mgmt-breakdown-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  color: #64748B;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.mgmt-breakdown-close:hover {
+  color: #0F172A;
+  background: #F1F5F9;
+}
+
+.mgmt-breakdown-body {
+  overflow: auto;
+  padding: 8px 24px 24px;
+}
+
+.breakdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.breakdown-table th {
+  position: sticky;
+  top: 0;
+  background: #F8FAFC;
+  text-align: right;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748B;
+  padding: 8px 10px;
+  border-bottom: 2px solid #DDE6F1;
+  white-space: nowrap;
+}
+
+.breakdown-table th:first-child {
+  text-align: left;
+}
+
+.breakdown-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #EEF2F7;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.breakdown-table td:first-child {
+  text-align: left;
+  white-space: normal;
+}
+
+.breakdown-customer-row {
+  cursor: pointer;
+  background: #F8FAFC;
+  font-weight: 700;
+}
+
+.breakdown-customer-row:hover {
+  background: #EFF6FF;
+}
+
+.breakdown-order-row {
+  cursor: pointer;
+  background: #FCFDFE;
+  font-weight: 600;
+  color: #334155;
+}
+
+.breakdown-order-row:hover {
+  background: #F1F5F9;
+}
+
+.breakdown-order-row td:first-child {
+  padding-left: 28px;
+}
+
+.breakdown-material-row td {
+  color: #475569;
+}
+
+.breakdown-material-row td:first-child {
+  padding-left: 48px;
+}
+
+/* ==============================
    DETAILS
    ============================== */
 
@@ -325,10 +478,6 @@ details.mgmt-section summary::-webkit-details-marker {
     .tile-quarter,
     .tile-half {
         grid-column: span 12;
-    }
-
-    .mgmt-kpis {
-        grid-template-columns: repeat(3, 1fr);
     }
 
 }
@@ -418,4 +567,11 @@ details.mgmt-section:not([open]) {
   background: #E0E7FF;
 }
 
-.ord
+.orderbook-month {
+  padding-left: 28px !important;
+}
+
+.orderbook-grand-total {
+  background: #DBEAFE;
+  font-weight: 800;
+}

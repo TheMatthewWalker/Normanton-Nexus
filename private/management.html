@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -156,9 +156,10 @@
 
       <!-- ORDERBOOK -->
       <div class="mgmt-section tile-half">
-        <summary class="mgmt-section-title">
-          Order Book with Saleable Stock &amp; Picked Stock
-        </summary>
+        <div class="mgmt-section-title mgmt-section-title--flex">
+          <span>Order Book with Saleable Stock &amp; Picked Stock</span>
+          <button id="fullBreakdownBtn" class="mgmt-breakdown-btn">Full Breakdown</button>
+        </div>
         <div id="orderBookTable"></div>
       </div>
 
@@ -199,4 +200,35 @@
           </div>
 
           <div class="mgmt-chart">
-            <h4 class="mgmt-chart-title">PV Daily
+            <h4 class="mgmt-chart-title">PV Daily OTIF</h4>
+            <div id="pvOtifChart"></div>
+          </div>
+
+        </div>
+
+      </details>
+
+    </div>
+
+  </main>
+
+  <footer class="footer">
+    <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
+    <span class="footer-right">Management</span>
+  </footer>
+
+  <!-- ORDER BOOK FULL BREAKDOWN MODAL -->
+  <div id="breakdownOverlay" class="wc-overlay mgmt-breakdown-overlay" style="display:none;">
+    <div class="mgmt-breakdown-modal">
+      <div class="mgmt-breakdown-header">
+        <h3>Order Book &mdash; Full Breakdown</h3>
+        <button id="closeBreakdownBtn" class="mgmt-breakdown-close" aria-label="Close">&times;</button>
+      </div>
+      <div id="breakdownTableContainer" class="mgmt-breakdown-body"></div>
+    </div>
+  </div>
+
+  <script src="./js/management.js"></script>
+
+</body>
+</html>

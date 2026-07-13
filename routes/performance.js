@@ -21,7 +21,7 @@ router.post('/refresh', async (req, res) => {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
 });
- 
+
 router.get('/refresh-log', async (req, res) => {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
@@ -74,7 +74,7 @@ router.get('/refresh-status', async (req, res) => {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
 });
- 
+
 // ── Daily performance — the trend data ────────────────────────────────────
 // This is the table the eventual graphs/metrics views should query. Never query the
 // *Snapshot tables for trends — they only ever hold the latest pull.
@@ -177,6 +177,35 @@ router.get('/orderbook-summary', async (req, res, next) => {
         orders: Number(r.OrdersValue || 0),
         stock: Number(r.StockValue || 0),
         picked: Number(r.PickedValue || 0)
+      }))
+    });
+
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Order book full breakdown (Customer > Order > Material) ─────────────────
+router.get('/orderbook-breakdown', async (req, res, next) => {
+  try {
+    const rows = await db.getOrderBookBreakdown();
+
+    res.json({
+      success: true,
+      data: rows.map(r => ({
+        valueStream: r.ValueStream,
+        customer: r.Customer,
+        customerName: r.CustomerName || r.Customer,
+        referenceDocument: r.ReferenceDocument,
+        material: r.Material,
+        materialText: r.MaterialText,
+
+        orderQty: Number(r.OrderQty || 0),
+        orderValue: Number(r.OrderValue || 0),
+        stockQty: Number(r.StockQty || 0),
+        stockValue: Number(r.StockValue || 0),
+        pickedQty: Number(r.PickedQty || 0),
+        pickedValue: Number(r.PickedValue || 0)
       }))
     });
 

@@ -557,7 +557,6 @@ function renderTable(data) {
     `;
   }).join('');
 }
-``
 
 
 function formatNumber(n) {
@@ -847,6 +846,183 @@ function renderOrderBookTable(rows, ptfeInvoiced = 0) {
 }
 
 
+// ── ORDER BOOK: FULL BREAKDOWN MODAL ────────────────────────────────────────
+// Customer > Order (ReferenceDocument) > Material. Reuses the same
+// data-parent / .ob-hidden / toggleOrderBookGroup mechanism as the main
+// orderbook table above, just with two nested levels instead of one.
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function numberCell(value) {
+  return value
+    ? Math.round(value).toLocaleString('en-GB')
+    : '-';
+}
+
+function zeroBreakdownTotals() {
+  return {
+    orderQty: 0, orderValue: 0,
+    stockQty: 0, stockValue: 0,
+    pickedQty: 0, pickedValue: 0
+  };
+}
+
+function addBreakdownTotals(target, row) {
+  target.orderQty    += row.orderQty    || 0;
+  target.orderValue  += row.orderValue  || 0;
+  target.stockQty    += row.stockQty    || 0;
+  target.stockValue  += row.stockValue  || 0;
+  target.pickedQty   += row.pickedQty   || 0;
+  target.pickedValue += row.pickedValue || 0;
+}
+
+function breakdownTotalsCells(totals) {
+  return `
+    <td>${numberCell(totals.orderQty)}</td>
+    <td>${currencyCell(totals.orderValue)}</td>
+    <td>${numberCell(totals.stockQty)}</td>
+    <td>${currencyCell(totals.stockValue)}</td>
+    <td>${numberCell(totals.pickedQty)}</td>
+    <td>${currencyCell(totals.pickedValue)}</td>
+  `;
+}
+
+function renderBreakdownTable(rows) {
+  const container = document.getElementById('breakdownTableContainer');
+
+  if (!rows.length) {
+    container.innerHTML = '<p>No order book data available.</p>';
+    return;
+  }
+
+  // group: customer -> order (referenceDocument) -> material rows
+  const customers = {};
+
+  for (const row of rows) {
+    const custKey = row.customer || 'UNKNOWN';
+
+    customers[custKey] ??= {
+      customerName: row.customerName || custKey,
+      orders: {},
+      totals: zeroBreakdownTotals()
+    };
+
+    const cust = customers[custKey];
+    const ordKey = row.referenceDocument || 'UNKNOWN';
+
+    cust.orders[ordKey] ??= {
+      referenceDocument: ordKey,
+      materials: [],
+      totals: zeroBreakdownTotals()
+    };
+
+    const ord = cust.orders[ordKey];
+
+    ord.materials.push(row);
+    addBreakdownTotals(ord.totals, row);
+    addBreakdownTotals(cust.totals, row);
+  }
+
+  const custKeys = Object.keys(customers).sort((a, b) =>
+    customers[a].customerName.localeCompare(customers[b].customerName)
+  );
+
+  let html = `
+    <table class="breakdown-table">
+      <thead>
+        <tr>
+          <th>Customer / Order / Material</th>
+          <th>Order Qty</th>
+          <th>Order Value</th>
+          <th>Stock Qty</th>
+          <th>Stock Value</th>
+          <th>Picked Qty</th>
+          <th>Picked Value</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  custKeys.forEach((custKey, ci) => {
+    const cust = customers[custKey];
+    const custGroupId = `bcust-${ci}`;
+
+    html += `
+      <tr class="breakdown-customer-row" onclick="toggleOrderBookGroup('${custGroupId}')">
+        <td><span id="icon-${custGroupId}">▶</span> ${escapeHtml(cust.customerName)}</td>
+        ${breakdownTotalsCells(cust.totals)}
+      </tr>
+    `;
+
+    const ordKeys = Object.keys(cust.orders).sort();
+
+    ordKeys.forEach((ordKey, oi) => {
+      const ord = cust.orders[ordKey];
+      const ordGroupId = `bord-${ci}-${oi}`;
+
+      html += `
+        <tr
+          class="breakdown-order-row ob-hidden"
+          data-parent="${custGroupId}"
+          onclick="toggleOrderBookGroup('${ordGroupId}')">
+          <td><span id="icon-${ordGroupId}">▶</span> Order ${escapeHtml(ord.referenceDocument)}</td>
+          ${breakdownTotalsCells(ord.totals)}
+        </tr>
+      `;
+
+      ord.materials.forEach(mat => {
+        html += `
+          <tr class="breakdown-material-row ob-hidden" data-parent="${ordGroupId}">
+            <td>${escapeHtml(mat.materialText || mat.material)}</td>
+            <td>${numberCell(mat.orderQty)}</td>
+            <td>${currencyCell(mat.orderValue)}</td>
+            <td>${numberCell(mat.stockQty)}</td>
+            <td>${currencyCell(mat.stockValue)}</td>
+            <td>${numberCell(mat.pickedQty)}</td>
+            <td>${currencyCell(mat.pickedValue)}</td>
+          </tr>
+        `;
+      });
+    });
+  });
+
+  html += `
+      </tbody>
+    </table>
+  `;
+
+  container.innerHTML = html;
+}
+
+async function openBreakdownModal() {
+  const overlay = document.getElementById('breakdownOverlay');
+  const container = document.getElementById('breakdownTableContainer');
+
+  overlay.style.display = 'flex';
+  container.innerHTML = 'Loading…';
+
+  try {
+    const res = await fetch(BASE + '/orderbook-breakdown');
+    const json = await res.json();
+
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load breakdown');
+
+    renderBreakdownTable(json.data);
+  } catch (err) {
+    console.error(err);
+    container.innerHTML = '<p>Failed to load breakdown.</p>';
+  }
+}
+
+function closeBreakdownModal() {
+  document.getElementById('breakdownOverlay').style.display = 'none';
+}
+
+
 // ✅ MAIN RENDER
 function renderDashboard() {
   const valueData = filterData(rawValueData);
@@ -857,7 +1033,7 @@ function renderDashboard() {
 
   const ptfeOtif = filterByArea(otifData, 'PTFE');
   const pvOtif = filterByArea(otifData, 'PV');
-  
+
   const ptfeOtifCum = buildCumulativeOtifData(ptfeOtif);
   const pvOtifCum   = buildCumulativeOtifData(pvOtif);
 
@@ -875,4 +1051,26 @@ function renderDashboard() {
   //renderValueCumulativeChart('pvValueCumulativeChart', buildCumulativeValueData(pv), '#16A34A');
   renderExtendedChart('pvValueExtendedChart', buildExtendedValueData(pv), '#16A34A');
   renderOtifChart('pvOtifChart', pvOtif, '#16A34A');
-  renderOtifCumulativeChart
+  renderOtifCumulativeChart('pvOtifCumulativeChart', pvOtifCum, '#16A34A');
+}
+
+// ✅ INIT
+document.addEventListener('DOMContentLoaded', async () => {
+  setDefaultDates();
+  await loadData();
+});
+
+document.getElementById('refreshBtn').onclick = refreshData;
+document.getElementById('dateFrom').onchange = renderDashboard;
+document.getElementById('dateTo').onchange = renderDashboard;
+
+document.getElementById('fullBreakdownBtn').onclick = openBreakdownModal;
+document.getElementById('closeBreakdownBtn').onclick = closeBreakdownModal;
+
+document.getElementById('breakdownOverlay').addEventListener('click', e => {
+  if (e.target.id === 'breakdownOverlay') closeBreakdownModal();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeBreakdownModal();
+});
