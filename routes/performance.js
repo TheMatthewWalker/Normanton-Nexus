@@ -237,6 +237,20 @@ function isOnOrBeforeCurrentMonth(date) {
   return y < cy || (y === cy && m <= cm);
 }
 
+// 1-based column index -> Excel letter ('A', 'B', ..., 'Z', 'AA', ...).
+// Used to build cell references for the Stock/Picked Value formulas below —
+// computed from ws.getColumn(key).number rather than hardcoded, so the
+// formulas stay correct if the column order in ws.columns ever changes.
+function excelColumnLetter(n) {
+  let letter = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letter = String.fromCharCode(65 + rem) + letter;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letter;
+}
+
 // ── Order book full breakdown — Excel export ────────────────────────────────
 // ?mode=monthEnd applies the same on-or-before-current-month filter as the
 // Breakdown for Month End modal; otherwise exports the full unfiltered
@@ -289,7 +303,23 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       cell.border    = cellBorder;
     });
 
+    // Stock Value / Picked Value are written as live formulas, not static
+    // numbers — this file goes to planners who manually overwrite Stock Qty /
+    // Picked Qty with expected month-end figures that haven't landed in SAP
+    // yet, and the Value cells need to recalculate automatically as they type.
+    // Formula mirrors the SQL-side valuation exactly (see getOrderBookBreakdown
+    // in performancesql.js): qty * (OrderValue / OrderQty), guarded against
+    // OrderQty = 0.
+    const orderQtyCol    = excelColumnLetter(ws.getColumn('orderQty').number);
+    const orderValueCol  = excelColumnLetter(ws.getColumn('orderValue').number);
+    const stockQtyCol    = excelColumnLetter(ws.getColumn('stockQty').number);
+    const stockValueCol  = excelColumnLetter(ws.getColumn('stockValue').number);
+    const pickedQtyCol   = excelColumnLetter(ws.getColumn('pickedQty').number);
+    const pickedValueCol = excelColumnLetter(ws.getColumn('pickedValue').number);
+
     rows.forEach((r, i) => {
+      const excelRow = i + 2; // header occupies row 1
+
       const row = ws.addRow({
         valueStream: r.ValueStream,
         customer: r.Customer,
@@ -301,10 +331,18 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         orderQty: Number(r.OrderQty || 0),
         orderValue: Number(r.OrderValue || 0),
         stockQty: Number(r.StockQty || 0),
-        stockValue: Number(r.StockValue || 0),
-        pickedQty: Number(r.PickedQty || 0),
-        pickedValue: Number(r.PickedValue || 0)
+        pickedQty: Number(r.PickedQty || 0)
+        // stockValue / pickedValue set as formulas below instead of static values.
       });
+
+      row.getCell('stockValue').value = {
+        formula: `IF(${orderQtyCol}${excelRow}>0,${stockQtyCol}${excelRow}*(${orderValueCol}${excelRow}/${orderQtyCol}${excelRow}),0)`,
+        result: Number(r.StockValue || 0)
+      };
+      row.getCell('pickedValue').value = {
+        formula: `IF(${orderQtyCol}${excelRow}>0,${pickedQtyCol}${excelRow}*(${orderValueCol}${excelRow}/${orderQtyCol}${excelRow}),0)`,
+        result: Number(r.PickedValue || 0)
+      };
 
       const fill = i % 2 === 0 ? oddFill : evenFill;
       row.eachCell(cell => {
