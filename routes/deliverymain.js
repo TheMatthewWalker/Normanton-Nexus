@@ -451,9 +451,93 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
             return isNaN(date.getTime()) ? null : date;
         }
 
+        // ── Auto-create Destinations rows for customers SAP knows but we don't ──
+        // Rather than just flagging a brand-new customer as "missing" and requiring
+        // someone to add it by hand before the picksheet can sync, pull whatever
+        // KNA1 (customer master) has — name, address, transportation zone — and
+        // create the Destinations row automatically. Fields KNA1 doesn't carry
+        // (incoterms, comment, forwarder, delivery service, email) are left null
+        // for someone to fill in later. A KNA1 failure (SAP unreachable, customer
+        // genuinely doesn't exist in SAP either) just falls back to the old
+        // behaviour of reporting it under `missing`.
+        const autoCreated = [];
+        const missingCustomerIds = [...new Set(
+            deliveries
+                .map(d => parseInt(d.customerNumber, 10))
+                .filter(id => Number.isFinite(id) && !destMap[String(id)])
+        )];
+
+        if (missingCustomerIds.length) {
+            try {
+                const kna1Res = await axios.post(
+                    `${sapConfig.url}/api/customs/kna1`,
+                    { customers: missingCustomerIds.map(String) },
+                    { timeout: 30000, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+                );
+                const kna1Body = kna1Res.data;
+                const kna1Rows = kna1Body?.success === false ? [] : (kna1Body?.data ?? []);
+
+                for (const row of kna1Rows) {
+                    const custId = parseInt(row.customerCode, 10);
+                    if (!Number.isFinite(custId) || destMap[String(custId)]) continue;
+
+                    const name       = String(row.name ?? '').trim() || `Customer ${custId}`;
+                    const street     = String(row.street ?? '').trim() || null;
+                    const city       = String(row.city ?? '').trim() || null;
+                    const postCode   = String(row.postCode ?? '').trim() || null;
+                    const country    = String(row.destinationCountry ?? '').trim() || null;
+                    const zone       = String(row.transportZone ?? '').trim() || null;
+
+                    try {
+                        await pool.request()
+                            .input('destinationID',          sql.BigInt,   custId)
+                            .input('destinationName',        sql.NVarChar, name)
+                            .input('destinationStreet',      sql.NVarChar, street)
+                            .input('destinationCity',        sql.NVarChar, city)
+                            .input('destinationPostCode',    sql.NVarChar, postCode)
+                            .input('destinationCountry',     sql.NVarChar, country)
+                            .input('defaultIncoterms',       sql.NVarChar, null)
+                            .input('destinationComment',     sql.NVarChar, null)
+                            .input('destinationEmail',       sql.NVarChar, null)
+                            .input('destinationZone',        sql.NVarChar, zone)
+                            .input('defaultDeliveryService', sql.NVarChar, null)
+                            .input('defaultForwarder',       sql.NVarChar, null)
+                            .query(`INSERT INTO Logistics.dbo.Destinations
+                                        (destinationID, destinationName, destinationStreet, destinationCity,
+                                         destinationPostCode, destinationCountry, defaultIncoterms,
+                                         destinationComment, destinationEmail, destinationZone,
+                                         defaultDeliveryService, defaultForwarder)
+                                    SELECT @destinationID, @destinationName, @destinationStreet, @destinationCity,
+                                           @destinationPostCode, @destinationCountry, @defaultIncoterms,
+                                           @destinationComment, @destinationEmail, @destinationZone,
+                                           @defaultDeliveryService, @defaultForwarder
+                                    WHERE NOT EXISTS (
+                                        SELECT 1 FROM Logistics.dbo.Destinations WHERE destinationID = @destinationID
+                                    )`);
+
+                        // Feed straight back into destMap so this sync run picks the
+                        // delivery up immediately instead of needing a second sync.
+                        destMap[String(custId)] = {
+                            destinationID:          custId,
+                            defaultDeliveryService: null,
+                            destinationComment:     null,
+                            destinationCountry:     country,
+                        };
+                        autoCreated.push({ customerNumber: String(custId), destinationName: name, needsReview: !street || !city || !postCode || !country });
+                    } catch (err) {
+                        // Leave it unset — falls through to `missing` below like before
+                    }
+                }
+            } catch (err) {
+                // KNA1 lookup itself failed (SAP unreachable etc.) — every one of these
+                // customers just falls through to `missing` in the loop below, same as
+                // pre-auto-create behaviour.
+            }
+        }
+
         let inserted = 0, skipped = 0;
         const errors  = [];
-        const missing = []; // customerNumbers not found in Destinations
+        const missing = []; // customerNumbers still not found in Destinations after the KNA1 auto-create attempt above
 
         for (const d of deliveries) {
             try {
@@ -498,7 +582,7 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
             }
         }
 
-        res.json({ success: true, total: deliveries.length, inserted, skipped, errors, missing });
+        res.json({ success: true, total: deliveries.length, inserted, skipped, errors, missing, autoCreated });
 
     } catch (err) {
         if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
