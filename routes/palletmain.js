@@ -1,6 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import { sqlConfig } from '../config.js';
+import { reverseStagedPackage } from './sapStaging.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -105,7 +106,46 @@ router.patch('/:palletId', async (req, res) => {
             grossWeight, packagingWeight, palletVolume, palletRemoved,
             palletType, palletLength, palletWidth, palletHeight } = req.body;
     try {
-        const pool    = await getPool();
+        const pool = await getPool();
+
+        // Deleting a pallet must also reverse every SAP transfer order it
+        // staged — otherwise the pallet disappears from the app while its
+        // batches are still sitting in the picksheet's 916 bin, blocking
+        // that stock for every other delivery. There's no atomic multi-call
+        // SAP transaction available here, so each package is reversed
+        // independently; if any of them fail, the pallet is NOT marked
+        // removed, so it stays visible (with whatever did reverse already
+        // reversed) and the operator can see exactly what's still stuck.
+        if (palletRemoved) {
+            const pkgsRes = await pool.request()
+                .input('palletId', sql.Int, req.params.palletId)
+                .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
+                               sapSourceStorageType, sapSourceBin
+                        FROM   Logistics.dbo.PalletPackages
+                        WHERE  palletID = @palletId`);
+
+            const failures = [];
+            for (const pkg of pkgsRes.recordset) {
+                const reversal = await reverseStagedPackage(pkg);
+                if (reversal.attempted && !reversal.success) {
+                    failures.push({
+                        palletItemID: pkg.palletItemID,
+                        sapMaterial: pkg.sapMaterial,
+                        sapBatch: pkg.sapBatch,
+                        error: reversal.error,
+                    });
+                }
+            }
+
+            if (failures.length) {
+                return res.status(422).json({
+                    success: false,
+                    error: `Could not reverse SAP staging for ${failures.length} package(s) — pallet not removed.`,
+                    failures,
+                });
+            }
+        }
+
         const request = pool.request().input('palletId', sql.Int, req.params.palletId);
         const sets    = [];
 

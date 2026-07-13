@@ -1,8 +1,7 @@
 import express from 'express';
 import sql     from 'mssql';
-import axios   from 'axios';
-import { sqlConfig, sapConfig } from '../config.js';
-import { makeSapToken, sapAgent } from './sap.js';
+import { sqlConfig } from '../config.js';
+import { reverseStagedPackage } from './sapStaging.js';
 
 const router   = express.Router();
 const getPool  = async () => await sql.connect(sqlConfig);
@@ -149,33 +148,13 @@ router.delete('/:palletItemId', async (req, res) => {
             .query(`SELECT sapMaterial, sapBatch, sapDelivery, sapSourceStorageType, sapSourceBin
                     FROM   Logistics.dbo.PalletPackages
                     WHERE  palletItemID = @palletItemId`);
-        const row = rowRes.recordset[0];
 
-        if (row && row.sapMaterial && row.sapBatch && row.sapDelivery
-            && row.sapSourceStorageType && row.sapSourceBin) {
-            const stagedBin = String(row.sapDelivery).trim().padStart(10, '0');
-            const response = await axios.post(
-                `${sapConfig.url}/api/warehouse/picksheet-unstage-batch`,
-                {
-                    material: row.sapMaterial,
-                    batch: row.sapBatch,
-                    stagedBin,
-                    originalSourceType: row.sapSourceStorageType,
-                    originalSourceBin: row.sapSourceBin,
-                },
-                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
-            ).catch(err => {
-                if (err.response?.data) return { data: err.response.data };
-                throw err;
+        const reversal = await reverseStagedPackage(rowRes.recordset[0]);
+        if (reversal.attempted && !reversal.success) {
+            return res.status(422).json({
+                success: false,
+                error: `${reversal.error} — package was not removed`,
             });
-
-            const body = response.data;
-            if (!body?.success) {
-                return res.status(422).json({
-                    success: false,
-                    error: body?.error?.message || body?.data?.error || 'SAP transfer-order reversal failed — package was not removed',
-                });
-            }
         }
 
         await pool.request()

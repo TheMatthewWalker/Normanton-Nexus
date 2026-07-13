@@ -804,10 +804,22 @@ async function finishExistingPallet(palletId) {
   } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
+// Deleting a pallet reverses SAP staging for every one of its packages
+// server-side (routes/palletmain.js PATCH handler, via reverseStagedPackage)
+// before the pallet is actually marked removed — fails closed, so a pallet
+// with stock still stuck in SAP stays visible instead of silently vanishing.
+function formatReversalError(json) {
+  let msg = json.error || 'Delete failed';
+  if (Array.isArray(json.failures) && json.failures.length) {
+    msg += '\n' + json.failures.map(f => `• ${f.sapMaterial || '?'} / ${f.sapBatch || '?'}: ${f.error}`).join('\n');
+  }
+  return msg;
+}
+
 async function deletePallet(palletId) {
   if (!await wConfirm({
     title: 'Delete Pallet',
-    message: 'Delete this pallet and all its packages?\nThis cannot be undone.',
+    message: 'Delete this pallet and all its packages?\nAny stock staged in SAP will be moved back to its original location first.\nThis cannot be undone.',
     confirmText: 'Delete',
     variant: 'danger',
   })) return;
@@ -817,7 +829,7 @@ async function deletePallet(palletId) {
       body: JSON.stringify({ palletRemoved: 1 }),
     });
     const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'Delete failed');
+    if (!json.success) throw new Error(formatReversalError(json));
     await refreshPalletList();
   } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
@@ -1564,7 +1576,7 @@ async function deletePalletFromBuilder() {
   if (!pb?.palletId) return;
   if (!await wConfirm({
     title: 'Delete Pallet',
-    message: 'Delete this pallet and all its packages?\nThis cannot be undone.',
+    message: 'Delete this pallet and all its packages?\nAny stock staged in SAP will be moved back to its original location first.\nThis cannot be undone.',
     confirmText: 'Delete',
     variant: 'danger',
   })) return;
@@ -1574,7 +1586,7 @@ async function deletePalletFromBuilder() {
       body: JSON.stringify({ palletRemoved: 1 }),
     });
     const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'Delete failed');
+    if (!json.success) throw new Error(formatReversalError(json));
     closePalletBuilder();
     await refreshPalletList();
   } catch (err) { showPbMsg('✕ ' + err.message, 'error'); }
