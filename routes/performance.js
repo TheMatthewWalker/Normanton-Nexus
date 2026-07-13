@@ -200,6 +200,7 @@ router.get('/orderbook-breakdown', async (req, res, next) => {
         referenceDocument: r.ReferenceDocument,
         material: r.Material,
         materialText: r.MaterialText,
+        requestDate: r.RequestDate ? new Date(r.RequestDate).toISOString().slice(0, 10) : null,
 
         orderQty: Number(r.OrderQty || 0),
         orderValue: Number(r.OrderValue || 0),
@@ -234,6 +235,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       { header: 'Customer',      key: 'customer',          width: 14 },
       { header: 'Customer Name', key: 'customerName',      width: 30 },
       { header: 'Order',         key: 'referenceDocument', width: 14 },
+      { header: 'Date',          key: 'requestDate',       width: 14 },
       { header: 'Material',      key: 'material',          width: 16 },
       { header: 'Material Text', key: 'materialText',      width: 40 },
       { header: 'Order Qty',     key: 'orderQty',          width: 14 },

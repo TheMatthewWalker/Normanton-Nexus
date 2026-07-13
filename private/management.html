@@ -158,7 +158,10 @@
       <div class="mgmt-section tile-half">
         <div class="mgmt-section-title mgmt-section-title--flex">
           <span>Order Book with Saleable Stock &amp; Picked Stock</span>
-          <button id="fullBreakdownBtn" class="mgmt-breakdown-btn">Full Breakdown</button>
+          <div class="mgmt-breakdown-header-actions">
+            <button id="fullBreakdownBtn" class="mgmt-breakdown-btn">Full Breakdown</button>
+            <button id="monthEndBreakdownBtn" class="mgmt-breakdown-btn">Breakdown for Month End</button>
+          </div>
         </div>
         <div id="orderBookTable"></div>
       </div>
@@ -221,7 +224,7 @@
   <div id="breakdownOverlay" class="wc-overlay mgmt-breakdown-overlay" style="display:none;">
     <div class="mgmt-breakdown-modal">
       <div class="mgmt-breakdown-header">
-        <h3>Order Book &mdash; Full Breakdown</h3>
+        <h3 id="breakdownModalTitle">Order Book &mdash; Full Breakdown</h3>
         <div class="mgmt-breakdown-header-actions">
           <button id="exportBreakdownBtn" class="mgmt-breakdown-btn">Export to Excel</button>
           <button id="closeBreakdownBtn" class="mgmt-breakdown-close" aria-label="Close">&times;</button>

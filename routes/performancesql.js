@@ -93,7 +93,7 @@ async function replaceTable(tableName, columns, rows) {
         let value = row[key];
 
         if (transform) {
-          try { value = transform(value, row); } 
+          try { value = transform(value, row); }
           catch { value = null; }
         }
 
@@ -249,7 +249,7 @@ export function replaceAgreementSnapshot(rows) {
     ['Period',               'period',             sql.VarChar(7), null, 7],
     ['OrderQty',             'orderQty',           sql.Decimal(15, 3)],
     ['Amount',               'amount',             sql.Decimal(15, 2)],
-    ['Currency',             'currency',           sql.VarChar(5), null, 5],
+    ['Currency',              'currency',          sql.VarChar(5), null, 5],
     ['DockStockAllocated',   'dockStockAllocated', sql.Decimal(15, 3)],
     ['PickedStockAllocated', 'pickedStockAllocated', sql.Decimal(15, 3)]
   ], rows);
@@ -711,6 +711,71 @@ export async function getOrderBookSummary() {
       YEAR(RequestDate),
       MONTH(RequestDate),
       ValueStream
+  `);
+
+  return recordset;
+}
+
+// Full breakdown for the Order Book "Full Breakdown" / "Breakdown for Month
+// End" drill-downs — Date > Customer > ReferenceDocument (order) > Material,
+// same stock/picked value-allocation logic as getOrderBookSummary
+// (proportional to Amount/OrderQty), but also carries the raw quantities and
+// the request date itself (rather than collapsing to year/month) since both
+// modals need day-level detail: Full Breakdown nests it under Year > Month,
+// and Month End Breakdown shows it inline next to each order.
+//
+// Note: SQL Server 2005 has no DATE type (added in 2008) — CAST(x AS DATE)
+// throws "Type DATE is not a defined system type" against this DB. Every
+// other date-truncation in this file already works around that via
+// CONVERT(VARCHAR(8), x, 112) (yyyymmdd) re-cast to DATETIME — see
+// recomputeDailyInvoiced()/recomputeDailyOtif() above — so this reuses the
+// same idiom instead of DATE.
+export async function getOrderBookBreakdown() {
+  const pool = await getPool();
+
+  const { recordset } = await pool.request().query(`
+    SELECT
+      ValueStream,
+      Customer,
+      CustomerName,
+      ReferenceDocument,
+      Material,
+      MaterialText,
+      CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
+
+      SUM(OrderQty) AS OrderQty,
+      SUM(Amount)   AS OrderValue,
+
+      SUM(DockStockAllocated) AS StockQty,
+      SUM(
+        CASE
+          WHEN OrderQty > 0
+          THEN DockStockAllocated * (Amount / OrderQty)
+          ELSE 0
+        END
+      ) AS StockValue,
+
+      SUM(PickedStockAllocated) AS PickedQty,
+      SUM(
+        CASE
+          WHEN OrderQty > 0
+          THEN PickedStockAllocated * (Amount / OrderQty)
+          ELSE 0
+        END
+      ) AS PickedValue
+
+    FROM dbo.AgreementSnapshot
+
+    WHERE
+      RequestDate IS NOT NULL
+      AND ValueStream IN ('PTFE','PV')
+
+    GROUP BY
+      ValueStream, Customer, CustomerName, ReferenceDocument, Material, MaterialText,
+      CONVERT(VARCHAR(8), RequestDate, 112)
+
+    ORDER BY
+      CONVERT(VARCHAR(8), RequestDate, 112), CustomerName, ReferenceDocument, MaterialText
   `);
 
   return recordset;

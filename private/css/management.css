@@ -381,15 +381,21 @@
   padding: 8px 24px 24px;
 }
 
+/* border-collapse: separate (not collapse) + z-index on th — with collapse,
+   sticky <th> backgrounds don't fully occlude body rows scrolling underneath
+   at the collapsed border edges in some browsers, so rows were briefly
+   visible passing over/through the header while scrolling. */
 .breakdown-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13px;
 }
 
 .breakdown-table th {
   position: sticky;
   top: 0;
+  z-index: 3;
   background: #F8FAFC;
   text-align: right;
   font-size: 11px;
@@ -405,11 +411,25 @@
   text-align: left;
 }
 
+.breakdown-table th.breakdown-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.breakdown-table th.breakdown-sortable:hover {
+  color: #2563EB;
+}
+
+.breakdown-table th.breakdown-sort-active {
+  color: #2563EB;
+}
+
 .breakdown-table td {
   padding: 7px 10px;
   border-bottom: 1px solid #EEF2F7;
   text-align: right;
   white-space: nowrap;
+  background: #ffffff;
 }
 
 .breakdown-table td:first-child {
@@ -417,37 +437,82 @@
   white-space: normal;
 }
 
-.breakdown-customer-row {
+.breakdown-date-tag {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+  background: #F1F5F9;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+/* Pivot-style indentation — one rule per nesting depth. Full Breakdown goes
+   6 levels deep (Year>Month>Date>Customer>Order>Material); Month End
+   Breakdown only uses levels 0-2 (Customer>Order>Material). */
+
+.breakdown-group-row {
   cursor: pointer;
+}
+
+.breakdown-table tr.breakdown-group-row:hover td {
+  background: #EFF6FF !important;
+}
+
+.breakdown-leaf-row td {
+  color: #475569;
+  font-weight: 400;
+}
+
+.breakdown-table tr[data-level="0"] td {
   background: #F8FAFC;
   font-weight: 700;
 }
 
-.breakdown-customer-row:hover {
-  background: #EFF6FF;
+.breakdown-table tr[data-level="0"] td:first-child {
+  padding-left: 12px;
 }
 
-.breakdown-order-row {
-  cursor: pointer;
-  background: #FCFDFE;
+.breakdown-table tr[data-level="1"] td {
+  background: #FBFCFE;
+  font-weight: 650;
+  color: #1E293B;
+}
+
+.breakdown-table tr[data-level="1"] td:first-child {
+  padding-left: 30px;
+}
+
+.breakdown-table tr[data-level="2"] td {
+  font-weight: 600;
+  color: #1E293B;
+}
+
+.breakdown-table tr[data-level="2"] td:first-child {
+  padding-left: 48px;
+}
+
+.breakdown-table tr[data-level="3"] td {
   font-weight: 600;
   color: #334155;
 }
 
-.breakdown-order-row:hover {
-  background: #F1F5F9;
+.breakdown-table tr[data-level="3"] td:first-child {
+  padding-left: 66px;
 }
 
-.breakdown-order-row td:first-child {
-  padding-left: 28px;
+.breakdown-table tr[data-level="4"] td {
+  font-weight: 600;
+  color: #334155;
 }
 
-.breakdown-material-row td {
-  color: #475569;
+.breakdown-table tr[data-level="4"] td:first-child {
+  padding-left: 84px;
 }
 
-.breakdown-material-row td:first-child {
-  padding-left: 48px;
+.breakdown-table tr[data-level="5"] td:first-child {
+  padding-left: 102px;
 }
 
 /* ==============================

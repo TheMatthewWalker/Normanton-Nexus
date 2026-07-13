@@ -39,24 +39,42 @@ function currencyCell(value) {
     : '£-';
 }
 
-// TOGGLE FOR ORDERBOOK GROUPS
-window.toggleOrderBookGroup = function(groupId) {
-
-  const rows = document.querySelectorAll(
-    `[data-parent="${groupId}"]`
-  );
-
-  rows.forEach(row => {
-    row.classList.toggle('ob-hidden');
-  });
-
+// TOGGLE FOR ORDERBOOK GROUPS — recursively collapses descendants so that a
+// re-expand always starts from a clean, fully-collapsed state. Previously,
+// collapsing a parent while a child group was left expanded only hid the
+// direct children — the grandchildren (still lacking the .ob-hidden class)
+// stayed visible even though their own parent row had just been hidden.
+// Every group row must carry data-group-id (its own id) alongside
+// data-parent (its parent's id) for the recursion below to find it.
+window.collapseOrderBookGroup = function(groupId) {
   const icon = document.getElementById(`icon-${groupId}`);
+  if (icon) icon.textContent = '▶';
 
-  if (icon) {
-    icon.textContent =
-      icon.textContent === '▶'
-        ? '▼'
-        : '▶';
+  document.querySelectorAll(`[data-parent="${groupId}"]`).forEach(row => {
+    row.classList.add('ob-hidden');
+    if (row.dataset.groupId) {
+      window.collapseOrderBookGroup(row.dataset.groupId);
+    }
+  });
+};
+
+window.expandOrderBookGroup = function(groupId) {
+  const icon = document.getElementById(`icon-${groupId}`);
+  if (icon) icon.textContent = '▼';
+
+  document.querySelectorAll(`[data-parent="${groupId}"]`).forEach(row => {
+    row.classList.remove('ob-hidden');
+  });
+};
+
+window.toggleOrderBookGroup = function(groupId) {
+  const icon = document.getElementById(`icon-${groupId}`);
+  const isCollapsed = !icon || icon.textContent.trim() === '▶';
+
+  if (isCollapsed) {
+    window.expandOrderBookGroup(groupId);
+  } else {
+    window.collapseOrderBookGroup(groupId);
   }
 };
 
@@ -773,6 +791,7 @@ function renderOrderBookTable(rows, ptfeInvoiced = 0) {
     html += `
       <tr
         class="orderbook-year-row"
+        data-group-id="${yearKey}"
         onclick="toggleOrderBookGroup('${yearKey}')">
 
         <td>
@@ -846,10 +865,14 @@ function renderOrderBookTable(rows, ptfeInvoiced = 0) {
 }
 
 
-// ── ORDER BOOK: FULL BREAKDOWN MODAL ────────────────────────────────────────
-// Customer > Order (ReferenceDocument) > Material. Reuses the same
-// data-parent / .ob-hidden / toggleOrderBookGroup mechanism as the main
-// orderbook table above, just with two nested levels instead of one.
+// ── ORDER BOOK: BREAKDOWN MODALS ────────────────────────────────────────────
+// Two views share one generic tree-builder/renderer:
+//   "Full Breakdown"          — Year > Month > Date > Customer > Order > Material
+//   "Breakdown for Month End" — Customer > Order (date shown inline) > Material,
+//                                 pre-filtered to rows on or before the current month.
+// Both reuse toggleOrderBookGroup/.ob-hidden/data-parent (now recursive — see
+// above), and support click-to-sort on any column via data-level indentation
+// for the pivot-style layout.
 
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({
@@ -891,7 +914,178 @@ function breakdownTotalsCells(totals) {
   `;
 }
 
-function renderBreakdownTable(rows) {
+// "On or before the current month" — same year/month comparison pattern
+// already used for the PTFE KPI tally in renderOrderBookTable() above.
+function isOnOrBeforeCurrentMonth(dateStr) {
+  if (!dateStr) return false;
+
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return false;
+
+  const today = new Date();
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  const cy = today.getFullYear();
+  const cm = today.getMonth() + 1;
+
+  return y < cy || (y === cy && m <= cm);
+}
+
+// Level definitions — each function pulls the {key, label} for one grouping
+// level out of a breakdown row. buildBreakdownTree() walks these in order,
+// creating/reusing one group node per level, then attaches the row itself
+// as a leaf under the deepest level.
+const fullBreakdownLevels = [
+  row => {
+    const y = row.requestDate ? row.requestDate.slice(0, 4) : 'Unknown';
+    return { key: `y-${y}`, label: y };
+  },
+  row => {
+    const y = row.requestDate ? row.requestDate.slice(0, 4) : 'x';
+    const m = row.requestDate ? Number(row.requestDate.slice(5, 7)) : 0;
+    return { key: `m-${y}-${m}`, label: m ? monthName(m) : 'Unknown' };
+  },
+  row => {
+    const d = row.requestDate || 'Unknown';
+    return { key: `d-${d}`, label: d };
+  },
+  row => {
+    const c = row.customer || 'UNKNOWN';
+    return { key: `c-${c}`, label: row.customerName || c };
+  },
+  row => {
+    const o = row.referenceDocument || 'UNKNOWN';
+    return { key: `o-${o}`, label: `Order ${o}` };
+  }
+];
+
+const monthEndLevels = [
+  row => {
+    const c = row.customer || 'UNKNOWN';
+    return { key: `c-${c}`, label: row.customerName || c };
+  },
+  row => {
+    const o = row.referenceDocument || 'UNKNOWN';
+    return { key: `o-${o}`, label: `Order ${o}`, extraLabel: row.requestDate || '' };
+  }
+];
+
+function buildBreakdownTree(rows, levelDefs) {
+  const root = { children: new Map() };
+
+  rows.forEach((row, rowIdx) => {
+    let node = root;
+
+    levelDefs.forEach((levelDef, i) => {
+      const { key, label, extraLabel } = levelDef(row);
+
+      if (!node.children.has(key)) {
+        node.children.set(key, {
+          key,
+          label,
+          extraLabel: extraLabel || null,
+          level: i,
+          isLeaf: false,
+          totals: zeroBreakdownTotals(),
+          children: new Map()
+        });
+      }
+
+      const child = node.children.get(key);
+      addBreakdownTotals(child.totals, row);
+      node = child;
+    });
+
+    // node is now the deepest group node (e.g. the order) — attach this
+    // row as a leaf material line underneath it.
+    node.children.set(`leaf-${rowIdx}`, {
+      label: `${row.material} - ${row.materialText}`,
+      level: levelDefs.length,
+      isLeaf: true,
+      row
+    });
+  });
+
+  return root.children;
+}
+
+function sortBreakdownChildren(childrenMap, sortKey, dir) {
+  const arr = Array.from(childrenMap.values());
+
+  arr.sort((a, b) => {
+    if (sortKey === 'label') {
+      return dir * String(a.label).localeCompare(String(b.label), undefined, { numeric: true });
+    }
+
+    const av = a.isLeaf ? (a.row[sortKey] || 0) : (a.totals[sortKey] || 0);
+    const bv = b.isLeaf ? (b.row[sortKey] || 0) : (b.totals[sortKey] || 0);
+
+    return dir * (av - bv);
+  });
+
+  return arr;
+}
+
+function renderBreakdownRows(childrenMap, parentGroupId, sortKey, dir) {
+  const arr = sortBreakdownChildren(childrenMap, sortKey, dir);
+  let html = '';
+
+  arr.forEach(node => {
+    if (node.isLeaf) {
+      html += `
+        <tr class="breakdown-leaf-row ob-hidden" data-level="${node.level}" data-parent="${parentGroupId}">
+          <td>${escapeHtml(node.label)}</td>
+          <td>${numberCell(node.row.orderQty)}</td>
+          <td>${currencyCell(node.row.orderValue)}</td>
+          <td>${numberCell(node.row.stockQty)}</td>
+          <td>${currencyCell(node.row.stockValue)}</td>
+          <td>${numberCell(node.row.pickedQty)}</td>
+          <td>${currencyCell(node.row.pickedValue)}</td>
+        </tr>
+      `;
+      return;
+    }
+
+    const groupId = `${parentGroupId || 'root'}-${node.key}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const isRoot = node.level === 0;
+    const parentAttr = parentGroupId ? ` data-parent="${parentGroupId}"` : '';
+    const labelHtml = node.extraLabel
+      ? `${escapeHtml(node.label)} <span class="breakdown-date-tag">${escapeHtml(node.extraLabel)}</span>`
+      : escapeHtml(node.label);
+
+    html += `
+      <tr class="breakdown-group-row${isRoot ? '' : ' ob-hidden'}" data-level="${node.level}" data-group-id="${groupId}"${parentAttr} onclick="toggleOrderBookGroup('${groupId}')">
+        <td><span id="icon-${groupId}">▶</span> ${labelHtml}</td>
+        ${breakdownTotalsCells(node.totals)}
+      </tr>
+    `;
+
+    html += renderBreakdownRows(node.children, groupId, sortKey, dir);
+  });
+
+  return html;
+}
+
+let breakdownSortKey = 'label';
+let breakdownSortDir = 1;
+let currentBreakdownRows = [];
+let currentBreakdownMode = 'full';
+
+window.sortBreakdownTable = function(key) {
+  if (breakdownSortKey === key) {
+    breakdownSortDir *= -1;
+  } else {
+    breakdownSortKey = key;
+    breakdownSortDir = 1;
+  }
+
+  renderBreakdownTable(currentBreakdownRows, currentBreakdownMode);
+};
+
+function renderBreakdownTable(rows, mode = currentBreakdownMode) {
+  currentBreakdownMode = mode;
+  currentBreakdownRows = rows;
+
   const container = document.getElementById('breakdownTableContainer');
 
   if (!rows.length) {
@@ -899,98 +1093,36 @@ function renderBreakdownTable(rows) {
     return;
   }
 
-  // group: customer -> order (referenceDocument) -> material rows
-  const customers = {};
+  const levelDefs = mode === 'monthEnd' ? monthEndLevels : fullBreakdownLevels;
+  const firstColLabel = mode === 'monthEnd'
+    ? 'Customer / Order / Material'
+    : 'Year / Month / Date / Customer / Order / Material';
 
-  for (const row of rows) {
-    const custKey = row.customer || 'UNKNOWN';
+  const tree = buildBreakdownTree(rows, levelDefs);
 
-    customers[custKey] ??= {
-      customerName: row.customerName || custKey,
-      orders: {},
-      totals: zeroBreakdownTotals()
-    };
+  const columns = [
+    { key: 'label', label: firstColLabel },
+    { key: 'orderQty', label: 'Order Qty' },
+    { key: 'orderValue', label: 'Order Value' },
+    { key: 'stockQty', label: 'Stock Qty' },
+    { key: 'stockValue', label: 'Stock Value' },
+    { key: 'pickedQty', label: 'Picked Qty' },
+    { key: 'pickedValue', label: 'Picked Value' }
+  ];
 
-    const cust = customers[custKey];
-    const ordKey = row.referenceDocument || 'UNKNOWN';
+  const theadCells = columns.map(col => {
+    const active = breakdownSortKey === col.key;
+    const arrow = active ? (breakdownSortDir === 1 ? ' ▲' : ' ▼') : '';
+    return `<th class="breakdown-sortable${active ? ' breakdown-sort-active' : ''}" onclick="sortBreakdownTable('${col.key}')">${col.label}${arrow}</th>`;
+  }).join('');
 
-    cust.orders[ordKey] ??= {
-      referenceDocument: ordKey,
-      materials: [],
-      totals: zeroBreakdownTotals()
-    };
-
-    const ord = cust.orders[ordKey];
-
-    ord.materials.push(row);
-    addBreakdownTotals(ord.totals, row);
-    addBreakdownTotals(cust.totals, row);
-  }
-
-  const custKeys = Object.keys(customers).sort((a, b) =>
-    customers[a].customerName.localeCompare(customers[b].customerName)
-  );
-
-  let html = `
+  const html = `
     <table class="breakdown-table" data-no-paginate>
       <thead>
-        <tr>
-          <th>Customer / Order / Material</th>
-          <th>Order Qty</th>
-          <th>Order Value</th>
-          <th>Stock Qty</th>
-          <th>Stock Value</th>
-          <th>Picked Qty</th>
-          <th>Picked Value</th>
-        </tr>
+        <tr>${theadCells}</tr>
       </thead>
       <tbody>
-  `;
-
-  custKeys.forEach((custKey, ci) => {
-    const cust = customers[custKey];
-    const custGroupId = `bcust-${ci}`;
-
-    html += `
-      <tr class="breakdown-customer-row" onclick="toggleOrderBookGroup('${custGroupId}')">
-        <td><span id="icon-${custGroupId}">▶</span> ${escapeHtml(cust.customerName)}</td>
-        ${breakdownTotalsCells(cust.totals)}
-      </tr>
-    `;
-
-    const ordKeys = Object.keys(cust.orders).sort();
-
-    ordKeys.forEach((ordKey, oi) => {
-      const ord = cust.orders[ordKey];
-      const ordGroupId = `bord-${ci}-${oi}`;
-
-      html += `
-        <tr
-          class="breakdown-order-row ob-hidden"
-          data-parent="${custGroupId}"
-          onclick="toggleOrderBookGroup('${ordGroupId}')">
-          <td><span id="icon-${ordGroupId}">▶</span> Order ${escapeHtml(ord.referenceDocument)}</td>
-          ${breakdownTotalsCells(ord.totals)}
-        </tr>
-      `;
-
-      ord.materials.forEach(mat => {
-        html += `
-          <tr class="breakdown-material-row ob-hidden" data-parent="${ordGroupId}">
-            <td>${escapeHtml(mat.materialText || mat.material)}</td>
-            <td>${numberCell(mat.orderQty)}</td>
-            <td>${currencyCell(mat.orderValue)}</td>
-            <td>${numberCell(mat.stockQty)}</td>
-            <td>${currencyCell(mat.stockValue)}</td>
-            <td>${numberCell(mat.pickedQty)}</td>
-            <td>${currencyCell(mat.pickedValue)}</td>
-          </tr>
-        `;
-      });
-    });
-  });
-
-  html += `
+        ${renderBreakdownRows(tree, null, breakdownSortKey, breakdownSortDir)}
       </tbody>
     </table>
   `;
@@ -998,9 +1130,19 @@ function renderBreakdownTable(rows) {
   container.innerHTML = html;
 }
 
-async function openBreakdownModal() {
+async function openBreakdownModal(mode) {
   const overlay = document.getElementById('breakdownOverlay');
   const container = document.getElementById('breakdownTableContainer');
+  const title = document.getElementById('breakdownModalTitle');
+
+  breakdownSortKey = 'label';
+  breakdownSortDir = 1;
+
+  if (title) {
+    title.textContent = mode === 'monthEnd'
+      ? 'Order Book — Breakdown for Month End'
+      : 'Order Book — Full Breakdown';
+  }
 
   overlay.style.display = 'flex';
   container.innerHTML = 'Loading…';
@@ -1011,7 +1153,13 @@ async function openBreakdownModal() {
 
     if (!json.success) throw new Error(json.error?.message || 'Failed to load breakdown');
 
-    renderBreakdownTable(json.data);
+    let rows = json.data;
+
+    if (mode === 'monthEnd') {
+      rows = rows.filter(r => isOnOrBeforeCurrentMonth(r.requestDate));
+    }
+
+    renderBreakdownTable(rows, mode);
   } catch (err) {
     console.error(err);
     container.innerHTML = '<p>Failed to load breakdown.</p>';
@@ -1026,6 +1174,9 @@ function exportBreakdown() {
   // Plain navigation, not fetch+blob — the response is a Content-Disposition:
   // attachment, so the browser handles the download without leaving the page,
   // and it rides on the same session cookie as every other request here.
+  // Always exports the full unfiltered dataset regardless of which modal is
+  // open — the Month End view's on-or-before-current-month filter is a
+  // display-only convenience and isn't applied to the export.
   window.location.href = BASE + '/orderbook-breakdown/export';
 }
 
@@ -1071,7 +1222,8 @@ document.getElementById('refreshBtn').onclick = refreshData;
 document.getElementById('dateFrom').onchange = renderDashboard;
 document.getElementById('dateTo').onchange = renderDashboard;
 
-document.getElementById('fullBreakdownBtn').onclick = openBreakdownModal;
+document.getElementById('fullBreakdownBtn').onclick = () => openBreakdownModal('full');
+document.getElementById('monthEndBreakdownBtn').onclick = () => openBreakdownModal('monthEnd');
 document.getElementById('closeBreakdownBtn').onclick = closeBreakdownModal;
 document.getElementById('exportBreakdownBtn').onclick = exportBreakdown;
 
