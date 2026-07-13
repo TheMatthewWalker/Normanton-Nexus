@@ -251,15 +251,32 @@ function excelColumnLetter(n) {
   return letter;
 }
 
-// ── Order book full breakdown — Excel export ────────────────────────────────
+// ── Order book full breakdown — Excel export (Dashboard + Data) ─────────────
 // ?mode=monthEnd applies the same on-or-before-current-month filter as the
 // Breakdown for Month End modal; otherwise exports the full unfiltered
-// dataset (same query as the JSON route above) — this is the "make it
-// exportable" companion to both breakdown modals.
+// dataset (same query as the JSON route above).
+//
+// Two sheets:
+//   Dashboard — summary cards (Invoiced to date, Invoiced+Picked, Invoiced+
+//   Potential Stock, and a Risk card). Every total except "Invoiced to date"
+//   is a live SUMIFS/COUNTIFS formula against the Data sheet, scoped to
+//   ValueStream = PTFE, so it recalculates as planners edit Stock Qty /
+//   Picked Qty / Risk there. "Invoiced to date" comes from real SAP billing
+//   documents (dbo.InvoiceSnapshot via dbo.DailyPerformance) — there's
+//   nothing on the Data sheet to compute it from, so it's written as a plain
+//   value, accurate as of the moment this file was generated.
+//   Data — the row-level export (as before), plus two new blank columns:
+//   Risk and Reason. Flagging a row "x" in Risk excludes its Stock Value
+//   from the Invoiced + Potential Stock card and rolls it into the Risk
+//   card instead ("we may or may not get it").
 router.get('/orderbook-breakdown/export', async (req, res) => {
   try {
-    let rows = await db.getOrderBookBreakdown();
     const mode = req.query.mode === 'monthEnd' ? 'monthEnd' : 'full';
+
+    let [rows, invoicedToDate] = await Promise.all([
+      db.getOrderBookBreakdown(),
+      db.getPtfeInvoicedMonthToDate()
+    ]);
 
     if (mode === 'monthEnd') {
       rows = rows.filter(r => isOnOrBeforeCurrentMonth(r.RequestDate));
@@ -269,9 +286,12 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     wb.creator = 'Kongsberg Portal';
     wb.created = new Date();
 
-    const ws = wb.addWorksheet(mode === 'monthEnd' ? 'Month End Breakdown' : 'Order Book Breakdown');
+    // Dashboard added first so it lands as the left-most/active tab.
+    const dashboardWs = wb.addWorksheet('Dashboard');
+    const dataWs = wb.addWorksheet('Data');
 
-    ws.columns = [
+    // ── Data sheet ────────────────────────────────────────────────────────
+    dataWs.columns = [
       { header: 'Value Stream',  key: 'valueStream',       width: 14 },
       { header: 'Customer',      key: 'customer',          width: 14 },
       { header: 'Customer Name', key: 'customerName',      width: 30 },
@@ -284,7 +304,9 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       { header: 'Stock Qty',     key: 'stockQty',          width: 14 },
       { header: 'Stock Value',   key: 'stockValue',        width: 14 },
       { header: 'Picked Qty',    key: 'pickedQty',         width: 14 },
-      { header: 'Picked Value',  key: 'pickedValue',       width: 14 }
+      { header: 'Picked Value',  key: 'pickedValue',       width: 14 },
+      { header: 'Risk',          key: 'risk',              width: 8 },
+      { header: 'Reason',        key: 'reason',            width: 34 }
     ];
 
     const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
@@ -293,8 +315,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const cellBorder  = { top: border, bottom: border, left: border, right: border };
     const oddFill     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
     const evenFill    = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9EEF4' } };
+    // Pale yellow — flags Risk/Reason as the two columns planners type into.
+    const inputFill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9DB' } };
 
-    const headerRow = ws.getRow(1);
+    const headerRow = dataWs.getRow(1);
     headerRow.height = 22;
     headerRow.eachCell(cell => {
       cell.fill      = headerFill;
@@ -310,17 +334,19 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Formula mirrors the SQL-side valuation exactly (see getOrderBookBreakdown
     // in performancesql.js): qty * (OrderValue / OrderQty), guarded against
     // OrderQty = 0.
-    const orderQtyCol    = excelColumnLetter(ws.getColumn('orderQty').number);
-    const orderValueCol  = excelColumnLetter(ws.getColumn('orderValue').number);
-    const stockQtyCol    = excelColumnLetter(ws.getColumn('stockQty').number);
-    const stockValueCol  = excelColumnLetter(ws.getColumn('stockValue').number);
-    const pickedQtyCol   = excelColumnLetter(ws.getColumn('pickedQty').number);
-    const pickedValueCol = excelColumnLetter(ws.getColumn('pickedValue').number);
+    const orderQtyCol    = excelColumnLetter(dataWs.getColumn('orderQty').number);
+    const orderValueCol  = excelColumnLetter(dataWs.getColumn('orderValue').number);
+    const stockQtyCol    = excelColumnLetter(dataWs.getColumn('stockQty').number);
+    const stockValueCol  = excelColumnLetter(dataWs.getColumn('stockValue').number);
+    const pickedQtyCol   = excelColumnLetter(dataWs.getColumn('pickedQty').number);
+    const pickedValueCol = excelColumnLetter(dataWs.getColumn('pickedValue').number);
+    const valueStreamCol = excelColumnLetter(dataWs.getColumn('valueStream').number);
+    const riskCol        = excelColumnLetter(dataWs.getColumn('risk').number);
 
     rows.forEach((r, i) => {
       const excelRow = i + 2; // header occupies row 1
 
-      const row = ws.addRow({
+      const row = dataWs.addRow({
         valueStream: r.ValueStream,
         customer: r.Customer,
         customerName: r.CustomerName || r.Customer,
@@ -331,7 +357,9 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         orderQty: Number(r.OrderQty || 0),
         orderValue: Number(r.OrderValue || 0),
         stockQty: Number(r.StockQty || 0),
-        pickedQty: Number(r.PickedQty || 0)
+        pickedQty: Number(r.PickedQty || 0),
+        risk: '',
+        reason: ''
         // stockValue / pickedValue set as formulas below instead of static values.
       });
 
@@ -344,23 +372,142 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         result: Number(r.PickedValue || 0)
       };
 
+      // Risk is a manual flag ("x" = we may not actually get this stock) —
+      // a dropdown keeps entries consistent, though SUMIFS/COUNTIFS on the
+      // Dashboard match "x" case-insensitively regardless.
+      row.getCell('risk').dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        formulae: ['"x"']
+      };
+      row.getCell('risk').alignment   = { horizontal: 'center' };
+      row.getCell('reason').alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+
       const fill = i % 2 === 0 ? oddFill : evenFill;
       row.eachCell(cell => {
         cell.fill   = fill;
         cell.font   = { name: 'Arial', size: 10, color: { argb: 'FF000000' } };
         cell.border = cellBorder;
       });
+
+      // Override the alternating fill just on Risk/Reason so they stand out
+      // as the columns meant for manual entry.
+      row.getCell('risk').fill   = inputFill;
+      row.getCell('reason').fill = inputFill;
     });
 
     ['orderQty', 'stockQty', 'pickedQty'].forEach(key => {
-      ws.getColumn(key).numFmt = '#,##0';
+      dataWs.getColumn(key).numFmt = '#,##0';
     });
     ['orderValue', 'stockValue', 'pickedValue'].forEach(key => {
-      ws.getColumn(key).numFmt = '#,##0.00';
+      dataWs.getColumn(key).numFmt = '#,##0.00';
     });
 
-    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columns.length } };
-    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    dataWs.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: dataWs.columns.length } };
+    dataWs.views = [{ state: 'frozen', ySplit: 1 }];
+
+    // ── Dashboard sheet ──────────────────────────────────────────────────
+    const dataStockRange  = `'Data'!$${stockValueCol}:$${stockValueCol}`;
+    const dataPickedRange = `'Data'!$${pickedValueCol}:$${pickedValueCol}`;
+    const dataStreamRange = `'Data'!$${valueStreamCol}:$${valueStreamCol}`;
+    const dataRiskRange   = `'Data'!$${riskCol}:$${riskCol}`;
+
+    // Cached display values (Excel recalculates the live formulas on open) —
+    // computed the same way the formulas will: no rows are flagged Risk yet
+    // at export time, so the "potential stock" total starts out equal to the
+    // full stock total and the Risk card starts at zero.
+    const ptfeRows = rows.filter(r => r.ValueStream === 'PTFE');
+    const pickedTotalPtfe    = ptfeRows.reduce((sum, r) => sum + Number(r.PickedValue || 0), 0);
+    const stockTotalPtfe     = ptfeRows.reduce((sum, r) => sum + Number(r.StockValue  || 0), 0);
+    const invoicedPlusPicked = invoicedToDate + pickedTotalPtfe;
+    const invoicedPlusStock  = invoicedPlusPicked + stockTotalPtfe;
+
+    dashboardWs.columns = [
+      { key: 'a', width: 16 }, { key: 'b', width: 16 }, { key: 'c', width: 16 },
+      { key: 'd', width: 16 }, { key: 'e', width: 16 }, { key: 'f', width: 16 }
+    ];
+
+    const titleFill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
+    const titleFont      = { name: 'Arial', bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+    const subFont        = { name: 'Arial', italic: true, size: 10, color: { argb: 'FF666666' } };
+    const cardLabelFill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCE6F1' } };
+    const cardLabelFont  = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF1F3864' } };
+    const cardValueFont  = { name: 'Arial', bold: true, size: 20, color: { argb: 'FF1F3864' } };
+    const cardDescFont   = { name: 'Arial', italic: true, size: 9, color: { argb: 'FF666666' } };
+    const riskLabelFill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8CBAD' } };
+    const riskLabelFont  = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF9C0006' } };
+    const riskValueFont  = { name: 'Arial', bold: true, size: 20, color: { argb: 'FFC00000' } };
+    const centerMiddle   = { horizontal: 'center', vertical: 'middle', wrapText: true };
+
+    function setMergedCell(range, value, font, fill, alignment) {
+      dashboardWs.mergeCells(range);
+      const cell = dashboardWs.getCell(range.split(':')[0]);
+      cell.value = value;
+      if (font) cell.font = font;
+      if (fill) cell.fill = fill;
+      cell.alignment = alignment || centerMiddle;
+      return cell;
+    }
+
+    const monthLabel = new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    const modeLabel = mode === 'monthEnd' ? 'Month End Breakdown' : 'Full Breakdown';
+
+    dashboardWs.getRow(1).height = 28;
+    setMergedCell('A1:F1', 'PTFE Order Book Dashboard', titleFont, titleFill);
+    dashboardWs.getRow(2).height = 18;
+    setMergedCell('A2:F2', `${modeLabel} — generated ${new Date().toLocaleDateString('en-GB')}`, subFont, null);
+
+    // Card 1 — Invoiced to date
+    setMergedCell('A4:F4', `INVOICED TO DATE (PTFE — ${monthLabel})`, cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(5).height = 30;
+    const invoicedCell = setMergedCell('A5:F5', invoicedToDate, cardValueFont, null);
+    invoicedCell.numFmt = '#,##0.00';
+    setMergedCell('A6:F6', 'From SAP billing documents, as of the moment this file was generated — not a live formula.', cardDescFont, null);
+
+    // Card 2 — Invoiced + Picked
+    setMergedCell('A8:F8', 'INVOICED + PICKED (PTFE)', cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(9).height = 30;
+    const pickedCardCell = setMergedCell(
+      'A9:F9',
+      { formula: `$A$5+SUMIFS(${dataPickedRange},${dataStreamRange},"PTFE")`, result: invoicedPlusPicked },
+      cardValueFont, null
+    );
+    pickedCardCell.numFmt = '#,##0.00';
+    setMergedCell('A10:F10', 'Invoiced plus stock already picked — effectively secured.', cardDescFont, null);
+
+    // Card 3 — Invoiced + Potential Stock
+    setMergedCell('A12:F12', 'INVOICED + POTENTIAL STOCK (PTFE)', cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(13).height = 30;
+    const stockCardCell = setMergedCell(
+      'A13:F13',
+      {
+        formula: `$A$5+SUMIFS(${dataPickedRange},${dataStreamRange},"PTFE")+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"<>x")`,
+        result: invoicedPlusStock
+      },
+      cardValueFont, null
+    );
+    stockCardCell.numFmt = '#,##0.00';
+    setMergedCell('A14:F14', 'Full month-end prediction: invoiced + picked + stock not flagged at risk on the Data tab.', cardDescFont, null);
+
+    // Card 4 — Risk
+    setMergedCell('A16:C16', 'VALUE AT RISK (PTFE)', riskLabelFont, riskLabelFill);
+    setMergedCell('D16:F16', 'ITEMS FLAGGED (PTFE)', riskLabelFont, riskLabelFill);
+    dashboardWs.getRow(17).height = 30;
+    const riskValueCell = setMergedCell(
+      'A17:C17',
+      { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"x")`, result: 0 },
+      riskValueFont, null
+    );
+    riskValueCell.numFmt = '#,##0.00';
+    setMergedCell(
+      'D17:F17',
+      { formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataRiskRange},"x")`, result: 0 },
+      riskValueFont, null
+    );
+    setMergedCell('A18:F18', 'Flagged rows are excluded from Invoiced + Potential Stock above — we may or may not receive this stock. See the Risk / Reason columns on the Data tab for detail.', cardDescFont, null);
+
+    dashboardWs.views = [{ showGridLines: false }];
+    wb.views = [{ activeTab: 0 }];
 
     const filenamePrefix = mode === 'monthEnd' ? 'orderbook_month_end' : 'orderbook_breakdown';
     const filename = `${filenamePrefix}_${new Date().toISOString().slice(0, 10)}.xlsx`;
