@@ -764,10 +764,16 @@ async function loadPalletPackages(palletId, bodyEl) {
   }
 }
 
+// If this package was staged in SAP, deleting it also reverses the
+// picksheet-stage-batch transfer order server-side (routes/palletpackages.js
+// DELETE handler) — the batch's stock moves back out of the picksheet's bin
+// to wherever it came from, freeing it for other deliveries again. That call
+// fails closed: if SAP rejects the reversal the row isn't deleted, so the
+// error below can legitimately be a SAP message, not just a DB failure.
 async function removePackage(palletItemId, palletId) {
   if (!await wConfirm({
     title: 'Remove Package',
-    message: 'Remove this package from the pallet?',
+    message: 'Remove this package from the pallet?\nIf it was staged in SAP, the stock will be moved back to its original location.',
     confirmText: 'Remove',
     variant: 'danger',
   })) return;
@@ -1411,6 +1417,8 @@ async function addPackage() {
   let stagedQuantity      = null;
   let transferOrderNumber = null;
   let binWasCreated       = false;
+  let sourceStorageType   = null;
+  let sourceBin           = null;
 
   try {
     // Stage the batch in SAP first — moves its full on-hand quantity into
@@ -1435,6 +1443,10 @@ async function addPackage() {
       stagedQuantity      = stageJson.data?.quantityMoved ?? null;
       transferOrderNumber = stageJson.data?.transferOrderNumber ?? null;
       binWasCreated        = !!stageJson.data?.binWasCreated;
+      // Recorded so the transfer order can be reversed automatically if this
+      // package is later removed from the pallet (see removePackage()).
+      sourceStorageType    = stageJson.data?.sourceType || null;
+      sourceBin             = stageJson.data?.sourceBin || null;
       showPbMsg('Adding…', '');
     }
 
@@ -1450,6 +1462,9 @@ async function addPackage() {
         sapMaterial:     pb.pendingSapMaterial || null,
         sapDeliveryItem: pb.pendingSapDeliveryItem || null,
         sapQuantity:     stagedQuantity,
+        sapSourceStorageType: sourceStorageType,
+        sapSourceBin:         sourceBin,
+        sapStageTransferOrder: transferOrderNumber,
         scanTime:    new Date().toISOString(),
       }),
     });

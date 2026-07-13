@@ -1,6 +1,8 @@
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import axios   from 'axios';
+import { sqlConfig, sapConfig } from '../config.js';
+import { makeSapToken, sapAgent } from './sap.js';
 
 const router   = express.Router();
 const getPool  = async () => await sql.connect(sqlConfig);
@@ -41,6 +43,7 @@ router.get('/pallet/:palletId', async (req, res) => {
                            pp.sapMaterial, pp.sapQuantity, pp.sapBatch,
                            pp.sapDelivery, pp.sapDeliveryItem,
                            pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
+                           pp.sapSourceStorageType, pp.sapSourceBin, pp.sapStageTransferOrder,
                            pd.packDescription, pd.packMaterial, pd.packWeight, pd.packHeight
                     FROM   Logistics.dbo.PalletPackages pp
                     LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pp.packagingID
@@ -81,12 +84,17 @@ router.get('/sapmaterial/:sapMaterial', async (req, res) => {
 // ── Create new package ──
 // palletItemID is IDENTITY — SQL Server assigns it automatically.
 // packagingID is NVARCHAR(2) referencing PackagingData.packID.
+// sapSourceStorageType/sapSourceBin record where a staged batch's stock came
+// from (its LGTYP/LGPLA before the picksheet-stage-batch transfer order moved
+// it into the picksheet's 916 bin) — required so DELETE below can reverse the
+// transfer order and put the stock back where it was.
 router.post('/', async (req, res) => {
     try {
         const {
             palletID, packagingID, palletLayer, sapMaterial,
             sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
-            sapCustomer, sapCustomerMaterial, scanTime
+            sapCustomer, sapCustomerMaterial, scanTime,
+            sapSourceStorageType, sapSourceBin, sapStageTransferOrder,
         } = req.body;
 
         const pool   = await getPool();
@@ -102,14 +110,19 @@ router.post('/', async (req, res) => {
             .input('sapCustomer',         sql.NVarChar(10), sapCustomer ?? null)
             .input('sapCustomerMaterial', sql.NVarChar(18), sapCustomerMaterial ?? null)
             .input('scanTime',            sql.DateTime,     scanTime ? new Date(scanTime) : null)
+            .input('sapSourceStorageType',sql.NVarChar(3),  sapSourceStorageType ?? null)
+            .input('sapSourceBin',        sql.NVarChar(10), sapSourceBin ?? null)
+            .input('sapStageTransferOrder',sql.NVarChar(10),sapStageTransferOrder ?? null)
             .query(`INSERT INTO Logistics.dbo.PalletPackages
                         (palletID, packagingID, palletLayer, sapMaterial,
                          sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
-                         sapCustomer, sapCustomerMaterial, scanTime)
+                         sapCustomer, sapCustomerMaterial, scanTime,
+                         sapSourceStorageType, sapSourceBin, sapStageTransferOrder)
                     VALUES
                         (@palletID, @packagingID, @palletLayer, @sapMaterial,
                          @sapQuantity, @sapBatch, @sapDelivery, @sapDeliveryItem,
-                         @sapCustomer, @sapCustomerMaterial, @scanTime);
+                         @sapCustomer, @sapCustomerMaterial, @scanTime,
+                         @sapSourceStorageType, @sapSourceBin, @sapStageTransferOrder);
                     SELECT SCOPE_IDENTITY() AS palletItemID;`);
 
         res.status(201).json({ success: true, palletItemID: result.recordset[0].palletItemID });
@@ -119,9 +132,52 @@ router.post('/', async (req, res) => {
 });
 
 // ── Delete a single package ──
+// If this package was staged in SAP (has sapMaterial/sapBatch/sapDelivery
+// and the source location we recorded at staging time), reverses the
+// picksheet-stage-batch transfer order first — moving the batch's stock
+// back out of the picksheet's 916 bin to wherever it came from — before
+// deleting the DB row. Deliberately fails closed, same reasoning as the
+// stage side: if SAP rejects the reversal, the row is NOT deleted, so the
+// app and physical/SAP reality can't end up disagreeing about where the
+// stock is. A package that was never staged (no SAP fields recorded, e.g.
+// a manually-typed batch with no SAP match) just deletes straight away.
 router.delete('/:palletItemId', async (req, res) => {
     try {
         const pool = await getPool();
+        const rowRes = await pool.request()
+            .input('palletItemId', sql.Int, req.params.palletItemId)
+            .query(`SELECT sapMaterial, sapBatch, sapDelivery, sapSourceStorageType, sapSourceBin
+                    FROM   Logistics.dbo.PalletPackages
+                    WHERE  palletItemID = @palletItemId`);
+        const row = rowRes.recordset[0];
+
+        if (row && row.sapMaterial && row.sapBatch && row.sapDelivery
+            && row.sapSourceStorageType && row.sapSourceBin) {
+            const stagedBin = String(row.sapDelivery).trim().padStart(10, '0');
+            const response = await axios.post(
+                `${sapConfig.url}/api/warehouse/picksheet-unstage-batch`,
+                {
+                    material: row.sapMaterial,
+                    batch: row.sapBatch,
+                    stagedBin,
+                    originalSourceType: row.sapSourceStorageType,
+                    originalSourceBin: row.sapSourceBin,
+                },
+                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+            ).catch(err => {
+                if (err.response?.data) return { data: err.response.data };
+                throw err;
+            });
+
+            const body = response.data;
+            if (!body?.success) {
+                return res.status(422).json({
+                    success: false,
+                    error: body?.error?.message || body?.data?.error || 'SAP transfer-order reversal failed — package was not removed',
+                });
+            }
+        }
+
         await pool.request()
             .input('palletItemId', sql.Int, req.params.palletItemId)
             .query('DELETE FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');
