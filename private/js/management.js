@@ -932,7 +932,7 @@ function renderBreakdownTable(rows) {
   );
 
   let html = `
-    <table class="breakdown-table">
+    <table class="breakdown-table" data-no-paginate>
       <thead>
         <tr>
           <th>Customer / Order / Material</th>
@@ -1022,6 +1022,13 @@ function closeBreakdownModal() {
   document.getElementById('breakdownOverlay').style.display = 'none';
 }
 
+function exportBreakdown() {
+  // Plain navigation, not fetch+blob — the response is a Content-Disposition:
+  // attachment, so the browser handles the download without leaving the page,
+  // and it rides on the same session cookie as every other request here.
+  window.location.href = BASE + '/orderbook-breakdown/export';
+}
+
 
 // ✅ MAIN RENDER
 function renderDashboard() {
@@ -1066,6 +1073,7 @@ document.getElementById('dateTo').onchange = renderDashboard;
 
 document.getElementById('fullBreakdownBtn').onclick = openBreakdownModal;
 document.getElementById('closeBreakdownBtn').onclick = closeBreakdownModal;
+document.getElementById('exportBreakdownBtn').onclick = exportBreakdown;
 
 document.getElementById('breakdownOverlay').addEventListener('click', e => {
   if (e.target.id === 'breakdownOverlay') closeBreakdownModal();

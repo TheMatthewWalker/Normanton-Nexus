@@ -354,6 +354,12 @@
   margin: 0;
 }
 
+.mgmt-breakdown-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .mgmt-breakdown-close {
   background: none;
   border: none;

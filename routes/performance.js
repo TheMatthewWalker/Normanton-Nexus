@@ -3,6 +3,7 @@ import { runFullRefresh, runTurnsValClassRefresh } from '../routes/performancesy
 import * as sap from './performancesap.js';
 import * as db  from './performancesql.js';
 import sql from 'mssql';
+import ExcelJS from 'exceljs';
 import { sqlConfig, auditQuery } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
@@ -211,6 +212,100 @@ router.get('/orderbook-breakdown', async (req, res, next) => {
 
   } catch (err) {
     next(err);
+  }
+});
+
+// ── Order book full breakdown — Excel export ────────────────────────────────
+// Full, unfiltered dataset (same query as the JSON route above) streamed as a
+// single-sheet .xlsx — this is the "make it exportable" companion to the
+// Full Breakdown modal, since the modal itself shows every row already.
+router.get('/orderbook-breakdown/export', async (req, res) => {
+  try {
+    const rows = await db.getOrderBookBreakdown();
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Kongsberg Portal';
+    wb.created = new Date();
+
+    const ws = wb.addWorksheet('Order Book Breakdown');
+
+    ws.columns = [
+      { header: 'Value Stream',  key: 'valueStream',       width: 14 },
+      { header: 'Customer',      key: 'customer',          width: 14 },
+      { header: 'Customer Name', key: 'customerName',      width: 30 },
+      { header: 'Order',         key: 'referenceDocument', width: 14 },
+      { header: 'Material',      key: 'material',          width: 16 },
+      { header: 'Material Text', key: 'materialText',      width: 40 },
+      { header: 'Order Qty',     key: 'orderQty',          width: 14 },
+      { header: 'Order Value',   key: 'orderValue',        width: 14 },
+      { header: 'Stock Qty',     key: 'stockQty',          width: 14 },
+      { header: 'Stock Value',   key: 'stockValue',        width: 14 },
+      { header: 'Picked Qty',    key: 'pickedQty',         width: 14 },
+      { header: 'Picked Value',  key: 'pickedValue',       width: 14 }
+    ];
+
+    const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
+    const headerFont = { name: 'Arial', bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+    const border      = { style: 'thin', color: { argb: 'FFBFCAD4' } };
+    const cellBorder  = { top: border, bottom: border, left: border, right: border };
+    const oddFill     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+    const evenFill    = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9EEF4' } };
+
+    const headerRow = ws.getRow(1);
+    headerRow.height = 22;
+    headerRow.eachCell(cell => {
+      cell.fill      = headerFill;
+      cell.font      = headerFont;
+      cell.alignment = { vertical: 'middle', horizontal: 'left' };
+      cell.border    = cellBorder;
+    });
+
+    rows.forEach((r, i) => {
+      const row = ws.addRow({
+        valueStream: r.ValueStream,
+        customer: r.Customer,
+        customerName: r.CustomerName || r.Customer,
+        referenceDocument: r.ReferenceDocument,
+        material: r.Material,
+        materialText: r.MaterialText,
+        orderQty: Number(r.OrderQty || 0),
+        orderValue: Number(r.OrderValue || 0),
+        stockQty: Number(r.StockQty || 0),
+        stockValue: Number(r.StockValue || 0),
+        pickedQty: Number(r.PickedQty || 0),
+        pickedValue: Number(r.PickedValue || 0)
+      });
+
+      const fill = i % 2 === 0 ? oddFill : evenFill;
+      row.eachCell(cell => {
+        cell.fill   = fill;
+        cell.font   = { name: 'Arial', size: 10, color: { argb: 'FF000000' } };
+        cell.border = cellBorder;
+      });
+    });
+
+    ['orderQty', 'stockQty', 'pickedQty'].forEach(key => {
+      ws.getColumn(key).numFmt = '#,##0';
+    });
+    ['orderValue', 'stockValue', 'pickedValue'].forEach(key => {
+      ws.getColumn(key).numFmt = '#,##0.00';
+    });
+
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columns.length } };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+    const filename = `orderbook_breakdown_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error('[orderbook-breakdown/export]', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
   }
 });
 
