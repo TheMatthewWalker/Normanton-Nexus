@@ -554,55 +554,72 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     pickedCardCell.numFmt = '#,##0.00';
     setMergedCell('A10:F10', 'Invoiced plus stock already picked — effectively secured.', cardDescFont, null);
 
-    // Card 3 — Invoiced + Potential Stock
+    // Card 3 — Invoiced + Potential Stock. Stock Qty/Value already includes
+    // picked stock (picked is a subset of stock, not additional to it), so
+    // this does NOT also add Picked Value on top — that would double-count
+    // whatever's already been picked.
     setMergedCell('A12:F12', 'INVOICED + POTENTIAL STOCK (PTFE)', cardLabelFont, cardLabelFill);
     dashboardWs.getRow(13).height = 30;
     const stockCardCell = setMergedCell(
       'A13:F13',
       {
-        formula: `$A$5+SUMIFS(${dataPickedRange},${dataStreamRange},"PTFE")+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"<>x")`,
-        result: invoicedPlusStock
+        formula: `$A$5+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"<>x")`,
+        result: invoicedToDate + stockTotalPtfe
       },
       cardValueFont, null
     );
     stockCardCell.numFmt = '#,##0.00';
-    setMergedCell('A14:F14', 'Full month-end prediction: invoiced + picked + stock not flagged at risk on the Data tab.', cardDescFont, null);
+    setMergedCell('A14:F14', 'Full month-end prediction: invoiced + stock not flagged at risk on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.', cardDescFont, null);
 
-    // Card 4 — Invoiced + Planned. Same "invoiced to date + X" pattern as
-    // cards 2 and 3, but adding Planned Production Value instead of Stock
-    // Value — this is the "what if everything still to be made actually gets
-    // made" prediction, kept as its own card rather than folded into
-    // Invoiced + Potential Stock above (which only counts what's already
-    // physically stock).
+    // Card 4 — Invoiced + Planned. Excludes rows flagged Last Day = "x" —
+    // those are tracked separately in the Final Day Total card and the
+    // Value-by-Hour table below, so they're deliberately left out here to
+    // avoid double-counting them in both places.
     setMergedCell('A16:F16', 'INVOICED + PLANNED (PTFE)', cardLabelFont, cardLabelFill);
     dashboardWs.getRow(17).height = 30;
     const plannedCardCell = setMergedCell(
       'A17:F17',
       {
-        formula: `$A$5+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE")`,
-        result: invoicedToDate + ptfeRows.reduce((sum, r) => sum + Number(r.StockValue || 0), 0)
+        formula: `$A$5+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x")`,
+        result: invoicedToDate + ptfeRows.filter(r => String(r.lastDay || '').toLowerCase() !== 'x').reduce((sum, r) => sum + Number(r.StockValue || 0), 0)
       },
       cardValueFont, null
     );
     plannedCardCell.numFmt = '#,##0.00';
-    setMergedCell('A18:F18', 'Invoiced plus everything in Planned Production Qty on the Data tab (defaults to Stock Qty — overtype per line as plans firm up).', cardDescFont, null);
+    setMergedCell('A18:F18', 'Invoiced plus Planned Production Value for everything NOT flagged Last Day (those are in Final Day Total below instead).', cardDescFont, null);
+
+    // Card 4b — Final Day Total. Invoiced + Planned above, plus whatever's
+    // flagged Last Day on top — the true month-end grand total once the
+    // final day's production lands.
+    setMergedCell('A20:F20', 'FINAL DAY TOTAL (PTFE)', cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(21).height = 30;
+    const finalDayTotalCell = setMergedCell(
+      'A21:F21',
+      {
+        formula: `$A$17+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`,
+        result: 0
+      },
+      cardValueFont, null
+    );
+    finalDayTotalCell.numFmt = '#,##0.00';
+    setMergedCell('A22:F22', 'Invoiced + Planned (above) plus the Planned Production Value of everything flagged Last Day — see the hour-by-hour breakdown below for when it lands.', cardDescFont, null);
 
     // Card 5 — Risk
-    setMergedCell('A20:C20', 'VALUE AT RISK (PTFE)', riskLabelFont, riskLabelFill);
-    setMergedCell('D20:F20', 'ITEMS FLAGGED (PTFE)', riskLabelFont, riskLabelFill);
-    dashboardWs.getRow(21).height = 30;
+    setMergedCell('A24:C24', 'VALUE AT RISK (PTFE)', riskLabelFont, riskLabelFill);
+    setMergedCell('D24:F24', 'ITEMS FLAGGED (PTFE)', riskLabelFont, riskLabelFill);
+    dashboardWs.getRow(25).height = 30;
     const riskValueCell = setMergedCell(
-      'A21:C21',
+      'A25:C25',
       { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"x")`, result: 0 },
       riskValueFont, null
     );
     riskValueCell.numFmt = '#,##0.00';
     setMergedCell(
-      'D21:F21',
+      'D25:F25',
       { formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataRiskRange},"x")`, result: 0 },
       riskValueFont, null
     );
-    setMergedCell('A22:F22', 'Flagged rows are excluded from Invoiced + Potential Stock above — we may or may not receive this stock. See the Risk / Reason columns on the Data tab for detail.', cardDescFont, null);
+    setMergedCell('A26:F26', 'Flagged rows are excluded from Invoiced + Potential Stock above — we may or may not receive this stock. See the Risk / Reason columns on the Data tab for detail.', cardDescFont, null);
 
     // Card 6 — At-risk lines detail. Excel has no true "hover tooltip" that
     // can show live, formula-driven content (native cell comments only hold
@@ -612,16 +629,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Seq" helper column on the Data tab, not TEXTJOIN/dynamic arrays, so it
     // evaluates correctly on any Excel version (2007 and up), not just
     // 365/2021+.
-    setMergedCell('A24:F24', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
+    setMergedCell('A28:F28', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
     setMergedCell(
-      'A25:F25',
+      'A29:F29',
       { text: 'Open the Data tab and use the Risk column filter arrow to show every flagged row', hyperlink: "#'Data'!A1" },
       { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
       null,
       { horizontal: 'left', vertical: 'middle' }
     );
 
-    const atRiskListStartRow = 26;
+    const atRiskListStartRow = 30;
     const atRiskListCount = 10;
     for (let idx = 0; idx < atRiskListCount; idx++) {
       const r = atRiskListStartRow + idx;
@@ -643,71 +660,68 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     );
 
     // Card 7 — Due on last day of the month
-    setMergedCell('A38:C38', 'VALUE DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
-    setMergedCell('D38:F38', 'ITEMS DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
-    dashboardWs.getRow(39).height = 30;
+    setMergedCell('A42:C42', 'VALUE DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
+    setMergedCell('D42:F42', 'ITEMS DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(43).height = 30;
     const lastDayValueCell = setMergedCell(
-      'A39:C39',
-      { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
+      'A43:C43',
+      { formula: `SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
       cardValueFont, null
     );
     lastDayValueCell.numFmt = '#,##0.00';
     setMergedCell(
-      'D39:F39',
+      'D43:F43',
       { formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
       cardValueFont, null
     );
-    setMergedCell('A40:F40', 'What product, value and time is coming through on the last day of the month. Flag a row "x" in Last Day on the Data tab and fill in Last Day Time — filter the Data tab by Last Day to see the individual products and times.', cardDescFont, null);
+    setMergedCell('A44:F44', 'What product, value and time is coming through on the last day of the month. Flag a row "x" in Last Day on the Data tab and fill in Last Day Time — filter the Data tab by Last Day to see the individual products and times.', cardDescFont, null);
 
-    // Card 8 — Value-by-hour for Last Day items. ExcelJS can't create native
-    // embedded chart objects (no chart API), so this pairs live SUMPRODUCT
-    // aggregation columns with Excel's built-in Data Bar conditional
-    // formatting for an automatic in-cell visual. For a full axis chart,
-    // select A43:D67 in Excel and Insert > Chart — a one-off manual step
-    // since this file regenerates fresh on every export. Cumulative adds the
-    // running Value + Planned totals for the day on top of Invoiced to date,
-    // so it reads as "expected invoiced total if we hit this hour".
-    setMergedCell('A42:F42', 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
+    // Card 8 — Value-by-hour for Last Day items. Sourced from Planned
+    // Production Value (column R) — that's the "expected production" figure,
+    // not Stock Value, since Last Day items are typically not made yet.
+    // ExcelJS can't create native embedded chart objects (no chart API), so
+    // this pairs a live SUMPRODUCT column with Excel's built-in Data Bar
+    // conditional formatting for an automatic in-cell visual. For a full axis
+    // chart, select A47:C71 in Excel and Insert > Chart — a one-off manual
+    // step since this file regenerates fresh on every export. Rows with Last
+    // Day = "x" but no parseable Last Day Time default into the Hour 0 bucket
+    // rather than being dropped.
+    setMergedCell('A46:F46', 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
 
-    const hourHeaderRow = 43;
+    const hourHeaderRow = 47;
     dashboardWs.getCell(`A${hourHeaderRow}`).value = 'Hour';
-    dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Value (made)';
-    dashboardWs.getCell(`C${hourHeaderRow}`).value = 'Planned (to make)';
-    dashboardWs.getCell(`D${hourHeaderRow}`).value = 'Cumulative Invoiced Total';
-    [`A${hourHeaderRow}`, `B${hourHeaderRow}`, `C${hourHeaderRow}`, `D${hourHeaderRow}`].forEach(ref => {
+    dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Expected Value (Planned Production)';
+    dashboardWs.getCell(`C${hourHeaderRow}`).value = 'Cumulative Invoiced Total';
+    [`A${hourHeaderRow}`, `B${hourHeaderRow}`, `C${hourHeaderRow}`].forEach(ref => {
       const cell = dashboardWs.getCell(ref);
       cell.font = cardLabelFont;
       cell.fill = cardLabelFill;
       cell.alignment = { horizontal: 'center', wrapText: true };
     });
-    dashboardWs.mergeCells(`D${hourHeaderRow}:F${hourHeaderRow}`);
+    dashboardWs.mergeCells(`C${hourHeaderRow}:F${hourHeaderRow}`);
 
-    const firstHourRow = hourHeaderRow + 1; // 44
-    const lastHourRow = firstHourRow + 23;  // 67
+    const firstHourRow = hourHeaderRow + 1; // 48
+    const lastHourRow = firstHourRow + 23;  // 71
 
     for (let hour = 0; hour <= 23; hour++) {
       const r = firstHourRow + hour;
       dashboardWs.getCell(`A${r}`).value = hour;
       dashboardWs.getCell(`A${r}`).alignment = { horizontal: 'center' };
 
+      // Defaults an unparseable/blank Last Day Time to hour 0 (per-request
+      // fallback), rather than the old -1 sentinel that silently dropped it
+      // from every bucket.
       const valueCell = dashboardWs.getCell(`B${r}`);
       valueCell.value = {
-        formula: `SUMPRODUCT((${dataStreamRangeB}="PTFE")*(${dataLastDayRangeB}="x")*(IFERROR(HOUR(${dataLastDayTimeRangeB}),-1)=A${r})*${dataStockRangeB})`,
+        formula: `SUMPRODUCT((${dataStreamRangeB}="PTFE")*(${dataLastDayRangeB}="x")*(IFERROR(HOUR(${dataLastDayTimeRangeB}),0)=A${r})*${dataPlannedValueRangeB})`,
         result: 0
       };
       valueCell.numFmt = '#,##0.00';
 
-      const plannedCell = dashboardWs.getCell(`C${r}`);
-      plannedCell.value = {
-        formula: `SUMPRODUCT((${dataStreamRangeB}="PTFE")*(${dataLastDayRangeB}="x")*(IFERROR(HOUR(${dataLastDayTimeRangeB}),-1)=A${r})*${dataPlannedValueRangeB})`,
-        result: 0
-      };
-      plannedCell.numFmt = '#,##0.00';
-
-      dashboardWs.mergeCells(`D${r}:F${r}`);
-      const cumulativeCell = dashboardWs.getCell(`D${r}`);
+      dashboardWs.mergeCells(`C${r}:F${r}`);
+      const cumulativeCell = dashboardWs.getCell(`C${r}`);
       cumulativeCell.value = {
-        formula: `$A$5+SUM($B$${firstHourRow}:B${r})+SUM($C$${firstHourRow}:C${r})`,
+        formula: `$A$17+SUM($B$${firstHourRow}:B${r})`,
         result: 0
       };
       cumulativeCell.numFmt = '#,##0.00';
@@ -723,20 +737,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         priority: 1
       }]
     });
-    dashboardWs.addConditionalFormatting({
-      ref: `C${firstHourRow}:C${lastHourRow}`,
-      rules: [{
-        type: 'dataBar',
-        cfvo: [{ type: 'min' }, { type: 'max' }],
-        color: { argb: 'FFA9D18E' },
-        priority: 1
-      }]
-    });
 
-    const hourTableCaptionRow = lastHourRow + 1; // 68
+    const hourTableCaptionRow = lastHourRow + 1; // 72
     setMergedCell(
       `A${hourTableCaptionRow}:F${hourTableCaptionRow}`,
-      'Data bars approximate a value-by-hour chart — this export can\'t embed a native Excel chart object. For a full axis chart, select A43:D67 and Insert > Chart. Needs Last Day Time entered as a clock time (e.g. 14:30) to bucket correctly.',
+      'Data bars approximate a value-by-hour chart — this export can\'t embed a native Excel chart object. For a full axis chart, select A47:C71 and Insert > Chart. Blank/unrecognised Last Day Time defaults to the Hour 0 row.',
       cardDescFont, null
     );
 
