@@ -216,19 +216,46 @@ router.get('/orderbook-breakdown', async (req, res, next) => {
   }
 });
 
+// "On or before the current month" — same comparison the Month End
+// Breakdown modal applies client-side (management.js isOnOrBeforeCurrentMonth),
+// mirrored here so ?mode=monthEnd on the export applies the identical filter.
+// Uses UTC accessors since RequestDate comes back from mssql as a UTC
+// midnight Date (the SQL side truncates it via CONVERT(...,112), and this
+// file's tedious config defaults to useUTC=true — see performancesql.js).
+function isOnOrBeforeCurrentMonth(date) {
+  if (!date) return false;
+
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return false;
+
+  const today = new Date();
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const cy = today.getUTCFullYear();
+  const cm = today.getUTCMonth() + 1;
+
+  return y < cy || (y === cy && m <= cm);
+}
+
 // ── Order book full breakdown — Excel export ────────────────────────────────
-// Full, unfiltered dataset (same query as the JSON route above) streamed as a
-// single-sheet .xlsx — this is the "make it exportable" companion to the
-// Full Breakdown modal, since the modal itself shows every row already.
+// ?mode=monthEnd applies the same on-or-before-current-month filter as the
+// Breakdown for Month End modal; otherwise exports the full unfiltered
+// dataset (same query as the JSON route above) — this is the "make it
+// exportable" companion to both breakdown modals.
 router.get('/orderbook-breakdown/export', async (req, res) => {
   try {
-    const rows = await db.getOrderBookBreakdown();
+    let rows = await db.getOrderBookBreakdown();
+    const mode = req.query.mode === 'monthEnd' ? 'monthEnd' : 'full';
+
+    if (mode === 'monthEnd') {
+      rows = rows.filter(r => isOnOrBeforeCurrentMonth(r.RequestDate));
+    }
 
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Kongsberg Portal';
     wb.created = new Date();
 
-    const ws = wb.addWorksheet('Order Book Breakdown');
+    const ws = wb.addWorksheet(mode === 'monthEnd' ? 'Month End Breakdown' : 'Order Book Breakdown');
 
     ws.columns = [
       { header: 'Value Stream',  key: 'valueStream',       width: 14 },
@@ -268,6 +295,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         customer: r.Customer,
         customerName: r.CustomerName || r.Customer,
         referenceDocument: r.ReferenceDocument,
+        requestDate: r.RequestDate ? new Date(r.RequestDate).toISOString().slice(0, 10) : '',
         material: r.Material,
         materialText: r.MaterialText,
         orderQty: Number(r.OrderQty || 0),
@@ -296,7 +324,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columns.length } };
     ws.views = [{ state: 'frozen', ySplit: 1 }];
 
-    const filename = `orderbook_breakdown_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    const filenamePrefix = mode === 'monthEnd' ? 'orderbook_month_end' : 'orderbook_breakdown';
+    const filename = `${filenamePrefix}_${new Date().toISOString().slice(0, 10)}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 

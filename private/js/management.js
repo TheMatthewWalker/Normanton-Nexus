@@ -904,13 +904,14 @@ function addBreakdownTotals(target, row) {
   target.pickedValue += row.pickedValue || 0;
 }
 
-function breakdownTotalsCells(totals) {
+// Value-only — quantities are tracked in the totals (zeroBreakdownTotals/
+// addBreakdownTotals) for the Excel export, but the modal itself only shows
+// value columns: quantities aren't useful for "what-if" analysis in the UI
+// and just add clutter, per feedback.
+function breakdownValueCells(totals) {
   return `
-    <td>${numberCell(totals.orderQty)}</td>
     <td>${currencyCell(totals.orderValue)}</td>
-    <td>${numberCell(totals.stockQty)}</td>
     <td>${currencyCell(totals.stockValue)}</td>
-    <td>${numberCell(totals.pickedQty)}</td>
     <td>${currencyCell(totals.pickedValue)}</td>
   `;
 }
@@ -1040,11 +1041,8 @@ function renderBreakdownRows(childrenMap, parentGroupId, sortKey, dir) {
       html += `
         <tr class="breakdown-leaf-row ob-hidden" data-level="${node.level}" data-parent="${parentGroupId}">
           <td>${leafLabelHtml}</td>
-          <td>${numberCell(node.row.orderQty)}</td>
           <td>${currencyCell(node.row.orderValue)}</td>
-          <td>${numberCell(node.row.stockQty)}</td>
           <td>${currencyCell(node.row.stockValue)}</td>
-          <td>${numberCell(node.row.pickedQty)}</td>
           <td>${currencyCell(node.row.pickedValue)}</td>
         </tr>
       `;
@@ -1061,7 +1059,7 @@ function renderBreakdownRows(childrenMap, parentGroupId, sortKey, dir) {
     html += `
       <tr class="breakdown-group-row${isRoot ? '' : ' ob-hidden'}" data-level="${node.level}" data-group-id="${groupId}"${parentAttr} onclick="toggleOrderBookGroup('${groupId}')">
         <td><span id="icon-${groupId}">▶</span> ${labelHtml}</td>
-        ${breakdownTotalsCells(node.totals)}
+        ${breakdownValueCells(node.totals)}
       </tr>
     `;
 
@@ -1108,13 +1106,13 @@ function renderBreakdownTable(rows, mode = currentBreakdownMode) {
   const leafExtraFn = mode === 'monthEnd' ? null : (row => row.requestDate || 'Unknown');
   const tree = buildBreakdownTree(rows, levelDefs, leafExtraFn);
 
+  // Value-only in the UI — quantities add clutter for on-screen "what-if"
+  // analysis and aren't shown here, but they're still exported to Excel
+  // (see the /orderbook-breakdown/export route, unaffected by this).
   const columns = [
     { key: 'label', label: firstColLabel },
-    { key: 'orderQty', label: 'Order Qty' },
     { key: 'orderValue', label: 'Order Value' },
-    { key: 'stockQty', label: 'Stock Qty' },
     { key: 'stockValue', label: 'Stock Value' },
-    { key: 'pickedQty', label: 'Picked Qty' },
     { key: 'pickedValue', label: 'Picked Value' }
   ];
 
@@ -1182,10 +1180,11 @@ function exportBreakdown() {
   // Plain navigation, not fetch+blob — the response is a Content-Disposition:
   // attachment, so the browser handles the download without leaving the page,
   // and it rides on the same session cookie as every other request here.
-  // Always exports the full unfiltered dataset regardless of which modal is
-  // open — the Month End view's on-or-before-current-month filter is a
-  // display-only convenience and isn't applied to the export.
-  window.location.href = BASE + '/orderbook-breakdown/export';
+  // Mode-aware: when the Month End modal is open, ?mode=monthEnd tells the
+  // server to apply the same on-or-before-current-month filter the modal
+  // itself uses, so the export matches what's on screen.
+  const params = currentBreakdownMode === 'monthEnd' ? '?mode=monthEnd' : '';
+  window.location.href = BASE + '/orderbook-breakdown/export' + params;
 }
 
 
