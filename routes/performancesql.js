@@ -594,6 +594,7 @@ export async function recomputeDailyInvoiced() {
       ValueStream AS ValueStream,
       SUM(LocalAmount) AS InvoicedValue
     FROM dbo.InvoiceSnapshot
+    WHERE InvoiceType <> 'F5'
     GROUP BY CONVERT(VARCHAR(8), InvoiceDate, 112), ValueStream
   `);
 

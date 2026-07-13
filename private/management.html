@@ -52,38 +52,48 @@
     <div class="dashboard">
 
       <!-- KPI BAR -->
-      <div class="mgmt-kpis">
-
-        <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">PTFE MTD</div>
-          <div id="kpi-ptfe" class="mgmt-kpi-value">£0</div>
+       <div class="mgmt-section tile-twothirds">
+        <h3 class="mgmt-section-title">PTFE</h3>
+        <div class="mgmt-kpis-6">
+          <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">Invoiced MTD</div>
+            <div id="kpi-ptfe" class="mgmt-kpi-value">£0</div>
+          </div>
+          <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">Picked Only</div>
+            <div id="kpi-ptfe-picked-only" class="mgmt-kpi-value">£0</div>
+          </div>
+           <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">Picked & Invoiced</div>
+            <div id="kpi-ptfe-picked" class="mgmt-kpi-value">£0</div>
+          </div>
+           <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">Available Stock</div>
+            <div id="kpi-ptfe-stock" class="mgmt-kpi-value">£0</div>
+          </div>
+          <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">Potential</div>
+            <div id="kpi-ptfe-potential" class="mgmt-kpi-value">£0</div>
+          </div>
+          <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">PTFE OTIF</div>
+            <div id="kpi-ptfe-otif" class="mgmt-kpi-value">0%</div>
+          </div>
         </div>
+      </div>
 
-        <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">PV MTD</div>
-          <div id="kpi-pv" class="mgmt-kpi-value">£0</div>
+      <div class="mgmt-section tile-onethird">
+        <h3 class="mgmt-section-title">PV</h3>
+        <div class="mgmt-kpis-2">
+          <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">Invoiced MTD</div>
+            <div id="kpi-pv" class="mgmt-kpi-value">£0</div>
+          </div>
+          <div class="mgmt-kpi">
+            <div class="mgmt-kpi-title">PV OTIF</div>
+            <div id="kpi-pv-otif" class="mgmt-kpi-value">0%</div>
+          </div>
         </div>
-
-        <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">Total MTD</div>
-          <div id="kpi-total" class="mgmt-kpi-value">£0</div>
-        </div>
-
-        <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">PTFE OTIF</div>
-          <div id="kpi-ptfe-otif" class="mgmt-kpi-value">0%</div>
-        </div>
-
-        <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">PV OTIF</div>
-          <div id="kpi-pv-otif" class="mgmt-kpi-value">0%</div>
-        </div>
-
-        <div class="mgmt-kpi">
-          <div class="mgmt-kpi-title">Total OTIF</div>
-          <div id="kpi-total-otif" class="mgmt-kpi-value">0%</div>
-        </div>
-
       </div>
 
       <!-- FILTERS -->
@@ -189,24 +199,4 @@
           </div>
 
           <div class="mgmt-chart">
-            <h4 class="mgmt-chart-title">PV Daily OTIF</h4>
-            <div id="pvOtifChart"></div>
-          </div>
-
-        </div>
-
-      </details>
-
-    </div>
-
-  </main>
-
-  <footer class="footer">
-    <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
-    <span class="footer-right">Management</span>
-  </footer>
-
-  <script src="./js/management.js"></script>
-
-</body>
-</html>
+            <h4 class="mgmt-chart-title">PV Daily

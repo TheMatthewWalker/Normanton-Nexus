@@ -20,11 +20,25 @@
    KPI CARDS
    ============================== */
 
-.mgmt-kpis {
+.mgmt-kpis-4 {
+
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+.mgmt-kpis-6 {
 
     grid-column: 1 / -1;
     display: grid;
     grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+}
+.mgmt-kpis-2 {
+
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
     gap: 12px;
 }
 
@@ -146,6 +160,14 @@
 
 .tile-quarter {
     grid-column: span 3;
+}
+
+.tile-twothirds {
+    grid-column: span 8;
+}
+
+.tile-onethird {
+    grid-column: span 4;
 }
 
 .tile-half {
@@ -396,11 +418,4 @@ details.mgmt-section:not([open]) {
   background: #E0E7FF;
 }
 
-.orderbook-month {
-  padding-left: 28px !important;
-}
-
-.orderbook-grand-total {
-  background: #DBEAFE;
-  font-weight: 800;
-}
+.ord

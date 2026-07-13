@@ -609,17 +609,17 @@ function renderKpis(valueData, otifData) {
 
   document.getElementById('kpi-ptfe').innerText = formatCurrency(ptfe);
   document.getElementById('kpi-pv').innerText   = formatCurrency(pv);
-  document.getElementById('kpi-total').innerText = formatCurrency(ptfe + pv);
   document.getElementById('kpi-ptfe-otif').innerText = formatPercent(ptfeOtif);
   document.getElementById('kpi-pv-otif').innerText = formatPercent(pvOtif);
-  document.getElementById('kpi-total-otif').innerText = formatPercent(totalOtif);
+
+  return { ptfe, pv };
 }
 
 
 // ORDERBOOK
 let rawOrderBookData = [];
 
-function renderOrderBookTable(rows) {
+function renderOrderBookTable(rows, ptfeInvoiced = 0) {
 
   const container = document.getElementById('orderBookTable');
 
@@ -654,6 +654,35 @@ function renderOrderBookTable(rows) {
     grouped[year][month][vs].stock += row.stock || 0;
     grouped[year][month][vs].picked += row.picked || 0;
   }
+
+  // Tally PTFE picked/stock across every period on or before the current
+  // real-world month. Done once, after grouping is complete — not per row —
+  // and compared against today's actual date, not each row's own month.
+  const today = new Date();
+  const currentYear = today.getFullYear();
+  const currentMonth = today.getMonth() + 1;
+
+  let pickedToDate = 0;
+  let stockToDate = 0;
+
+  for (const y of Object.keys(grouped)) {
+    if (Number(y) > currentYear) continue;
+
+    for (const m of Object.keys(grouped[y])) {
+      if (Number(y) === currentYear && Number(m) > currentMonth) continue;
+
+      pickedToDate += grouped[y][m].PTFE.picked || 0;
+      stockToDate += grouped[y][m].PTFE.stock || 0;
+    }
+  }
+
+  const remainingStock = stockToDate - pickedToDate;
+  const potential = ptfeInvoiced + remainingStock;
+
+  document.getElementById('kpi-ptfe-picked-only').innerText = formatCurrency(pickedToDate);
+  document.getElementById('kpi-ptfe-picked').innerText = formatCurrency(pickedToDate + ptfeInvoiced);
+  document.getElementById('kpi-ptfe-stock').innerText = formatCurrency(remainingStock);
+  document.getElementById('kpi-ptfe-potential').innerText = formatCurrency(potential);
 
   const grand = {
     PTFE: {
@@ -833,8 +862,8 @@ function renderDashboard() {
   const pvOtifCum   = buildCumulativeOtifData(pvOtif);
 
   renderTable(valueData);
-  renderKpis(valueData, otifData);
-  renderOrderBookTable(rawOrderBookData);
+  const kpis = renderKpis(valueData, otifData);
+  renderOrderBookTable(rawOrderBookData, kpis.ptfe);
 
   renderValueChart('ptfeValueChart', ptfe, '#2563EB');
   //renderValueCumulativeChart('ptfeValueCumulativeChart', buildCumulativeValueData(ptfe), '#2563EB');
@@ -846,16 +875,4 @@ function renderDashboard() {
   //renderValueCumulativeChart('pvValueCumulativeChart', buildCumulativeValueData(pv), '#16A34A');
   renderExtendedChart('pvValueExtendedChart', buildExtendedValueData(pv), '#16A34A');
   renderOtifChart('pvOtifChart', pvOtif, '#16A34A');
-  renderOtifCumulativeChart('pvOtifCumulativeChart', pvOtifCum, '#16A34A');
-}
-
-// ✅ INIT
-document.addEventListener('DOMContentLoaded', async () => {
-  setDefaultDates();
-  await loadData();
-});
-
-document.getElementById('refreshBtn').onclick = refreshData;
-document.getElementById('dateFrom').onchange = renderDashboard;
-document.getElementById('dateTo').onchange = renderDashboard;
-
+  renderOtifCumulativeChart
