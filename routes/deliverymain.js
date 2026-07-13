@@ -245,8 +245,11 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
         // can be compared directly.
         const norm = v => String(v || '').trim().replace(/^0+(?=\d)/, '');
 
-        // 1. What material(s) and quantity does this delivery need?
-        const lipsBody = await sapPost('/api/customs/lips', { deliveries: [String(deliveryId)] });
+        // 1. What material(s) and quantity does this delivery need? Uses a
+        //    picksheet-specific LIPS query (LFIMG, not the customs feature's
+        //    KCMENG) since this delivery hasn't been picked/confirmed yet —
+        //    see PicksheetHelpers.LipsColumns in SapServer for why.
+        const lipsBody = await sapPost('/api/warehouse/picksheet-materials', { deliveries: [String(deliveryId)] });
         if (lipsBody?.success === false) throw new Error(lipsBody.error || 'SAP LIPS query failed');
         const lipsRows = unwrap(lipsBody);
 
