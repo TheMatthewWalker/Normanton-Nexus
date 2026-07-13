@@ -285,6 +285,14 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Kongsberg Portal';
     wb.created = new Date();
+    // Forces Excel to fully recalculate every formula the moment this file is
+    // opened, regardless of the user's Automatic/Manual calculation setting —
+    // without this, a workbook opened in an Excel session left in Manual mode
+    // (an application-level setting that can carry over from a previous file)
+    // would keep showing the cached 0 values this file was generated with
+    // until the user presses F9, which looks exactly like "the formula is
+    // stuck" even though it isn't.
+    wb.calcProperties = { fullCalcOnLoad: true };
 
     // Dashboard added first so it lands as the left-most/active tab.
     const dashboardWs = wb.addWorksheet('Dashboard');
@@ -708,12 +716,20 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       dashboardWs.getCell(`A${r}`).value = hour;
       dashboardWs.getCell(`A${r}`).alignment = { horizontal: 'center' };
 
-      // Defaults an unparseable/blank Last Day Time to hour 0 (per-request
-      // fallback), rather than the old -1 sentinel that silently dropped it
-      // from every bucket.
+      // Hour extraction is done with TEXT/LEFT/FIND rather than HOUR() —
+      // HOUR() only works reliably on a genuine Excel time value, but Last
+      // Day Time is free text (so planners can write "TBC" etc.), and text
+      // typed or pasted in isn't always auto-converted to a real time by
+      // Excel. TEXT(cell,"hh:mm") normalises a real time value to a 2-digit
+      // "hh:mm" string but passes plain text straight through unchanged, so
+      // this reads the hour correctly whether the cell holds a true Excel
+      // time (e.g. from typing "15:00" and Excel auto-converting it) or
+      // plain text (e.g. "9:00", "15:00", pasted rather than typed).
+      // Defaults an unparseable/blank Last Day Time to hour 0 (per request).
+      const hourExpr = `LEFT(TEXT(${dataLastDayTimeRangeB},"hh:mm"),FIND(":",TEXT(${dataLastDayTimeRangeB},"hh:mm"))-1)`;
       const valueCell = dashboardWs.getCell(`B${r}`);
       valueCell.value = {
-        formula: `SUMPRODUCT((${dataStreamRangeB}="PTFE")*(${dataLastDayRangeB}="x")*(IFERROR(HOUR(${dataLastDayTimeRangeB}),0)=A${r})*${dataPlannedValueRangeB})`,
+        formula: `SUMPRODUCT((${dataStreamRangeB}="PTFE")*(${dataLastDayRangeB}="x")*(IFERROR(VALUE(${hourExpr}),0)=A${r})*${dataPlannedValueRangeB})`,
         result: 0
       };
       valueCell.numFmt = '#,##0.00';
