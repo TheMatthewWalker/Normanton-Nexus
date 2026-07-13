@@ -3,7 +3,7 @@ import sql from 'mssql';
 import axios from 'axios';
 import { sqlConfig, sapConfig } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
-import { makeSapToken } from './sap.js';
+import { makeSapToken, sapAgent } from './sap.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -210,6 +210,14 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
 // directly comparing that delivery's own customer (via LIKP~KUNNR) against
 // this picksheet's customer, rather than the VBA's fragile string-position
 // hack on a constructed label.
+//
+// Calls SapServer directly with the service token (same pattern as every
+// route in sap.js) rather than looping back through this app's own
+// /api/sap/* routes over HTTP — that self-referential fetch() depends on
+// this server being able to reach itself via req.protocol/req.get('host'),
+// which breaks under some reverse-proxy/TLS setups (observed as a bare
+// "fetch failed" with no further detail after a server restart). Calling
+// SapServer directly removes that extra, fragile hop entirely.
 router.get('/:deliveryId/picksheet-materials', async (req, res) => {
     try {
         const deliveryId = req.params.deliveryId;
@@ -220,9 +228,17 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
             .query('SELECT customerID FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId');
         const customerId = dmRes.recordset[0]?.customerID != null ? String(dmRes.recordset[0].customerID) : null;
 
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-        const headers = { 'Content-Type': 'application/json', ...(req.headers.cookie ? { Cookie: req.headers.cookie } : {}) };
-        const sapPost = (path, body) => fetch(`${baseUrl}${path}`, { method: 'POST', headers, body: JSON.stringify(body) }).then(r => r.json());
+        // Direct SapServer call — mirrors the /api/sap/* routes in sap.js
+        // (same auth header, same httpsAgent, same success-flag handling)
+        // instead of proxying back through this app's own HTTP layer.
+        const sapPost = async (path, body) => {
+            const response = await axios.post(
+                `${sapConfig.url}${path}`,
+                body,
+                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+            );
+            return response.data;
+        };
         const unwrap  = body => Array.isArray(body) ? body : (body?.success && Array.isArray(body.data) ? body.data : []);
         // SAP returns delivery numbers zero-padded to 10 digits (VBELN); the
         // portal stores/sends them unpadded — strip leading zeros so the two
@@ -230,7 +246,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
         const norm = v => String(v || '').trim().replace(/^0+(?=\d)/, '');
 
         // 1. What material(s) and quantity does this delivery need?
-        const lipsBody = await sapPost('/api/sap/lips', { deliveries: [String(deliveryId)] });
+        const lipsBody = await sapPost('/api/customs/lips', { deliveries: [String(deliveryId)] });
         if (lipsBody?.success === false) throw new Error(lipsBody.error || 'SAP LIPS query failed');
         const lipsRows = unwrap(lipsBody);
 
@@ -241,7 +257,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
 
         // 2. Where is that material physically sitting, and is any of it
         //    already tagged against another delivery (ZPRODBATCH~VBELN)?
-        const stockBody = await sapPost('/api/sap/picksheet-stock', { materials });
+        const stockBody = await sapPost('/api/warehouse/picksheet-stock', { materials });
         if (stockBody?.success === false) throw new Error(stockBody.error || 'SAP stock query failed');
         const batchRows = unwrap(stockBody);
 
@@ -252,7 +268,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
 
         const customerByDelivery = {};
         if (conflictDeliveries.length) {
-            const likpBody = await sapPost('/api/sap/likp', { deliveries: conflictDeliveries });
+            const likpBody = await sapPost('/api/customs/likp', { deliveries: conflictDeliveries });
             if (likpBody?.success !== false) {
                 unwrap(likpBody).forEach(r => { customerByDelivery[norm(r.deliveryNumber)] = norm(r.consigneeCode); });
             }
@@ -461,6 +477,7 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
         // genuinely doesn't exist in SAP either) just falls back to the old
         // behaviour of reporting it under `missing`.
         const autoCreated = [];
+        let kna1Error = null; // surfaced in the response so a silent failure is diagnosable
         const missingCustomerIds = [...new Set(
             deliveries
                 .map(d => parseInt(d.customerNumber, 10))
@@ -472,9 +489,10 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
                 const kna1Res = await axios.post(
                     `${sapConfig.url}/api/customs/kna1`,
                     { customers: missingCustomerIds.map(String) },
-                    { timeout: 30000, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+                    { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
                 );
                 const kna1Body = kna1Res.data;
+                if (kna1Body?.success === false) kna1Error = kna1Body.error || 'SapServer returned success=false';
                 const kna1Rows = kna1Body?.success === false ? [] : (kna1Body?.data ?? []);
 
                 for (const row of kna1Rows) {
@@ -526,12 +544,17 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
                         autoCreated.push({ customerNumber: String(custId), destinationName: name, needsReview: !street || !city || !postCode || !country });
                     } catch (err) {
                         // Leave it unset — falls through to `missing` below like before
+                        console.error(`[sap-sync] Failed to auto-create Destinations row for customer ${custId}:`, err.message);
+                        kna1Error = kna1Error || `Insert failed for customer ${custId}: ${err.message}`;
                     }
                 }
             } catch (err) {
-                // KNA1 lookup itself failed (SAP unreachable etc.) — every one of these
-                // customers just falls through to `missing` in the loop below, same as
-                // pre-auto-create behaviour.
+                // KNA1 lookup itself failed (SAP unreachable, bad field list, etc.) — every
+                // one of these customers just falls through to `missing` in the loop below,
+                // same as pre-auto-create behaviour, but now the reason is visible instead
+                // of being silently swallowed.
+                kna1Error = err.response?.data?.error ?? err.message;
+                console.error('[sap-sync] KNA1 auto-create lookup failed:', kna1Error);
             }
         }
 
@@ -582,7 +605,7 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
             }
         }
 
-        res.json({ success: true, total: deliveries.length, inserted, skipped, errors, missing, autoCreated });
+        res.json({ success: true, total: deliveries.length, inserted, skipped, errors, missing, autoCreated, kna1Error });
 
     } catch (err) {
         if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
