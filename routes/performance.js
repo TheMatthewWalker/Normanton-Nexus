@@ -371,9 +371,10 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     const pool = await getPool();
     const request = pool.request();
     let whereSql = '';
+    let materials = [];
 
     if (req.query.materials) {
-      const materials = String(req.query.materials).split(',').map(m => m.trim()).filter(Boolean);
+      materials = String(req.query.materials).split(',').map(m => m.trim()).filter(Boolean);
       if (materials.length) {
         const inClause = materials.map((m, i) => {
           request.input(`m${i}`, sql.VarChar(18), m);
@@ -389,7 +390,9 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         HistoryM12, HistoryM11, HistoryM10, HistoryM09, HistoryM08, HistoryM07,
         HistoryM06, HistoryM05, HistoryM04, HistoryM03, HistoryM02, HistoryM01, HistoryM00,
         ForecastM12, ForecastM11, ForecastM10, ForecastM09, ForecastM08, ForecastM07,
-        ForecastM06, ForecastM05, ForecastM04, ForecastM03, ForecastM02, ForecastM01, ForecastM00
+        ForecastM06, ForecastM05, ForecastM04, ForecastM03, ForecastM02, ForecastM01, ForecastM00,
+        PredictedM12, PredictedM11, PredictedM10, PredictedM09, PredictedM08, PredictedM07,
+        PredictedM06, PredictedM05, PredictedM04, PredictedM03, PredictedM02, PredictedM01, PredictedM00
       FROM dbo.TurnsValClassSnapshot
       ${whereSql}
       ORDER BY Material
@@ -407,10 +410,68 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
       demandForecast: [
         r.ForecastM12, r.ForecastM11, r.ForecastM10, r.ForecastM09, r.ForecastM08, r.ForecastM07,
         r.ForecastM06, r.ForecastM05, r.ForecastM04, r.ForecastM03, r.ForecastM02, r.ForecastM01, r.ForecastM00
+      ],
+      predictedUsage: [
+        r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
+        r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
       ]
     }));
 
-    res.json({ success: true, data });
+    // ── Recorded accuracy overlay (dbo.ForecastAccuracyLog) ─────────────────────
+    // What SAP demand and our prediction WERE for each of the last 12 months, frozen
+    // as of right before each month started, alongside what actually happened — see
+    // the table comment in create_performance_turnsvalclass_database.sql for the full
+    // design. Aggregated server-side (SUM by TargetMonth) rather than returned per
+    // material: with the material filter applied it's a no-op (one row per group
+    // anyway), and with no filter (the "all materials" view) it collapses what could
+    // be hundreds of thousands of rows down to ~13, matching how the frontend already
+    // sums consumptionHistory/demandForecast across materials for that same view.
+    const thisMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+    const fromMonth = new Date(Date.UTC(thisMonth.getUTCFullYear(), thisMonth.getUTCMonth() - 12, 1));
+
+    const accuracyRequest = pool.request();
+    accuracyRequest.input('fromMonth', sql.DateTime, fromMonth);
+    accuracyRequest.input('toMonth', sql.DateTime, thisMonth);
+    let accuracyWhereSql = 'WHERE TargetMonth >= @fromMonth AND TargetMonth <= @toMonth';
+
+    if (materials.length) {
+      const inClause = materials.map((m, i) => {
+        accuracyRequest.input(`am${i}`, sql.VarChar(18), m);
+        return `@am${i}`;
+      }).join(',');
+      accuracyWhereSql += ` AND Material IN (${inClause})`;
+    }
+
+    const { recordset: accuracyRows } = await accuracyRequest.query(`
+      SELECT TargetMonth, SUM(SapDemandQty) AS SapDemandQty, SUM(PredictedQty) AS PredictedQty, SUM(ActualQty) AS ActualQty
+      FROM dbo.ForecastAccuracyLog
+      ${accuracyWhereSql}
+      GROUP BY TargetMonth
+      ORDER BY TargetMonth
+    `);
+
+    // Same 13-slot alignment as consumptionHistory: index 12 = current month, index 0 = 12 months ago.
+    const recordedSapDemand = new Array(13).fill(null);
+    const recordedPredicted = new Array(13).fill(null);
+    const recordedActual    = new Array(13).fill(null);
+
+    accuracyRows.forEach(r => {
+      const targetMonth = new Date(r.TargetMonth);
+      const monthsBack = (thisMonth.getUTCFullYear() - targetMonth.getUTCFullYear()) * 12
+                        + (thisMonth.getUTCMonth() - targetMonth.getUTCMonth());
+      if (monthsBack < 0 || monthsBack > 12) return;
+
+      const idx = 12 - monthsBack;
+      recordedSapDemand[idx] = r.SapDemandQty;
+      recordedPredicted[idx] = r.PredictedQty;
+      recordedActual[idx]    = r.ActualQty;
+    });
+
+    res.json({
+      success: true,
+      data,
+      accuracy: { recordedSapDemand, recordedPredicted, recordedActual }
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }

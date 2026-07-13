@@ -3945,21 +3945,31 @@ async function shfLoadChart(material, title) {
     const json = await resp.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load history');
 
-    let history, forecast;
+    let history, forecast, predicted;
 
     if (material) {
       const row = json.data[0];
       if (!row) throw new Error('No history/forecast data for that material.');
-      history  = row.consumptionHistory.map(v => Number(v) || 0);
-      forecast = row.demandForecast.map(v => Number(v) || 0);
+      history   = row.consumptionHistory.map(v => Number(v) || 0);
+      forecast  = row.demandForecast.map(v => Number(v) || 0);
+      predicted = (row.predictedUsage || []).map(v => Number(v) || 0);
     } else {
-      history  = new Array(13).fill(0);
-      forecast = new Array(13).fill(0);
+      history   = new Array(13).fill(0);
+      forecast  = new Array(13).fill(0);
+      predicted = new Array(13).fill(0);
       json.data.forEach(r => {
-        (r.consumptionHistory || []).forEach((v, i) => { history[i]  += Number(v) || 0; });
-        (r.demandForecast     || []).forEach((v, i) => { forecast[i] += Number(v) || 0; });
+        (r.consumptionHistory || []).forEach((v, i) => { history[i]   += Number(v) || 0; });
+        (r.demandForecast     || []).forEach((v, i) => { forecast[i]  += Number(v) || 0; });
+        (r.predictedUsage     || []).forEach((v, i) => { predicted[i] += Number(v) || 0; });
       });
     }
+
+    // "Recorded" values come from dbo.ForecastAccuracyLog (see performance.js /turns-valclass/history) —
+    // what SAP demand and our prediction WERE for each of the last 12 months, frozen as of right before
+    // each month started. Already summed server-side across whichever materials this request covers.
+    const accuracy = json.accuracy || {};
+    const recordedSapDemand = (accuracy.recordedSapDemand || new Array(13).fill(null)).map(v => v == null ? null : Number(v));
+    const recordedPredicted = (accuracy.recordedPredicted || new Array(13).fill(null)).map(v => v == null ? null : Number(v));
 
     titleEl.textContent = title;
 
@@ -3979,20 +3989,23 @@ async function shfLoadChart(material, title) {
       ? 'No consumption history recorded in SAP (MVER) for this selection — the material\'s consumption-values indicator may not be maintained, or it genuinely has no consumption yet.'
       : '';
 
-    // history[0..12] runs M-12 -> Current; forecast[0..12] runs Current -> M+12
+    // history[0..12] runs M-12 -> Current; forecast/predicted[0..12] run Current -> M+12
     // (see BuildConsumptionHistoryRequest/ParseDemandForecastRows in PerformanceHelpers.cs —
-    // the two arrays share "Current" at opposite ends, not the same position). Plotting both
-    // against one 13-point past-facing label set made the forecast line render backwards
-    // (its Current-month value landing under the "M-12" label). Instead build one continuous
-    // 25-point timeline and pad each series with nulls on the side it doesn't cover, so the
-    // lines visually join at "Current" and the forecast correctly extends into the future.
+    // the arrays share "Current" at opposite ends, not the same position). One continuous
+    // 25-point timeline, each series padded with nulls on the side it doesn't cover, so the
+    // lines visually join at "Current". recordedSapDemand/recordedPredicted (from
+    // dbo.ForecastAccuracyLog) are already 13-wide in the same M-12..Current shape as
+    // history, so they get the same right-padding treatment.
     const labels = [
       ...Array.from({ length: 12 }, (_, i) => `M-${12 - i}`),
       'Current',
       ...Array.from({ length: 12 }, (_, i) => `M+${i + 1}`),
     ];
-    const historySeries  = [...history, ...Array(12).fill(null)];
-    const forecastSeries = [...Array(12).fill(null), ...forecast];
+    const historySeries          = [...history, ...Array(12).fill(null)];
+    const forecastSeries         = [...Array(12).fill(null), ...forecast];
+    const predictedSeries        = [...Array(12).fill(null), ...predicted];
+    const recordedSapSeries      = [...recordedSapDemand, ...Array(12).fill(null)];
+    const recordedPredictedSeries = [...recordedPredicted, ...Array(12).fill(null)];
 
     let canvas = document.getElementById('shf-chart');
     if (!canvas) {
@@ -4008,7 +4021,10 @@ async function shfLoadChart(material, title) {
         labels,
         datasets: [
           { label: 'Consumption History', data: historySeries, borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#0891B2', spanGaps: false },
-          { label: 'Demand Forecast', data: forecastSeries, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4], spanGaps: false },
+          { label: 'SAP Demand Forecast', data: forecastSeries, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4], spanGaps: false },
+          { label: 'Predicted Usage', data: predictedSeries, borderColor: '#16A34A', backgroundColor: 'rgba(22,163,74,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#16A34A', borderDash: [5, 4], spanGaps: false },
+          { label: 'SAP Demand (recorded)', data: recordedSapSeries, borderColor: '#F59E0B', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#F59E0B', borderDash: [1, 3], borderWidth: 1.5, spanGaps: false },
+          { label: 'Predicted (recorded)', data: recordedPredictedSeries, borderColor: '#16A34A', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#16A34A', borderDash: [1, 3], borderWidth: 1.5, spanGaps: false },
         ],
       },
       options: {

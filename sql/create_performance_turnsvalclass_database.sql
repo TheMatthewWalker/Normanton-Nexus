@@ -13,6 +13,8 @@
                                      pull only (TRUNCATE + reinsert on
                                      every sync — same pattern as
                                      dbo.StockSnapshot / dbo.AgreementSnapshot).
+                                     Includes PredictedUsage[0..12] (Node-computed
+                                     seasonal-index forecast) alongside History/Forecast.
    2. dbo.ValuationClassCatalog   — valid valuation classes per material
                                      type, for the change-valuation-class
                                      dropdown (T025/T025T/T134 catalog).
@@ -20,6 +22,11 @@
                                         POST (header: order, plant, who, when).
    4. dbo.ValuationClassChangeDetail — one row per material within that
                                         batch (mirrors ValClassChangeResult).
+   5. dbo.ForecastAccuracyLog     — append-only, one row per material/plant/month.
+                                     Written daily; retains what SAP demand and our
+                                     prediction were for a month right up until it
+                                     started, plus actual consumption once known —
+                                     for comparing forecast accuracy over time.
 
    dbo.RefreshLog already exists (written by the Stock/Agreements/
    Invoicing/Otif sync) and is reused here with two new DatasetName
@@ -109,6 +116,14 @@ BEGIN
     ForecastM03 DECIMAL(15,3) NULL, ForecastM02 DECIMAL(15,3) NULL, ForecastM01 DECIMAL(15,3) NULL,
     ForecastM00 DECIMAL(15,3) NULL,
 
+    -- PredictedUsage[0..12] — seasonal-index weighted forecast computed in Node from 36
+    -- months of consumption history (performanceforecast.js), same 13-slot shape as above.
+    PredictedM12 DECIMAL(15,3) NULL, PredictedM11 DECIMAL(15,3) NULL, PredictedM10 DECIMAL(15,3) NULL,
+    PredictedM09 DECIMAL(15,3) NULL, PredictedM08 DECIMAL(15,3) NULL, PredictedM07 DECIMAL(15,3) NULL,
+    PredictedM06 DECIMAL(15,3) NULL, PredictedM05 DECIMAL(15,3) NULL, PredictedM04 DECIMAL(15,3) NULL,
+    PredictedM03 DECIMAL(15,3) NULL, PredictedM02 DECIMAL(15,3) NULL, PredictedM01 DECIMAL(15,3) NULL,
+    PredictedM00 DECIMAL(15,3) NULL,
+
     LastReceiptDate        DATETIME NULL,   -- S032 LETZTZUG
     LastGoodsIssueDate     DATETIME NULL,   -- S032 LETZTABG
     LastConsumptionDate    DATETIME NULL,   -- S032 LETZTVER
@@ -134,6 +149,41 @@ BEGIN
 END
 ELSE
   PRINT 'dbo.TurnsValClassSnapshot already exists — skipped';
+
+
+/* ── 1b. TurnsValClassSnapshot — add PredictedUsage columns (existing installs) ─────
+   The CREATE TABLE above only runs on a brand-new install. Databases that already had
+   TurnsValClassSnapshot before PredictedUsage was added need these columns brought in
+   with ALTER TABLE instead. COL_LENGTH() returns NULL when the column doesn't exist yet,
+   so each guard below is safe to re-run every time this script is executed.            */
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM12') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM12 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM11') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM11 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM10') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM10 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM09') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM09 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM08') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM08 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM07') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM07 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM06') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM06 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM05') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM05 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM04') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM04 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM03') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM03 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM02') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM02 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM01') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM01 DECIMAL(15,3) NULL;
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM00') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM00 DECIMAL(15,3) NULL;
+
+PRINT 'dbo.TurnsValClassSnapshot PredictedUsage columns verified/added';
 
 
 /* ── 2. ValuationClassCatalog ─────────────────────────────────────────────
@@ -219,6 +269,50 @@ ELSE
   PRINT 'dbo.ValuationClassChangeDetail already exists — skipped';
 
 
+/* ── 5. ForecastAccuracyLog ───────────────────────────────────────────────
+   Append-only, one row per Material+Plant+TargetMonth — NEVER truncated (unlike
+   TurnsValClassSnapshot, which only ever holds the latest pull). This is what makes
+   it possible to look back and compare "what did SAP say this month would need",
+   "what did our seasonal-index model predict", and "what actually happened".
+
+   Written daily by the same sync that refreshes TurnsValClassSnapshot
+   (routes/performancesync.js). Each day's upsert only ever touches:
+     - SapDemandQty / PredictedQty for TargetMonth = today's month through +12 months
+       (i.e. while that month is still current or in the future). The moment a month
+       drops out of that forward window, this upsert stops touching it — so the row
+       is left holding whatever SapDemandQty/PredictedQty were last written right up
+       until the month started. No separate "freeze" step needed; it falls out of the
+       upsert boundary naturally.
+     - ActualQty for TargetMonth = today's month through -12 months (current/recent/past),
+       taken from consumption history — this keeps converging to the true total as the
+       month progresses, and stays accurate once it's fully in the past.
+
+   Net effect: for any past month, this table holds the forecast as it stood right
+   before that month began, next to what actually happened — a straightforward
+   SAP-vs-predicted-vs-actual accuracy comparison per material per month.          */
+IF NOT EXISTS (SELECT 1 FROM sys.objects
+               WHERE object_id = OBJECT_ID(N'dbo.ForecastAccuracyLog') AND type = 'U')
+BEGIN
+  CREATE TABLE dbo.ForecastAccuracyLog (
+    Material       NVARCHAR(18)  NOT NULL,
+    Plant          NVARCHAR(4)   NOT NULL,
+    TargetMonth    DATETIME      NOT NULL,   -- first day of the target calendar month (UTC midnight)
+    SapDemandQty   DECIMAL(15,3) NULL,       -- SAP demand forecast for this month, frozen once it starts
+    PredictedQty   DECIMAL(15,3) NULL,       -- seasonal-index prediction for this month, same freeze rule
+    ActualQty      DECIMAL(15,3) NULL,       -- actual consumption; converges to final total by month end
+    LastUpdatedUtc DATETIME      NOT NULL DEFAULT GETUTCDATE(),
+
+    CONSTRAINT PK_ForecastAccuracyLog PRIMARY KEY (Material, Plant, TargetMonth)
+  );
+
+  CREATE INDEX IX_FAL_TargetMonth ON dbo.ForecastAccuracyLog (TargetMonth) INCLUDE (Material, Plant);
+
+  PRINT 'Created dbo.ForecastAccuracyLog';
+END
+ELSE
+  PRINT 'dbo.ForecastAccuracyLog already exists — skipped';
+
+
 /* ── Verify ──────────────────────────────────────────────────────────────── */
 SELECT 'TurnsValClassSnapshot'      AS TableName, COUNT(*) AS Rows FROM dbo.TurnsValClassSnapshot
 UNION ALL
@@ -226,4 +320,6 @@ SELECT 'ValuationClassCatalog',                   COUNT(*)         FROM dbo.Valu
 UNION ALL
 SELECT 'ValuationClassChangeBatch',               COUNT(*)         FROM dbo.ValuationClassChangeBatch
 UNION ALL
-SELECT 'ValuationClassChangeDetail',              COUNT(*)         FROM dbo.ValuationClassChangeDetail;
+SELECT 'ValuationClassChangeDetail',              COUNT(*)         FROM dbo.ValuationClassChangeDetail
+UNION ALL
+SELECT 'ForecastAccuracyLog',                     COUNT(*)         FROM dbo.ForecastAccuracyLog;

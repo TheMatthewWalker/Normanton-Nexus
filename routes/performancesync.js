@@ -6,6 +6,7 @@ import {
   enrichWithValueStream,
   computeTodayStockAndPickedTotals
 } from './performancevaluestream.js';
+import { computePredictedUsage } from './performanceforecast.js';
 
 async function syncStockAndAgreements(stockRows, agreementRows) {
   const stockRunId = await db.startRefresh('Stock');
@@ -87,7 +88,17 @@ async function syncTurnsValClass(rows) {
     // raw SAP row count (which is inflated for split-valuated materials — see
     // dedupeTurnsValClassRows in performancesql.js for why duplicates occur).
     const deduped = db.dedupeTurnsValClassRows(rows);
+
+    // Seasonal-index predicted usage (performanceforecast.js) needs 36 months of
+    // consumption history (consumptionHistory36, from PerformanceHelpers.cs) — attach
+    // it to each row before persisting, so both TurnsValClassSnapshot's PredictedM..
+    // columns and the ForecastAccuracyLog upsert below see the same numbers.
+    deduped.forEach(row => {
+      row.predictedUsage = computePredictedUsage(row.consumptionHistory36);
+    });
+
     await db.replaceTurnsValClassSnapshot(deduped);
+    await db.upsertForecastAccuracyLog(deduped);
     await db.completeRefresh(runId, deduped.length);
     return { name: 'TurnsValClass', status: 'success', rowCount: deduped.length };
   } catch (err) {

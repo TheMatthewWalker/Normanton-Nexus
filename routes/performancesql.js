@@ -131,6 +131,80 @@ async function replaceTable(tableName, columns, rows) {
   }
 }
 
+// ── Generic batched upsert ──────────────────────────────────────────────────
+// For append-only tables (ForecastAccuracyLog) that must NOT be truncated — replaceTable()
+// above only works for "latest pull replaces everything" snapshots. SQL Server 2005 has no
+// MERGE statement (added in 2008), so this does the same job as one: build a staging set via
+// the same parameterised UNION ALL SELECT pattern as replaceTable(), then run an UPDATE
+// against whatever already matches on keyColumns, followed by an INSERT for whatever didn't.
+// Two round-trips per batch instead of one, but no temp tables/transactions — same reasoning
+// as replaceTable() (SQL Server 2005 connection-pool behaviour under failed transactions).
+async function upsertBatch(tableName, keyColumns, columns, rows) {
+  if (rows.length === 0) return;
+
+  const pool = await getPool();
+  const allColumns = [...keyColumns, ...columns];
+  const batchSize = Math.max(1, Math.floor(2000 / allColumns.length));
+  const keyJoin = keyColumns.map(([c]) => `t.[${c}] = s.[${c}]`).join(' AND ');
+  const insertCols = allColumns.map(([c]) => `[${c}]`).join(', ');
+  const insertVals = allColumns.map(([c]) => `s.[${c}]`).join(', ');
+  const updateSet = columns.map(([c]) => `t.[${c}] = s.[${c}]`).join(', ');
+
+  const buildStaging = (request, batch, paramPrefix) => {
+    const selectClauses = [];
+
+    for (let rowIdx = 0; rowIdx < batch.length; rowIdx++) {
+      const row = batch[rowIdx];
+      const parts = [];
+
+      for (let colIdx = 0; colIdx < allColumns.length; colIdx++) {
+        const [colName, key, type, transform] = allColumns[colIdx];
+        const paramName = `${paramPrefix}${rowIdx}_${colIdx}`;
+        let value = transform ? transform(row[key], row) : row[key];
+        if (value === undefined) value = null;
+
+        request.input(paramName, type, value);
+        parts.push(`@${paramName} AS [${colName}]`);
+      }
+
+      selectClauses.push(`SELECT ${parts.join(', ')}`);
+    }
+
+    return selectClauses.join('\nUNION ALL\n');
+  };
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+
+    try {
+      const updateRequest = pool.request();
+      const updateStaging = buildStaging(updateRequest, batch, 'u');
+      await updateRequest.query(`
+        WITH staging AS (${updateStaging})
+        UPDATE t SET ${updateSet}, LastUpdatedUtc = GETUTCDATE()
+        FROM ${tableName} t
+        INNER JOIN staging s ON ${keyJoin};
+      `);
+
+      // Separate request/param set — a request's inputs can only be bound to one query.
+      const insertRequest = pool.request();
+      const insertStaging = buildStaging(insertRequest, batch, 'i');
+      await insertRequest.query(`
+        WITH staging AS (${insertStaging})
+        INSERT INTO ${tableName} (${insertCols})
+        SELECT ${insertVals}
+        FROM staging s
+        LEFT JOIN ${tableName} t ON ${keyJoin}
+        WHERE t.[${keyColumns[0][0]}] IS NULL;
+      `);
+    } catch (err) {
+      console.error('❌ UPSERT FAILED:', { table: tableName, batchStart: i, error: err.message });
+      console.error('🔴 SAMPLE BAD ROW:', batch[0]);
+      throw err;
+    }
+  }
+}
+
 // ── Snapshot replace functions ────────────────────────────────────────────────
 
 export function replaceStockSnapshot(rows) {
@@ -321,6 +395,10 @@ export function replaceTurnsValClassSnapshot(rows) {
 
     ...historyForecastCols('History', 'consumptionHistory'),
     ...historyForecastCols('Forecast', 'demandForecast'),
+    // predictedUsage is attached to each row in performancesync.js (computePredictedUsage,
+    // from performanceforecast.js) before this function is called — same 13-slot Current..+12
+    // shape as demandForecast, so it reuses the same column-generation helper unchanged.
+    ...historyForecastCols('Predicted', 'predictedUsage'),
 
     ['LastReceiptDate',        'lastReceiptDate',        sql.DateTime, toDate],
     ['LastGoodsIssueDate',     'lastGoodsIssueDate',     sql.DateTime, toDate],
@@ -342,6 +420,83 @@ export function replaceValuationClassCatalog(rows) {
     ['AccountRef',     'accountRef',     sql.VarChar(4),  null, 4],
     ['Description',    'description',    sql.VarChar(40), null, 40]
   ], rows);
+}
+
+// ── Forecast accuracy log ───────────────────────────────────────────────────
+// Append-only — never truncated (see dbo.ForecastAccuracyLog comment in the SQL script for
+// the full design rationale). Called once per sync, after predictedUsage has been attached
+// to each row (see performancesync.js).
+//
+// Forward window (k = 0..12, current month through +12 months): upserts SapDemandQty and
+// PredictedQty. Once a month passes out of this window it's simply never touched again by
+// this loop on future days, which is what "freezes" the recorded forecast at whatever it
+// last was right before the month started — no separate freeze step needed.
+//
+// Backward window (j = 0..2, current month through 2 months back only): upserts ActualQty
+// from consumption history. Deliberately NOT the full 12-month backward window — once a
+// month has fully closed, its actual consumption in MVER doesn't change, so there's no
+// value in re-writing it every day forever. j=0..2 covers the current (still-accruing)
+// month plus a small buffer for any late-posted consumption in the prior couple of months.
+// Once a month's ActualQty has been written during this 3-month window, it just stays in
+// the table indefinitely afterward (this table is never truncated), so it's still there
+// whenever the M-12..M-1 section of the chart asks for it later.
+function firstOfMonthUtc(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+function addMonthsUtc(d, n) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, 1));
+}
+
+export async function upsertForecastAccuracyLog(rows) {
+  const thisMonth = firstOfMonthUtc(new Date());
+
+  const forecastRows = [];
+  const actualRows   = [];
+
+  for (const row of rows) {
+    const demandForecast     = Array.isArray(row.demandForecast)     ? row.demandForecast     : [];
+    const predictedUsage     = Array.isArray(row.predictedUsage)     ? row.predictedUsage     : [];
+    const consumptionHistory = Array.isArray(row.consumptionHistory) ? row.consumptionHistory : [];
+
+    for (let k = 0; k <= 12; k++) {
+      forecastRows.push({
+        material:     row.material,
+        plant:        row.plant,
+        targetMonth:  addMonthsUtc(thisMonth, k),
+        sapDemandQty: Number(demandForecast[k]) || 0,
+        predictedQty: Number(predictedUsage[k]) || 0,
+      });
+    }
+
+    // consumptionHistory index 12 = current month, index (12-j) = j months back.
+    for (let j = 0; j <= 2; j++) {
+      const idx = 12 - j;
+      if (idx < 0) continue;
+
+      actualRows.push({
+        material:    row.material,
+        plant:       row.plant,
+        targetMonth: addMonthsUtc(thisMonth, -j),
+        actualQty:   Number(consumptionHistory[idx]) || 0,
+      });
+    }
+  }
+
+  const keyColumns = [
+    ['Material',    'material',    sql.VarChar(18)],
+    ['Plant',       'plant',       sql.VarChar(4)],
+    ['TargetMonth', 'targetMonth', sql.DateTime],
+  ];
+
+  await upsertBatch('dbo.ForecastAccuracyLog', keyColumns, [
+    ['SapDemandQty', 'sapDemandQty', sql.Decimal(15, 3)],
+    ['PredictedQty', 'predictedQty', sql.Decimal(15, 3)],
+  ], forecastRows);
+
+  await upsertBatch('dbo.ForecastAccuracyLog', keyColumns, [
+    ['ActualQty', 'actualQty', sql.Decimal(15, 3)],
+  ], actualRows);
 }
 
 // ── Valuation class change audit ────────────────────────────────────────────
