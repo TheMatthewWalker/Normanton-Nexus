@@ -63,7 +63,7 @@ router.post('/', async (req, res) => {
         const {
             destinationID, destinationName, destinationStreet, destinationCity,
             destinationPostCode, destinationCountry, defaultIncoterms,
-            destinationComment, destinationEmail, destinationZone,
+            destinationComment, destinationZone,
             defaultDeliveryService, defaultForwarder
         } = req.body;
 
@@ -77,19 +77,18 @@ router.post('/', async (req, res) => {
             .input('destinationCountry',   sql.NVarChar, destinationCountry)
             .input('defaultIncoterms',     sql.NVarChar, defaultIncoterms)
             .input('destinationComment',   sql.NVarChar, destinationComment)
-            .input('destinationEmail',     sql.NVarChar, destinationEmail)
             .input('destinationZone',      sql.NVarChar, destinationZone)
             .input('defaultDeliveryService', sql.NVarChar, defaultDeliveryService ?? null)
             .input('defaultForwarder',       sql.NVarChar, defaultForwarder       ?? null)
             .query(`INSERT INTO Logistics.dbo.Destinations
                 (destinationID, destinationName, destinationStreet, destinationCity,
                  destinationPostCode, destinationCountry, defaultIncoterms,
-                 destinationComment, destinationEmail, destinationZone,
+                 destinationComment, destinationZone,
                  defaultDeliveryService, defaultForwarder)
                 VALUES
                 (@destinationID, @destinationName, @destinationStreet, @destinationCity,
                  @destinationPostCode, @destinationCountry, @defaultIncoterms,
-                 @destinationComment, @destinationEmail, @destinationZone,
+                 @destinationComment, @destinationZone,
                  @defaultDeliveryService, @defaultForwarder)`);
 
         res.status(201).json({ message: 'Record created successfully' });

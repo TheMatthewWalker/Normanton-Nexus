@@ -516,18 +516,17 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
                             .input('destinationCountry',     sql.NVarChar, country)
                             .input('defaultIncoterms',       sql.NVarChar, null)
                             .input('destinationComment',     sql.NVarChar, null)
-                            .input('destinationEmail',       sql.NVarChar, null)
                             .input('destinationZone',        sql.NVarChar, zone)
                             .input('defaultDeliveryService', sql.NVarChar, null)
                             .input('defaultForwarder',       sql.NVarChar, null)
                             .query(`INSERT INTO Logistics.dbo.Destinations
                                         (destinationID, destinationName, destinationStreet, destinationCity,
                                          destinationPostCode, destinationCountry, defaultIncoterms,
-                                         destinationComment, destinationEmail, destinationZone,
+                                         destinationComment, destinationZone,
                                          defaultDeliveryService, defaultForwarder)
                                     SELECT @destinationID, @destinationName, @destinationStreet, @destinationCity,
                                            @destinationPostCode, @destinationCountry, @defaultIncoterms,
-                                           @destinationComment, @destinationEmail, @destinationZone,
+                                           @destinationComment, @destinationZone,
                                            @defaultDeliveryService, @defaultForwarder
                                     WHERE NOT EXISTS (
                                         SELECT 1 FROM Logistics.dbo.Destinations WHERE destinationID = @destinationID
