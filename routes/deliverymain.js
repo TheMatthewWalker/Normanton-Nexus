@@ -335,6 +335,53 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
     }
 });
 
+// ── Stage a batch to this picksheet's bin (SAP transfer order) ─────────────
+// Called whenever the operator adds a batch to a pallet on this picksheet.
+// Moves the batch's full on-hand quantity into a bin named after the
+// picksheet's own delivery number (zero-padded to 10 digits, storage type
+// 916) via SapServer's /api/warehouse/picksheet-stage-batch, which itself
+// checks whether that bin already exists in SAP and creates it first if not
+// (ported from the wm_lt01.xltm macro's create_LS01 — "sometimes the
+// picksheet BIN will not have been created yet"). That bin becomes the
+// visible indicator to anyone else in the warehouse that this stock is
+// allocated to this delivery.
+//
+// Deliberately fails closed: if SAP rejects the bin creation or the transfer
+// order, this returns success:false and the caller (warehouse.js) must NOT
+// add the package locally — an app-side "added" pallet package that was
+// never actually moved in SAP would be exactly the kind of mismatch this
+// bin-allocation feature exists to prevent.
+router.post('/:deliveryId/stage-batch', async (req, res) => {
+    try {
+        const deliveryId = req.params.deliveryId;
+        const { material, batch } = req.body || {};
+        if (!material || !batch) {
+            return res.status(400).json({ success: false, error: 'material and batch are required' });
+        }
+
+        const response = await axios.post(
+            `${sapConfig.url}/api/warehouse/picksheet-stage-batch`,
+            { material: String(material), batch: String(batch), deliveryNumber: String(deliveryId) },
+            { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        ).catch(err => {
+            // SapServer returns 422 (with a normal ApiResponse body) for
+            // business-level staging failures — surface that body rather
+            // than treating it as a transport error.
+            if (err.response?.data) return { data: err.response.data };
+            throw err;
+        });
+
+        const body = response.data;
+        if (!body?.success) {
+            return res.status(422).json({ success: false, error: body?.error?.message || body?.data?.error || 'SAP staging failed' });
+        }
+
+        res.json({ success: true, data: body.data });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Pallets picked for a delivery (includes palletID for builder) ──
 router.get('/:deliveryId/pallets', async (req, res) => {
     try {

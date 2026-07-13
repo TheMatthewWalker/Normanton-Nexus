@@ -845,7 +845,7 @@ async function openPalletBuilder() {
          palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
          requiredMaterials: [], stockError: null,
-         pendingSapMaterial: null, pendingSapDeliveryItem: null };
+         pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -904,7 +904,7 @@ async function openPalletBuilderOnExisting(palletId) {
          palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
          requiredMaterials: [], stockError: null,
-         pendingSapMaterial: null, pendingSapDeliveryItem: null };
+         pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -989,7 +989,7 @@ function renderStockPanel() {
       const action = b.allowed
         ? (showAddBtn
             ? `<button type="button" class="pb-stock-add" title="Add this batch"
-                 onclick="addPackageFromFoundBatch('${escJs(m.material)}','${escJs(b.batch)}','${escJs(m.deliveryItem || '')}')">+</button>`
+                 onclick="addPackageFromFoundBatch('${escJs(m.material)}','${escJs(b.batch)}','${escJs(m.deliveryItem || '')}', ${Number(b.totalQty || 0)})">+</button>`
             : '')
         : `<span class="pb-stock-restricted-tag" title="${esc(b.reason || 'Allocated elsewhere')}">restricted</span>`;
       return `<div class="pb-stock-batch${restrictedCls}">
@@ -1019,12 +1019,13 @@ function renderStockPanel() {
 // adds it immediately, same as scanning it in. Also works as the "scan"
 // half of the feature: typing/scanning a batch that matches one listed here
 // (see wireBatchScanInput) sets the same pending fields before Add fires.
-function addPackageFromFoundBatch(material, batch, deliveryItem) {
+function addPackageFromFoundBatch(material, batch, deliveryItem, qty) {
   const batchInput = document.getElementById('pb-batch');
   if (!batchInput) return;
   batchInput.value = batch;
   pb.pendingSapMaterial     = material;
   pb.pendingSapDeliveryItem = deliveryItem || null;
+  pb.pendingSapQuantity     = qty || null;
   addPackage();
 }
 
@@ -1042,10 +1043,11 @@ function wireBatchScanInput() {
     let match = null;
     for (const m of (pb.requiredMaterials || [])) {
       const hit = (m.batches || []).find(b => b.allowed && (b.batch || '').toUpperCase() === val);
-      if (hit) { match = { material: m.material, deliveryItem: m.deliveryItem }; break; }
+      if (hit) { match = { material: m.material, deliveryItem: m.deliveryItem, qty: hit.totalQty }; break; }
     }
     pb.pendingSapMaterial     = match?.material || null;
     pb.pendingSapDeliveryItem = match?.deliveryItem || null;
+    pb.pendingSapQuantity     = match?.qty || null;
   });
 
   input.addEventListener('keydown', e => {
@@ -1406,7 +1408,36 @@ async function addPackage() {
 
   showPbMsg('Adding…', '');
 
+  let stagedQuantity      = null;
+  let transferOrderNumber = null;
+  let binWasCreated       = false;
+
   try {
+    // Stage the batch in SAP first — moves its full on-hand quantity into
+    // this picksheet's bin (delivery number, zero-padded to 10 digits,
+    // storage type 916), creating the bin first if SAP doesn't have it yet.
+    // Deliberately fails closed: only a batch matched against a SAP material
+    // (via the "+" button or a scan match against the found-batches list)
+    // gets staged; if the SAP call fails, we throw here and never reach the
+    // /api/palletpackages POST below — an app-side "added" package that was
+    // never actually moved in SAP is exactly the mismatch this bin is meant
+    // to prevent.
+    if (pb.pendingSapMaterial && batch) {
+      showPbMsg('Staging in SAP…', '');
+      const stageRes  = await fetch(`/api/deliverymain/${encodeURIComponent(pb.deliveryId)}/stage-batch`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ material: pb.pendingSapMaterial, batch }),
+      });
+      const stageJson = await stageRes.json();
+      if (!stageRes.ok || !stageJson.success) {
+        throw new Error(stageJson.error || 'SAP staging failed — package was not added');
+      }
+      stagedQuantity      = stageJson.data?.quantityMoved ?? null;
+      transferOrderNumber = stageJson.data?.transferOrderNumber ?? null;
+      binWasCreated        = !!stageJson.data?.binWasCreated;
+      showPbMsg('Adding…', '');
+    }
+
     const res  = await fetch('/api/palletpackages', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1418,6 +1449,7 @@ async function addPackage() {
         sapCustomer: pb.customerId ? String(pb.customerId) : null,
         sapMaterial:     pb.pendingSapMaterial || null,
         sapDeliveryItem: pb.pendingSapDeliveryItem || null,
+        sapQuantity:     stagedQuantity,
         scanTime:    new Date().toISOString(),
       }),
     });
@@ -1451,6 +1483,7 @@ async function addPackage() {
     document.getElementById('pb-layer').value = pb.nextLayer;
     pb.pendingSapMaterial     = null;
     pb.pendingSapDeliveryItem = null;
+    pb.pendingSapQuantity     = null;
     if (usingCustom) {
       ['pb-dim-l','pb-dim-w','pb-dim-h'].forEach(id => {
         const el = document.getElementById(id);
@@ -1458,7 +1491,8 @@ async function addPackage() {
       });
     }
 
-    showPbMsg(`✓ Added (layer ${layer})`, 'ok');
+    const toNote = transferOrderNumber ? ` · TO ${transferOrderNumber}${binWasCreated ? ' (bin created)' : ''}` : '';
+    showPbMsg(`✓ Added (layer ${layer})${toNote}`, 'ok');
     document.getElementById('pb-batch')?.focus();
   } catch (err) {
     showPbMsg('✕ ' + err.message, 'error');
