@@ -281,8 +281,24 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
         const batchRows = unwrap(stockBody);
 
         // 3. For any batch allocated elsewhere, whose customer is that delivery?
+        //    A batch sitting in storage type 916 (the picksheet-staging area —
+        //    see PicksheetHelpers.StagingStorageType in SapServer) is allocated
+        //    to whichever delivery its bin is named after: the bin IS that
+        //    delivery's own number, zero-padded to 10 digits (see the
+        //    /:deliveryId/stage-batch route below). That's a live signal the
+        //    transfer order itself produces, unlike ZPRODBATCH~VBELN below
+        //    (an older tagging field the transfer order never touches) — so
+        //    prefer the bin-derived delivery when the batch is actually
+        //    sitting in a 916 bin, otherwise fall back to ZPRODBATCH~VBELN.
+        const STAGING_STORAGE_TYPE = '916';
+        const deriveAllocDelivery = b => {
+            const bin = String(b.storageType || '').trim() === STAGING_STORAGE_TYPE
+                ? String(b.bin || '').trim() : '';
+            return bin && /^\d+$/.test(bin) ? norm(bin) : norm(b.allocatedDelivery);
+        };
+
         const conflictDeliveries = [...new Set(
-            batchRows.map(b => norm(b.allocatedDelivery)).filter(v => v && v !== norm(deliveryId))
+            batchRows.map(deriveAllocDelivery).filter(v => v && v !== norm(deliveryId))
         )];
 
         const customerByDelivery = {};
@@ -308,7 +324,9 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
             if (!mat) return;
             if (!byMaterial[mat]) byMaterial[mat] = { material: mat, requiredQty: 0, deliveryItem: null, batches: [] };
 
-            const allocDelivery        = norm(b.allocatedDelivery);
+            const allocDelivery        = deriveAllocDelivery(b);
+            const stagedViaBin         = String(b.storageType || '').trim() === STAGING_STORAGE_TYPE
+                                          && !!allocDelivery && norm(b.bin) === allocDelivery;
             const isOwnOrUnassigned    = !allocDelivery || allocDelivery === norm(deliveryId);
             const allocCustomer        = allocDelivery ? customerByDelivery[allocDelivery] : null;
             const sameCustomer         = !allocCustomer || allocCustomer === norm(customerId);
@@ -325,7 +343,9 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
                 allocatedDelivery:  isOwnOrUnassigned ? null : allocDelivery,
                 allowed,
                 reason: allowed ? null
-                    : `Already allocated to delivery ${allocDelivery}${allocCustomer ? ` (customer ${allocCustomer})` : ''}`,
+                    : stagedViaBin
+                        ? `Already staged to delivery ${allocDelivery}'s bin${allocCustomer ? ` (customer ${allocCustomer})` : ''}`
+                        : `Already allocated to delivery ${allocDelivery}${allocCustomer ? ` (customer ${allocCustomer})` : ''}`,
             });
         });
 
