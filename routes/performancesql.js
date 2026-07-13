@@ -780,3 +780,25 @@ export async function getOrderBookBreakdown() {
 
   return recordset;
 }
+
+// ── PTFE invoiced value, current calendar month ─────────────────────────────
+// Feeds the Dashboard sheet on the order-book Excel export ("Invoiced to
+// date" card). Pulled from dbo.DailyPerformance — the daily fact table
+// populated by recomputeDailyInvoiced() from real SAP billing documents
+// (dbo.InvoiceSnapshot) — NOT from AgreementSnapshot/getOrderBookBreakdown,
+// which only covers open order-book lines and has no invoiced figures at all.
+// Scoped to PTFE only and to the current month (YEAR/MONTH, not a DATE cast —
+// see the SQL Server 2005 note above) per the dashboard's intended scope.
+export async function getPtfeInvoicedMonthToDate() {
+  const pool = await getPool();
+
+  const { recordset } = await pool.request().query(`
+    SELECT SUM(InvoicedValue) AS InvoicedToDate
+    FROM dbo.DailyPerformance
+    WHERE ValueStream = 'PTFE'
+      AND YEAR(MetricDate) = YEAR(GETDATE())
+      AND MONTH(MetricDate) = MONTH(GETDATE())
+  `);
+
+  return Number(recordset[0]?.InvoicedToDate || 0);
+}
