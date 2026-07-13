@@ -244,6 +244,22 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
         // portal stores/sends them unpadded — strip leading zeros so the two
         // can be compared directly.
         const norm = v => String(v || '').trim().replace(/^0+(?=\d)/, '');
+        // SAP returns quantities (LFIMG, GESME, VERME) in German/European
+        // number format — '.' as thousands separator, ',' as decimal
+        // separator, e.g. "10.875,000" means 10875, not 10.875. Plain
+        // Number() on a string with a comma returns NaN, which every
+        // `|| 0` fallback downstream then silently displays as 0 — that's
+        // why required quantities and batch quantities were showing 0 even
+        // when SAP had real figures. Mirrors parseSapQty() in warehouse.js.
+        const parseSapNum = v => {
+            const str = String(v ?? '').trim();
+            if (!str) return 0;
+            const normalized = str.includes(',')
+                ? str.replace(/\./g, '').replace(',', '.')
+                : str.replace(/\./g, '');
+            const num = Number(normalized);
+            return Number.isFinite(num) ? num : 0;
+        };
 
         // 1. What material(s) and quantity does this delivery need? Uses a
         //    picksheet-specific LIPS query (LFIMG, not the customs feature's
@@ -284,7 +300,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
             const mat = String(r.materialNumber || '').trim();
             if (!mat) return;
             if (!byMaterial[mat]) byMaterial[mat] = { material: mat, requiredQty: 0, deliveryItem: r.itemNumber || null, batches: [] };
-            byMaterial[mat].requiredQty += Number(r.quantity || 0);
+            byMaterial[mat].requiredQty += parseSapNum(r.quantity);
         });
 
         batchRows.forEach(b => {
@@ -302,8 +318,8 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
                 batch:              (b.batch || '').trim(),
                 storageType:        b.storageType,
                 bin:                b.bin,
-                totalQty:           Number(b.totalQty || 0),
-                availableQty:       Number(b.availableQty || 0),
+                totalQty:           parseSapNum(b.totalQty),
+                availableQty:       parseSapNum(b.availableQty),
                 stockCategory:      b.stockCategory,
                 packagingMaterial:  b.packagingMaterial,
                 allocatedDelivery:  isOwnOrUnassigned ? null : allocDelivery,

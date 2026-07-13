@@ -1154,6 +1154,12 @@ async function createPallet() {
     pb.packagingWeight  = Number(td?.palletWeight || 0);
     pb.packages  = [];
     pb.nextLayer = 1;
+    pb.phase     = 2; // was never set here — left renderStockPanel()'s
+                       // showAddBtn (pb.phase === 2) permanently false for a
+                       // newly-created pallet, so the found-batch "+" button
+                       // never rendered. openPalletBuilderOnExisting() sets
+                       // phase:2 upfront, which is why continuing an existing
+                       // pallet worked but building a new one didn't.
 
     renderBuilderPhase2();
   } catch (err) {
