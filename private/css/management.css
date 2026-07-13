@@ -449,8 +449,9 @@
 }
 
 /* Pivot-style indentation — one rule per nesting depth. Full Breakdown goes
-   6 levels deep (Year>Month>Date>Customer>Order>Material); Month End
-   Breakdown only uses levels 0-2 (Customer>Order>Material). */
+   5 levels deep (Year>Month>Customer>Order>Material, level 4 being the
+   material leaf); Month End Breakdown only uses levels 0-2
+   (Customer>Order>Material). Level 5 is unused but kept for headroom. */
 
 .breakdown-group-row {
   cursor: pointer;
@@ -513,6 +514,18 @@
 
 .breakdown-table tr[data-level="5"] td:first-child {
   padding-left: 102px;
+}
+
+/* Leaf (material) rows must always render in the lighter/normal-weight
+   style regardless of which numeric level they land on — Month End's
+   leaves sit at level 2, Full Breakdown's at level 4 (since it dropped its
+   own Date grouping level in favour of an inline date tag). Matches the
+   tr[data-level="N"] td selector's specificity and comes later in the
+   cascade, so it wins over whichever level rule would otherwise apply. */
+.breakdown-table tr.breakdown-leaf-row td {
+  font-weight: 400;
+  color: #475569;
+  background: #ffffff;
 }
 
 /* ==============================

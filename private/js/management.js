@@ -867,7 +867,8 @@ function renderOrderBookTable(rows, ptfeInvoiced = 0) {
 
 // ── ORDER BOOK: BREAKDOWN MODALS ────────────────────────────────────────────
 // Two views share one generic tree-builder/renderer:
-//   "Full Breakdown"          — Year > Month > Date > Customer > Order > Material
+//   "Full Breakdown"          — Year > Month > Customer > Order > Material,
+//                                 with each material line tagged with its date
 //   "Breakdown for Month End" — Customer > Order (date shown inline) > Material,
 //                                 pre-filtered to rows on or before the current month.
 // Both reuse toggleOrderBookGroup/.ob-hidden/data-parent (now recursive — see
@@ -946,10 +947,6 @@ const fullBreakdownLevels = [
     return { key: `m-${y}-${m}`, label: m ? monthName(m) : 'Unknown' };
   },
   row => {
-    const d = row.requestDate || 'Unknown';
-    return { key: `d-${d}`, label: d };
-  },
-  row => {
     const c = row.customer || 'UNKNOWN';
     return { key: `c-${c}`, label: row.customerName || c };
   },
@@ -970,7 +967,7 @@ const monthEndLevels = [
   }
 ];
 
-function buildBreakdownTree(rows, levelDefs) {
+function buildBreakdownTree(rows, levelDefs, leafExtraFn) {
   const root = { children: new Map() };
 
   rows.forEach((row, rowIdx) => {
@@ -997,9 +994,13 @@ function buildBreakdownTree(rows, levelDefs) {
     });
 
     // node is now the deepest group node (e.g. the order) — attach this
-    // row as a leaf material line underneath it.
+    // row as a leaf material line underneath it. leafExtraFn optionally
+    // supplies a tag shown before the material label (Full Breakdown uses
+    // this to show the row's date, since it no longer has its own grouping
+    // level — see fullBreakdownLevels above).
     node.children.set(`leaf-${rowIdx}`, {
       label: `${row.material} - ${row.materialText}`,
+      extraLabel: leafExtraFn ? leafExtraFn(row) : null,
       level: levelDefs.length,
       isLeaf: true,
       row
@@ -1032,9 +1033,13 @@ function renderBreakdownRows(childrenMap, parentGroupId, sortKey, dir) {
 
   arr.forEach(node => {
     if (node.isLeaf) {
+      const leafLabelHtml = node.extraLabel
+        ? `<span class="breakdown-date-tag">${escapeHtml(node.extraLabel)}</span> ${escapeHtml(node.label)}`
+        : escapeHtml(node.label);
+
       html += `
         <tr class="breakdown-leaf-row ob-hidden" data-level="${node.level}" data-parent="${parentGroupId}">
-          <td>${escapeHtml(node.label)}</td>
+          <td>${leafLabelHtml}</td>
           <td>${numberCell(node.row.orderQty)}</td>
           <td>${currencyCell(node.row.orderValue)}</td>
           <td>${numberCell(node.row.stockQty)}</td>
@@ -1096,9 +1101,12 @@ function renderBreakdownTable(rows, mode = currentBreakdownMode) {
   const levelDefs = mode === 'monthEnd' ? monthEndLevels : fullBreakdownLevels;
   const firstColLabel = mode === 'monthEnd'
     ? 'Customer / Order / Material'
-    : 'Year / Month / Date / Customer / Order / Material';
+    : 'Year / Month / Customer / Order / Material';
 
-  const tree = buildBreakdownTree(rows, levelDefs);
+  // Full Breakdown no longer has its own Date grouping level — the date is
+  // shown as a tag before each material line instead (see buildBreakdownTree).
+  const leafExtraFn = mode === 'monthEnd' ? null : (row => row.requestDate || 'Unknown');
+  const tree = buildBreakdownTree(rows, levelDefs, leafExtraFn);
 
   const columns = [
     { key: 'label', label: firstColLabel },
