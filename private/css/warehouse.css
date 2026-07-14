@@ -1115,13 +1115,30 @@ body::before {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px; display: flex; flex-direction: column; gap: 1px;
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 5px; padding: 6px 8px;
+  border-radius: 5px; padding: 6px 26px 6px 8px;
+  position: relative;
 }
 .pb-running-layer { font-weight: 700; color: var(--accent); }
+.pb-running-layer-wrap { font-weight: 700; color: var(--accent); display: flex; align-items: center; gap: 4px; }
+.pb-running-layer-input {
+  width: 40px; font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 700; color: var(--accent);
+  background: var(--bg); border: 1px solid var(--border2);
+  border-radius: 3px; padding: 1px 4px;
+}
+.pb-running-layer-input:hover,
+.pb-running-layer-input:focus { border-color: var(--accent); outline: none; }
 .pb-running-mat   { color: var(--text); font-weight: 600; }
 .pb-running-pack  { color: var(--text-muted); font-size: 9px; }
 .pb-running-qty   { color: var(--text-dim); }
 .pb-running-batch { color: var(--text-muted); }
+.pb-running-remove {
+  position: absolute; top: 4px; right: 4px;
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 5px;
+  border-radius: 3px; transition: color 0.15s, background 0.15s;
+}
+.pb-running-remove:hover { color: var(--error); background: rgba(220,38,38,0.08); }
 .pb-running-item--container {
   border-color: var(--accent);
   background: rgba(124,58,237,0.06);

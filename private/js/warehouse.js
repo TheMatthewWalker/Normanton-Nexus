@@ -1018,14 +1018,14 @@ async function openPalletBuilderOnExisting(palletId) {
 // with a "restricted" tag instead of an Add button.
 function renderStockPanel() {
   if (pb.stockError) {
-    return `<div class="pb-stock-panel">
+    return `<div class="pb-stock-panel" id="pb-stock-panel">
       <div class="pb-section-label">Required Materials &amp; Stock</div>
       <div class="pb-stock-error">✕ ${esc(pb.stockError)}</div>
     </div>`;
   }
 
   if (!pb.requiredMaterials || !pb.requiredMaterials.length) {
-    return `<div class="pb-stock-panel">
+    return `<div class="pb-stock-panel" id="pb-stock-panel">
       <div class="pb-section-label">Required Materials &amp; Stock</div>
       <div class="pb-stock-empty">No SAP line items found for this delivery.</div>
     </div>`;
@@ -1096,7 +1096,7 @@ function renderStockPanel() {
     </div>`;
   }).join('');
 
-  return `<div class="pb-stock-panel">
+  return `<div class="pb-stock-panel" id="pb-stock-panel">
     <div class="pb-section-label">Required Materials &amp; Stock</div>
     <div class="pb-stock-list">${groups}</div>
   </div>`;
@@ -1450,13 +1450,149 @@ function renderRunningList() {
     const isContainer = isContainerPackagingId(p.packagingID) && !p.sapBatch;
     return `
     <div class="pb-running-item${isContainer ? ' pb-running-item--container' : ''}">
-      <span class="pb-running-layer">Layer ${p.palletLayer}</span>
+      <span class="pb-running-layer-wrap">Layer
+        <input type="number" class="pb-running-layer-input" min="1" step="1"
+          value="${p.palletLayer}"
+          onchange="changeBuilderPackageLayer(${p.palletItemID}, this)">
+      </span>
       <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
       ${isContainer
         ? `<span class="pb-running-container-tag">outer box</span>`
         : (p.sapBatch ? `<span class="pb-running-batch">${esc(p.sapBatch)}</span>` : '')}
+      <button type="button" class="pb-running-remove" title="Remove this package"
+        onclick="removeBuilderPackage(${p.palletItemID})">✕</button>
     </div>`;
   }).join('');
+}
+
+// Moves a package to a different layer in place — no remove/re-add needed,
+// so a staged batch doesn't need its SAP transfer order reversed and
+// re-staged just to fix a layer number. Container-packing rows (SB/MB/LB
+// outer box + the C2 batches inside it) have extra rules: a C2 batch can
+// only move into a layer that already has its own outer box, and the outer
+// box itself can't move away while batches are still sitting in its old
+// layer (that would orphan them with nothing to sit in).
+async function changeBuilderPackageLayer(palletItemId, inputEl) {
+  const pkg = pb.packages.find(p => p.palletItemID === palletItemId);
+  if (!pkg) return;
+  const oldLayer = pkg.palletLayer;
+  const newLayer = parseInt(inputEl.value, 10);
+
+  if (!Number.isInteger(newLayer) || newLayer < 1) {
+    inputEl.value = oldLayer;
+    showPbMsg('Layer must be a positive whole number', 'error');
+    return;
+  }
+  if (newLayer === oldLayer) return;
+
+  const isContainerRow = isContainerPackagingId(pkg.packagingID) && !pkg.sapBatch;
+  const isC2Row        = pkg.packagingID === INNER_PACKAGING_ID && !!pkg.sapBatch;
+
+  if (isContainerRow) {
+    const stillHasBatches = pb.packages.some(p => p !== pkg && p.palletLayer === oldLayer);
+    if (stillHasBatches) {
+      inputEl.value = oldLayer;
+      showPbMsg(`Move or remove layer ${oldLayer}'s batches before moving its outer box`, 'error');
+      return;
+    }
+    if (pb.layerContainers[newLayer] && pb.layerContainers[newLayer] !== pkg.packagingID) {
+      inputEl.value = oldLayer;
+      showPbMsg(`Layer ${newLayer} already has an outer box`, 'error');
+      return;
+    }
+  } else if (isC2Row && !pb.layerContainers[newLayer]) {
+    inputEl.value = oldLayer;
+    showPbMsg(`Layer ${newLayer} has no outer box yet — add one first`, 'error');
+    return;
+  }
+
+  inputEl.disabled = true;
+  try {
+    const res  = await fetch(`/api/palletpackages/${palletItemId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletLayer: newLayer }),
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.error || 'Failed to move package');
+
+    pkg.palletLayer = newLayer;
+    if (isContainerRow) {
+      delete pb.layerContainers[oldLayer];
+      pb.layerContainers[newLayer] = pkg.packagingID;
+    }
+    document.getElementById('pb-running-list').innerHTML = renderRunningList();
+    showPbMsg(`✓ Moved to layer ${newLayer}`, 'ok');
+  } catch (err) {
+    inputEl.disabled = false;
+    inputEl.value = oldLayer;
+    showPbMsg('✕ ' + err.message, 'error');
+  }
+}
+
+// Removes a single package from the pallet while still in the builder —
+// e.g. undoing a wrongly-scanned batch — without deleting and rebuilding
+// the whole pallet. If the package was staged in SAP, the server reverses
+// that transfer order first (routes/palletpackages.js DELETE handler),
+// failing closed: a rejected reversal leaves the package in place. On
+// success, a staged batch's original stock-list entry (captured when it was
+// added — see addPackage()) is put straight back into the "available
+// batches" panel so it can be picked again.
+async function removeBuilderPackage(palletItemId) {
+  const idx = pb.packages.findIndex(p => p.palletItemID === palletItemId);
+  if (idx === -1) return;
+  const pkg = pb.packages[idx];
+
+  const isContainerRow = isContainerPackagingId(pkg.packagingID) && !pkg.sapBatch;
+  if (isContainerRow) {
+    const stillHasBatches = pb.packages.some(p => p !== pkg && p.palletLayer === pkg.palletLayer);
+    if (stillHasBatches) {
+      showPbMsg(`Remove layer ${pkg.palletLayer}'s batches before removing its outer box`, 'error');
+      return;
+    }
+  }
+
+  if (!await wConfirm({
+    title: 'Remove Package',
+    message: 'Remove this package from the pallet?\nIf it was staged in SAP, the stock will be moved back to its original location.',
+    confirmText: 'Remove',
+    variant: 'danger',
+  })) return;
+
+  try {
+    const res  = await fetch(`/api/palletpackages/${palletItemId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
+
+    pb.packages.splice(idx, 1);
+    pb.packagingWeight = Math.max(0, (pb.packagingWeight || 0) - (pkg.packWeight || 0));
+    if (isContainerRow) delete pb.layerContainers[pkg.palletLayer];
+
+    if (pkg.sapMaterial && pkg.originalBatchEntry) {
+      const mat = pb.requiredMaterials.find(m => m.material === pkg.sapMaterial);
+      if (mat) {
+        mat.batches = (mat.batches || []).filter(b => (b.batch || '') !== pkg.originalBatchEntry.batch);
+        mat.batches.push(pkg.originalBatchEntry);
+      }
+      const stockPanelEl = document.getElementById('pb-stock-panel');
+      if (stockPanelEl) stockPanelEl.outerHTML = renderStockPanel();
+    }
+
+    document.getElementById('pb-running-list').innerHTML = renderRunningList();
+    document.getElementById('pb-pkg-count').textContent =
+      `${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}`;
+    const wtEl = document.getElementById('pb-pkg-weight-display');
+    if (wtEl) wtEl.textContent = `${Number(pb.packagingWeight).toFixed(2)} kg`;
+
+    // Update DB packagingWeight in the background
+    fetch(`/api/palletmain/${pb.palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ packagingWeight: pb.packagingWeight }),
+    }).catch(() => {});
+
+    showPbMsg('✓ Package removed', 'ok');
+  } catch (err) {
+    showPbMsg('✕ ' + err.message, 'error');
+  }
 }
 
 function calcPalletHeight() {
@@ -1489,6 +1625,17 @@ async function addPackage() {
 
   const layer = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
   const batch = document.getElementById('pb-batch').value.trim();
+
+  // Guard against adding the same batch twice — whether it's a leftover
+  // stale entry in the "available batches" list (fixed below by pruning
+  // that list as soon as a batch is added) or the operator/scanner sending
+  // the same barcode a second time. SAP itself tolerates a repeat stage
+  // (it just re-moves whatever's already sitting in the bin), but it would
+  // create a duplicate PalletPackages row and double-count weight.
+  if (batch && pb.packages.some(p => (p.sapBatch || '').toUpperCase() === batch.toUpperCase())) {
+    showPbMsg(`Batch ${batch} has already been added to this pallet`, 'error');
+    return;
+  }
 
   // Profit centre 2007 materials: the operator still picks the outer box
   // size (SB/MB/LB) via the normal packaging picker, but only once per
@@ -1573,6 +1720,8 @@ async function addPackage() {
         palletLayer:  layer,
         packagingID:  chosenContainerType,
         sapBatch:     null,
+        sapMaterial:  null,
+        originalBatchEntry: null,
         packHeight:   Number(containerPkg.packHeight || 0),
         packWeight:   Number(containerPkg.packWeight || 0),
       });
@@ -1630,16 +1779,44 @@ async function addPackage() {
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || 'Failed to add package');
 
+    // Remove the just-added batch from the "available batches" list —
+    // staging moves its full on-hand quantity into this picksheet's bin, so
+    // nothing of it is left to offer, and leaving the stale entry on screen
+    // is exactly what let the same batch be added (and staged) twice. The
+    // removed entry is kept on the package record so removeBuilderPackage()
+    // can put it straight back if the operator undoes this add (e.g. a
+    // wrongly-scanned batch), without a full re-fetch from SAP.
+    let removedBatchEntry = null;
+    if (pb.pendingSapMaterial && batch) {
+      const mat = pb.requiredMaterials.find(m => m.material === pb.pendingSapMaterial);
+      if (mat) {
+        const idx = (mat.batches || []).findIndex(b => (b.batch || '') === batch);
+        if (idx !== -1) { removedBatchEntry = mat.batches[idx]; mat.batches.splice(idx, 1); }
+      }
+    }
+
     pb.packages.push({
       palletItemID: json.palletItemID,
       palletLayer:  layer,
       packagingID:  effectivePackagingID,
       sapBatch:     batch,
+      sapMaterial:  pb.pendingSapMaterial || null,
+      originalBatchEntry: removedBatchEntry,
       packHeight,
       packWeight,
     });
-    pb.nextLayer       = layer + 1;
+    // Container-packing layers (SB/MB/LB outer box + a run of C2 batches)
+    // are meant to keep collecting batches into the SAME layer until the
+    // operator explicitly types a new layer number — auto-incrementing
+    // here defaulted the layer field forward after every single batch,
+    // forcing a manual re-type back for every batch after the first.
+    // Normal (non-container) materials keep the existing sequential
+    // default, one layer per batch.
+    pb.nextLayer       = isContainerMaterial ? layer : layer + 1;
     pb.packagingWeight = (pb.packagingWeight || 0) + packWeight;
+
+    const stockPanelEl = document.getElementById('pb-stock-panel');
+    if (stockPanelEl) stockPanelEl.outerHTML = renderStockPanel();
 
     // Update DB packagingWeight in the background
     fetch(`/api/palletmain/${pb.palletId}`, {

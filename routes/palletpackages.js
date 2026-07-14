@@ -130,6 +130,37 @@ router.post('/', async (req, res) => {
     }
 });
 
+// ── Update a single package's layer ──
+// Lets the builder move a package to a different layer in place instead of
+// requiring a remove-then-re-add (which, for a staged batch, would otherwise
+// mean reversing and re-running a SAP transfer order just to fix a layer
+// number). Deliberately narrow — only palletLayer is editable here; changing
+// packagingID/batch/material is still a remove + re-add since those affect
+// SAP staging and weight/height totals.
+router.patch('/:palletItemId', async (req, res) => {
+    try {
+        const palletLayer = parseInt(req.body.palletLayer, 10);
+        if (!Number.isInteger(palletLayer) || palletLayer < 1) {
+            return res.status(400).json({ success: false, error: 'palletLayer must be a positive integer' });
+        }
+
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('palletItemId', sql.Int, req.params.palletItemId)
+            .input('palletLayer',  sql.Int, palletLayer)
+            .query(`UPDATE Logistics.dbo.PalletPackages
+                    SET    palletLayer = @palletLayer
+                    WHERE  palletItemID = @palletItemId`);
+
+        if (!result.rowsAffected[0]) {
+            return res.status(404).json({ success: false, error: 'Package not found' });
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Delete a single package ──
 // If this package was staged in SAP (has sapMaterial/sapBatch/sapDelivery
 // and the source location we recorded at staging time), reverses the
