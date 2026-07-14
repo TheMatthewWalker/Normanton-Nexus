@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import https from "https";
 import http from "http";
 import fs from "fs";
+import { spawn }             from 'child_process';
 import bcrypt                 from 'bcrypt';
 import rateLimit              from 'express-rate-limit';
 import cron                   from 'node-cron';
@@ -57,6 +58,7 @@ import debugRoutes             from './routes/debugsap.js';
 
 import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
+import deployRoutes            from './routes/deploy.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
 
 const httpsOptions = {
@@ -127,11 +129,42 @@ cron.schedule('55 * * * *', () => {
     .catch(err => console.error('[cron] warehouse SAP sync failed', err));
 });
 
+// Scheduled deployment checker — every minute. Looks for due, pending rows
+// in ScheduledDeployments and hands each one off to a detached
+// deploy-runner.cjs process (git pull + Windows Service restart). Detached
+// so it survives this very process being killed mid-restart — see
+// deploy-runner.cjs for the full explanation.
+cron.schedule('* * * * *', async () => {
+  try {
+    const pool = await sql.connect(configJS.sqlConfig);
+    const due = await pool.request().query(`
+      UPDATE kongsberg.dbo.ScheduledDeployments
+      SET Status = 'running', StartedAt = GETDATE()
+      OUTPUT INSERTED.DeploymentID
+      WHERE Status = 'pending' AND ScheduledAt <= GETDATE()
+    `);
+    for (const row of due.recordset) {
+      console.log(`[cron] triggering scheduled deployment #${row.DeploymentID}`);
+      const child = spawn(
+        process.execPath,
+        [path.join(__dirname, 'deploy-runner.cjs'), String(row.DeploymentID)],
+        { detached: true, stdio: 'ignore', cwd: __dirname }
+      );
+      child.unref();
+    }
+  } catch (err) {
+    console.error('[cron] deployment checker failed', err);
+  }
+});
+
 // ── Auth routes (public — no requireLogin) ───────────────────────────────────
 app.use('/', authRoutes);
 
 // ── Admin routes (requires admin role minimum) ────────────────────────────────
 app.use('/api/admin', requireLogin, requireRole('admin'), adminRoutes);
+
+// ── Scheduled deployments (superadmin manages; /next is any logged-in user) ─
+app.use('/api/deploy', requireLogin, deployRoutes);
 
 // ── API routes (require login) ───────────────────────────────────────────────
 app.use('/api/mixing', requireLogin,            mixingRoutes);

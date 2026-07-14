@@ -50,6 +50,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (permNav) {
     permNav.addEventListener('click', () => { if (!allPermissionsLoaded) loadPermissions(); }, { once: true });
   }
+
+  // Load scheduled deployments when that section is first opened (superadmin only)
+  const deployNav = document.getElementById('nav-deployments');
+  if (deployNav) {
+    deployNav.addEventListener('click', () => { setupDeploySection(); }, { once: true });
+  }
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -69,6 +75,10 @@ function applyRoleVisibility() {
   // Show permissions nav only for superadmin
   const permNav = document.getElementById('nav-permissions');
   if (permNav) permNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
+
+  // Show deployments nav only for superadmin
+  const deployNav = document.getElementById('nav-deployments');
+  if (deployNav) deployNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -939,6 +949,103 @@ async function setupNotifSend() {
       btn.disabled = false; btn.textContent = 'Send Notification';
     }
   });
+}
+
+// ── Scheduled Deployments (superadmin only) ──────────────────────────────────
+let deploySectionSetup = false;
+
+async function loadDeployments() {
+  const tbody = document.getElementById('deploy-tbody');
+  tbody.innerHTML = '<tr><td colspan="7" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
+  try {
+    const data = await api('/api/deploy');
+    renderDeployments(data.deployments || []);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function renderDeployments(rows) {
+  const tbody = document.getElementById('deploy-tbody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No deployments scheduled yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(d => {
+    const result = d.Status === 'failed'
+      ? `<span style="color:var(--error)">${esc((d.ErrorMessage || '').slice(0, 120))}</span>`
+      : d.Status === 'completed'
+        ? '<span style="color:var(--success)">OK</span>'
+        : '—';
+
+    const cancelBtn = d.Status === 'pending'
+      ? `<button class="btn-icon btn-icon--delete" title="Cancel" onclick="cancelDeployment(${d.DeploymentID})">✕</button>`
+      : '';
+
+    return `
+      <tr>
+        <td>${formatDateTime(d.ScheduledAt)}</td>
+        <td><span style="font-family:'JetBrains Mono',monospace">${esc(d.GitRef)}</span></td>
+        <td><span class="badge dep-status--${esc(d.Status)}">${esc(d.Status)}</span></td>
+        <td style="max-width:260px">${d.Notes ? esc(d.Notes) : '<span style="color:var(--text-muted)">—</span>'}</td>
+        <td>${esc(d.CreatedByUsername || '—')}</td>
+        <td style="max-width:220px;font-size:11px">${result}</td>
+        <td style="text-align:center">${cancelBtn}</td>
+      </tr>`;
+  }).join('');
+}
+
+async function scheduleDeployment() {
+  const btn    = document.getElementById('deploy-schedule-btn');
+  const result = document.getElementById('deploy-schedule-result');
+  const whenEl = document.getElementById('deploy-when');
+
+  const scheduledAt    = whenEl.value;
+  const gitRef          = document.getElementById('deploy-branch').value.trim() || 'main';
+  const warningMinutes  = document.getElementById('deploy-warning').value;
+  const notes           = document.getElementById('deploy-notes').value.trim();
+
+  if (!scheduledAt) {
+    result.style.color = 'var(--error)'; result.textContent = 'Pick a date and time.'; return;
+  }
+
+  btn.disabled = true; btn.textContent = 'Scheduling…'; result.textContent = '';
+  try {
+    await api('/api/deploy', 'POST', {
+      scheduledAt: new Date(scheduledAt).toISOString(),
+      gitRef, warningMinutes: Number(warningMinutes) || 15, notes: notes || null,
+    });
+    result.style.color = 'var(--accent)';
+    result.textContent = '✓ Deployment scheduled';
+    whenEl.value = '';
+    document.getElementById('deploy-notes').value = '';
+    await loadDeployments();
+  } catch (err) {
+    result.style.color = 'var(--error)';
+    result.textContent = err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Schedule Deployment';
+  }
+}
+
+async function cancelDeployment(id) {
+  if (!confirm('Cancel this scheduled deployment?')) return;
+  try {
+    await api(`/api/deploy/${id}/cancel`, 'POST');
+    showToast('Deployment cancelled', 'success');
+    await loadDeployments();
+  } catch (err) {
+    showToast('Cancel failed: ' + err.message, 'error');
+  }
+}
+
+function setupDeploySection() {
+  if (deploySectionSetup) return;
+  deploySectionSetup = true;
+  document.getElementById('deploy-schedule-btn').addEventListener('click', scheduleDeployment);
+  document.getElementById('deploy-refresh-btn').addEventListener('click', loadDeployments);
+  loadDeployments();
 }
 
 function fmtDate(dt) {

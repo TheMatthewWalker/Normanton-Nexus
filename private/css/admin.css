@@ -636,3 +636,10 @@ tbody td:last-child { border-right: none; }
 .event--PERM_CREATE  { background: var(--success-dim); color: var(--success); }
 .event--PERM_UPDATE  { background: var(--accent-dim);  color: var(--accent); }
 .event--PERM_DELETE  { background: var(--error-dim);   color: var(--error); }
+
+/* ── DEPLOYMENT STATUS BADGES ────────────────────────────────────────────── */
+.dep-status--pending   { background: var(--accent-dim);  color: var(--accent); }
+.dep-status--running   { background: var(--warn-dim);    color: var(--warn); }
+.dep-status--completed { background: var(--success-dim); color: var(--success); }
+.dep-status--failed    { background: var(--error-dim);   color: var(--error); }
+.dep-status--cancelled { background: rgba(148,168,194,0.15); color: var(--text-muted); }

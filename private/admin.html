@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="./css/nexus-common.css">
   <link rel="stylesheet" href="./css/notifications.css">
   <script src="./js/notifications.js" defer></script>
+  <script src="./js/deploy-banner.js" defer></script>
   <script src="./js/table-paginate.js" defer></script>
   <link rel="icon" href="/images/logo16.png">
 </head>
@@ -84,6 +85,15 @@
             <path d="M7 8v5M5 10.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           </svg>
           Permissions
+        </div>
+
+        <!-- Scheduled Deployments — shown only for superadmin -->
+        <div class="nav-item" data-section="deployments" id="nav-deployments" style="display:none">
+          <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
+            <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M7 3.5v3.5l2.5 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Deployments
         </div>
 
         <div class="nav-item" data-section="notifications">
@@ -260,6 +270,64 @@
 
         <div id="sql-result" class="sql-result">
           <div class="empty-state">No query executed yet.</div>
+        </div>
+      </section>
+
+      <!-- ── SCHEDULED DEPLOYMENTS ─────────────────────────────────────────── -->
+      <section class="section" id="section-deployments">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Scheduled Deployments</div>
+            <div class="section-sub">Git pull + service restart at a chosen date/time &middot; superadmin only</div>
+          </div>
+          <div class="section-actions">
+            <button type="button" class="btn-secondary" id="deploy-refresh-btn">Refresh</button>
+          </div>
+        </div>
+
+        <!-- Schedule form -->
+        <div style="background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;padding:20px 22px;margin-bottom:24px">
+          <div style="display:grid;grid-template-columns:1fr 1fr 140px;gap:14px;margin-bottom:14px">
+            <div>
+              <label class="modal-label">Date &amp; Time</label>
+              <input type="datetime-local" id="deploy-when" class="modal-input">
+            </div>
+            <div>
+              <label class="modal-label">Git Branch</label>
+              <input type="text" id="deploy-branch" class="modal-input" value="main" placeholder="main">
+            </div>
+            <div>
+              <label class="modal-label">Warn (mins before)</label>
+              <input type="number" id="deploy-warning" class="modal-input" value="15" min="0" max="1440">
+            </div>
+          </div>
+          <div style="margin-bottom:14px">
+            <label class="modal-label">Notes <span style="color:var(--text-muted);font-weight:400">(optional, shown in the banner)</span></label>
+            <textarea id="deploy-notes" class="modal-textarea" rows="2" placeholder="e.g. Rolling out order-book currency fix and pallet builder updates"></textarea>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button type="button" class="btn-primary" id="deploy-schedule-btn">Schedule Deployment</button>
+            <span id="deploy-schedule-result" style="font-size:13px"></span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table id="deploy-table">
+            <thead>
+              <tr>
+                <th>Scheduled For</th>
+                <th>Branch</th>
+                <th>Status</th>
+                <th>Notes</th>
+                <th>Created By</th>
+                <th>Result</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="deploy-tbody">
+              <tr><td colspan="7" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
