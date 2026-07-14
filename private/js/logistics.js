@@ -2209,9 +2209,26 @@ function runCustomerSpecifics() {
 function openAdminEditModal(title, subtitle, fields, record, onSave) {
   const fieldHtml = fields.map(f => {
     const raw = String(record[f.key] ?? '');
-    const inputEl = f.multiline
-      ? `<textarea id="aed-${f.key}" class="tf-input" rows="2" style="resize:vertical">${esc(raw)}</textarea>`
-      : `<input id="aed-${f.key}" class="tf-input" type="${f.type || 'text'}"${f.step ? ` step="${f.step}"` : ''} value="${raw.replace(/"/g, '&quot;')}">`;
+    let inputEl;
+    if (f.type === 'select') {
+      // f.options is a plain list of strings (the value doubles as the label —
+      // matches how these fields are stored, e.g. Destinations.defaultForwarder
+      // holds the forwarder's name, not a foreign-key id). The current value is
+      // always included even if it's no longer in the options list (a stale
+      // free-text value from before this was a dropdown, or a forwarder that's
+      // since been unapproved/renamed) so saving without changing it is a no-op
+      // rather than silently blanking the field.
+      const opts = [...new Set(f.options || [])];
+      if (raw && !opts.includes(raw)) opts.unshift(raw);
+      const optionsHtml = ['<option value=""></option>', ...opts.map(o =>
+        `<option value="${esc(o)}"${o === raw ? ' selected' : ''}>${esc(o)}</option>`
+      )].join('');
+      inputEl = `<select id="aed-${f.key}" class="tf-input">${optionsHtml}</select>`;
+    } else if (f.multiline) {
+      inputEl = `<textarea id="aed-${f.key}" class="tf-input" rows="2" style="resize:vertical">${esc(raw)}</textarea>`;
+    } else {
+      inputEl = `<input id="aed-${f.key}" class="tf-input" type="${f.type || 'text'}"${f.step ? ` step="${f.step}"` : ''} value="${raw.replace(/"/g, '&quot;')}">`;
+    }
     return `<div class="tf-field${f.wide ? ' tf-field--wide' : ''}">
       <label class="tf-label">${esc(f.label)}</label>
       ${inputEl}
@@ -2414,11 +2431,30 @@ async function runUpdatePackagingData() {
 async function runUpdateDestinations() {
   showResultPanel('Update Destinations', 'Click a row to edit · Tick rows for bulk actions');
   try {
-    const rows = await fetch('/api/destinations').then(r => r.json());
+    const [rows, approvedForwarders, forwarderModes] = await Promise.all([
+      fetch('/api/destinations').then(r => r.json()),
+      fetch('/api/forwarders/approved').then(r => r.json()).catch(() => []),
+      fetch('/api/forwarders/modes').then(r => r.json()).catch(() => []),
+    ]);
     if (!Array.isArray(rows) || !rows.length) {
       document.getElementById('result-body').innerHTML = '<div class="sap-error">No destinations found.</div>';
       return;
     }
+
+    // Default Forwarder is stored as the forwarder's name (not an id — matches
+    // how the pallet/shipment builder already matches it against forwarder
+    // options elsewhere), Default Service against the distinct delivery modes
+    // of approved forwarders. Both back the dropdowns below instead of free text.
+    const forwarderOptions = [...new Set(
+      (Array.isArray(approvedForwarders) ? approvedForwarders : [])
+        .map(f => String(f.forwarderName ?? '').trim())
+        .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b));
+    const serviceOptions = [...new Set(
+      (Array.isArray(forwarderModes) ? forwarderModes : [])
+        .map(m => String(m.forwarderMode ?? '').trim())
+        .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b));
 
     rows.sort((a, b) => (a.destinationName ?? '').localeCompare(b.destinationName ?? ''));
 
@@ -2451,11 +2487,17 @@ async function runUpdateDestinations() {
           font-weight:700;color:var(--accent);white-space:nowrap">0 selected</span>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1">
           <div style="display:flex;gap:5px;align-items:center">
-            <input id="dest-bulk-forwarder" class="tf-input" placeholder="Default Forwarder" style="width:160px">
+            <select id="dest-bulk-forwarder" class="tf-input" style="width:160px">
+              <option value="">Default Forwarder…</option>
+              ${forwarderOptions.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}
+            </select>
             <button class="btn-secondary" data-bulk-field="defaultForwarder" data-bulk-input="dest-bulk-forwarder">Apply</button>
           </div>
           <div style="display:flex;gap:5px;align-items:center">
-            <input id="dest-bulk-service" class="tf-input" placeholder="Default Service" style="width:140px">
+            <select id="dest-bulk-service" class="tf-input" style="width:140px">
+              <option value="">Default Service…</option>
+              ${serviceOptions.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}
+            </select>
             <button class="btn-secondary" data-bulk-field="defaultDeliveryService" data-bulk-input="dest-bulk-service">Apply</button>
           </div>
           <div style="display:flex;gap:5px;align-items:center">
@@ -2587,9 +2629,9 @@ async function runUpdateDestinations() {
             { key: 'destinationPostCode',    label: 'Post Code' },
             { key: 'destinationCountry',     label: 'Country' },
             { key: 'destinationZone',        label: 'Zone' },
-            { key: 'defaultDeliveryService', label: 'Default Service' },
+            { key: 'defaultDeliveryService', label: 'Default Service',   type: 'select', options: serviceOptions },
             { key: 'defaultIncoterms',       label: 'Incoterms' },
-            { key: 'defaultForwarder',       label: 'Default Forwarder' },
+            { key: 'defaultForwarder',       label: 'Default Forwarder', type: 'select', options: forwarderOptions },
             { key: 'emails',                 label: 'Email Addresses (one per line)', wide: true, multiline: true },
             { key: 'destinationComment',     label: 'Comment',                       wide: true, multiline: true },
           ],

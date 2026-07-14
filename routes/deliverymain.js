@@ -675,6 +675,9 @@ async function runSapSync() {
                     const postCode   = String(row.postCode ?? '').trim() || null;
                     const country    = String(row.destinationCountry ?? '').trim() || null;
                     const zone       = String(row.transportZone ?? '').trim() || null;
+                    // From KNVV (customer master sales data), joined in by SapServer's
+                    // /api/customs/kna1 response alongside the KNA1 fields above.
+                    const incoterms  = String(row.incoterms ?? '').trim() || null;
 
                     try {
                         await pool.request()
@@ -684,7 +687,7 @@ async function runSapSync() {
                             .input('destinationCity',        sql.NVarChar, city)
                             .input('destinationPostCode',    sql.NVarChar, postCode)
                             .input('destinationCountry',     sql.NVarChar, country)
-                            .input('defaultIncoterms',       sql.NVarChar, null)
+                            .input('defaultIncoterms',       sql.NVarChar, incoterms)
                             .input('destinationComment',     sql.NVarChar, null)
                             .input('destinationZone',        sql.NVarChar, zone)
                             .input('defaultDeliveryService', sql.NVarChar, null)
@@ -707,6 +710,7 @@ async function runSapSync() {
                         destMap[String(custId)] = {
                             destinationID:          custId,
                             defaultDeliveryService: null,
+                            defaultIncoterms:       incoterms,
                             destinationComment:     null,
                             destinationCountry:     country,
                         };
