@@ -130,27 +130,47 @@ router.post('/', async (req, res) => {
     }
 });
 
-// ── Update a single package's layer ──
-// Lets the builder move a package to a different layer in place instead of
-// requiring a remove-then-re-add (which, for a staged batch, would otherwise
-// mean reversing and re-running a SAP transfer order just to fix a layer
-// number). Deliberately narrow — only palletLayer is editable here; changing
-// packagingID/batch/material is still a remove + re-add since those affect
-// SAP staging and weight/height totals.
+// ── Update a single package's layer and/or packaging type ──
+// Lets the builder move a package to a different layer, or change its
+// packaging type (e.g. a batch scanned with the wrong code), in place
+// instead of requiring a remove-then-re-add — which, for a staged batch,
+// would otherwise mean reversing and re-running a SAP transfer order just
+// to fix a layer number or packaging type. Both fields are optional but at
+// least one must be provided; batch/material/SAP staging fields are still
+// remove + re-add only, since those affect the actual SAP transfer order.
 router.patch('/:palletItemId', async (req, res) => {
     try {
-        const palletLayer = parseInt(req.body.palletLayer, 10);
-        if (!Number.isInteger(palletLayer) || palletLayer < 1) {
-            return res.status(400).json({ success: false, error: 'palletLayer must be a positive integer' });
+        const hasLayer = req.body.palletLayer !== undefined;
+        const hasPack  = req.body.packagingID !== undefined;
+        if (!hasLayer && !hasPack) {
+            return res.status(400).json({ success: false, error: 'Provide palletLayer and/or packagingID' });
         }
 
-        const pool = await getPool();
-        const result = await pool.request()
-            .input('palletItemId', sql.Int, req.params.palletItemId)
-            .input('palletLayer',  sql.Int, palletLayer)
-            .query(`UPDATE Logistics.dbo.PalletPackages
-                    SET    palletLayer = @palletLayer
-                    WHERE  palletItemID = @palletItemId`);
+        const request = (await getPool()).request()
+            .input('palletItemId', sql.Int, req.params.palletItemId);
+
+        const setClauses = [];
+        if (hasLayer) {
+            const palletLayer = parseInt(req.body.palletLayer, 10);
+            if (!Number.isInteger(palletLayer) || palletLayer < 1) {
+                return res.status(400).json({ success: false, error: 'palletLayer must be a positive integer' });
+            }
+            request.input('palletLayer', sql.Int, palletLayer);
+            setClauses.push('palletLayer = @palletLayer');
+        }
+        if (hasPack) {
+            const packagingID = String(req.body.packagingID || '').trim();
+            if (!packagingID) {
+                return res.status(400).json({ success: false, error: 'packagingID must not be empty' });
+            }
+            request.input('packagingID', sql.NVarChar(3), packagingID);
+            setClauses.push('packagingID = @packagingID');
+        }
+
+        const result = await request.query(`
+            UPDATE Logistics.dbo.PalletPackages
+            SET    ${setClauses.join(', ')}
+            WHERE  palletItemID = @palletItemId`);
 
         if (!result.rowsAffected[0]) {
             return res.status(404).json({ success: false, error: 'Package not found' });

@@ -1360,6 +1360,7 @@ function renderBuilderPhase2() {
         <div class="pb-running-count" id="pb-pkg-count">${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}</div>
         <div class="pb-running-list" id="pb-running-list">${renderRunningList()}</div>
         <div class="pb-running-actions">
+          <button class="btn-secondary pb-bulk-btn" onclick="openBulkEditModal()">Bulk Edit…</button>
           <button class="btn-danger pb-delete-btn" onclick="deletePalletFromBuilder()">Delete</button>
           <button class="btn-submit pb-finish-btn" onclick="finishBuilderPallet()">Finish Pallet ✓</button>
         </div>
@@ -1479,6 +1480,10 @@ function renderBuilderPhase2() {
   }
 }
 
+// Layer and packaging type are changed via right-click (see
+// showPackageContextMenu) rather than an always-visible control — keeps the
+// running list readable, and the "Change Packaging" option only appears
+// when it's actually applicable to that row (see eligiblePackagingOptions).
 function renderRunningList() {
   if (!pb.packages.length)
     return `<div class="pb-running-empty">No packages added yet</div>`;
@@ -1487,12 +1492,9 @@ function renderRunningList() {
     // represent the box itself for a PC2007 layer, not a picked item.
     const isContainer = isContainerPackagingId(p.packagingID) && !p.sapBatch;
     return `
-    <div class="pb-running-item${isContainer ? ' pb-running-item--container' : ''}">
-      <span class="pb-running-layer-wrap">Layer
-        <input type="number" class="pb-running-layer-input" min="1" step="1"
-          value="${p.palletLayer}"
-          onchange="changeBuilderPackageLayer(${p.palletItemID}, this)">
-      </span>
+    <div class="pb-running-item${isContainer ? ' pb-running-item--container' : ''}"
+      oncontextmenu="showPackageContextMenu(event, ${p.palletItemID}); return false;" title="Right-click to edit">
+      <span class="pb-running-layer">Layer ${p.palletLayer}</span>
       <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
       ${isContainer
         ? `<span class="pb-running-container-tag">outer box</span>`
@@ -1503,25 +1505,45 @@ function renderRunningList() {
   }).join('');
 }
 
-// Moves a package to a different layer in place — no remove/re-add needed,
-// so a staged batch doesn't need its SAP transfer order reversed and
-// re-staged just to fix a layer number. Container-packing rows (SB/MB/LB
-// outer box + the C2 batches inside it) have extra rules: a C2 batch can
-// only move into a layer that already has its own outer box, and the outer
-// box itself can't move away while batches are still sitting in its old
-// layer (that would orphan them with nothing to sit in).
-async function changeBuilderPackageLayer(palletItemId, inputEl) {
+// Which packaging types a row can be changed to via the context menu /
+// bulk-edit modal. Outer boxes (SB/MB/LB) can only swap between each other;
+// everything else can pick from the pallet type's allowed packaging (or the
+// full catalogue if none is configured) minus the outer-box types, which
+// represent the pallet's own box, not a per-batch packaging choice.
+function eligiblePackagingOptions(pkg) {
+  const isContainerRow = isContainerPackagingId(pkg.packagingID) && !pkg.sapBatch;
+  const source = pb.allowedPackaging.length ? pb.allowedPackaging : pb.allPackaging;
+  return isContainerRow
+    ? source.filter(p => CONTAINER_PACKAGING_IDS.includes(p.packagingID))
+    : source.filter(p => !CONTAINER_PACKAGING_IDS.includes(p.packagingID));
+}
+
+// A C2 batch that's part of a PC2007 container layer has its packaging
+// structurally fixed — every batch in that layer must be C2 so it fits
+// inside the layer's SB/MB/LB outer box (see addPackage()). Changing it
+// individually would break that invariant, so it's not offered as editable.
+function isPackagingFixed(pkg) {
+  return pkg.packagingID === INNER_PACKAGING_ID && !!pkg.sapBatch && !!pb.layerContainers[pkg.palletLayer];
+}
+
+// Moves a package to a different layer in place via PATCH — no SAP
+// transfer-order reversal/re-stage needed, since only the layer number
+// changes. Container-packing rows (SB/MB/LB outer box + the C2 batches
+// inside it) have extra rules: a C2 batch can only move into a layer that
+// already has its own outer box, and the outer box itself can't move away
+// while batches are still sitting in its old layer (that would orphan
+// them). Returns { success, error } rather than showing a message itself,
+// so both the single-item context-menu flow and the bulk-edit flow can
+// report results in whatever way suits them.
+async function applyPackageLayerChange(palletItemId, newLayer) {
   const pkg = pb.packages.find(p => p.palletItemID === palletItemId);
-  if (!pkg) return;
+  if (!pkg) return { success: false, error: 'Package not found' };
   const oldLayer = pkg.palletLayer;
-  const newLayer = parseInt(inputEl.value, 10);
 
   if (!Number.isInteger(newLayer) || newLayer < 1) {
-    inputEl.value = oldLayer;
-    showPbMsg('Layer must be a positive whole number', 'error');
-    return;
+    return { success: false, error: 'Layer must be a positive whole number' };
   }
-  if (newLayer === oldLayer) return;
+  if (newLayer === oldLayer) return { success: true, error: null };
 
   const isContainerRow = isContainerPackagingId(pkg.packagingID) && !pkg.sapBatch;
   const isC2Row        = pkg.packagingID === INNER_PACKAGING_ID && !!pkg.sapBatch;
@@ -1529,22 +1551,15 @@ async function changeBuilderPackageLayer(palletItemId, inputEl) {
   if (isContainerRow) {
     const stillHasBatches = pb.packages.some(p => p !== pkg && p.palletLayer === oldLayer);
     if (stillHasBatches) {
-      inputEl.value = oldLayer;
-      showPbMsg(`Move or remove layer ${oldLayer}'s batches before moving its outer box`, 'error');
-      return;
+      return { success: false, error: `Move or remove layer ${oldLayer}'s batches before moving its outer box` };
     }
     if (pb.layerContainers[newLayer] && pb.layerContainers[newLayer] !== pkg.packagingID) {
-      inputEl.value = oldLayer;
-      showPbMsg(`Layer ${newLayer} already has an outer box`, 'error');
-      return;
+      return { success: false, error: `Layer ${newLayer} already has an outer box` };
     }
   } else if (isC2Row && !pb.layerContainers[newLayer]) {
-    inputEl.value = oldLayer;
-    showPbMsg(`Layer ${newLayer} has no outer box yet — add one first`, 'error');
-    return;
+    return { success: false, error: `Layer ${newLayer} has no outer box yet — add one first` };
   }
 
-  inputEl.disabled = true;
   try {
     const res  = await fetch(`/api/palletpackages/${palletItemId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -1559,11 +1574,105 @@ async function changeBuilderPackageLayer(palletItemId, inputEl) {
       pb.layerContainers[newLayer] = pkg.packagingID;
     }
     document.getElementById('pb-running-list').innerHTML = renderRunningList();
-    showPbMsg(`✓ Moved to layer ${newLayer}`, 'ok');
+    return { success: true, error: null };
   } catch (err) {
-    inputEl.disabled = false;
-    inputEl.value = oldLayer;
-    showPbMsg('✕ ' + err.message, 'error');
+    return { success: false, error: err.message };
+  }
+}
+
+// Changes a package's packaging type in place via PATCH — e.g. a batch
+// scanned as the wrong code. Weight/height are tracked locally per package
+// (see addPackage()) and summed into pb.packagingWeight / calcPalletHeight(),
+// so the old type's weight is swapped out for the new type's here to keep
+// those totals correct without a full re-fetch. Same { success, error }
+// return shape as applyPackageLayerChange, for the same reason.
+async function applyPackagePackagingChange(palletItemId, newPackagingID) {
+  const pkg = pb.packages.find(p => p.palletItemID === palletItemId);
+  if (!pkg) return { success: false, error: 'Package not found' };
+  if (!newPackagingID) return { success: false, error: 'Select a packaging type' };
+  if (newPackagingID === pkg.packagingID) return { success: true, error: null };
+
+  if (isPackagingFixed(pkg)) {
+    return { success: false, error: 'This batch is packed inside a PC2007 outer box — packaging is fixed to C2' };
+  }
+  const isContainerRow = isContainerPackagingId(pkg.packagingID) && !pkg.sapBatch;
+  if (isContainerRow && !isContainerPackagingId(newPackagingID)) {
+    return { success: false, error: `Outer box can only change between ${CONTAINER_PACKAGING_IDS.join('/')}` };
+  }
+
+  const newPkg = findPackagingType(newPackagingID);
+  if (!newPkg) return { success: false, error: `Packaging type "${newPackagingID}" is not configured` };
+
+  try {
+    const res  = await fetch(`/api/palletpackages/${palletItemId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ packagingID: newPackagingID }),
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.error || 'Failed to change packaging');
+
+    pb.packagingWeight = Math.max(0, (pb.packagingWeight || 0) - (pkg.packWeight || 0) + Number(newPkg.packWeight || 0));
+    pkg.packagingID = newPackagingID;
+    pkg.packWeight  = Number(newPkg.packWeight || 0);
+    pkg.packHeight  = Number(newPkg.packHeight || 0);
+    if (isContainerRow) pb.layerContainers[pkg.palletLayer] = newPackagingID;
+
+    document.getElementById('pb-running-list').innerHTML = renderRunningList();
+    const wtEl = document.getElementById('pb-pkg-weight-display');
+    if (wtEl) wtEl.textContent = `${Number(pb.packagingWeight).toFixed(2)} kg`;
+    return { success: true, error: null };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// Small floating menu on right-click of a running-list card — "Change
+// Layer" is always offered; "Change Packaging" only when the row isn't
+// packaging-fixed (see isPackagingFixed). Built dynamically (like
+// wConfirm/wPrompt) rather than reusing the page's static #ctx-menu, since
+// that's a singleton owned by the SAP stock table's own right-click menu.
+function closePackageContextMenu() {
+  document.getElementById('pb-pkg-ctx-menu')?.remove();
+  document.removeEventListener('click', closePackageContextMenu);
+}
+
+function showPackageContextMenu(event, palletItemId) {
+  event.preventDefault();
+  closePackageContextMenu();
+
+  const pkg = pb.packages.find(p => p.palletItemID === palletItemId);
+  if (!pkg) return;
+  const canChangePackaging = !isPackagingFixed(pkg);
+
+  const menu = document.createElement('div');
+  menu.id = 'pb-pkg-ctx-menu';
+  menu.className = 'pb-ctx-menu';
+  menu.style.left = `${Math.min(event.pageX, window.innerWidth  - 210)}px`;
+  menu.style.top  = `${Math.min(event.pageY, window.innerHeight - 90)}px`;
+  menu.innerHTML = `
+    <div class="pb-ctx-item" data-action="layer">Change Layer…</div>
+    ${canChangePackaging ? `<div class="pb-ctx-item" data-action="pack">Change Packaging…</div>` : ''}`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closePackageContextMenu), 0);
+
+  menu.querySelector('[data-action="layer"]').addEventListener('click', async () => {
+    closePackageContextMenu();
+    const val = await wPrompt({ title: 'Change Layer', label: 'New layer number', inputType: 'number', initialValue: pkg.palletLayer });
+    if (val == null || val === '') return;
+    const r = await applyPackageLayerChange(palletItemId, parseInt(val, 10));
+    showPbMsg(r.success ? `✓ Moved to layer ${val}` : '✕ ' + r.error, r.success ? 'ok' : 'error');
+  });
+
+  const packBtn = menu.querySelector('[data-action="pack"]');
+  if (packBtn) {
+    packBtn.addEventListener('click', async () => {
+      closePackageContextMenu();
+      const options = eligiblePackagingOptions(pkg).map(p => ({ value: p.packagingID, label: `${p.packagingID} — ${p.packDescription || ''}` }));
+      const val = await wPrompt({ title: 'Change Packaging', label: 'New packaging type', options, initialValue: pkg.packagingID });
+      if (val == null) return;
+      const r = await applyPackagePackagingChange(palletItemId, val);
+      showPbMsg(r.success ? `✓ Packaging changed to ${val}` : '✕ ' + r.error, r.success ? 'ok' : 'error');
+    });
   }
 }
 
@@ -1631,6 +1740,126 @@ async function removeBuilderPackage(palletItemId) {
   } catch (err) {
     showPbMsg('✕ ' + err.message, 'error');
   }
+}
+
+// ── Bulk edit modal ──────────────────────────────────────────────────────────
+// A tickbox list of every package on the pallet, with "apply to checked"
+// actions for layer and packaging type — for when several batches were
+// scanned with the wrong packaging code and fixing them one at a time via
+// the right-click menu would be tedious. Reuses applyPackageLayerChange /
+// applyPackagePackagingChange per checked item (same validation, same
+// container-layer guards), just looped and tallied.
+function openBulkEditModal() {
+  if (!pb?.packages?.length) return;
+  document.getElementById('pb-bulk-modal')?.remove();
+
+  const packOptions = (pb.allowedPackaging.length ? pb.allowedPackaging : pb.allPackaging)
+    .filter(p => !CONTAINER_PACKAGING_IDS.includes(p.packagingID));
+
+  const overlay = document.createElement('div');
+  overlay.id        = 'pb-bulk-modal';
+  overlay.className = 'pb-overlay';
+  overlay.innerHTML = `
+    <div class="pb-modal" style="max-width:640px">
+      <div class="pb-header">
+        <div class="pb-title">Bulk Edit Packages</div>
+        <button class="pb-close" onclick="closeBulkEditModal()">✕</button>
+      </div>
+      <div class="pb-body">
+        <div class="pb-section-label">Select Packages</div>
+        <div class="pb-bulk-list" id="pb-bulk-list">${renderBulkList()}</div>
+
+        <div class="pb-bulk-controls">
+          <div class="pb-bulk-row">
+            <label class="pb-label">Set layer to</label>
+            <input class="pb-input" id="pb-bulk-layer" type="number" min="1" step="1" style="width:80px">
+            <button type="button" class="btn-secondary" onclick="applyBulkLayer()">Apply to checked</button>
+          </div>
+          <div class="pb-bulk-row">
+            <label class="pb-label">Set packaging to</label>
+            <select class="pb-input" id="pb-bulk-packaging" style="width:220px">
+              ${packOptions.map(p => `<option value="${esc(p.packagingID)}">${esc(p.packagingID)} — ${esc(p.packDescription || '')}</option>`).join('')}
+            </select>
+            <button type="button" class="btn-secondary" onclick="applyBulkPackaging()">Apply to checked</button>
+          </div>
+        </div>
+        <div id="pb-bulk-msg" class="pb-pkg-msg" style="margin-top:8px;display:block"></div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+function closeBulkEditModal() {
+  document.getElementById('pb-bulk-modal')?.remove();
+}
+
+function renderBulkList() {
+  return pb.packages.map(p => {
+    const isContainer = isContainerPackagingId(p.packagingID) && !p.sapBatch;
+    const label = isContainer ? 'outer box' : (p.sapBatch || '—');
+    return `<label class="pb-bulk-item">
+      <input type="checkbox" class="pb-bulk-check" value="${p.palletItemID}">
+      <span class="pb-bulk-layer">L${p.palletLayer}</span>
+      <span class="pb-bulk-pack">${esc(p.packagingID || '')}</span>
+      <span class="pb-bulk-batch">${esc(label)}</span>
+    </label>`;
+  }).join('');
+}
+
+function getBulkChecked() {
+  return Array.from(document.querySelectorAll('#pb-bulk-list .pb-bulk-check:checked'))
+    .map(el => parseInt(el.value, 10));
+}
+
+function showBulkMsg(text, type) {
+  const el = document.getElementById('pb-bulk-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className = `pb-pkg-msg${type ? ' pb-pkg-msg--' + type : ''}`;
+}
+
+async function applyBulkLayer() {
+  const ids      = getBulkChecked();
+  const newLayer = parseInt(document.getElementById('pb-bulk-layer').value, 10);
+  if (!ids.length) { showBulkMsg('Select at least one package', 'error'); return; }
+  if (!Number.isInteger(newLayer) || newLayer < 1) { showBulkMsg('Enter a valid layer number', 'error'); return; }
+
+  let ok = 0, fail = 0, firstError = null;
+  for (const id of ids) {
+    const r = await applyPackageLayerChange(id, newLayer);
+    if (r.success) ok++; else { fail++; firstError = firstError || r.error; }
+  }
+  document.getElementById('pb-bulk-list').innerHTML = renderBulkList();
+  const wtEl = document.getElementById('pb-pkg-weight-display');
+  if (wtEl) wtEl.textContent = `${Number(pb.packagingWeight).toFixed(2)} kg`;
+  document.getElementById('pb-pkg-count').textContent =
+    `${pb.packages.length} package${pb.packages.length !== 1 ? 's' : ''}`;
+  showBulkMsg(
+    `${ok} moved to layer ${newLayer}${fail ? `, ${fail} failed (${firstError})` : ''}`,
+    fail ? 'error' : 'ok'
+  );
+}
+
+async function applyBulkPackaging() {
+  const ids            = getBulkChecked();
+  const newPackagingID = document.getElementById('pb-bulk-packaging').value;
+  if (!ids.length) { showBulkMsg('Select at least one package', 'error'); return; }
+
+  let ok = 0, fail = 0, skipped = 0, firstError = null;
+  for (const id of ids) {
+    const pkg = pb.packages.find(p => p.palletItemID === id);
+    if (!pkg) continue;
+    if (isPackagingFixed(pkg) || (isContainerPackagingId(pkg.packagingID) && !pkg.sapBatch)) { skipped++; continue; }
+    const r = await applyPackagePackagingChange(id, newPackagingID);
+    if (r.success) ok++; else { fail++; firstError = firstError || r.error; }
+  }
+  document.getElementById('pb-bulk-list').innerHTML = renderBulkList();
+  const wtEl = document.getElementById('pb-pkg-weight-display');
+  if (wtEl) wtEl.textContent = `${Number(pb.packagingWeight).toFixed(2)} kg`;
+  showBulkMsg(
+    `${ok} changed to ${newPackagingID}${skipped ? `, ${skipped} skipped (fixed/outer-box)` : ''}${fail ? `, ${fail} failed (${firstError})` : ''}`,
+    fail ? 'error' : 'ok'
+  );
 }
 
 function calcPalletHeight() {
@@ -2498,6 +2727,53 @@ function wConfirm({ title, message, confirmText = 'Confirm', variant = '' }) {
     overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => close(false));
     overlay.querySelector('.wc-btn-confirm').addEventListener('click', () => close(true));
     overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+  });
+}
+
+// wPrompt({ title, label, inputType, options, initialValue })
+// Single-field prompt dialog, styled like wConfirm. Pass `options` (array of
+// { value, label }) for a <select>; otherwise renders an <input type=inputType>.
+// Returns Promise<string|null> — null if cancelled, otherwise the field's value.
+function wPrompt({ title, label, inputType = 'text', options = null, initialValue = '' }) {
+  return new Promise(resolve => {
+    document.getElementById('w-prompt-modal')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id        = 'w-prompt-modal';
+    overlay.className = 'wc-overlay';
+
+    const fieldHtml = options
+      ? `<select class="pb-input" id="wp-field">
+           ${options.map(o => `<option value="${esc(o.value)}"${String(o.value) === String(initialValue) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
+         </select>`
+      : `<input class="pb-input" id="wp-field" type="${esc(inputType)}" value="${esc(initialValue)}">`;
+
+    overlay.innerHTML = `
+      <div class="wc-modal">
+        <div class="wc-title">${esc(title)}</div>
+        <div class="wc-message" style="text-align:left">
+          <label class="pb-label" style="display:block;margin-bottom:6px">${esc(label)}</label>
+          ${fieldHtml}
+        </div>
+        <div class="wc-actions">
+          <button class="wc-btn-cancel">Cancel</button>
+          <button class="wc-btn-confirm">Save</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(overlay);
+
+    const fieldEl = overlay.querySelector('#wp-field');
+    fieldEl.focus();
+    if (fieldEl.select) fieldEl.select();
+
+    const close = val => { overlay.remove(); resolve(val); };
+    overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => close(null));
+    overlay.querySelector('.wc-btn-confirm').addEventListener('click', () => close(fieldEl.value));
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
+    fieldEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); close(fieldEl.value); }
+    });
   });
 }
 
