@@ -1033,11 +1033,22 @@ function renderStockPanel() {
 
   const showAddBtn = pb.phase === 2;
 
-  // Available batches render normally; restricted ones (allocated to a
-  // different customer's delivery, or already staged in someone else's
-  // picksheet bin) are grouped into a collapsed <details> block instead —
-  // they aren't a normal pick option, so they shouldn't compete for
-  // attention with what's actually usable.
+  // Batches come from the backend pre-sorted into one of four groups (see
+  // routes/deliverymain.js's picksheet-materials assembly):
+  //   available    — normal, addable, shown at the top uncollapsed.
+  //   unassigned   — packaging instruction (PALL_MATNR) has no parseable
+  //                  customer segment, so it can't be confirmed either way;
+  //                  still addable, just grouped separately for visibility.
+  //   restricted   — allocated to a different customer's delivery (existing
+  //                  ZPRODBATCH~VBELN / 916-bin conflict check); not addable.
+  //   wrongCustomer— packaging instruction's customer segment doesn't match
+  //                  this delivery's customer (e.g. "IB_363660_C2" on a
+  //                  delivery for a different customer); not addable.
+  // Restricted/wrongCustomer/unassigned all render inside their own
+  // collapsed <details> block so they don't compete for attention with
+  // what's actually usable, but stay visible rather than being hidden.
+  const GROUP_LABELS = { unassigned: 'unassigned', restricted: 'restricted', wrongCustomer: 'other customer' };
+
   const renderBatch = (m, b) => {
     const restrictedCls = b.allowed ? '' : ' pb-stock-batch--restricted';
     const action = b.allowed
@@ -1045,7 +1056,7 @@ function renderStockPanel() {
           ? `<button type="button" class="pb-stock-add" title="Add this batch"
                onclick="addPackageFromFoundBatch('${escJs(m.material)}','${escJs(b.batch)}','${escJs(m.deliveryItem || '')}', ${Number(b.totalQty || 0)})">+</button>`
           : '')
-      : `<span class="pb-stock-restricted-tag" title="${esc(b.reason || 'Allocated elsewhere')}">restricted</span>`;
+      : `<span class="pb-stock-restricted-tag" title="${esc(b.reason || 'Allocated elsewhere')}">${esc(GROUP_LABELS[b.group] || 'restricted')}</span>`;
     return `<div class="pb-stock-batch${restrictedCls}">
       <span class="pb-stock-batch-no">${esc(b.batch || '—')}</span>
       <span class="pb-stock-batch-bin">${esc(b.storageType || '')} ${esc(b.bin || '')}</span>
@@ -1055,23 +1066,25 @@ function renderStockPanel() {
   };
 
   const groups = pb.requiredMaterials.map(m => {
-    const batches    = m.batches || [];
-    const available   = batches.filter(b => b.allowed);
-    const restricted  = batches.filter(b => !b.allowed);
+    const batches       = m.batches || [];
+    const available      = batches.filter(b => b.group === 'available');
+    const unassigned      = batches.filter(b => b.group === 'unassigned');
+    const restricted      = batches.filter(b => b.group === 'restricted');
+    const wrongCustomer   = batches.filter(b => b.group === 'wrongCustomer');
 
     const availableSection = available.length
       ? `<div class="pb-stock-batches">${available.map(b => renderBatch(m, b)).join('')}</div>`
-      : (restricted.length ? `<div class="pb-stock-nobatch">No available stock (see restricted below)</div>` : '');
+      : (batches.length ? `<div class="pb-stock-nobatch">No available stock (see groups below)</div>` : '');
 
-    const restrictedSection = restricted.length
+    const collapsed = (list, label) => list.length
       ? `<details class="pb-stock-restricted-group">
-           <summary class="pb-stock-restricted-summary">${restricted.length} restricted batch${restricted.length !== 1 ? 'es' : ''}</summary>
-           <div class="pb-stock-batches">${restricted.map(b => renderBatch(m, b)).join('')}</div>
+           <summary class="pb-stock-restricted-summary">${list.length} ${label} batch${list.length !== 1 ? 'es' : ''}</summary>
+           <div class="pb-stock-batches">${list.map(b => renderBatch(m, b)).join('')}</div>
          </details>`
       : '';
 
     const batchRows = batches.length
-      ? `${availableSection}${restrictedSection}`
+      ? `${availableSection}${collapsed(unassigned, 'unassigned')}${collapsed(restricted, 'restricted')}${collapsed(wrongCustomer, 'other-customer')}`
       : `<div class="pb-stock-nobatch">No stock found</div>`;
 
     return `<div class="pb-stock-material">

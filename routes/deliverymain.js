@@ -353,6 +353,24 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
             byMaterial[mat].requiredQty += parseSapNum(r.quantity);
         });
 
+        // Packaging instruction (ZPRODBATCH~PALL_MATNR) encodes the customer
+        // it was built for as its middle underscore-delimited segment, e.g.
+        // "IB_363660_C2" -> customer 363660. A batch built for a DIFFERENT
+        // customer than this delivery's is still shown (so the operator can
+        // see the stock exists) but grouped and locked out like the existing
+        // allocation-conflict "restricted" batches, just under its own
+        // "wrongCustomer" group/reason — it's a different kind of block
+        // (wrong packaging for this customer, not "someone else has dibs").
+        // A blank/unparseable instruction (no customer segment found) isn't
+        // a mismatch — there's nothing to check against — so it stays
+        // addable, just grouped separately ("unassigned") for visibility
+        // rather than mixed in with confirmed matches.
+        const PACKAGING_INSTRUCTION_RE = /^[^_]*_(\d+)_/;
+        const packagingInstructionCustomer = b => {
+            const match = String(b.packagingMaterial || '').match(PACKAGING_INSTRUCTION_RE);
+            return match ? norm(match[1]) : null;
+        };
+
         batchRows.forEach(b => {
             const mat = String(b.material || '').trim();
             if (!mat) return;
@@ -364,7 +382,29 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
             const isOwnOrUnassigned    = !allocDelivery || allocDelivery === norm(deliveryId);
             const allocCustomer        = allocDelivery ? customerByDelivery[allocDelivery] : null;
             const sameCustomer         = !allocCustomer || allocCustomer === norm(customerId);
-            const allowed              = isOwnOrUnassigned || sameCustomer;
+            const allocationAllowed    = isOwnOrUnassigned || sameCustomer;
+
+            const packagingCustomer        = packagingInstructionCustomer(b);
+            const packagingMismatch        = packagingCustomer !== null && packagingCustomer !== norm(customerId);
+            const packagingCustomerUnknown = packagingCustomer === null;
+            const allowed                  = allocationAllowed && !packagingMismatch;
+
+            // Precedence: wrong-customer packaging blocks first (strongest
+            // reason), then existing allocation conflicts, then "we simply
+            // don't know" — anything else is a normal, available batch.
+            let group = 'available';
+            let reason = null;
+            if (packagingMismatch) {
+                group = 'wrongCustomer';
+                reason = `Packaged for customer ${packagingCustomer}, not ${norm(customerId) || 'this delivery'}`;
+            } else if (!allocationAllowed) {
+                group = 'restricted';
+                reason = stagedViaBin
+                    ? `Already staged to delivery ${allocDelivery}'s bin${allocCustomer ? ` (customer ${allocCustomer})` : ''}`
+                    : `Already allocated to delivery ${allocDelivery}${allocCustomer ? ` (customer ${allocCustomer})` : ''}`;
+            } else if (packagingCustomerUnknown) {
+                group = 'unassigned';
+            }
 
             byMaterial[mat].batches.push({
                 batch:              (b.batch || '').trim(),
@@ -376,10 +416,8 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
                 packagingMaterial:  b.packagingMaterial,
                 allocatedDelivery:  isOwnOrUnassigned ? null : allocDelivery,
                 allowed,
-                reason: allowed ? null
-                    : stagedViaBin
-                        ? `Already staged to delivery ${allocDelivery}'s bin${allocCustomer ? ` (customer ${allocCustomer})` : ''}`
-                        : `Already allocated to delivery ${allocDelivery}${allocCustomer ? ` (customer ${allocCustomer})` : ''}`,
+                group,
+                reason,
             });
         });
 
