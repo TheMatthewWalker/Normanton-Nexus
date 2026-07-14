@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import https from "https";
 import http from "http";
 import fs from "fs";
+import crypto from "crypto";
 import { spawn }             from 'child_process';
 import bcrypt                 from 'bcrypt';
 import rateLimit              from 'express-rate-limit';
@@ -69,6 +70,15 @@ const httpsOptions = {
 const config = JSON.parse(fs.readFileSync("./config.json"));
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// A fresh random value generated once, when THIS process starts — used by
+// deploy-runner.cjs to prove that a restart actually replaced the running
+// process, rather than just observing that "something" is answering on
+// port 443 (a stale process left over from an incomplete Windows Service
+// stop could otherwise keep answering and be mistaken for a successful
+// restart — see GET /api/health below).
+const BOOT_ID = crypto.randomUUID();
+const SERVER_STARTED_AT = new Date().toISOString();
 
 const app = express();
 app.use(express.json());
@@ -164,6 +174,14 @@ cron.schedule('* * * * *', async () => {
 
 // ── Auth routes (public — no requireLogin) ───────────────────────────────────
 app.use('/', authRoutes);
+
+// ── Health/identity endpoint — intentionally public (no requireLogin) ──────
+// Purely for deploy-runner.cjs's restart verification (and general poking).
+// pid + bootId together let a caller distinguish "the same process is still
+// running" from "a genuinely new process is now serving requests".
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, pid: process.pid, bootId: BOOT_ID, startedAt: SERVER_STARTED_AT });
+});
 
 // ── Admin routes (requires admin role minimum) ────────────────────────────────
 app.use('/api/admin', requireLogin, requireRole('admin'), adminRoutes);
@@ -262,15 +280,55 @@ app.get('/private/images/:file', requireLogin, (req, res) => {
 });
 
 
-https.createServer(httpsOptions, app).listen(443, () => {
+const httpsServer = https.createServer(httpsOptions, app).listen(443, () => {
   console.log("✅ HTTPS server running on port 443");
+});
+httpsServer.on('error', err => {
+  // Most likely EADDRINUSE — a previous instance is still bound to the
+  // port. Fail loudly and exit rather than limping along with no server
+  // actually listening; the Windows Service wrapper's own restart/recovery
+  // behavior (and deploy-runner.cjs's verification, when this happens
+  // during a deploy) depend on a crash here being visible and unambiguous.
+  console.error('❌ HTTPS server failed to start:', err.message);
+  process.exit(1);
 });
 
 
-http.createServer((req, res) => {
+const httpServer = http.createServer((req, res) => {
   res.writeHead(301, { Location: `https://${req.headers.host}${req.url}` });
   res.end();
 }).listen(80);
+httpServer.on('error', err => {
+  console.error('❌ HTTP redirect server failed to start:', err.message);
+});
+
+// ── Graceful shutdown ───────────────────────────────────────────────────
+// The Windows Service stop (see deploy-runner.cjs / restart.cjs) delivers
+// this via an emulated SIGINT — Windows has no real POSIX signal delivery
+// to a background service process, and that emulation is not always
+// reliably received (observed directly in daemon/normantonnexus.wrapper.log
+// falling back to a forced kill). Handling the signal explicitly here and
+// exiting promptly gives it the best chance of working cleanly, so the
+// process is actually gone before anything tries to start a new one on top
+// of it.
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] received ${signal} — shutting down…`);
+  const forceExit = setTimeout(() => {
+    console.warn('[server] graceful shutdown timed out — forcing exit.');
+    process.exit(0);
+  }, 8000);
+  forceExit.unref();
+  httpsServer.close(() => {});
+  httpServer.close(() => {});
+  // Don't wait indefinitely on close() — an idle keep-alive socket can hold
+  // it open well past when we actually want to exit.
+  setTimeout(() => process.exit(0), 500).unref();
+}
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 
 //app.listen(4000, "0.0.0.0", () => console.log("✅ SQL2005 Bridge accessible on network port 4000"));

@@ -45,6 +45,30 @@
  *      terminal prompt with nothing able to answer it, and stdio:'ignore'
  *      upstream meant nothing about it was ever visible.
  *
+ * IMPORTANT — restart verification: node-windows' svc.on('start') fires as
+ * soon as Windows ACKNOWLEDGES the start command, not when server.js has
+ * actually finished booting, and svc.on('stop') is no more trustworthy —
+ * it's driven by an emulated SIGINT that Windows does not reliably deliver
+ * to a background service process (daemon/normantonnexus.wrapper.log has
+ * shown this exact emulation failing and falling back to a forced kill on
+ * a previous cycle). The failure mode this produces: the OLD process is
+ * still alive and still answering port 443 when we think we've stopped it,
+ * a NEW process either never starts cleanly or crashes shortly after, and
+ * nothing is left to notice or recover once this script has already exited
+ * declaring success. To make this trustworthy:
+ *   - server.js exposes GET /api/health -> { pid, bootId, startedAt },
+ *     where bootId is a fresh random value generated once per process
+ *     start. A different bootId proves a genuinely NEW process is serving,
+ *     not a stale leftover one.
+ *   - After 'stop', we actively poll for the OLD process to actually stop
+ *     answering, and forcibly kill whatever's still bound to port 443 if it
+ *     doesn't (via netstat + taskkill) before starting a new one on top.
+ *   - After 'start', we poll for a NEW bootId to appear (retrying the start
+ *     once if it doesn't), then keep watching for several minutes — the
+ *     process can start cleanly and still crash shortly after, which is
+ *     exactly what was reported — attempting one automatic recovery start
+ *     if it goes down during that window before finally declaring success.
+ *
  * Usage: node deploy-runner.cjs <DeploymentID>
  * (DeploymentID must already exist in kongsberg.dbo.ScheduledDeployments
  * with Status = 'running' — the server.js cron checker sets that atomically
@@ -56,7 +80,7 @@
 const { execSync } = require('child_process');
 const path         = require('path');
 const fs           = require('fs');
-const https         = require('https');
+const https        = require('https');
 const sql          = require('mssql');
 const { Service }  = require('node-windows');
 
@@ -78,45 +102,130 @@ const BASE_GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 // while it's in progress, including any JS-level timer-based watchdog).
 const GIT_PULL_TIMEOUT_MS = 2 * 60 * 1000;
 
-// How long svc.stop()/svc.start() are allowed to take (that part IS
-// event-driven/async, so a normal setTimeout-based watchdog works here).
-const SERVICE_RESTART_TIMEOUT_MS = 3 * 60 * 1000;
+// Overall ceiling for the entire stop -> verify -> start -> verify ->
+// stability-monitor sequence below. Generous on purpose: this is a detached
+// background process, nothing is blocked waiting on it, and the whole point
+// of the stability-monitoring window is to sit and watch for several
+// minutes before declaring victory.
+const SERVICE_RESTART_TIMEOUT_MS = 10 * 60 * 1000;
 
-// node-windows' svc.on('start') fires as soon as Windows ACKNOWLEDGES the
-// start command (net start / SCM StartService returning) — that is NOT the
-// same thing as server.js actually finishing its own startup (reading
-// certs, binding port 443, connecting to SQL). Any failure in that window
-// previously went unnoticed: the deployment was marked 'completed' the
-// instant the OS accepted the start command, even if the process then
-// immediately crashed or never finished booting. So after 'start' fires we
-// actively poll the site itself before declaring victory.
-const LIVENESS_PORT          = 443;
-const LIVENESS_TIMEOUT_MS    = 30 * 1000;   // per-request timeout
-const LIVENESS_MAX_WAIT_MS   = 45 * 1000;   // total time to wait for a 2xx-5xx response
-const LIVENESS_RETRY_DELAY_MS = 3 * 1000;   // gap between liveness attempts
+// ── Restart-verification tuning ─────────────────────────────────────────
+const HEALTH_PATH              = '/api/health';
+const LIVENESS_PORT            = 443;
+const HEALTH_REQUEST_TIMEOUT_MS = 10 * 1000;   // single health-check request
 
-// Polls https://127.0.0.1:443/ until it gets ANY HTTP response (self-signed
-// cert, so rejectUnauthorized: false — we only care that something is
-// actually listening and answering, not about certificate trust) or the
-// overall time budget runs out. Resolves true/false, never throws.
-function waitForServerUp(maxWaitMs, intervalMs) {
-  const deadline = Date.now() + maxWaitMs;
+const STOP_VERIFY_MAX_WAIT_MS  = 25 * 1000;    // wait this long for the OLD process to actually go quiet
+const STOP_VERIFY_POLL_MS      = 2 * 1000;
+
+const START_VERIFY_MAX_WAIT_MS = 45 * 1000;    // wait this long, per attempt, for a NEW bootId to appear
+const START_VERIFY_POLL_MS     = 3 * 1000;
+
+const SVC_EVENT_TIMEOUT_MS     = 60 * 1000;    // wait this long for Windows to even acknowledge stop/start
+
+// Re-checks after the new instance is first confirmed live — matches the
+// reported failure mode of "came up fine, then died a couple of minutes
+// later with nothing left running to notice."
+const STABILITY_CHECKS_MS = [30 * 1000, 60 * 1000, 120 * 1000];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Hits GET /api/health and returns the parsed body, or null on any failure
+// (connection refused, timeout, non-JSON, etc.) — null always means
+// "nothing usable is answering right now," which is exactly what callers
+// need to know.
+function getHealth() {
   return new Promise(resolve => {
-    const attempt = () => {
-      const req = https.get(
-        { host: '127.0.0.1', port: LIVENESS_PORT, path: '/', rejectUnauthorized: false, timeout: LIVENESS_TIMEOUT_MS },
-        res => {
-          res.resume(); // drain, don't care about the body
-          resolve(true);
-        }
-      );
-      req.on('timeout', () => req.destroy());
-      req.on('error', () => {
-        if (Date.now() >= deadline) { resolve(false); return; }
-        setTimeout(attempt, LIVENESS_RETRY_DELAY_MS);
-      });
-    };
-    attempt();
+    const req = https.get(
+      {
+        host: '127.0.0.1', port: LIVENESS_PORT, path: HEALTH_PATH,
+        rejectUnauthorized: false, timeout: HEALTH_REQUEST_TIMEOUT_MS,
+      },
+      res => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); }
+          catch { resolve(null); }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(null));
+  });
+}
+
+// Polls until nothing answers /api/health, proving the old process has
+// actually exited — not just that Windows acknowledged the stop command.
+async function waitForPortFree(maxWaitMs, intervalMs) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const health = await getHealth();
+    if (!health) return true;
+    await sleep(intervalMs);
+  }
+  return false;
+}
+
+// Polls until /api/health reports a DIFFERENT bootId than beforeBootId (or
+// any bootId at all if beforeBootId is null) — proves a genuinely NEW
+// process is serving, not a stale one left over from before the restart.
+async function waitForNewInstance(beforeBootId, maxWaitMs, intervalMs) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const health = await getHealth();
+    if (health && health.bootId && health.bootId !== beforeBootId) return health;
+    await sleep(intervalMs);
+  }
+  return null;
+}
+
+// Last-resort: find whatever's actually bound to port 443 and kill it. Only
+// reached if the old process is still answering well after the Windows
+// Service reported itself stopped — i.e. the emulated-SIGINT stop genuinely
+// failed, not just a slow shutdown.
+function forceKillPort443() {
+  let killedAny = false;
+  try {
+    const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', timeout: 15000 });
+    const pids = new Set();
+    for (const line of out.split(/\r?\n/)) {
+      if (/:443\s/.test(line) && /LISTENING/i.test(line)) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (pid && /^\d+$/.test(pid)) pids.add(pid);
+      }
+    }
+    for (const pid of pids) {
+      console.warn(`[deploy-runner] force-killing stale process PID ${pid} still bound to port 443…`);
+      try {
+        execSync(`taskkill /F /PID ${pid}`, { encoding: 'utf8', timeout: 10000 });
+        killedAny = true;
+      } catch (err) {
+        console.error(`[deploy-runner] taskkill PID ${pid} failed:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[deploy-runner] netstat lookup failed:', err.message);
+  }
+  return killedAny;
+}
+
+// Calls svc.stop()/svc.start() and resolves once Windows acknowledges it
+// (the 'stop'/'start' event fires), or rejects if that acknowledgement
+// itself never arrives. This is ONLY about the OS-level command completing
+// — it says nothing about whether the underlying process is actually gone
+// or actually serving requests yet, which is what the waitFor* helpers
+// above are for.
+function svcCommandAndWaitAck(svc, command, event, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`svc.${command}() did not fire a '${event}' event within ${timeoutMs / 1000}s`)),
+      timeoutMs
+    );
+    svc.once(event, () => { clearTimeout(timer); resolve(); });
+    svc[command]();
   });
 }
 
@@ -231,80 +340,117 @@ async function main() {
     return;
   }
 
-  // ── Restart the Windows Service ───────────────────────────────────────
+  // ── Restart the Windows Service, with real verification ────────────────
   const svc = new Service({
     name:   'Normanton Nexus',
     script: path.join(REPO_DIR, 'server.js'),
   });
+  svc.on('error', err => {
+    console.error('[deploy-runner] service event error:', err?.message || err);
+  });
 
   const restartWatchdog = setTimeout(() => {
     markFailed(
-      `Service restart did not complete within ${SERVICE_RESTART_TIMEOUT_MS / 1000}s — ` +
-      `svc.stop()/svc.start() never fired their completion events. Check Windows Services ` +
-      `manually; the "Normanton Nexus" service may need a manual restart.`
+      `Restart verification did not complete within ${SERVICE_RESTART_TIMEOUT_MS / 1000}s — see deploy-runner.log ` +
+      `for how far it got. The "Normanton Nexus" service may need a manual check/restart.`
     );
   }, SERVICE_RESTART_TIMEOUT_MS);
 
-  svc.on('stop', () => {
-    console.log('[deploy-runner] service stopped — restarting…');
-    svc.start();
-  });
-
-  let startRetried = false;
-
-  svc.on('start', async () => {
-    if (finished) return; // watchdog already fired and closed the pool
-    console.log('[deploy-runner] Windows acknowledged the service start — verifying it is actually answering requests…');
-
-    const up = await waitForServerUp(LIVENESS_MAX_WAIT_MS, LIVENESS_RETRY_DELAY_MS);
-    if (finished) return; // watchdog fired while we were polling
-
-    if (!up) {
-      if (!startRetried) {
-        // First attempt never came up — give it exactly one more try (a slow
-        // SQL connect or cert read on a loaded box can plausibly still be in
-        // progress) before giving up. svc.start() again will re-fire this
-        // same 'start' handler once Windows acknowledges it.
-        startRetried = true;
-        console.warn('[deploy-runner] service did not answer https://127.0.0.1:443/ in time — retrying start once…');
-        svc.start();
-        return;
-      }
-      clearTimeout(restartWatchdog);
-      await markFailed(
-        `Service start was acknowledged by Windows but the app never answered https://127.0.0.1:${LIVENESS_PORT}/ ` +
-        `within the verification window (tried twice). The service process may have crashed on startup — check ` +
-        `daemon/normantonnexus.err.log and confirm manually whether "Normanton Nexus" is actually running.`
-      );
-      return;
+  try {
+    const before = await getHealth();
+    if (before) {
+      console.log(`[deploy-runner] instance before restart: pid=${before.pid} bootId=${before.bootId}`);
+    } else {
+      console.log('[deploy-runner] no instance currently answering /api/health (service may already be down).');
     }
+
+    console.log('[deploy-runner] stopping service…');
+    await svcCommandAndWaitAck(svc, 'stop', 'stop', SVC_EVENT_TIMEOUT_MS);
+    console.log('[deploy-runner] Windows acknowledged the stop — confirming the old process actually exited…');
+
+    // node-windows stops the process via an emulated SIGINT, which is not
+    // always reliably delivered on Windows (wrapper.log has shown this
+    // exact emulation fail and fall back to a forced kill). Don't trust the
+    // 'stop' event alone — actively verify nothing is still answering
+    // before starting a new instance on top of a leftover old one.
+    const portFree = await waitForPortFree(STOP_VERIFY_MAX_WAIT_MS, STOP_VERIFY_POLL_MS);
+    if (!portFree) {
+      console.warn('[deploy-runner] old process is still answering after stop — forcing it to exit…');
+      forceKillPort443();
+      await sleep(3000); // give Windows a moment to actually release the port
+      const stillUp = await getHealth();
+      if (stillUp) {
+        throw new Error(
+          `Old process (pid ${stillUp.pid}) on port 443 would not exit even after a forced kill — refusing to ` +
+          `start a new instance on top of it. Manual intervention needed on the server.`
+        );
+      }
+    }
+    console.log('[deploy-runner] old process confirmed gone.');
+
+    // Start, verify a fresh bootId shows up, retry the start once if not.
+    let fresh = null;
+    for (let attempt = 1; attempt <= 2 && !fresh; attempt++) {
+      console.log(`[deploy-runner] starting service (attempt ${attempt}/2)…`);
+      await svcCommandAndWaitAck(svc, 'start', 'start', SVC_EVENT_TIMEOUT_MS);
+      console.log('[deploy-runner] Windows acknowledged the start — waiting for a new instance identity to answer…');
+      fresh = await waitForNewInstance(before?.bootId || null, START_VERIFY_MAX_WAIT_MS, START_VERIFY_POLL_MS);
+      if (!fresh && attempt < 2) {
+        console.warn('[deploy-runner] no new instance identity appeared in time — retrying start once…');
+      }
+    }
+    if (!fresh) {
+      throw new Error(
+        `Service start was acknowledged by Windows but no new process ever answered ` +
+        `https://127.0.0.1:${LIVENESS_PORT}${HEALTH_PATH} with a fresh identity (tried twice). The new process ` +
+        `may be crash-looping on startup — check daemon/normantonnexus.err.log and confirm manually.`
+      );
+    }
+    console.log(`[deploy-runner] new instance confirmed live: pid=${fresh.pid} bootId=${fresh.bootId}. Monitoring for early crash…`);
+
+    // The process can start cleanly and still die shortly after (this is
+    // exactly what was reported: it came up, looked fine, then exited a
+    // couple of minutes later with nothing left running to notice). Stay
+    // attached for a stability window, re-verifying the SAME instance is
+    // still up, with one automatic recovery attempt if it isn't.
+    for (const waitMs of STABILITY_CHECKS_MS) {
+      await sleep(waitMs);
+      const check = await getHealth();
+      if (check && check.bootId === fresh.bootId) {
+        console.log(`[deploy-runner] stability check OK at +${waitMs / 1000}s (pid=${check.pid} still running).`);
+        continue;
+      }
+      console.warn(`[deploy-runner] instance did not survive to +${waitMs / 1000}s — attempting one recovery start…`);
+      await svcCommandAndWaitAck(svc, 'start', 'start', SVC_EVENT_TIMEOUT_MS);
+      const recovered = await waitForNewInstance(fresh.bootId, START_VERIFY_MAX_WAIT_MS, START_VERIFY_POLL_MS);
+      if (!recovered) {
+        throw new Error(
+          `New instance crashed during the post-restart stability window and did not recover automatically after ` +
+          `a retry. Check daemon/normantonnexus.err.log and confirm manually whether "Normanton Nexus" is running.`
+        );
+      }
+      console.log(`[deploy-runner] recovered: pid=${recovered.pid} bootId=${recovered.bootId}. Continuing to monitor.`);
+      fresh = recovered;
+    }
+
+    clearTimeout(restartWatchdog);
+    console.log(`[deploy-runner] service restarted and verified stable (pid=${fresh.pid}, bootId=${fresh.bootId}).`);
 
     finished = true;
-    clearTimeout(restartWatchdog);
-    console.log('[deploy-runner] service restarted and verified live (https://127.0.0.1:443/ responded).');
-    try {
-      await pool.request()
-        .input('id',  sql.Int, deploymentID)
-        .input('log', sql.NVarChar(sql.MAX), gitOutput.slice(0, 8000))
-        .query(`UPDATE kongsberg.dbo.ScheduledDeployments
-                SET Status = 'completed', CompletedAt = GETDATE(), OutputLog = @log
-                WHERE DeploymentID = @id`);
-      await audit('DEPLOY_COMPLETED', `Deployment #${deploymentID} completed (${gitRef})`);
-    } catch (err) {
-      console.error('[deploy-runner] failed to record completion:', err.message);
-    } finally {
-      await pool.close();
-      process.exit(0);
-    }
-  });
+    await pool.request()
+      .input('id',  sql.Int, deploymentID)
+      .input('log', sql.NVarChar(sql.MAX), gitOutput.slice(0, 8000))
+      .query(`UPDATE kongsberg.dbo.ScheduledDeployments
+              SET Status = 'completed', CompletedAt = GETDATE(), OutputLog = @log
+              WHERE DeploymentID = @id`);
+    await audit('DEPLOY_COMPLETED', `Deployment #${deploymentID} completed (${gitRef})`);
+    await pool.close();
+    process.exit(0);
 
-  svc.on('error', err => {
+  } catch (err) {
     clearTimeout(restartWatchdog);
-    markFailed('Service error: ' + (err?.message || err));
-  });
-
-  console.log('[deploy-runner] stopping service…');
-  svc.stop();
+    await markFailed(err?.message || String(err));
+  }
 }
 
 main().catch(err => {
