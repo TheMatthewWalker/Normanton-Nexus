@@ -15,19 +15,36 @@
  * with { detached: true, stdio: 'ignore' } + .unref() specifically so it
  * keeps running independently of server.js's lifecycle.
  *
- * IMPORTANT — SSH auth: the "Normanton Nexus" service has no `user` set in
+ * IMPORTANT — auth: the "Normanton Nexus" service has no `user` set in
  * install.cjs, so Windows runs it as LocalSystem — a completely different
  * account from whoever is logged in interactively, with its own (normally
- * empty) profile and no access to your personal SSH agent/keys. Testing
- * `git pull` or `ssh -T git@github.com` in your own terminal proves nothing
- * about whether THIS script can authenticate. To fix that without needing
- * to run the whole service under a real user account, this script looks for
- * a dedicated, passphrase-less deploy key at .deploykey/id_ed25519 (relative
- * to the repo root, git-ignored) and — if present — points git at it
- * explicitly via GIT_SSH_COMMAND, bypassing whatever SSH agent state exists
- * for the account the service happens to run as. See the README note this
- * script's error message points to for how to generate and register that
- * key as a GitHub deploy key.
+ * empty) profile and no access to your personal SSH agent/keys or git
+ * credentials. Testing `git pull` or `ssh -T git@github.com` in your own
+ * terminal proves nothing about whether THIS script can authenticate.
+ *
+ * This script supports two credential-file options, checked in this order,
+ * neither of which is ever committed (both live under .deploykey/, which is
+ * git-ignored):
+ *
+ *   1. .deploykey/github_token — a GitHub fine-grained personal access
+ *      token, scoped to ONLY this repo with Contents: Read-only permission
+ *      (Settings -> Developer settings -> Personal access tokens ->
+ *      Fine-grained tokens on github.com). This is the tighter-scoped,
+ *      preferred option — the token can do nothing except read this one
+ *      repo's contents, and it's independently revocable/rotatable without
+ *      touching any SSH key. Used via GIT_ASKPASS (deploy-askpass.cmd)
+ *      against an explicit HTTPS URL, so it never touches the existing
+ *      SSH-based 'origin' remote used for interactive pushes.
+ *
+ *   2. .deploykey/id_ed25519 — a dedicated, passphrase-less SSH deploy key
+ *      (add the matching .pub as a GitHub deploy key on this repo). Used
+ *      via GIT_SSH_COMMAND against the normal 'origin' remote. Only tried
+ *      if no github_token file is present.
+ *
+ * If neither is present, falls back to whatever ambient SSH state (if any)
+ * the LocalSystem account happens to have — which is almost certainly
+ * nothing, so this will very likely fail with a publickey error until one
+ * of the two options above is set up.
  *
  * Usage: node deploy-runner.cjs <DeploymentID>
  * (DeploymentID must already exist in kongsberg.dbo.ScheduledDeployments
@@ -43,8 +60,11 @@ const fs           = require('fs');
 const sql          = require('mssql');
 const { Service }  = require('node-windows');
 
-const REPO_DIR       = __dirname;
-const DEPLOY_KEY_PATH = path.join(REPO_DIR, '.deploykey', 'id_ed25519');
+const REPO_DIR         = __dirname;
+const TOKEN_PATH        = path.join(REPO_DIR, '.deploykey', 'github_token');
+const ASKPASS_PATH      = path.join(REPO_DIR, 'deploy-askpass.cmd');
+const SSH_DEPLOY_KEY    = path.join(REPO_DIR, '.deploykey', 'id_ed25519');
+const REPO_HTTPS_URL    = 'https://x-access-token@github.com/TheMatthewWalker/Normanton-Nexus.git';
 
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
@@ -102,38 +122,40 @@ async function main() {
     }
   }
 
-  // ── git pull (fast-forward only — refuses to silently discard any local
-  // commits/changes rather than force-resetting over them) ────────────────
-  //
-  // If a dedicated deploy key is present at .deploykey/id_ed25519, use it
-  // explicitly via GIT_SSH_COMMAND instead of relying on whatever ambient
-  // ssh-agent/keys (if any) exist for the account this process runs as.
-  // -o IdentitiesOnly=yes stops ssh from also trying any other keys it
-  // might find first; -o StrictHostKeyChecking=accept-new avoids this
-  // unattended run hanging on an interactive host-key prompt the first
-  // time it connects to github.com from this account.
-  const hasDeployKey = fs.existsSync(DEPLOY_KEY_PATH);
-  const gitEnv = hasDeployKey
-    ? {
-        ...process.env,
-        GIT_SSH_COMMAND: `ssh -i "${DEPLOY_KEY_PATH}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
-      }
-    : process.env;
+  // ── Work out how to authenticate the pull ───────────────────────────────
+  // Preferred: fine-grained PAT (read-only, scoped to just this repo) over
+  // HTTPS via GIT_ASKPASS, pulling an explicit URL rather than 'origin' so
+  // the SSH-based 'origin' remote (used for interactive pushes) is never
+  // touched. Falls back to the SSH deploy key, then to plain `git pull
+  // origin` (whatever ambient auth this account has, almost certainly none).
+  let pullCommand;
+  let gitEnv = process.env;
 
-  if (!hasDeployKey) {
+  if (fs.existsSync(TOKEN_PATH)) {
+    console.log('[deploy-runner] using fine-grained PAT (.deploykey/github_token) over HTTPS');
+    gitEnv = { ...process.env, GIT_ASKPASS: ASKPASS_PATH, GIT_TERMINAL_PROMPT: '0' };
+    pullCommand = `git pull --ff-only ${REPO_HTTPS_URL} ${gitRef}`;
+  } else if (fs.existsSync(SSH_DEPLOY_KEY)) {
+    console.log('[deploy-runner] using SSH deploy key (.deploykey/id_ed25519)');
+    gitEnv = {
+      ...process.env,
+      GIT_SSH_COMMAND: `ssh -i "${SSH_DEPLOY_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
+    };
+    pullCommand = `git pull --ff-only origin ${gitRef}`;
+  } else {
     console.warn(
-      `[deploy-runner] no deploy key found at ${DEPLOY_KEY_PATH} — falling back to ` +
-      `whatever SSH keys/agent this account already has (this is usually NOT the ` +
-      `same account/agent you tested "ssh -T git@github.com" with interactively). ` +
-      `Generate a passphrase-less key, save it there, and add the .pub as a GitHub ` +
-      `deploy key on this repo if git pull below fails with a publickey error.`
+      `[deploy-runner] no credentials found at ${TOKEN_PATH} or ${SSH_DEPLOY_KEY} — falling back to ` +
+      `whatever auth (if any) this account already has (this is usually NOT the same account/agent ` +
+      `you tested "ssh -T git@github.com" or "git push" with interactively). Set up a fine-grained ` +
+      `GitHub token (Contents: Read-only, scoped to this repo only) at ${TOKEN_PATH} if this fails.`
     );
+    pullCommand = `git pull --ff-only origin ${gitRef}`;
   }
 
   let gitOutput = '';
   try {
     console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only)…`);
-    gitOutput = execSync(`git pull --ff-only origin ${gitRef}`, {
+    gitOutput = execSync(pullCommand, {
       cwd: REPO_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv,
     });
     console.log('[deploy-runner] git pull complete:\n' + gitOutput);
