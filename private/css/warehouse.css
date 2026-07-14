@@ -908,6 +908,25 @@ body::before {
   font-size: 10px; color: var(--text-muted);
   white-space: nowrap;
 }
+.pb-stock-material-req--done { color: var(--success, #059669); }
+/* Material requirement fully met — rendered as a collapsed <details> instead
+   of the plain <div> above, so it stops competing for attention once nothing
+   more is needed but stays reachable if the operator wants to add extra. */
+.pb-stock-material--done > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.pb-stock-material--done > summary::-webkit-details-marker { display: none; }
+.pb-stock-material--done > summary::before {
+  content: '▸';
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-right: 6px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.pb-stock-material--done[open] > summary::before { transform: rotate(90deg); }
+.pb-stock-material--done .pb-stock-batches { margin-top: 8px; }
 .pb-stock-batches {
   display: flex; flex-direction: column; gap: 6px;
 }
@@ -1149,10 +1168,19 @@ body::before {
   color: var(--accent);
 }
 .pb-running-actions {
-  display: flex; gap: 8px; align-items: center;
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   padding-top: 10px; border-top: 1px solid var(--border);
 }
-.pb-running-actions .pb-finish-btn { flex: 1; }
+/* .pb-finish-btn's own width:100% rule below is meant for contexts where
+   it's the only button in its row — inside this now-three-button row (Bulk
+   Edit / Delete / Finish, since the bulk-edit button was added) it fought
+   the flex sizing and pushed the button wider than the row, spilling out of
+   the .pb-running panel. flex-basis:0 + width:auto here makes flex:1 (grow
+   to fill whatever space Bulk Edit/Delete don't take) the only thing sizing
+   it, and flex-wrap above on the parent means if the row ever gets too
+   narrow to fit all three, Finish Pallet wraps onto its own line instead of
+   overflowing. */
+.pb-running-actions .pb-finish-btn { flex: 1 1 0; width: auto; min-width: 120px; }
 .btn-danger {
   font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 600;
   padding: 8px 14px; background: transparent;

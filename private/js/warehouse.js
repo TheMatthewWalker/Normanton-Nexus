@@ -1117,13 +1117,25 @@ function renderStockPanel() {
       ? `${availableSection}${collapsed(unassigned, 'unassigned')}${collapsed(restricted, 'restricted')}${collapsed(wrongCustomer, 'other-customer')}`
       : `<div class="pb-stock-nobatch">No stock found</div>`;
 
-    return `<div class="pb-stock-material">
-      <div class="pb-stock-material-hdr">
+    // requiredQty is decremented in addPackage() as batches are staged (see
+    // there) rather than SAP's original line quantity, so this reflects what
+    // still needs picking, not what the order originally asked for. Once
+    // nothing more is needed, collapse the whole material into a <details>
+    // instead of a plain <div> so it stops taking up space among materials
+    // still being picked, but stays reachable (e.g. to over-pick deliberately).
+    const remaining   = Math.max(0, Number(m.requiredQty || 0));
+    const isComplete  = remaining <= 0;
+    const materialHdr = `<div class="pb-stock-material-hdr">
         <span class="pb-stock-material-code">${esc(m.material)}</span>
-        <span class="pb-stock-material-req">req. ${Number(m.requiredQty || 0).toFixed(0)}</span>
-      </div>
-      ${batchRows}
-    </div>`;
+        <span class="pb-stock-material-req${isComplete ? ' pb-stock-material-req--done' : ''}">${isComplete ? '✓ done' : `req. ${remaining.toFixed(0)}`}</span>
+      </div>`;
+
+    return isComplete
+      ? `<details class="pb-stock-material pb-stock-material--done">
+          <summary>${materialHdr}</summary>
+          ${batchRows}
+        </details>`
+      : `<div class="pb-stock-material">${materialHdr}${batchRows}</div>`;
   }).join('');
 
   return `<div class="pb-stock-panel" id="pb-stock-panel">
@@ -1647,8 +1659,12 @@ function showPackageContextMenu(event, palletItemId) {
   const menu = document.createElement('div');
   menu.id = 'pb-pkg-ctx-menu';
   menu.className = 'pb-ctx-menu';
-  menu.style.left = `${Math.min(event.pageX, window.innerWidth  - 210)}px`;
-  menu.style.top  = `${Math.min(event.pageY, window.innerHeight - 90)}px`;
+  // .pb-ctx-menu is position: fixed (viewport-relative), so it needs
+  // clientX/clientY — pageX/pageY are document-relative (include scroll
+  // offset) and made the menu drift away from the cursor as soon as the
+  // page was scrolled at all.
+  menu.style.left = `${Math.min(event.clientX, window.innerWidth  - 210)}px`;
+  menu.style.top  = `${Math.min(event.clientY, window.innerHeight - 90)}px`;
   menu.innerHTML = `
     <div class="pb-ctx-item" data-action="layer">Change Layer…</div>
     ${canChangePackaging ? `<div class="pb-ctx-item" data-action="pack">Change Packaging…</div>` : ''}`;
@@ -1719,6 +1735,12 @@ async function removeBuilderPackage(palletItemId) {
       if (mat) {
         mat.batches = (mat.batches || []).filter(b => (b.batch || '') !== pkg.originalBatchEntry.batch);
         mat.batches.push(pkg.originalBatchEntry);
+        // Mirror of the decrement in addPackage() — undoing a staged batch
+        // means it's no longer covering any of the requirement, so add its
+        // quantity back rather than leaving "req." (or a collapsed "done")
+        // wrong until the next full refresh.
+        const movedQty = Number(pkg.sapQuantity ?? pkg.originalBatchEntry?.totalQty ?? 0);
+        mat.requiredQty = Number(mat.requiredQty || 0) + movedQty;
       }
       const stockPanelEl = document.getElementById('pb-stock-panel');
       if (stockPanelEl) stockPanelEl.outerHTML = renderStockPanel();
@@ -1904,6 +1926,28 @@ async function addPackage() {
     return;
   }
 
+  // Staging always moves this batch's full on-hand quantity — SAP doesn't
+  // split a batch across a partial stage. If that's more than what's still
+  // required for this material, the delivery would go over what SAP has on
+  // order for it. That's not necessarily wrong (over-picking happens), but
+  // it usually means the order quantity changed and VL02N hasn't been
+  // updated to match yet, so flag it and let the operator decide rather than
+  // silently taking the requirement negative.
+  if (pb.pendingSapMaterial && batch) {
+    const reqMat = pb.requiredMaterials.find(m => m.material === pb.pendingSapMaterial);
+    const pendingQty = Number(pb.pendingSapQuantity || 0);
+    const stillNeeded = Number(reqMat?.requiredQty || 0);
+    if (reqMat && pendingQty > stillNeeded) {
+      const proceed = await wConfirm({
+        title: 'Quantity exceeds requirement',
+        message: `Batch ${batch} (${pendingQty} units) is more than the ${stillNeeded} unit${stillNeeded === 1 ? '' : 's'} still needed for ${reqMat.material}.\n\nIf the order quantity has changed, update it in VL02N before continuing. Otherwise, adding this batch will take the requirement below zero.`,
+        confirmText: 'Add Anyway',
+        variant: 'danger',
+      });
+      if (!proceed) { showPbMsg('Add cancelled', ''); return; }
+    }
+  }
+
   // Profit centre 2007 materials: the operator still picks the outer box
   // size (SB/MB/LB) via the normal packaging picker, but only once per
   // layer — for the FIRST batch added to a layer. Every batch after that
@@ -2054,11 +2098,22 @@ async function addPackage() {
     // can put it straight back if the operator undoes this add (e.g. a
     // wrongly-scanned batch), without a full re-fetch from SAP.
     let removedBatchEntry = null;
+    // How much this batch actually reduces the requirement by — prefer the
+    // real staged amount SAP moved, falling back to what the batch was
+    // listed as if that response field is ever missing. Stored on the
+    // package record too so removeBuilderPackage() can add it straight back
+    // if the operator undoes this add, without needing a full re-fetch.
+    let movedQty = 0;
     if (pb.pendingSapMaterial && batch) {
       const mat = pb.requiredMaterials.find(m => m.material === pb.pendingSapMaterial);
       if (mat) {
         const idx = (mat.batches || []).findIndex(b => (b.batch || '') === batch);
         if (idx !== -1) { removedBatchEntry = mat.batches[idx]; mat.batches.splice(idx, 1); }
+
+        movedQty = Number(stagedQuantity ?? removedBatchEntry?.totalQty ?? pb.pendingSapQuantity ?? 0);
+        // Floored at 0 so over-picking (see the VL02N warning above) shows
+        // "done" rather than a negative "req." figure.
+        mat.requiredQty = Math.max(0, Number(mat.requiredQty || 0) - movedQty);
       }
     }
 
@@ -2068,6 +2123,7 @@ async function addPackage() {
       packagingID:  effectivePackagingID,
       sapBatch:     batch,
       sapMaterial:  pb.pendingSapMaterial || null,
+      sapQuantity:  movedQty || null,
       originalBatchEntry: removedBatchEntry,
       packHeight,
       packWeight,
