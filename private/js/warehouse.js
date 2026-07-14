@@ -841,6 +841,20 @@ function closePickModal() {
 // ── Pallet Builder ────────────────────────────────────────────────────────────
 let pb = null; // active builder state
 
+// Profit centre 2007 materials are packed differently from everything else:
+// each batch sits inside its own C2 box, and the pallet itself is a single MB
+// (medium pallet box) holding all of those C2s. addPackage() below creates one
+// MB "container" row per layer (no batch/material attached — it's the box
+// itself) the first time a PC2007 batch is added to that layer, then forces
+// every batch added to that layer afterward onto C2 automatically — the
+// operator doesn't need to manage the MB/C2 split by hand.
+const CONTAINER_PACKAGING_ID = 'MB';
+const INNER_PACKAGING_ID     = 'C2';
+
+function materialUsesContainerPacking(material) {
+  return !!pb?.requiredMaterials?.find(m => m.material === material)?.usesContainerPacking;
+}
+
 function getPbOverlay() {
   let el = document.getElementById('pb-overlay');
   if (!el) {
@@ -863,7 +877,8 @@ async function openPalletBuilder() {
          palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
          requiredMaterials: [], stockError: null,
-         pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null };
+         pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
+         layerContainers: {} };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -922,7 +937,8 @@ async function openPalletBuilderOnExisting(palletId) {
          palletTypeData: null, allPalletTypes: [],
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
          requiredMaterials: [], stockError: null,
-         pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null };
+         pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
+         layerContainers: {} };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -968,6 +984,13 @@ async function openPalletBuilderOnExisting(palletId) {
     pb.nextLayer    = existing.length
       ? Math.max(...existing.map(p => p.palletLayer || 0)) + 1
       : 1;
+
+    // Rebuild which layers already have their MB container box created, so
+    // re-opening a pallet that already has PC2007 packages on it doesn't
+    // create a duplicate MB row the next time a batch is added to that layer.
+    existing
+      .filter(p => p.packagingID === CONTAINER_PACKAGING_ID && !p.sapBatch)
+      .forEach(p => { pb.layerContainers[p.palletLayer] = true; });
 
     // Validation endpoint now returns full PackagingData rows (BIGINT packagingID included)
     pb.allowedPackaging = valRes.data || valRes;
@@ -1399,12 +1422,19 @@ function renderBuilderPhase2() {
 function renderRunningList() {
   if (!pb.packages.length)
     return `<div class="pb-running-empty">No packages added yet</div>`;
-  return pb.packages.map(p => `
-    <div class="pb-running-item">
+  return pb.packages.map(p => {
+    // MB container rows have no batch/material of their own — they
+    // represent the outer box for a PC2007 layer, not a picked item.
+    const isContainer = p.packagingID === CONTAINER_PACKAGING_ID && !p.sapBatch;
+    return `
+    <div class="pb-running-item${isContainer ? ' pb-running-item--container' : ''}">
       <span class="pb-running-layer">Layer ${p.palletLayer}</span>
       <span class="pb-running-pack">${esc(p.packagingID || '')}</span>
-      ${p.sapBatch ? `<span class="pb-running-batch">${esc(p.sapBatch)}</span>` : ''}
-    </div>`).join('');
+      ${isContainer
+        ? `<span class="pb-running-container-tag">outer box</span>`
+        : (p.sapBatch ? `<span class="pb-running-batch">${esc(p.sapBatch)}</span>` : '')}
+    </div>`;
+  }).join('');
 }
 
 function calcPalletHeight() {
@@ -1418,24 +1448,49 @@ function calcPalletHeight() {
   return baseH + Object.values(layerMax).reduce((s, h) => s + h, 0);
 }
 
+// Looks a packaging type up first in this pallet type's allowed list, then
+// falls back to the full packaging catalogue — MB/C2 (see
+// CONTAINER_PACKAGING_ID/INNER_PACKAGING_ID above) need to resolve correctly
+// for the container-packing flow even if a given pallet type's PalletValidation
+// rows haven't been set up to include them explicitly.
+function findPackagingType(packagingID) {
+  if (!packagingID) return null;
+  return pb.allowedPackaging.find(p => p.packagingID === packagingID)
+      || pb.allPackaging.find(p => p.packagingID === packagingID)
+      || null;
+}
+
 async function addPackage() {
   const packInput  = document.querySelector('input[name="pb-pack"]:checked');
   const packType   = packInput?.value || null;
   const hasPackaging = pb.allowedPackaging.length > 0;
 
-  if (hasPackaging && !packType) {
-    showPbMsg('Select a packaging type first', 'error'); return;
-  }
-
   const layer = parseInt(document.getElementById('pb-layer').value, 10) || pb.nextLayer;
   const batch = document.getElementById('pb-batch').value.trim();
 
-  const selectedPkg   = packType ? pb.allowedPackaging.find(p => p.packagingID === packType) : null;
-  const packWeight    = Number(selectedPkg?.packWeight || 0);
+  // Profit centre 2007 materials skip the manual packaging picker entirely —
+  // packaging is auto-determined (MB outer box once per layer, C2 for every
+  // batch) rather than chosen by the operator. See CONTAINER_PACKAGING_ID.
+  const isContainerMaterial = !!pb.pendingSapMaterial && materialUsesContainerPacking(pb.pendingSapMaterial);
+  const needsContainer      = isContainerMaterial && !pb.layerContainers[layer];
 
-  // Use entered dimensions when the selected type has no defaults
+  if (!isContainerMaterial && hasPackaging && !packType) {
+    showPbMsg('Select a packaging type first', 'error'); return;
+  }
+
+  const effectivePackagingID = isContainerMaterial ? INNER_PACKAGING_ID : packType;
+  const selectedPkg          = findPackagingType(effectivePackagingID);
+  if (isContainerMaterial && !selectedPkg) {
+    showPbMsg(`Packaging type "${INNER_PACKAGING_ID}" is not configured — cannot add this batch`, 'error');
+    return;
+  }
+  const packWeight = Number(selectedPkg?.packWeight || 0);
+
+  // Use entered dimensions when the selected type has no defaults — not
+  // applicable to the auto-determined container flow, C2/MB are expected to
+  // already have their dimensions configured in PackagingData.
   const dimsEl        = document.getElementById('pb-custom-dims');
-  const usingCustom   = dimsEl && dimsEl.style.display !== 'none';
+  const usingCustom   = !isContainerMaterial && dimsEl && dimsEl.style.display !== 'none';
   let packHeight = Number(selectedPkg?.packHeight || 0);
   if (usingCustom) {
     const enteredH = parseFloat(document.getElementById('pb-dim-h')?.value) || 0;
@@ -1457,6 +1512,44 @@ async function addPackage() {
   let sourceBin           = null;
 
   try {
+    // First batch of a PC2007 material added to a layer — create the MB
+    // outer box for that layer before anything else. No material/batch/
+    // quantity on this row; it represents the box itself, not a SAP batch,
+    // so it's never staged in SAP. Counted once per layer (not once per
+    // batch), which is also what keeps pb.packagingWeight correct — each
+    // C2 batch below only adds its own weight on top of this.
+    if (needsContainer) {
+      const containerPkg = findPackagingType(CONTAINER_PACKAGING_ID);
+      if (!containerPkg) {
+        throw new Error(`Packaging type "${CONTAINER_PACKAGING_ID}" is not configured — cannot create the outer box`);
+      }
+      showPbMsg(`Creating ${CONTAINER_PACKAGING_ID} box for layer ${layer}…`, '');
+      const boxRes  = await fetch('/api/palletpackages', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          palletID:    pb.palletId,
+          packagingID: CONTAINER_PACKAGING_ID,
+          palletLayer: layer,
+          sapDelivery: String(pb.deliveryId),
+          sapCustomer: pb.customerId ? String(pb.customerId) : null,
+          scanTime:    new Date().toISOString(),
+        }),
+      });
+      const boxJson = await boxRes.json();
+      if (!boxRes.ok) throw new Error(boxJson.error || `Failed to create ${CONTAINER_PACKAGING_ID} box`);
+
+      pb.packages.push({
+        palletItemID: boxJson.palletItemID,
+        palletLayer:  layer,
+        packagingID:  CONTAINER_PACKAGING_ID,
+        sapBatch:     null,
+        packHeight:   Number(containerPkg.packHeight || 0),
+        packWeight:   Number(containerPkg.packWeight || 0),
+      });
+      pb.packagingWeight     = (pb.packagingWeight || 0) + Number(containerPkg.packWeight || 0);
+      pb.layerContainers[layer] = true;
+    }
+
     // Stage the batch in SAP first — moves its full on-hand quantity into
     // this picksheet's bin (delivery number, zero-padded to 10 digits,
     // storage type 916), creating the bin first if SAP doesn't have it yet.
@@ -1490,7 +1583,7 @@ async function addPackage() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         palletID:    pb.palletId,
-        packagingID: packType || null,
+        packagingID: effectivePackagingID || null,
         palletLayer: layer,
         sapBatch:    batch || null,
         sapDelivery: String(pb.deliveryId),
@@ -1510,7 +1603,7 @@ async function addPackage() {
     pb.packages.push({
       palletItemID: json.palletItemID,
       palletLayer:  layer,
-      packagingID:  packType,
+      packagingID:  effectivePackagingID,
       sapBatch:     batch,
       packHeight,
       packWeight,
@@ -1542,8 +1635,9 @@ async function addPackage() {
       });
     }
 
-    const toNote = transferOrderNumber ? ` · TO ${transferOrderNumber}${binWasCreated ? ' (bin created)' : ''}` : '';
-    showPbMsg(`✓ Added (layer ${layer})${toNote}`, 'ok');
+    const toNote        = transferOrderNumber ? ` · TO ${transferOrderNumber}${binWasCreated ? ' (bin created)' : ''}` : '';
+    const containerNote = needsContainer ? ` · ${CONTAINER_PACKAGING_ID} box created` : '';
+    showPbMsg(`✓ Added (layer ${layer}, ${effectivePackagingID || 'no packaging'})${containerNote}${toNote}`, 'ok');
     document.getElementById('pb-batch')?.focus();
   } catch (err) {
     showPbMsg('✕ ' + err.message, 'error');

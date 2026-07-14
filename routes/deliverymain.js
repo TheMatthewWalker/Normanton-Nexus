@@ -280,6 +280,40 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
         if (stockBody?.success === false) throw new Error(stockBody.error || 'SAP stock query failed');
         const batchRows = unwrap(stockBody);
 
+        // 2b. Profit centre per material (MARC~PRCTR), via SapServer's
+        //     existing GET /api/production/check-profit-centre — the same
+        //     lookup productionnexus.js's assertProfitCentre already uses to
+        //     gate production postings, called once per required material.
+        //     Materials on profit centre 2007 are packed differently: each
+        //     batch sits inside a C2 box, and the pallet itself is one MB
+        //     (medium pallet box) holding all of those C2s — see
+        //     CONTAINER_PROFIT_CENTRE below and its use in addPackage()'s
+        //     equivalent packing logic on the frontend.
+        const CONTAINER_PROFIT_CENTRE = '2007';
+        const sapGet = async (path, body) => {
+            const response = await axios.request({
+                method: 'get',
+                url: `${sapConfig.url}${path}`,
+                data: body,
+                timeout: 30000,
+                httpsAgent: sapAgent,
+                headers: { Authorization: `Bearer ${makeSapToken()}`, 'Content-Type': 'application/json' },
+            });
+            return response.data;
+        };
+        const profitCentreByMaterial = {};
+        await Promise.all(materials.map(async mat => {
+            try {
+                const raw = await sapGet('/api/production/check-profit-centre', { Material: mat });
+                if (raw?.success === false) return;
+                profitCentreByMaterial[mat] = String(raw?.data ?? '').trim().replace(/^0+(?=\d)/, '');
+            } catch {
+                // Profit centre couldn't be confirmed for this material — leave
+                // it undetermined rather than failing the whole picksheet load;
+                // it just won't get the container-packing treatment below.
+            }
+        }));
+
         // 3. For any batch allocated elsewhere, whose customer is that delivery?
         //    A batch sitting in storage type 916 (the picksheet-staging area —
         //    see PicksheetHelpers.StagingStorageType in SapServer) is allocated
@@ -347,6 +381,11 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
                         ? `Already staged to delivery ${allocDelivery}'s bin${allocCustomer ? ` (customer ${allocCustomer})` : ''}`
                         : `Already allocated to delivery ${allocDelivery}${allocCustomer ? ` (customer ${allocCustomer})` : ''}`,
             });
+        });
+
+        Object.values(byMaterial).forEach(m => {
+            m.profitCentre = profitCentreByMaterial[m.material] || null;
+            m.usesContainerPacking = m.profitCentre === CONTAINER_PROFIT_CENTRE;
         });
 
         res.json({ success: true, data: { customerId, materials: Object.values(byMaterial) } });

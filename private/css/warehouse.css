@@ -1122,6 +1122,15 @@ body::before {
 .pb-running-pack  { color: var(--text-muted); font-size: 9px; }
 .pb-running-qty   { color: var(--text-dim); }
 .pb-running-batch { color: var(--text-muted); }
+.pb-running-item--container {
+  border-color: var(--accent);
+  background: rgba(124,58,237,0.06);
+}
+.pb-running-container-tag {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
 .pb-running-actions {
   display: flex; gap: 8px; align-items: center;
   padding-top: 10px; border-top: 1px solid var(--border);
