@@ -145,11 +145,16 @@ cron.schedule('* * * * *', async () => {
     `);
     for (const row of due.recordset) {
       console.log(`[cron] triggering scheduled deployment #${row.DeploymentID}`);
+      // stdio is redirected to deploy-runner.log (NOT 'ignore') — deploy-runner.cjs
+      // logs every step it takes, and this was previously being discarded entirely,
+      // which is why a stuck/failed deployment showed zero diagnostic evidence.
+      const logFd = fs.openSync(path.join(__dirname, 'deploy-runner.log'), 'a');
       const child = spawn(
         process.execPath,
         [path.join(__dirname, 'deploy-runner.cjs'), String(row.DeploymentID)],
-        { detached: true, stdio: 'ignore', cwd: __dirname }
+        { detached: true, stdio: ['ignore', logFd, logFd], cwd: __dirname }
       );
+      fs.closeSync(logFd); // the child keeps its own handle to the same file
       child.unref();
     }
   } catch (err) {

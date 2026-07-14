@@ -12,39 +12,38 @@
  * child process, the moment svc.stop() takes down server.js, the OS/service
  * manager could tear this script down right along with it — mid-restart,
  * before svc.start() ever fires. The cron checker in server.js spawns this
- * with { detached: true, stdio: 'ignore' } + .unref() specifically so it
- * keeps running independently of server.js's lifecycle.
+ * with { detached: true } + .unref() specifically so it keeps running
+ * independently of server.js's lifecycle. Its stdout/stderr are redirected
+ * to deploy-runner.log (NOT 'ignore') — this file is your primary source of
+ * truth if a deployment gets stuck; the ScheduledDeployments.OutputLog /
+ * ErrorMessage columns only get populated for the specific failure modes
+ * this script anticipates and catches, whereas the log file captures
+ * everything, including crashes this script never gets a chance to record
+ * to the database.
  *
  * IMPORTANT — auth: the "Normanton Nexus" service has no `user` set in
  * install.cjs, so Windows runs it as LocalSystem — a completely different
  * account from whoever is logged in interactively, with its own (normally
- * empty) profile and no access to your personal SSH agent/keys or git
- * credentials. Testing `git pull` or `ssh -T git@github.com` in your own
- * terminal proves nothing about whether THIS script can authenticate.
- *
- * This script supports two credential-file options, checked in this order,
- * neither of which is ever committed (both live under .deploykey/, which is
- * git-ignored):
- *
- *   1. .deploykey/github_token — a GitHub fine-grained personal access
- *      token, scoped to ONLY this repo with Contents: Read-only permission
- *      (Settings -> Developer settings -> Personal access tokens ->
- *      Fine-grained tokens on github.com). This is the tighter-scoped,
- *      preferred option — the token can do nothing except read this one
- *      repo's contents, and it's independently revocable/rotatable without
- *      touching any SSH key. Used via GIT_ASKPASS (deploy-askpass.cmd)
- *      against an explicit HTTPS URL, so it never touches the existing
- *      SSH-based 'origin' remote used for interactive pushes.
- *
+ * empty) profile and no access to your personal SSH agent/keys. Testing
+ * `git pull` or `ssh -T git@github.com` in your own terminal proves nothing
+ * about whether THIS script can authenticate. To fix that without needing
+ * to run the whole service under a real user account, this script looks
+ * for, in order:
+ *   1. .deploykey/github_token — a GitHub fine-grained PAT, scoped to just
+ *      this repo with Contents: Read-only. Preferred — tightest scope,
+ *      independently revocable. Used over HTTPS via deploy-askpass.cmd.
  *   2. .deploykey/id_ed25519 — a dedicated, passphrase-less SSH deploy key
- *      (add the matching .pub as a GitHub deploy key on this repo). Used
- *      via GIT_SSH_COMMAND against the normal 'origin' remote. Only tried
- *      if no github_token file is present.
- *
- * If neither is present, falls back to whatever ambient SSH state (if any)
- * the LocalSystem account happens to have — which is almost certainly
- * nothing, so this will very likely fail with a publickey error until one
- * of the two options above is set up.
+ *      (register the .pub as a GitHub deploy key on this repo).
+ *   3. Whatever ambient auth (if any) the LocalSystem account already has
+ *      — almost certainly nothing, so this will likely fail until 1 or 2
+ *      is set up. GIT_TERMINAL_PROMPT=0 and SSH BatchMode=yes are set even
+ *      in this fallback case so a missing-credential failure comes back
+ *      as a fast, visible error instead of hanging forever waiting on an
+ *      interactive prompt that can never be answered (host-key
+ *      confirmation, username/password, etc.) — this is what was silently
+ *      swallowing deployments before: no credential, an unattended
+ *      terminal prompt with nothing able to answer it, and stdio:'ignore'
+ *      upstream meant nothing about it was ever visible.
  *
  * Usage: node deploy-runner.cjs <DeploymentID>
  * (DeploymentID must already exist in kongsberg.dbo.ScheduledDeployments
@@ -60,11 +59,27 @@ const fs           = require('fs');
 const sql          = require('mssql');
 const { Service }  = require('node-windows');
 
-const REPO_DIR         = __dirname;
-const TOKEN_PATH        = path.join(REPO_DIR, '.deploykey', 'github_token');
-const ASKPASS_PATH      = path.join(REPO_DIR, 'deploy-askpass.cmd');
-const SSH_DEPLOY_KEY    = path.join(REPO_DIR, '.deploykey', 'id_ed25519');
-const REPO_HTTPS_URL    = 'https://x-access-token@github.com/TheMatthewWalker/Normanton-Nexus.git';
+const REPO_DIR       = __dirname;
+const TOKEN_PATH      = path.join(REPO_DIR, '.deploykey', 'github_token');
+const ASKPASS_PATH    = path.join(REPO_DIR, 'deploy-askpass.cmd');
+const SSH_DEPLOY_KEY  = path.join(REPO_DIR, '.deploykey', 'id_ed25519');
+const REPO_HTTPS_URL  = 'https://x-access-token@github.com/TheMatthewWalker/Normanton-Nexus.git';
+
+// Git must NEVER fall back to an interactive prompt — there is nothing and
+// no one able to answer one when this runs unattended under a service
+// account. Without this, a missing/misconfigured credential doesn't fail
+// fast, it just hangs forever waiting for input that will never arrive.
+const BASE_GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+
+// How long the git pull itself is allowed to take before it's killed and
+// treated as a failure (this is what actually protects against a hang —
+// execSync is synchronous/blocking, so nothing else in this script can run
+// while it's in progress, including any JS-level timer-based watchdog).
+const GIT_PULL_TIMEOUT_MS = 2 * 60 * 1000;
+
+// How long svc.stop()/svc.start() are allowed to take (that part IS
+// event-driven/async, so a normal setTimeout-based watchdog works here).
+const SERVICE_RESTART_TIMEOUT_MS = 3 * 60 * 1000;
 
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
@@ -72,6 +87,8 @@ async function main() {
     console.error('[deploy-runner] missing DeploymentID argument');
     process.exit(1);
   }
+
+  console.log(`\n[deploy-runner] ==== starting run for deployment #${deploymentID} @ ${new Date().toString()} ====`);
 
   const config = JSON.parse(fs.readFileSync(path.join(REPO_DIR, 'config.json'), 'utf8'));
   const sqlConfig = {
@@ -83,6 +100,7 @@ async function main() {
   };
 
   const pool = await sql.connect(sqlConfig);
+  console.log('[deploy-runner] connected to SQL Server');
 
   const rowResult = await pool.request()
     .input('id', sql.Int, deploymentID)
@@ -104,7 +122,11 @@ async function main() {
     }
   }
 
+  let finished = false;
+
   async function markFailed(detail) {
+    if (finished) return;
+    finished = true;
     console.error('[deploy-runner] FAILED:', detail);
     try {
       await pool.request()
@@ -123,23 +145,18 @@ async function main() {
   }
 
   // ── Work out how to authenticate the pull ───────────────────────────────
-  // Preferred: fine-grained PAT (read-only, scoped to just this repo) over
-  // HTTPS via GIT_ASKPASS, pulling an explicit URL rather than 'origin' so
-  // the SSH-based 'origin' remote (used for interactive pushes) is never
-  // touched. Falls back to the SSH deploy key, then to plain `git pull
-  // origin` (whatever ambient auth this account has, almost certainly none).
   let pullCommand;
-  let gitEnv = process.env;
+  let gitEnv = BASE_GIT_ENV;
 
   if (fs.existsSync(TOKEN_PATH)) {
     console.log('[deploy-runner] using fine-grained PAT (.deploykey/github_token) over HTTPS');
-    gitEnv = { ...process.env, GIT_ASKPASS: ASKPASS_PATH, GIT_TERMINAL_PROMPT: '0' };
+    gitEnv = { ...BASE_GIT_ENV, GIT_ASKPASS: ASKPASS_PATH };
     pullCommand = `git pull --ff-only ${REPO_HTTPS_URL} ${gitRef}`;
   } else if (fs.existsSync(SSH_DEPLOY_KEY)) {
     console.log('[deploy-runner] using SSH deploy key (.deploykey/id_ed25519)');
     gitEnv = {
-      ...process.env,
-      GIT_SSH_COMMAND: `ssh -i "${SSH_DEPLOY_KEY}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
+      ...BASE_GIT_ENV,
+      GIT_SSH_COMMAND: `ssh -i "${SSH_DEPLOY_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`,
     };
     pullCommand = `git pull --ff-only origin ${gitRef}`;
   } else {
@@ -149,18 +166,29 @@ async function main() {
       `you tested "ssh -T git@github.com" or "git push" with interactively). Set up a fine-grained ` +
       `GitHub token (Contents: Read-only, scoped to this repo only) at ${TOKEN_PATH} if this fails.`
     );
+    // Still force non-interactive SSH even with no dedicated key, so a
+    // missing/rejected credential fails fast instead of hanging on a
+    // host-key or password prompt nothing can ever answer.
+    gitEnv = {
+      ...BASE_GIT_ENV,
+      GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
+    };
     pullCommand = `git pull --ff-only origin ${gitRef}`;
   }
 
   let gitOutput = '';
   try {
-    console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only)…`);
+    console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only, ${GIT_PULL_TIMEOUT_MS / 1000}s timeout)…`);
     gitOutput = execSync(pullCommand, {
-      cwd: REPO_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv,
+      cwd: REPO_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: gitEnv, timeout: GIT_PULL_TIMEOUT_MS,
     });
     console.log('[deploy-runner] git pull complete:\n' + gitOutput);
   } catch (err) {
-    await markFailed((err.stdout || '') + (err.stderr || '') + err.message);
+    const timedOut = err.signal === 'SIGTERM' && err.killed;
+    const detail = (err.stdout || '') + (err.stderr || '') + err.message +
+      (timedOut ? ' [git pull TIMED OUT and was killed — most likely stuck on an auth prompt or unreachable network]' : '');
+    await markFailed(detail);
     return;
   }
 
@@ -170,12 +198,23 @@ async function main() {
     script: path.join(REPO_DIR, 'server.js'),
   });
 
+  const restartWatchdog = setTimeout(() => {
+    markFailed(
+      `Service restart did not complete within ${SERVICE_RESTART_TIMEOUT_MS / 1000}s — ` +
+      `svc.stop()/svc.start() never fired their completion events. Check Windows Services ` +
+      `manually; the "Normanton Nexus" service may need a manual restart.`
+    );
+  }, SERVICE_RESTART_TIMEOUT_MS);
+
   svc.on('stop', () => {
     console.log('[deploy-runner] service stopped — restarting…');
     svc.start();
   });
 
   svc.on('start', async () => {
+    if (finished) return; // watchdog already fired and closed the pool
+    finished = true;
+    clearTimeout(restartWatchdog);
     console.log('[deploy-runner] service restarted successfully.');
     try {
       await pool.request()
@@ -194,6 +233,7 @@ async function main() {
   });
 
   svc.on('error', err => {
+    clearTimeout(restartWatchdog);
     markFailed('Service error: ' + (err?.message || err));
   });
 

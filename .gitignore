@@ -8,3 +8,4 @@ certs
 test.http
 debug
 .deploykey
+deploy-runner.log
