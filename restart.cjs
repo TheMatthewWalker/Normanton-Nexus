@@ -59,7 +59,7 @@ async function main() {
   const portFree = await waitForPortFree(STOP_VERIFY_MAX_WAIT_MS, STOP_VERIFY_POLL_MS);
   if (!portFree) {
     console.warn('[restart] old process is still answering after stop — forcing it to exit…');
-    forceKillPort443();
+    await forceKillPort443();
     await sleep(3000);
     const stillUp = await getHealth();
     if (stillUp) {

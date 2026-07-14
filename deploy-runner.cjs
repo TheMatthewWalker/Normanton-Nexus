@@ -42,16 +42,24 @@
  *      in this fallback case so a missing-credential failure comes back
  *      as a fast, visible error instead of hanging forever waiting on an
  *      interactive prompt that can never be answered (host-key
- *      confirmation, username/password, etc.) — this is what was silently
- *      swallowing deployments before: no credential, an unattended
- *      terminal prompt with nothing able to answer it, and stdio:'ignore'
- *      upstream meant nothing about it was ever visible.
+ *      confirmation, username/password, etc.).
  *
  * IMPORTANT — restart verification: see the big comment at the top of
  * restart-lib.cjs for why the stop/start events alone can't be trusted, and
  * why every restart here is verified by process identity (bootId) rather
  * than mere port reachability, with a post-restart stability window before
  * declaring success.
+ *
+ * IMPORTANT — no execSync anywhere in this file: a real deployment once
+ * froze permanently mid-run because execSync's `timeout` option is not
+ * reliable on Windows for shell-wrapped commands (see restart-lib.cjs's
+ * runCommand() for the full explanation) — and because execSync blocks the
+ * entire event loop, a stuck call also silently defeats every watchdog
+ * timer in this script, including the outer one below. Both the git pull
+ * and every OS command in restart-lib.cjs now go through runCommand(),
+ * which is async and enforces its own timeout by killing the child process
+ * directly, so the event loop — and every watchdog relying on it — keeps
+ * running no matter what the underlying command does.
  *
  * Usage: node deploy-runner.cjs <DeploymentID>
  * (DeploymentID must already exist in kongsberg.dbo.ScheduledDeployments
@@ -61,13 +69,13 @@
 
 'use strict';
 
-const { execSync } = require('child_process');
 const path         = require('path');
 const fs           = require('fs');
 const sql          = require('mssql');
 const { Service }  = require('node-windows');
 const {
   sleep,
+  runCommand,
   getHealth,
   waitForPortFree,
   waitForNewInstance,
@@ -90,16 +98,18 @@ const REPO_HTTPS_URL  = 'https://x-access-token@github.com/TheMatthewWalker/Norm
 const BASE_GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 
 // How long the git pull itself is allowed to take before it's killed and
-// treated as a failure (this is what actually protects against a hang —
-// execSync is synchronous/blocking, so nothing else in this script can run
-// while it's in progress, including any JS-level timer-based watchdog).
+// treated as a failure. Enforced by runCommand()'s own timer (see the
+// top-of-file comment) — NOT by execSync's timeout option, which proved
+// unreliable on Windows.
 const GIT_PULL_TIMEOUT_MS = 2 * 60 * 1000;
 
 // Overall ceiling for the entire stop -> verify -> start -> verify ->
 // stability-monitor sequence below. Generous on purpose: this is a detached
 // background process, nothing is blocked waiting on it, and the whole point
 // of the stability-monitoring window is to sit and watch for several
-// minutes before declaring victory.
+// minutes before declaring victory. This watchdog is only meaningful
+// because nothing else in this script blocks the event loop anymore — see
+// the top-of-file note about execSync.
 const SERVICE_RESTART_TIMEOUT_MS = 10 * 60 * 1000;
 
 // ── Restart-verification tuning ─────────────────────────────────────────
@@ -180,20 +190,20 @@ async function main() {
   }
 
   // ── Work out how to authenticate the pull ───────────────────────────────
-  let pullCommand;
+  let gitArgs;
   let gitEnv = BASE_GIT_ENV;
 
   if (fs.existsSync(TOKEN_PATH)) {
     console.log('[deploy-runner] using fine-grained PAT (.deploykey/github_token) over HTTPS');
     gitEnv = { ...BASE_GIT_ENV, GIT_ASKPASS: ASKPASS_PATH };
-    pullCommand = `git pull --ff-only ${REPO_HTTPS_URL} ${gitRef}`;
+    gitArgs = ['pull', '--ff-only', REPO_HTTPS_URL, gitRef];
   } else if (fs.existsSync(SSH_DEPLOY_KEY)) {
     console.log('[deploy-runner] using SSH deploy key (.deploykey/id_ed25519)');
     gitEnv = {
       ...BASE_GIT_ENV,
       GIT_SSH_COMMAND: `ssh -i "${SSH_DEPLOY_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`,
     };
-    pullCommand = `git pull --ff-only origin ${gitRef}`;
+    gitArgs = ['pull', '--ff-only', 'origin', gitRef];
   } else {
     console.warn(
       `[deploy-runner] no credentials found at ${TOKEN_PATH} or ${SSH_DEPLOY_KEY} — falling back to ` +
@@ -208,24 +218,18 @@ async function main() {
       ...BASE_GIT_ENV,
       GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
     };
-    pullCommand = `git pull --ff-only origin ${gitRef}`;
+    gitArgs = ['pull', '--ff-only', 'origin', gitRef];
   }
 
-  let gitOutput = '';
-  try {
-    console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only, ${GIT_PULL_TIMEOUT_MS / 1000}s timeout)…`);
-    gitOutput = execSync(pullCommand, {
-      cwd: REPO_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      env: gitEnv, timeout: GIT_PULL_TIMEOUT_MS,
-    });
-    console.log('[deploy-runner] git pull complete:\n' + gitOutput);
-  } catch (err) {
-    const timedOut = err.signal === 'SIGTERM' && err.killed;
-    const detail = (err.stdout || '') + (err.stderr || '') + err.message +
-      (timedOut ? ' [git pull TIMED OUT and was killed — most likely stuck on an auth prompt or unreachable network]' : '');
+  console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only, ${GIT_PULL_TIMEOUT_MS / 1000}s timeout)…`);
+  const pullResult = await runCommand('git', gitArgs, { cwd: REPO_DIR, env: gitEnv, timeoutMs: GIT_PULL_TIMEOUT_MS });
+  if (!pullResult.ok) {
+    const detail = pullResult.stdout + pullResult.stderr + (pullResult.error ? pullResult.error.message : 'git pull failed');
     await markFailed(detail);
     return;
   }
+  const gitOutput = pullResult.stdout;
+  console.log('[deploy-runner] git pull complete:\n' + gitOutput);
 
   // ── Restart the Windows Service, with real verification ────────────────
   const svc = new Service({
@@ -263,7 +267,7 @@ async function main() {
     const portFree = await waitForPortFree(STOP_VERIFY_MAX_WAIT_MS, STOP_VERIFY_POLL_MS);
     if (!portFree) {
       console.warn('[deploy-runner] old process is still answering after stop — forcing it to exit…');
-      forceKillPort443();
+      await forceKillPort443();
       await sleep(3000); // give Windows a moment to actually release the port
       const stillUp = await getHealth();
       if (stillUp) {

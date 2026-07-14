@@ -34,12 +34,38 @@
  * bootId, startedAt }, where bootId is a fresh random value generated once
  * per process start, specifically so callers here can tell "a genuinely
  * NEW process is serving" apart from "something is still answering."
+ *
+ * WHY runCommand() EXISTS INSTEAD OF execSync/execFileSync:
+ * A real deployment got stuck here — the log stopped dead right after
+ * "force-killing stale process PID ... still bound to port 443", with
+ * nothing further for several minutes. Root cause: execSync's own
+ * `timeout` option is NOT reliable on Windows for commands that end up
+ * running through a shell (execSync's default). Node spawns
+ * `cmd.exe /d /s /c "<command>"`, and on timeout it kills THAT immediate
+ * child — but if cmd.exe has already spawned taskkill.exe as its OWN
+ * child and that grandchild still holds the stdout/stderr pipe open (or
+ * is itself slow to exit), killing cmd.exe does not kill the grandchild,
+ * and Node's SYNCHRONOUS read keeps blocking forever waiting for a pipe
+ * EOF that never arrives — the advertised timeout never actually fires.
+ * Worse, because execSync blocks the entire event loop by design, nothing
+ * else in the process can run while this happens — including any of our
+ * OWN setTimeout-based watchdogs, which need the event loop to be free to
+ * fire at all. A synchronous call that can hang forever therefore
+ * defeats every other layer of protection in this codebase simultaneously.
+ *
+ * runCommand() fixes this at the root: it uses the ASYNC execFile (no
+ * shell — args are passed as an array straight to CreateProcess, so there
+ * is no cmd.exe layer to leave orphaned children behind) and enforces its
+ * OWN timeout via a plain JS timer that calls child.kill() directly. Since
+ * this all happens on the event loop rather than blocking it, the rest of
+ * the script (including deploy-runner.cjs's outer restart watchdog) keeps
+ * running no matter what the child process does.
  */
 
 'use strict';
 
-const { execSync } = require('child_process');
-const https        = require('https');
+const { execFile } = require('child_process');
+const https         = require('https');
 
 const HEALTH_PATH               = '/api/health';
 const LIVENESS_PORT             = 443;
@@ -47,6 +73,40 @@ const HEALTH_REQUEST_TIMEOUT_MS = 10 * 1000; // single health-check request
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Runs `file args...` with NO shell involved (so no cmd.exe layer that can
+// orphan a grandchild and hold pipes open) and enforces timeoutMs itself by
+// killing the child process directly — never relies on execFile/execSync's
+// own built-in timeout handling. Always resolves (never rejects/throws);
+// callers check `.ok`.
+function runCommand(file, args, { timeoutMs = 15000, cwd, env } = {}) {
+  return new Promise(resolve => {
+    let settled = false;
+    let timer = null;
+
+    const child = execFile(
+      file, args,
+      { cwd, env, encoding: 'utf8', windowsHide: true },
+      (err, stdout, stderr) => {
+        if (settled) return; // already resolved via the timeout path below
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve({ ok: !err, stdout: stdout || '', stderr: stderr || '', error: err || null });
+      }
+    );
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch (_) { /* best effort */ }
+      resolve({
+        ok: false, stdout: '', stderr: '',
+        error: new Error(`${file} ${args.join(' ')} did not complete within ${timeoutMs / 1000}s — killed.`),
+      });
+    }, timeoutMs);
+    timer.unref?.(); // never let this timer alone keep the process alive
+  });
 }
 
 // Hits GET /api/health and returns the parsed body, or null on any failure
@@ -102,31 +162,37 @@ async function waitForNewInstance(beforeBootId, maxWaitMs, intervalMs) {
 // Last-resort: find whatever's actually bound to port 443 and kill it. Only
 // reached if the old process is still answering well after the Windows
 // Service reported itself stopped — i.e. the emulated-SIGINT stop genuinely
-// failed, not just a slow shutdown.
-function forceKillPort443() {
+// failed, not just a slow shutdown. Uses runCommand() throughout (see the
+// big comment at the top of this file) so a stuck/unresponsive taskkill
+// can never freeze the whole script the way it did before.
+async function forceKillPort443() {
   let killedAny = false;
-  try {
-    const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', timeout: 15000 });
-    const pids = new Set();
-    for (const line of out.split(/\r?\n/)) {
-      if (/:443\s/.test(line) && /LISTENING/i.test(line)) {
-        const parts = line.trim().split(/\s+/);
-        const pid = parts[parts.length - 1];
-        if (pid && /^\d+$/.test(pid)) pids.add(pid);
-      }
-    }
-    for (const pid of pids) {
-      console.warn(`[restart-lib] force-killing stale process PID ${pid} still bound to port 443…`);
-      try {
-        execSync(`taskkill /F /PID ${pid}`, { encoding: 'utf8', timeout: 10000 });
-        killedAny = true;
-      } catch (err) {
-        console.error(`[restart-lib] taskkill PID ${pid} failed:`, err.message);
-      }
-    }
-  } catch (err) {
-    console.error('[restart-lib] netstat lookup failed:', err.message);
+
+  const netstatResult = await runCommand('netstat', ['-ano', '-p', 'tcp'], { timeoutMs: 15000 });
+  if (!netstatResult.ok) {
+    console.error('[restart-lib] netstat lookup failed:', netstatResult.error?.message);
+    return killedAny;
   }
+
+  const pids = new Set();
+  for (const line of netstatResult.stdout.split(/\r?\n/)) {
+    if (/:443\s/.test(line) && /LISTENING/i.test(line)) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && /^\d+$/.test(pid)) pids.add(pid);
+    }
+  }
+
+  for (const pid of pids) {
+    console.warn(`[restart-lib] force-killing stale process PID ${pid} still bound to port 443…`);
+    const killResult = await runCommand('taskkill', ['/F', '/PID', pid], { timeoutMs: 10000 });
+    if (killResult.ok) {
+      killedAny = true;
+    } else {
+      console.error(`[restart-lib] taskkill PID ${pid} failed or timed out:`, killResult.error?.message);
+    }
+  }
+
   return killedAny;
 }
 
@@ -152,6 +218,7 @@ module.exports = {
   LIVENESS_PORT,
   HEALTH_REQUEST_TIMEOUT_MS,
   sleep,
+  runCommand,
   getHealth,
   waitForPortFree,
   waitForNewInstance,
