@@ -968,6 +968,33 @@ body::before {
 }
 .pb-stock-error { color: var(--error); }
 
+.pb-stock-restricted-group {
+  margin-top: 6px;
+}
+.pb-stock-restricted-group summary {
+  list-style: none;
+  cursor: pointer;
+}
+.pb-stock-restricted-group summary::-webkit-details-marker { display: none; }
+.pb-stock-restricted-summary {
+  display: flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600; color: var(--text-muted);
+  padding: 4px 2px;
+  user-select: none;
+}
+.pb-stock-restricted-summary::before {
+  content: '▸';
+  font-size: 9px;
+  transition: transform 0.15s;
+}
+.pb-stock-restricted-group[open] .pb-stock-restricted-summary::before {
+  transform: rotate(90deg);
+}
+.pb-stock-restricted-group .pb-stock-batches {
+  margin-top: 6px;
+}
+
 /* ── PHASE 1: Pallet type selection ──────────────────────────────────────── */
 .pb-phase1 { max-width: 720px; }
 
