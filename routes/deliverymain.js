@@ -600,9 +600,16 @@ router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
 
 // ── SAP sync — pull open picksheets from SAP server, insert any not already present ──
 // Expected response shape: { data: [{ deliveryID, customerID, dispatchDate, deliveryService, deliveryPriority, picksheetComment }] }
-router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
-    const sapSecret = process.env.SAP_SERVER_SECRET;
-    const syncUrl   = `${sapConfig.url}/api/logistics/picksheets/open`;
+//
+// Extracted into a standalone function (rather than living only inside the
+// route handler) so it can be called both from the manual "/sap-sync" button
+// (LOG_SUPER only) and from server.js's hourly xx:55 cron job — cron has no
+// req/res to hand a permission-gated route handler, so the actual sync logic
+// can't depend on either. Returns a plain result object instead of writing
+// to `res` directly; the route handler below maps that onto the HTTP
+// response, and the cron caller in server.js just logs it.
+async function runSapSync() {
+    const syncUrl = `${sapConfig.url}/api/logistics/picksheets/open`;
 
     try {
         const sapRes = await axios.get(syncUrl, {
@@ -612,7 +619,7 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
 
         const deliveries = sapRes.data?.data ?? sapRes.data;
         if (!Array.isArray(deliveries)) {
-            return res.status(502).json({ success: false, error: 'Unexpected response format from SAP server' });
+            return { success: false, status: 502, error: 'Unexpected response format from SAP server' };
         }
 
         const pool = await getPool();
@@ -767,17 +774,22 @@ router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
             }
         }
 
-        res.json({ success: true, total: deliveries.length, inserted, skipped, errors, missing, autoCreated, kna1Error });
+        return { success: true, status: 200, total: deliveries.length, inserted, skipped, errors, missing, autoCreated, kna1Error };
 
     } catch (err) {
         if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
-            return res.status(503).json({ success: false, error: `SAP server unreachable: ${syncUrl}` });
+            return { success: false, status: 503, error: `SAP server unreachable: ${syncUrl}` };
         }
         if (err.response) {
-            return res.status(502).json({ success: false, error: `SAP server error ${err.response.status}: ${err.response.data?.error ?? err.message}` });
+            return { success: false, status: 502, error: `SAP server error ${err.response.status}: ${err.response.data?.error ?? err.message}` };
         }
-        res.status(500).json({ success: false, error: err.message });
+        return { success: false, status: 500, error: err.message };
     }
+}
+
+router.post('/sap-sync', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { status, ...body } = await runSapSync();
+    res.status(status).json(body);
 });
 
 // ── Landing page sparkline — on-time shipment rate over last 30 days ──────────
@@ -839,4 +851,5 @@ router.get('/landing-sparkline', async (req, res) => {
     }
 });
 
+export { runSapSync };
 export default router;

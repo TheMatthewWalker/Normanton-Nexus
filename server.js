@@ -23,7 +23,7 @@ import costElementsRoutes      from './routes/costelements.js';
 import costCentersRoutes       from './routes/costcenters.js';
 import forwardersRoutes        from './routes/forwarders.js';
 import incotermsRoutes         from './routes/incoterms.js';
-import deliveryMainRoutes      from './routes/deliverymain.js';
+import deliveryMainRoutes, { runSapSync } from './routes/deliverymain.js';
 import deliveryLinkRoutes      from './routes/deliverylink.js';
 import deliveryRoutesRoutes    from './routes/deliveryroutes.js';
 import palletMainRoutes        from './routes/palletmain.js';
@@ -116,6 +116,18 @@ cron.schedule('45 5 * * *', () => {
   runTurnsValClassRefresh()
     .then(results => console.log('[cron] turns-valclass refresh complete', results))
     .catch(err => console.error('[cron] turns-valclass refresh failed', err));
+});
+
+// Warehouse SAP sync (open picksheets -> DeliveryMain) — every hour at xx:55
+// (to avoid clashing with the 30-min refresh at xx:00 and xx:30). Was
+// previously calling an undefined runSAPDeliveryNoteSync() — this schedule
+// slot was set up for this sync but never actually wired up, so it silently
+// threw every hour instead of running anything.
+cron.schedule('55 * * * *', () => {
+  console.log('[cron] starting scheduled warehouse SAP sync');
+  runSapSync()
+    .then(result => console.log('[cron] warehouse SAP sync complete', result))
+    .catch(err => console.error('[cron] warehouse SAP sync failed', err));
 });
 
 // ── Auth routes (public — no requireLogin) ───────────────────────────────────
