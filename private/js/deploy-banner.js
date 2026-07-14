@@ -2,11 +2,19 @@
 
 /**
  * Scheduled-deployment countdown banner — self-mounting, like notifications.js.
- * Include this script on any private page. Polls /api/deploy/next and, once
- * the current time enters the deployment's warning window, shows a fixed
- * banner across the top of the viewport counting down to the automatic
- * git-pull + service restart, so logged-in users get advance warning of the
- * upcoming downtime.
+ * Include this script on any private page. Polls /api/deploy/next and shows a
+ * fixed banner across the top of the viewport:
+ *   - 'pending'  — once the current time enters the deployment's warning
+ *                  window, counts down to the restart.
+ *   - 'running'  — the restart is actually happening right now; shown
+ *                  unconditionally (ignores the warning-window countdown)
+ *                  so the banner stays up through the actual downtime
+ *                  instead of vanishing the moment the cron checker flips
+ *                  the row from pending to running.
+ *   - 'failed'   — the deploy-runner failed (e.g. git pull couldn't
+ *                  authenticate) and never restarted anything; shown for a
+ *                  short grace period (server-side, last 10 minutes) so it
+ *                  doesn't just silently disappear leaving people guessing.
  *
  * Everything below is wrapped in an IIFE so none of its names (poll, esc,
  * pollTimer, POLL_INTERVAL_MS, etc.) leak into the shared global scope —
@@ -19,7 +27,7 @@
   const POLL_INTERVAL_MS = 30_000;
   const API_URL           = '/api/deploy/next';
 
-  let deployment = null; // { DeploymentID, ScheduledAt, WarningMinutes, Notes }
+  let deployment = null; // { DeploymentID, ScheduledAt, WarningMinutes, Notes, Status, ErrorMessage }
   let tickTimer  = null;
   let pollTimer  = null;
 
@@ -46,7 +54,7 @@
     } catch (_) { /* network — silent, same as notifications.js */ }
   }
 
-  // ── Countdown ───────────────────────────────────────────────────────────────
+  // ── State machine ─────────────────────────────────────────────────────────
 
   function refresh() {
     clearInterval(tickTimer);
@@ -57,6 +65,18 @@
       return;
     }
 
+    if (deployment.Status === 'running') {
+      renderRunning();
+      return;
+    }
+
+    if (deployment.Status === 'failed') {
+      renderFailed();
+      return;
+    }
+
+    // 'pending' — only show once we're inside the warning window, then
+    // count down every second until the scheduled time.
     const scheduledMs = new Date(deployment.ScheduledAt).getTime();
     const warnMs       = (deployment.WarningMinutes || 0) * 60_000;
 
@@ -66,7 +86,7 @@
         removeBanner();
         return;
       }
-      renderBanner(remainingMs);
+      renderCountdown(remainingMs);
     };
 
     tick();
@@ -75,7 +95,7 @@
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  function renderBanner(remainingMs) {
+  function getBar() {
     let bar = document.getElementById('deploy-banner');
     if (!bar) {
       bar = document.createElement('div');
@@ -83,13 +103,22 @@
       document.body.prepend(bar);
     }
     document.body.classList.add('deploy-banner-active');
+    return bar;
+  }
+
+  function renderCountdown(remainingMs) {
+    const bar = getBar();
 
     if (remainingMs <= 0) {
+      // Local clock says we've hit the scheduled time, but the server-side
+      // cron checker (which runs once a minute) hasn't flipped the row to
+      // 'running' yet — show an imminent state until the next poll picks
+      // that up and renderRunning() takes over.
       bar.classList.add('deploy-banner--imminent');
       bar.innerHTML =
         '<span class="deploy-banner-icon">⏳</span>' +
-        '<span class="deploy-banner-text"><strong>Maintenance restart in progress…</strong> ' +
-        'The system will be back in a moment — please avoid submitting changes right now.</span>';
+        '<span class="deploy-banner-text"><strong>Maintenance restart starting…</strong> ' +
+        'Please avoid submitting changes right now.</span>';
       return;
     }
 
@@ -102,6 +131,27 @@
       '<span class="deploy-banner-icon">⏳</span>' +
       `<span class="deploy-banner-text"><strong>Scheduled maintenance in ${countdown}</strong> — ` +
       `the system will restart automatically.${notes}</span>`;
+  }
+
+  function renderRunning() {
+    const bar = getBar();
+    bar.classList.add('deploy-banner--imminent');
+    bar.innerHTML =
+      '<span class="deploy-banner-icon">⏳</span>' +
+      '<span class="deploy-banner-text"><strong>Maintenance restart in progress…</strong> ' +
+      'The system will be back in a moment — please avoid submitting changes right now.</span>';
+  }
+
+  function renderFailed() {
+    const bar = getBar();
+    bar.classList.add('deploy-banner--imminent');
+    const detail = deployment.ErrorMessage
+      ? `<span class="deploy-banner-notes">${esc(String(deployment.ErrorMessage).slice(0, 160))}</span>`
+      : '';
+    bar.innerHTML =
+      '<span class="deploy-banner-icon">⚠</span>' +
+      `<span class="deploy-banner-text"><strong>Scheduled maintenance failed to complete.</strong> ` +
+      `The system was not restarted — an admin has been notified.${detail}</span>`;
   }
 
   function removeBanner() {

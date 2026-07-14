@@ -15,6 +15,20 @@
  * with { detached: true, stdio: 'ignore' } + .unref() specifically so it
  * keeps running independently of server.js's lifecycle.
  *
+ * IMPORTANT — SSH auth: the "Normanton Nexus" service has no `user` set in
+ * install.cjs, so Windows runs it as LocalSystem — a completely different
+ * account from whoever is logged in interactively, with its own (normally
+ * empty) profile and no access to your personal SSH agent/keys. Testing
+ * `git pull` or `ssh -T git@github.com` in your own terminal proves nothing
+ * about whether THIS script can authenticate. To fix that without needing
+ * to run the whole service under a real user account, this script looks for
+ * a dedicated, passphrase-less deploy key at .deploykey/id_ed25519 (relative
+ * to the repo root, git-ignored) and — if present — points git at it
+ * explicitly via GIT_SSH_COMMAND, bypassing whatever SSH agent state exists
+ * for the account the service happens to run as. See the README note this
+ * script's error message points to for how to generate and register that
+ * key as a GitHub deploy key.
+ *
  * Usage: node deploy-runner.cjs <DeploymentID>
  * (DeploymentID must already exist in kongsberg.dbo.ScheduledDeployments
  * with Status = 'running' — the server.js cron checker sets that atomically
@@ -29,7 +43,8 @@ const fs           = require('fs');
 const sql          = require('mssql');
 const { Service }  = require('node-windows');
 
-const REPO_DIR = __dirname;
+const REPO_DIR       = __dirname;
+const DEPLOY_KEY_PATH = path.join(REPO_DIR, '.deploykey', 'id_ed25519');
 
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
@@ -89,11 +104,37 @@ async function main() {
 
   // ── git pull (fast-forward only — refuses to silently discard any local
   // commits/changes rather than force-resetting over them) ────────────────
+  //
+  // If a dedicated deploy key is present at .deploykey/id_ed25519, use it
+  // explicitly via GIT_SSH_COMMAND instead of relying on whatever ambient
+  // ssh-agent/keys (if any) exist for the account this process runs as.
+  // -o IdentitiesOnly=yes stops ssh from also trying any other keys it
+  // might find first; -o StrictHostKeyChecking=accept-new avoids this
+  // unattended run hanging on an interactive host-key prompt the first
+  // time it connects to github.com from this account.
+  const hasDeployKey = fs.existsSync(DEPLOY_KEY_PATH);
+  const gitEnv = hasDeployKey
+    ? {
+        ...process.env,
+        GIT_SSH_COMMAND: `ssh -i "${DEPLOY_KEY_PATH}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`,
+      }
+    : process.env;
+
+  if (!hasDeployKey) {
+    console.warn(
+      `[deploy-runner] no deploy key found at ${DEPLOY_KEY_PATH} — falling back to ` +
+      `whatever SSH keys/agent this account already has (this is usually NOT the ` +
+      `same account/agent you tested "ssh -T git@github.com" with interactively). ` +
+      `Generate a passphrase-less key, save it there, and add the .pub as a GitHub ` +
+      `deploy key on this repo if git pull below fails with a publickey error.`
+    );
+  }
+
   let gitOutput = '';
   try {
     console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only)…`);
     gitOutput = execSync(`git pull --ff-only origin ${gitRef}`, {
-      cwd: REPO_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: REPO_DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv,
     });
     console.log('[deploy-runner] git pull complete:\n' + gitOutput);
   } catch (err) {
