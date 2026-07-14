@@ -248,8 +248,12 @@ export function replaceAgreementSnapshot(rows) {
     ['Week',                 'week',               sql.VarChar(6), null, 6],
     ['Period',               'period',             sql.VarChar(7), null, 7],
     ['OrderQty',             'orderQty',           sql.Decimal(15, 3)],
-    ['Amount',               'amount',             sql.Decimal(15, 2)],
-    ['LocalAmount',          'localAmount',        sql.Decimal(15, 2)],
+    // Amount is populated from localAmount (GBP/home-currency), not the raw
+    // document-currency amount — the document amount isn't used anywhere in
+    // this app, and every query here already reads from Amount, so this
+    // avoids adding a parallel LocalAmount column that every query would
+    // otherwise need to be switched over to.
+    ['Amount',               'localAmount',        sql.Decimal(15, 2)],
     ['Currency',              'currency',          sql.VarChar(5), null, 5],
     ['DockStockAllocated',   'dockStockAllocated', sql.Decimal(15, 3)],
     ['PickedStockAllocated', 'pickedStockAllocated', sql.Decimal(15, 3)]
@@ -679,12 +683,12 @@ export async function getOrderBookSummary() {
       DATEPART(MONTH, RequestDate) AS [Month],
       ValueStream,
 
-      SUM(LocalAmount) AS OrdersValue,
+      SUM(Amount) AS OrdersValue,
 
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN DockStockAllocated * (LocalAmount / OrderQty)
+          THEN DockStockAllocated * (Amount / OrderQty)
           ELSE 0
         END
       ) AS StockValue,
@@ -692,7 +696,7 @@ export async function getOrderBookSummary() {
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN PickedStockAllocated * (LocalAmount / OrderQty)
+          THEN PickedStockAllocated * (Amount / OrderQty)
           ELSE 0
         END
       ) AS PickedValue
@@ -744,14 +748,14 @@ export async function getOrderBookBreakdown() {
       MaterialText,
       CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
 
-      SUM(OrderQty)     AS OrderQty,
-      SUM(LocalAmount)  AS OrderValue,
+      SUM(OrderQty) AS OrderQty,
+      SUM(Amount)   AS OrderValue,
 
       SUM(DockStockAllocated) AS StockQty,
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN DockStockAllocated * (LocalAmount / OrderQty)
+          THEN DockStockAllocated * (Amount / OrderQty)
           ELSE 0
         END
       ) AS StockValue,
@@ -760,7 +764,7 @@ export async function getOrderBookBreakdown() {
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN PickedStockAllocated * (LocalAmount / OrderQty)
+          THEN PickedStockAllocated * (Amount / OrderQty)
           ELSE 0
         END
       ) AS PickedValue
