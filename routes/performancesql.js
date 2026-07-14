@@ -249,6 +249,7 @@ export function replaceAgreementSnapshot(rows) {
     ['Period',               'period',             sql.VarChar(7), null, 7],
     ['OrderQty',             'orderQty',           sql.Decimal(15, 3)],
     ['Amount',               'amount',             sql.Decimal(15, 2)],
+    ['LocalAmount',          'localAmount',        sql.Decimal(15, 2)],
     ['Currency',              'currency',          sql.VarChar(5), null, 5],
     ['DockStockAllocated',   'dockStockAllocated', sql.Decimal(15, 3)],
     ['PickedStockAllocated', 'pickedStockAllocated', sql.Decimal(15, 3)]
@@ -678,12 +679,12 @@ export async function getOrderBookSummary() {
       DATEPART(MONTH, RequestDate) AS [Month],
       ValueStream,
 
-      SUM(Amount) AS OrdersValue,
+      SUM(LocalAmount) AS OrdersValue,
 
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN DockStockAllocated * (Amount / OrderQty)
+          THEN DockStockAllocated * (LocalAmount / OrderQty)
           ELSE 0
         END
       ) AS StockValue,
@@ -691,7 +692,7 @@ export async function getOrderBookSummary() {
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN PickedStockAllocated * (Amount / OrderQty)
+          THEN PickedStockAllocated * (LocalAmount / OrderQty)
           ELSE 0
         END
       ) AS PickedValue
@@ -743,14 +744,14 @@ export async function getOrderBookBreakdown() {
       MaterialText,
       CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
 
-      SUM(OrderQty) AS OrderQty,
-      SUM(Amount)   AS OrderValue,
+      SUM(OrderQty)     AS OrderQty,
+      SUM(LocalAmount)  AS OrderValue,
 
       SUM(DockStockAllocated) AS StockQty,
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN DockStockAllocated * (Amount / OrderQty)
+          THEN DockStockAllocated * (LocalAmount / OrderQty)
           ELSE 0
         END
       ) AS StockValue,
@@ -759,7 +760,7 @@ export async function getOrderBookBreakdown() {
       SUM(
         CASE
           WHEN OrderQty > 0
-          THEN PickedStockAllocated * (Amount / OrderQty)
+          THEN PickedStockAllocated * (LocalAmount / OrderQty)
           ELSE 0
         END
       ) AS PickedValue
