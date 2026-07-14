@@ -119,10 +119,7 @@ cron.schedule('45 5 * * *', () => {
 });
 
 // Warehouse SAP sync (open picksheets -> DeliveryMain) — every hour at xx:55
-// (to avoid clashing with the 30-min refresh at xx:00 and xx:30). Was
-// previously calling an undefined runSAPDeliveryNoteSync() — this schedule
-// slot was set up for this sync but never actually wired up, so it silently
-// threw every hour instead of running anything.
+// (to avoid clashing with the 30-min refresh at xx:00 and xx:30).
 cron.schedule('55 * * * *', () => {
   console.log('[cron] starting scheduled warehouse SAP sync');
   runSapSync()
