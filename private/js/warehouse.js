@@ -862,6 +862,36 @@ function materialUsesContainerPacking(material) {
   return !!pb?.requiredMaterials?.find(m => m.material === material)?.usesContainerPacking;
 }
 
+// The packaging instruction (ZPRODBATCH~PALL_MATNR) also encodes which
+// packaging type the batch was built for as its LAST underscore-delimited
+// segment, e.g. "IB_363660_MD" -> packaging type "MD" (customer 363660 is
+// the middle segment — see packagingInstructionCustomer in
+// routes/deliverymain.js). Used to auto-select the matching radio in the
+// packaging picker as soon as a batch is scanned/matched, so the operator
+// doesn't have to hunt for the right type manually — they can still click
+// a different one before adding if the packaging has changed since the
+// batch was originally assigned.
+const PACKAGING_TYPE_SUFFIX_RE = /_([A-Za-z0-9]+)$/;
+
+function packagingInstructionType(packagingMaterial) {
+  const match = String(packagingMaterial || '').match(PACKAGING_TYPE_SUFFIX_RE);
+  return match ? match[1].toUpperCase() : null;
+}
+
+// Skipped for profit-centre-2007 (container-packing) materials — their
+// picker chooses the outer SB/MB/LB box size for the layer, not a per-batch
+// type, and every batch is force-set to C2 regardless (see addPackage()),
+// so there's nothing useful to auto-select there.
+function applySuggestedPackaging(material, packagingMaterial) {
+  if (!material || materialUsesContainerPacking(material)) return;
+  const suggested = packagingInstructionType(packagingMaterial);
+  if (!suggested) return;
+  const radio = document.querySelector(`input[name="pb-pack"][value="${CSS.escape(suggested)}"]`);
+  if (!radio || radio.checked) return;
+  radio.checked = true;
+  radio.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function getPbOverlay() {
   let el = document.getElementById('pb-overlay');
   if (!el) {
@@ -1054,7 +1084,7 @@ function renderStockPanel() {
     const action = b.allowed
       ? (showAddBtn
           ? `<button type="button" class="pb-stock-add" title="Add this batch"
-               onclick="addPackageFromFoundBatch('${escJs(m.material)}','${escJs(b.batch)}','${escJs(m.deliveryItem || '')}', ${Number(b.totalQty || 0)})">+</button>`
+               onclick="addPackageFromFoundBatch('${escJs(m.material)}','${escJs(b.batch)}','${escJs(m.deliveryItem || '')}', ${Number(b.totalQty || 0)}, '${escJs(b.packagingMaterial || '')}')">+</button>`
           : '')
       : `<span class="pb-stock-restricted-tag" title="${esc(b.reason || 'Allocated elsewhere')}">${esc(GROUP_LABELS[b.group] || 'restricted')}</span>`;
     return `<div class="pb-stock-batch${restrictedCls}">
@@ -1106,13 +1136,17 @@ function renderStockPanel() {
 // adds it immediately, same as scanning it in. Also works as the "scan"
 // half of the feature: typing/scanning a batch that matches one listed here
 // (see wireBatchScanInput) sets the same pending fields before Add fires.
-function addPackageFromFoundBatch(material, batch, deliveryItem, qty) {
+// packagingMaterial is the batch's raw SAP packaging instruction (e.g.
+// "IB_363660_MD") — used to auto-select the matching packaging radio (see
+// applySuggestedPackaging) so the operator doesn't have to pick it manually.
+function addPackageFromFoundBatch(material, batch, deliveryItem, qty, packagingMaterial) {
   const batchInput = document.getElementById('pb-batch');
   if (!batchInput) return;
   batchInput.value = batch;
   pb.pendingSapMaterial     = material;
   pb.pendingSapDeliveryItem = deliveryItem || null;
   pb.pendingSapQuantity     = qty || null;
+  applySuggestedPackaging(material, packagingMaterial);
   addPackage();
 }
 
@@ -1120,7 +1154,10 @@ function addPackageFromFoundBatch(material, batch, deliveryItem, qty) {
 // then sends Enter, which previously did nothing (the operator had to click
 // "+ Add Package" manually every time). Also auto-matches whatever's typed
 // against the found-batches list so a scanned batch carries its SAP material
-// through to the package record, same as clicking "+" on the left panel.
+// through to the package record, same as clicking "+" on the left panel —
+// and auto-selects its suggested packaging type (see applySuggestedPackaging),
+// which the operator can still override by clicking a different radio before
+// pressing Enter / Add.
 function wireBatchScanInput() {
   const input = document.getElementById('pb-batch');
   if (!input) return;
@@ -1130,11 +1167,12 @@ function wireBatchScanInput() {
     let match = null;
     for (const m of (pb.requiredMaterials || [])) {
       const hit = (m.batches || []).find(b => b.allowed && (b.batch || '').toUpperCase() === val);
-      if (hit) { match = { material: m.material, deliveryItem: m.deliveryItem, qty: hit.totalQty }; break; }
+      if (hit) { match = { material: m.material, deliveryItem: m.deliveryItem, qty: hit.totalQty, packagingMaterial: hit.packagingMaterial }; break; }
     }
     pb.pendingSapMaterial     = match?.material || null;
     pb.pendingSapDeliveryItem = match?.deliveryItem || null;
     pb.pendingSapQuantity     = match?.qty || null;
+    if (match) applySuggestedPackaging(match.material, match.packagingMaterial);
   });
 
   input.addEventListener('keydown', e => {
