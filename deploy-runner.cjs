@@ -56,6 +56,7 @@
 const { execSync } = require('child_process');
 const path         = require('path');
 const fs           = require('fs');
+const https         = require('https');
 const sql          = require('mssql');
 const { Service }  = require('node-windows');
 
@@ -80,6 +81,44 @@ const GIT_PULL_TIMEOUT_MS = 2 * 60 * 1000;
 // How long svc.stop()/svc.start() are allowed to take (that part IS
 // event-driven/async, so a normal setTimeout-based watchdog works here).
 const SERVICE_RESTART_TIMEOUT_MS = 3 * 60 * 1000;
+
+// node-windows' svc.on('start') fires as soon as Windows ACKNOWLEDGES the
+// start command (net start / SCM StartService returning) — that is NOT the
+// same thing as server.js actually finishing its own startup (reading
+// certs, binding port 443, connecting to SQL). Any failure in that window
+// previously went unnoticed: the deployment was marked 'completed' the
+// instant the OS accepted the start command, even if the process then
+// immediately crashed or never finished booting. So after 'start' fires we
+// actively poll the site itself before declaring victory.
+const LIVENESS_PORT          = 443;
+const LIVENESS_TIMEOUT_MS    = 30 * 1000;   // per-request timeout
+const LIVENESS_MAX_WAIT_MS   = 45 * 1000;   // total time to wait for a 2xx-5xx response
+const LIVENESS_RETRY_DELAY_MS = 3 * 1000;   // gap between liveness attempts
+
+// Polls https://127.0.0.1:443/ until it gets ANY HTTP response (self-signed
+// cert, so rejectUnauthorized: false — we only care that something is
+// actually listening and answering, not about certificate trust) or the
+// overall time budget runs out. Resolves true/false, never throws.
+function waitForServerUp(maxWaitMs, intervalMs) {
+  const deadline = Date.now() + maxWaitMs;
+  return new Promise(resolve => {
+    const attempt = () => {
+      const req = https.get(
+        { host: '127.0.0.1', port: LIVENESS_PORT, path: '/', rejectUnauthorized: false, timeout: LIVENESS_TIMEOUT_MS },
+        res => {
+          res.resume(); // drain, don't care about the body
+          resolve(true);
+        }
+      );
+      req.on('timeout', () => req.destroy());
+      req.on('error', () => {
+        if (Date.now() >= deadline) { resolve(false); return; }
+        setTimeout(attempt, LIVENESS_RETRY_DELAY_MS);
+      });
+    };
+    attempt();
+  });
+}
 
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
@@ -211,11 +250,38 @@ async function main() {
     svc.start();
   });
 
+  let startRetried = false;
+
   svc.on('start', async () => {
     if (finished) return; // watchdog already fired and closed the pool
+    console.log('[deploy-runner] Windows acknowledged the service start — verifying it is actually answering requests…');
+
+    const up = await waitForServerUp(LIVENESS_MAX_WAIT_MS, LIVENESS_RETRY_DELAY_MS);
+    if (finished) return; // watchdog fired while we were polling
+
+    if (!up) {
+      if (!startRetried) {
+        // First attempt never came up — give it exactly one more try (a slow
+        // SQL connect or cert read on a loaded box can plausibly still be in
+        // progress) before giving up. svc.start() again will re-fire this
+        // same 'start' handler once Windows acknowledges it.
+        startRetried = true;
+        console.warn('[deploy-runner] service did not answer https://127.0.0.1:443/ in time — retrying start once…');
+        svc.start();
+        return;
+      }
+      clearTimeout(restartWatchdog);
+      await markFailed(
+        `Service start was acknowledged by Windows but the app never answered https://127.0.0.1:${LIVENESS_PORT}/ ` +
+        `within the verification window (tried twice). The service process may have crashed on startup — check ` +
+        `daemon/normantonnexus.err.log and confirm manually whether "Normanton Nexus" is actually running.`
+      );
+      return;
+    }
+
     finished = true;
     clearTimeout(restartWatchdog);
-    console.log('[deploy-runner] service restarted successfully.');
+    console.log('[deploy-runner] service restarted and verified live (https://127.0.0.1:443/ responded).');
     try {
       await pool.request()
         .input('id',  sql.Int, deploymentID)

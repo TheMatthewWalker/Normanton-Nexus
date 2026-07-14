@@ -133,12 +133,25 @@ router.post('/', requireSuperadmin, async (req, res) => {
     return res.status(400).json({ success: false, error: 'A valid scheduledAt date/time is required.' });
   }
 
-  // Courtesy "must be in the future" check only — NOT used for the stored
-  // value. Assumes this Node process runs in the same local timezone as the
-  // SQL Server machine and the people scheduling deployments (true for this
+  const warnMin = parseInt(warningMinutes, 10);
+  if (!Number.isFinite(warnMin) || warnMin < 0 || warnMin > 1440) {
+    return res.status(400).json({ success: false, error: 'warningMinutes must be between 0 and 1440.' });
+  }
+
+  // Courtesy validation only — NOT used for the stored value. Requires at
+  // LEAST warnMin minutes of lead time so the countdown banner actually gets
+  // its full advertised warning window to display before the restart fires
+  // (previously nothing stopped scheduling e.g. a 5-minute warning only 30
+  // seconds out, so the restart could hit with barely any notice at all).
+  // Assumes this Node process runs in the same local timezone as the SQL
+  // Server machine and the people scheduling deployments (true for this
   // on-prem, single-site setup). See timezone note at the top of this file.
-  if (new Date(scheduledAt).getTime() <= Date.now()) {
-    return res.status(400).json({ success: false, error: 'Scheduled time must be in the future.' });
+  const leadMs = new Date(scheduledAt).getTime() - Date.now();
+  if (leadMs < warnMin * 60_000) {
+    return res.status(400).json({
+      success: false,
+      error: `Scheduled time must be at least ${warnMin} minute(s) from now, matching the warning window — pick a later time or a shorter warning window.`,
+    });
   }
 
   // Literal "YYYY-MM-DD HH:mm:ss" string for SQL Server's CONVERT(..., 120)
@@ -146,10 +159,6 @@ router.post('/', requireSuperadmin, async (req, res) => {
   // JS Date object, so no timezone conversion can sneak in here.
   const sqlLiteral = scheduledAt.replace('T', ' ') + (scheduledAt.length === 16 ? ':00' : '');
 
-  const warnMin = parseInt(warningMinutes, 10);
-  if (!Number.isFinite(warnMin) || warnMin < 0 || warnMin > 1440) {
-    return res.status(400).json({ success: false, error: 'warningMinutes must be between 0 and 1440.' });
-  }
   const branch = String(gitRef || 'main').trim();
   if (!/^[A-Za-z0-9._/-]{1,100}$/.test(branch)) {
     return res.status(400).json({ success: false, error: 'Invalid git branch/ref name.' });
