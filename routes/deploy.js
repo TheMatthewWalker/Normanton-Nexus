@@ -10,6 +10,23 @@
  * them off to deploy-runner.cjs (git pull + Windows Service restart), which
  * runs as a detached process — see that file for why it has to be detached.
  *
+ * TIMEZONE HANDLING — important, and the reason ScheduledAt is treated
+ * specially throughout this file: kongsberg.dbo.ScheduledDeployments.ScheduledAt
+ * is a plain SQL Server DATETIME column, which has NO timezone concept, and
+ * the cron checker in server.js compares it directly against GETDATE(), which
+ * returns the SQL Server machine's own local wall-clock time. So ScheduledAt
+ * has to be written as a literal local wall-clock value in the SAME frame as
+ * GETDATE() — NOT converted to/from UTC via a JS Date object. Round-tripping
+ * a JS Date through node-mssql (which defaults to useUTC: true) silently
+ * shifts the stored value by the server's UTC offset (e.g. an admin entering
+ * 15:10 BST would get "14:10:00" stored, so the cron checker would fire an
+ * hour early). To avoid that, ScheduledAt is written via a hand-built literal
+ * string (CONVERT(datetime, @str, 120)) and read back the same way
+ * (CONVERT(varchar, ScheduledAt, 126)) — never through a JS Date object on
+ * either side of the SQL boundary. All OTHER timestamp columns here
+ * (CreatedAt/StartedAt/CompletedAt/CancelledAt) are always written via
+ * GETDATE() directly in SQL, so they're unaffected by this issue.
+ *
  * Mount in server.js:
  *   import deployRoutes from './routes/deploy.js';
  *   app.use('/api/deploy', requireLogin, deployRoutes);
@@ -60,11 +77,19 @@ async function audit(eventType, actorUsername, detail, req) {
 // warning window), falls back to the next 'pending' one, and also surfaces a
 // 'failed' deployment for a short grace period afterwards so the banner
 // doesn't just silently vanish if the restart didn't actually go through.
+//
+// ScheduledAt is pulled out via CONVERT(..., 126) — ISO8601 with a 'T'
+// separator and NO timezone designator — so that when the browser parses it
+// with `new Date(...)`, it's interpreted as local time (per spec, a
+// date-time string with no timezone designator is local), matching what was
+// literally typed into the scheduling form. See the timezone-handling note
+// at the top of this file.
 router.get('/next', async (req, res) => {
   try {
     const pool = await sql.connect(sqlConfig);
     const result = await pool.request().query(`
-      SELECT TOP 1 DeploymentID, ScheduledAt, WarningMinutes, Notes, Status, ErrorMessage
+      SELECT TOP 1 DeploymentID, CONVERT(varchar(23), ScheduledAt, 126) AS ScheduledAt,
+        WarningMinutes, Notes, Status, ErrorMessage
       FROM kongsberg.dbo.ScheduledDeployments
       WHERE Status IN ('pending', 'running')
          OR (Status = 'failed' AND CompletedAt >= DATEADD(minute, -10, GETDATE()))
@@ -83,7 +108,8 @@ router.get('/', requireSuperadmin, async (req, res) => {
     const pool = await sql.connect(sqlConfig);
     const result = await pool.request().query(`
       SELECT TOP 200
-        DeploymentID, ScheduledAt, GitRef, WarningMinutes, Status, Notes,
+        DeploymentID, CONVERT(varchar(23), ScheduledAt, 126) AS ScheduledAt,
+        GitRef, WarningMinutes, Status, Notes,
         CreatedByUsername, CreatedAt, StartedAt, CompletedAt,
         OutputLog, ErrorMessage, CancelledAt, CancelledBy
       FROM kongsberg.dbo.ScheduledDeployments
@@ -100,13 +126,26 @@ router.get('/', requireSuperadmin, async (req, res) => {
 router.post('/', requireSuperadmin, async (req, res) => {
   const { scheduledAt, gitRef = 'main', warningMinutes = 15, notes } = req.body;
 
-  if (!scheduledAt || isNaN(Date.parse(scheduledAt))) {
+  // Expect the raw value straight from a <input type="datetime-local">
+  // ("YYYY-MM-DDTHH:mm", optionally with seconds) — a literal wall-clock
+  // reading with no timezone attached, exactly what we want to store as-is.
+  if (!scheduledAt || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(scheduledAt)) {
     return res.status(400).json({ success: false, error: 'A valid scheduledAt date/time is required.' });
   }
-  const when = new Date(scheduledAt);
-  if (when.getTime() <= Date.now()) {
+
+  // Courtesy "must be in the future" check only — NOT used for the stored
+  // value. Assumes this Node process runs in the same local timezone as the
+  // SQL Server machine and the people scheduling deployments (true for this
+  // on-prem, single-site setup). See timezone note at the top of this file.
+  if (new Date(scheduledAt).getTime() <= Date.now()) {
     return res.status(400).json({ success: false, error: 'Scheduled time must be in the future.' });
   }
+
+  // Literal "YYYY-MM-DD HH:mm:ss" string for SQL Server's CONVERT(..., 120)
+  // to parse verbatim — built by plain string manipulation, never through a
+  // JS Date object, so no timezone conversion can sneak in here.
+  const sqlLiteral = scheduledAt.replace('T', ' ') + (scheduledAt.length === 16 ? ':00' : '');
+
   const warnMin = parseInt(warningMinutes, 10);
   if (!Number.isFinite(warnMin) || warnMin < 0 || warnMin > 1440) {
     return res.status(400).json({ success: false, error: 'warningMinutes must be between 0 and 1440.' });
@@ -121,7 +160,7 @@ router.post('/', requireSuperadmin, async (req, res) => {
     const actor = req.session.user.username;
 
     const result = await pool.request()
-      .input('scheduledAt',   sql.DateTime,      when)
+      .input('scheduledAt',   sql.VarChar(19),   sqlLiteral)
       .input('gitRef',        sql.NVarChar(100), branch)
       .input('warningMin',    sql.Int,           warnMin)
       .input('notes',         sql.NVarChar(500), notes?.trim() || null)
@@ -131,13 +170,13 @@ router.post('/', requireSuperadmin, async (req, res) => {
         INSERT INTO kongsberg.dbo.ScheduledDeployments
           (ScheduledAt, GitRef, WarningMinutes, Notes, CreatedByUserID, CreatedByUsername)
         OUTPUT INSERTED.DeploymentID
-        VALUES (@scheduledAt, @gitRef, @warningMin, @notes, @createdByID, @createdByUser)
+        VALUES (CONVERT(datetime, @scheduledAt, 120), @gitRef, @warningMin, @notes, @createdByID, @createdByUser)
       `);
 
     const deploymentID = result.recordset[0].DeploymentID;
 
     await audit('DEPLOY_SCHEDULED', actor,
-      `Scheduled deployment #${deploymentID}: ${branch} @ ${when.toISOString()}`, req);
+      `Scheduled deployment #${deploymentID}: ${branch} @ ${sqlLiteral} (server local time)`, req);
 
     res.json({ success: true, deploymentID });
 

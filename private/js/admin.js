@@ -1013,7 +1013,12 @@ async function scheduleDeployment() {
   btn.disabled = true; btn.textContent = 'Scheduling…'; result.textContent = '';
   try {
     await api('/api/deploy', 'POST', {
-      scheduledAt: new Date(scheduledAt).toISOString(),
+      // Sent as the raw "YYYY-MM-DDTHH:mm" value straight from the datetime-
+      // local input — NOT converted via toISOString(), which would shift it to
+      // UTC and cause it to trigger at the wrong local time server-side (SQL
+      // Server's GETDATE(), which the cron checker compares against, has no
+      // timezone concept and just returns the server's local wall-clock time).
+      scheduledAt,
       gitRef, warningMinutes: Number(warningMinutes) || 15, notes: notes || null,
     });
     result.style.color = 'var(--accent)';
