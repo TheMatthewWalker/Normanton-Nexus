@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
 import fs from 'fs';
@@ -6,7 +6,9 @@ import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
-import { sqlConfig } from '../server.js';
+import { sqlConfig, stampDbChange } from '../config.js';
+
+import { requirePermission } from '../middleware/auth.js';
 import e from 'express';
 
 const router = express.Router();
@@ -86,11 +88,18 @@ function normalizeShipmentUpdates(input) {
     const shipmentID = Number.parseInt(String(item?.shipmentID), 10);
     if (!Number.isFinite(shipmentID) || shipmentID <= 0 || seen.has(shipmentID)) return acc;
     seen.add(shipmentID);
+    const cost = item?.expectedCost != null && String(item.expectedCost).trim() !== ''
+      ? Number(item.expectedCost) : null;
     acc.push({
       shipmentID,
-      trackingNumber: String(item?.trackingNumber || '').trim(),
+      trackingNumber:    String(item?.trackingNumber || '').trim(),
       plannedCollection: item?.plannedCollection ? new Date(item.plannedCollection) : null,
-      forwarderID: item?.forwarderID === '' || item?.forwarderID == null ? null : Number.parseInt(String(item.forwarderID), 10),
+      forwarderID:       item?.forwarderID === '' || item?.forwarderID == null ? null : Number.parseInt(String(item.forwarderID), 10),
+      expectedCost:      Number.isFinite(cost) ? cost : null,
+      costCenter:        String(item?.costCenter  || '').trim() || null,
+      elementCode:       String(item?.elementCode || '').trim() || null,
+      skipCost:          Boolean(item?.skipCost),
+      customsCost:       item?.customsCost != null ? Number(item.customsCost) : null,
     });
     return acc;
   }, []);
@@ -610,8 +619,8 @@ async function getShipmentContext(shipmentId) {
     shipment.forwarderName = '';
   }
   const deliveries = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
-    SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, 
-      CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, 
+    SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.completionDate, dm.deliveryService, dm.picksheetComment,
+      CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
       CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume, 
       d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, 
     STUFF((
@@ -813,10 +822,10 @@ function unwrapSapArray(body) {
 
 
 async function fetchSapCustomsData(deliveries, req) {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  const trustedOrigin = `http://127.0.0.1:${process.env.PORT || 3000}`;
   const headers = { 'Content-Type': 'application/json', ...(req.headers.cookie ? { Cookie: req.headers.cookie } : {}) };
 
-  const sapPost = (path, body) => fetch(`${baseUrl}${path}`, {
+  const sapPost = (path, body) => fetch(new URL(path, trustedOrigin), {
     method: 'POST', headers, body: JSON.stringify(body),
   }).then(r => r.json());
 
@@ -1161,6 +1170,7 @@ function buildShipmentQueueFilter(mode, request, settings) {
   if (mode === 'awaiting-collection') {
     return `
       ISNULL(sm.shipmentCancelled, 0) = 0
+      AND ISNULL(sm.bookingStatus,    0) = 1
       AND ISNULL(sm.collectionStatus, 0) = 0
       AND ${applySiteMatch(request, 'sm.origin', settings, 'originSiteId', 'originSiteName')}
     `;
@@ -1429,7 +1439,7 @@ router.get('/', async (req, res) => {
 });
 
 
-// ── Shipment queues ──
+// â”€â”€ Shipment queues â”€â”€
 router.get('/queue/:mode', async (req, res) => {
   try {
     const settings = getLogisticsSettings();
@@ -1460,8 +1470,8 @@ router.get('/queue/:mode', async (req, res) => {
 });
 
 
-// ── Bulk mark collected ───────────────────────────────────────────────────────
-router.post('/mark-collected-bulk', async (req, res) => {
+// â”€â”€ Bulk mark collected â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
 
@@ -1482,7 +1492,8 @@ router.post('/mark-collected-bulk', async (req, res) => {
           SELECT @@ROWCOUNT AS affectedRows;
         `);
       if (!result.recordset[0]?.affectedRows) throw new Error('Already collected or not found.');
-      const eventDesc = String(req.body.description || 'Shipment marked as collected').trim();
+      const username  = req.session?.user?.username || 'unknown';
+      const eventDesc = [String(req.body.description || ''), `confirmed by ${username}`].filter(Boolean).join(' | ');
       await writeShipmentEvent(pool, shipmentId, 'COLLECTED', eventDesc);
       completed.push(shipmentId);
     } catch (err) {
@@ -1495,7 +1506,7 @@ router.post('/mark-collected-bulk', async (req, res) => {
 });
 
 
-// ── Loading list PDF (streams directly to browser) ────────────────────────────
+// â”€â”€ Loading list PDF (streams directly to browser) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.post('/loading-list', async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
@@ -1539,8 +1550,8 @@ router.post('/loading-list', async (req, res) => {
 });
 
 
-// ── Update planned collection date for multiple shipments ─────────────────────
-router.post('/update-planned-collection', async (req, res) => {
+// â”€â”€ Update planned collection date for multiple shipments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.post('/update-planned-collection', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   const date        = req.body.date;
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
@@ -1556,12 +1567,12 @@ router.post('/update-planned-collection', async (req, res) => {
   await request.query(`
     UPDATE Logistics.dbo.ShipmentMain SET plannedCollection = @date
     WHERE shipmentID IN (${inClause}) AND ISNULL(shipmentCancelled, 0) = 0`);
-
+  stampDbChange(req.session?.user?.username, 'ShipmentMain');
   res.json({ success: true });
 });
 
 
-// ── Write ShipmentEvents entries ──────────────────────────────────────────────
+// â”€â”€ Write ShipmentEvents entries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.post('/events', async (req, res) => {
   const events = req.body.events;
   if (!Array.isArray(events) || !events.length) return res.status(400).json({ success: false, error: 'events array required.' });
@@ -1575,7 +1586,7 @@ router.post('/events', async (req, res) => {
 });
 
 
-router.post('/cancel', async (req, res) => {
+router.post('/cancel', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) {
     return res.status(400).json({ success: false, error: 'Select at least one shipment before cancelling.' });
@@ -1614,7 +1625,7 @@ router.post('/cancel', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/mark-collected', async (req, res) => {
+router.post('/:shipmentId/mark-collected', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -1634,7 +1645,8 @@ router.post('/:shipmentId/mark-collected', async (req, res) => {
       err.statusCode = 409;
       throw err;
     }
-    await writeShipmentEvent(pool, shipmentId, 'COLLECTED', 'Shipment marked as collected');
+    const username = req.session?.user?.username || 'unknown';
+    await writeShipmentEvent(pool, shipmentId, 'COLLECTED', `Shipment marked as collected by ${username}`);
     res.json({ success: true });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
@@ -1642,22 +1654,21 @@ router.post('/:shipmentId/mark-collected', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/mark-delivered', async (req, res) => {
+router.post('/:shipmentId/mark-delivered', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
-    const pool = await getPool();
+    const pool         = await getPool();
+    const shipmentId   = Number(req.params.shipmentId);
+    const actualDelivery = req.body.actualDelivery ? new Date(req.body.actualDelivery) : new Date();
     const result = await pool.request()
-      .input('shipmentId', sql.BigInt, req.params.shipmentId)
+      .input('shipmentId',    sql.BigInt,   shipmentId)
+      .input('actualDelivery', sql.DateTime, actualDelivery)
       .query(`
         UPDATE Logistics.dbo.ShipmentMain
-        SET
-          deliveryStatus = 1,
-          actualDelivery = GETDATE()
-        WHERE
-          shipmentID = @shipmentId
+        SET deliveryStatus = 1, actualDelivery = COALESCE(@actualDelivery, GETDATE())
+        WHERE shipmentID = @shipmentId
           AND ISNULL(shipmentCancelled, 0) = 0
-          AND ISNULL(collectionStatus, 0) = 1
-          AND ISNULL(deliveryStatus, 0) = 0;
-
+          AND ISNULL(collectionStatus,  0) = 1
+          AND ISNULL(deliveryStatus,    0) = 0;
         SELECT @@ROWCOUNT AS affectedRows;
       `);
 
@@ -1667,6 +1678,9 @@ router.post('/:shipmentId/mark-delivered', async (req, res) => {
       throw err;
     }
 
+    const username = req.session?.user?.username || 'unknown';
+    await writeShipmentEvent(pool, shipmentId, 'DELIVERED',
+      `Delivered on ${actualDelivery.toLocaleDateString('en-GB')} - confirmed by ${username}`);
     res.json({ success: true });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
@@ -1674,7 +1688,7 @@ router.post('/:shipmentId/mark-delivered', async (req, res) => {
 });
 
 
-router.post('/mark-booked', async (req, res) => {
+router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentUpdates = normalizeShipmentUpdates(req.body.shipments);
   const shipmentIds = shipmentUpdates.length ? shipmentUpdates.map(item => item.shipmentID) : normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) {
@@ -1692,16 +1706,18 @@ router.post('/mark-booked', async (req, res) => {
       for (const item of shipmentUpdates) {
         const result = await tx.request()
           .input('shipmentId', sql.BigInt, item.shipmentID)
-          .input('trackingNumber', sql.NVarChar, item.trackingNumber || null)
-          .input('plannedCollection', sql.DateTime, item.plannedCollection)
+          .input('trackingNumber',   sql.NVarChar, item.trackingNumber || null)
+          .input('plannedCollection', sql.DateTime, item.plannedCollection || null)
+          .input('plannedDelivery',   sql.DateTime, item.plannedDelivery  ? new Date(item.plannedDelivery) : null)
           .input('forwarderID', sql.BigInt, Number.isFinite(item.forwarderID) ? item.forwarderID : null)
           .query(`
             UPDATE Logistics.dbo.ShipmentMain
             SET
-              bookingStatus = 1,
-              trackingNumber = COALESCE(NULLIF(@trackingNumber, ''), trackingNumber),
+              bookingStatus     = 1,
+              trackingNumber    = COALESCE(NULLIF(@trackingNumber, ''), trackingNumber),
               plannedCollection = COALESCE(@plannedCollection, plannedCollection),
-              forwarderID = COALESCE(@forwarderID, forwarderID)
+              plannedDelivery   = COALESCE(@plannedDelivery,   plannedDelivery),
+              forwarderID       = COALESCE(@forwarderID, forwarderID)
             WHERE shipmentID = @shipmentId
               AND ISNULL(shipmentCancelled, 0) = 0
               AND ISNULL(bookingStatus, 0) = 0;
@@ -1726,6 +1742,49 @@ router.post('/mark-booked', async (req, res) => {
     }
 
     await tx.commit();
+
+    // Insert ShipmentCost rows for each booked shipment that has a cost
+    const pool2 = await getPool();
+    for (const item of shipmentUpdates) {
+      if (item.skipCost) continue;
+
+      // Freight cost (costType 1)
+      if (item.expectedCost != null) {
+        try {
+          await pool2.request()
+            .input('shipmentID',   sql.BigInt,        item.shipmentID)
+            .input('costType',     sql.NVarChar(3),   '1')
+            .input('costElement',  sql.NVarChar(6),   item.elementCode || null)
+            .input('costCenter',   sql.NVarChar(20),  item.costCenter  || null)
+            .input('expectedCost', sql.Decimal(18,2), item.expectedCost)
+            .input('actualCost',   sql.Decimal(18,2), 0)
+            .input('migoStatus',   sql.Bit,           0)
+            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                    VALUES
+                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+        } catch (_) {}
+      }
+
+      // Customs cost (costType 2) — KN only, £50 DDP / £0 DAP
+      if (item.customsCost != null) {
+        try {
+          await pool2.request()
+            .input('shipmentID',   sql.BigInt,        item.shipmentID)
+            .input('costType',     sql.NVarChar(3),   '2')
+            .input('costElement',  sql.NVarChar(6),   '603120')
+            .input('costCenter',   sql.NVarChar(20),  item.costCenter || null)
+            .input('expectedCost', sql.Decimal(18,2), item.customsCost)
+            .input('actualCost',   sql.Decimal(18,2), 0)
+            .input('migoStatus',   sql.Bit,           0)
+            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                    VALUES
+                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+        } catch (_) {}
+      }
+    }
+
     res.json({ success: true, data: { updated } });
   } catch (err) {
     try { if (tx) await tx.rollback(); } catch (_) {}
@@ -1734,7 +1793,7 @@ router.post('/mark-booked', async (req, res) => {
 });
 
 
-router.post('/create-from-deliveries', async (req, res) => {
+router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async (req, res) => {
   const deliveryIDs = normalizeDeliveryIds(req.body.deliveryIDs);
   if (!deliveryIDs.length) 
     return res.status(400).json({ success: false, error: 'Select at least one delivery before creating a shipment.' });
@@ -1746,9 +1805,9 @@ router.post('/create-from-deliveries', async (req, res) => {
     const inClause = createInClause(request, deliveryIDs, 'deliveryId');
 
     const deliveriesResult = await request.query(`
-      SELECT dm.deliveryID, dm.customerID, dm.dueDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, 
-        CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, 
-        CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume, 
+      SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.completionDate, dm.deliveryService, dm.picksheetComment, dm.incoterms,
+        CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
+        CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
         d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, d.defaultIncoterms,
         STUFF((
           SELECT '; ' + e.address
@@ -1769,10 +1828,24 @@ router.post('/create-from-deliveries', async (req, res) => {
       throw new Error('One or more deliveries are no longer available for shipment creation. Please refresh and try again.');
 
     const customerIds = [...new Set(deliveries.map(row => String(row.customerID)))];
-    if (customerIds.length !== 1) 
+    if (customerIds.length !== 1)
       throw new Error('Selected deliveries must all belong to the same customer.');
 
-    const first = deliveries[0]; 
+    // Enforce incoterms consistency — delivery-level incoterms take priority over destination default
+    const effectiveIncoterms = deliveries.map(row =>
+      String(row.incoterms || row.defaultIncoterms || '').trim().toUpperCase()
+    );
+    const uniqueIncoterms = [...new Set(effectiveIncoterms.filter(Boolean))];
+    if (uniqueIncoterms.length > 1) {
+      const detail = deliveries.map(row =>
+        `#${row.deliveryID} â†’ ${String(row.incoterms || row.defaultIncoterms || '?').toUpperCase()}`
+      ).join(', ');
+      const err = new Error(`Deliveries have conflicting incoterms (${uniqueIncoterms.join(' vs ')}): ${detail}. All deliveries in a shipment must share the same incoterms.`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const first = deliveries[0];
     const settings = getLogisticsSettings();
     const totals = deliveries.reduce((acc, row) => { acc.netWeight += toDecimal(row.netWeight); acc.grossWeight += toDecimal(row.grossWeight); acc.palletCount += toDecimal(row.palletCount); acc.shipmentVolume += toDecimal(row.deliveryVolume); return acc; }, { netWeight: 0, grossWeight: 0, palletCount: 0, shipmentVolume: 0 });
     const shipmentDraft = {
@@ -1787,7 +1860,7 @@ router.post('/create-from-deliveries', async (req, res) => {
       collectionStatus: toBool(req.body.collectionStatus),
       forwarderID: toNullableInteger(req.body.forwarderID),
       trackingNumber: String(req.body.trackingNumber || '').trim(),
-      incoTerms: String(req.body.incoTerms || first.defaultIncoterms || '').trim(),
+      incoTerms: String(req.body.incoTerms || effectiveIncoterms[0] || '').trim(),
       customsRequired: toBool(req.body.customsRequired),
       customsComplete: toBool(req.body.customsComplete),
       shipmentCancelled: toBool(req.body.shipmentCancelled),
@@ -1799,7 +1872,11 @@ router.post('/create-from-deliveries', async (req, res) => {
       await tx.request().input('shipmentID', sql.BigInt, shipmentID).input('deliveryID', sql.BigInt, deliveryID).query('INSERT INTO Logistics.dbo.ShipmentLink (shipmentID, deliveryID) VALUES (@shipmentID, @deliveryID)');
     
     await tx.commit();
-    const shipment = await getShipmentById(pool, shipmentID); 
+    const username = req.session?.user?.username || 'unknown';
+    stampDbChange(username, 'ShipmentMain');
+    await writeShipmentEvent(pool, shipmentID, 'CREATED',
+      `Shipment created by ${username} from ${deliveryIDs.length} deliver${deliveryIDs.length !== 1 ? 'ies' : 'y'}: ${deliveryIDs.join(', ')}`);
+    const shipment = await getShipmentById(pool, shipmentID);
     const folder = getShipmentFolderInfo(shipment);
     return res.status(201).json({ success: true, data: { shipmentID, shipmentRef: formatShipmentRef(shipmentID), linkedDeliveries: deliveryIDs.length, canSendEmail: isExWorks(shipment.incoTerms), folderPath: folder.shipmentPath, shipment } });
   } catch (err) {
@@ -1819,7 +1896,7 @@ router.post('/:shipmentId/create-folder', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/generate-packing-list', async (req, res) => {
+router.post('/:shipmentId/generate-packing-list', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const context = await getShipmentContext(req.params.shipmentId); 
     const generated = await generateShipmentDocuments(context);
@@ -1849,7 +1926,7 @@ router.get('/:shipmentId/documents/:fileName', async (req, res) => {
 });
 
 
-router.post('/:shipmentId/send-collection-email', async (req, res) => {
+router.post('/:shipmentId/send-collection-email', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const context = await getShipmentContext(req.params.shipmentId);
     if (!isExWorks(context.shipment.incoTerms)) 
@@ -1870,7 +1947,7 @@ router.post('/:shipmentId/send-collection-email', async (req, res) => {
 });
 
 
-router.post('/customs/create', async (req, res) => {
+router.post('/customs/create', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) {
     return res.status(400).json({ success: false, error: 'Select at least one shipment before creating customs entries.' });
@@ -1913,6 +1990,7 @@ router.post('/customs/create', async (req, res) => {
             AND ISNULL(shipmentCancelled, 0) = 0
             AND ISNULL(customsRequired, 0) = 1;
         `);
+      stampDbChange(req.session?.user?.username, 'ShipmentMain');
 
       completed.push({
         shipmentID: shipment.shipmentID,
@@ -1949,7 +2027,7 @@ router.post('/customs/create', async (req, res) => {
 });
 
 
-// ── Shipment detail (standard modal) ─────────────────────────────────────────
+// â”€â”€ Shipment detail (standard modal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.get('/:shipmentId/details', async (req, res) => {
   try {
     const pool = await getPool();
@@ -1958,9 +2036,22 @@ router.get('/:shipmentId/details', async (req, res) => {
     const shipmentResult = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
-        SELECT sm.*,
-          CAST(ISNULL(sm.customsRequired, 0) AS bit) AS customsRequired,
-          CAST(ISNULL(sm.customsComplete, 0)  AS bit) AS customsComplete,
+        SELECT
+          sm.shipmentID,
+          sm.originID, sm.originName, sm.originStreet, sm.originCity, sm.originPostCode, sm.originCountry,
+          sm.destinationID, sm.destinationName, sm.destinationStreet, sm.destinationCity, sm.destinationPostCode, sm.destinationCountry,
+          sm.netWeight, sm.grossWeight, sm.palletCount, sm.shipmentVolume,
+          sm.plannedCollection, sm.actualCollection,
+          sm.PlannedDelivery  AS plannedDelivery,
+          sm.ActualDelivery   AS actualDelivery,
+          sm.forwarderID, sm.trackingNumber, sm.incoTerms,
+          sm.customsID,
+          CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
+          CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
+          CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
+          CAST(ISNULL(sm.customsRequired,  0) AS bit) AS customsRequired,
+          CAST(ISNULL(sm.customsComplete,  0) AS bit) AS customsComplete,
+          CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
           fa.forwarderName
         FROM Logistics.dbo.ShipmentMain sm
         OUTER APPLY (
@@ -1992,8 +2083,8 @@ router.get('/:shipmentId/details', async (req, res) => {
 });
 
 
-// ── Toggle customsRequired (blocked if customsComplete) ───────────────────────
-router.patch('/:shipmentId/customs-required', async (req, res) => {
+// â”€â”€ Toggle customsRequired (blocked if customsComplete) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2012,14 +2103,14 @@ router.patch('/:shipmentId/customs-required', async (req, res) => {
       .input('required', sql.Bit, toBool(req.body.required) ? 1 : 0)
       .query(`UPDATE Logistics.dbo.ShipmentMain SET customsRequired = @required
               WHERE shipmentID = @shipmentId AND ISNULL(customsComplete, 0) = 0`);
-
+    stampDbChange(req.session?.user?.username, 'ShipmentMain');
     res.json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 
-// ── Remove a delivery from a shipment ────────────────────────────────────────
-router.delete('/:shipmentId/deliveries/:deliveryId', async (req, res) => {
+// â”€â”€ Remove a delivery from a shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.delete('/:shipmentId/deliveries/:deliveryId', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2047,8 +2138,8 @@ router.delete('/:shipmentId/deliveries/:deliveryId', async (req, res) => {
 });
 
 
-// ── Add deliveries to an existing shipment ────────────────────────────────────
-router.post('/:shipmentId/deliveries', async (req, res) => {
+// â”€â”€ Add deliveries to an existing shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2059,18 +2150,19 @@ router.post('/:shipmentId/deliveries', async (req, res) => {
 
     const shipmentResult = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT destinationID FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0');
+      .query('SELECT destinationID, incoTerms FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0');
 
     if (!shipmentResult.recordset.length)
       return res.status(404).json({ success: false, error: 'Shipment not found or cancelled.' });
 
-    const customerId = shipmentResult.recordset[0].destinationID;
+    const { destinationID: customerId, incoTerms: shipmentIncoTerms } = shipmentResult.recordset[0];
 
     const req2 = pool.request();
     const inClause = createInClause(req2, deliveryIDs, 'deliveryId');
     const available = await req2.query(`
-      SELECT dm.deliveryID, dm.customerID
+      SELECT dm.deliveryID, dm.customerID, dm.incoterms, d.defaultIncoterms
       FROM Logistics.dbo.DeliveryMain dm
+      LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = dm.customerID
       LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
       WHERE dm.deliveryID IN (${inClause})
         AND dm.completionStatus = 1
@@ -2083,6 +2175,24 @@ router.post('/:shipmentId/deliveries', async (req, res) => {
     const wrongCustomer = available.recordset.filter(d => String(d.customerID) !== String(customerId));
     if (wrongCustomer.length)
       return res.status(400).json({ success: false, error: 'All deliveries must belong to the same customer as the shipment.' });
+
+    // Validate incoterms match the shipment
+    const shipmentTerms = String(shipmentIncoTerms || '').trim().toUpperCase();
+    if (shipmentTerms) {
+      const conflicting = available.recordset.filter(d => {
+        const effective = String(d.incoterms || d.defaultIncoterms || '').trim().toUpperCase();
+        return effective && effective !== shipmentTerms;
+      });
+      if (conflicting.length) {
+        const detail = conflicting.map(d =>
+          `#${d.deliveryID} (${String(d.incoterms || d.defaultIncoterms || '?').toUpperCase()})`
+        ).join(', ');
+        return res.status(400).json({
+          success: false,
+          error: `Incoterms mismatch: shipment is ${shipmentTerms} but ${detail} differ. Only deliveries with matching incoterms can be added.`,
+        });
+      }
+    }
 
     for (const deliveryId of deliveryIDs) {
       await pool.request()
@@ -2097,8 +2207,61 @@ router.post('/:shipmentId/deliveries', async (req, res) => {
 });
 
 
-// ── Update haulier ────────────────────────────────────────────────────────────
-router.patch('/:shipmentId/forwarder', async (req, res) => {
+// â”€â”€ Update haulier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Correct dates and status flags (admin correction) ────────────────────────
+router.patch('/:shipmentId/status-dates', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const pool       = await getPool();
+    const shipmentId = Number(req.params.shipmentId);
+    const request    = pool.request().input('shipmentId', sql.BigInt, shipmentId);
+    const sets       = [];
+
+    const addDate = (key, col) => {
+      const raw = req.body[key];
+      if (raw === undefined) return;
+      request.input(key, sql.DateTime, raw ? new Date(raw) : null);
+      sets.push(`${col} = @${key}`);
+    };
+    const addBit = (key, col) => {
+      if (req.body[key] === undefined) return;
+      request.input(key, sql.Bit, req.body[key] ? 1 : 0);
+      sets.push(`${col} = @${key}`);
+    };
+
+    addBit ('bookingStatus',     'bookingStatus');
+    addDate('plannedCollection', 'plannedCollection');
+    addBit ('collectionStatus',  'collectionStatus');
+    addDate('actualCollection',  'actualCollection');
+    // If marking collected but no actual date given, default to now
+    if (req.body.collectionStatus && !req.body.actualCollection) {
+      sets.push('actualCollection = COALESCE(actualCollection, GETDATE())');
+    }
+    addDate('plannedDelivery',   'plannedDelivery');
+    addBit ('deliveryStatus',    'deliveryStatus');
+    addDate('actualDelivery',    'actualDelivery');
+    // If marking delivered but no actual date given, default to now
+    if (req.body.deliveryStatus && !req.body.actualDelivery) {
+      sets.push('actualDelivery = COALESCE(actualDelivery, GETDATE())');
+    }
+
+    if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
+
+    await request.query(
+      `UPDATE Logistics.dbo.ShipmentMain SET ${sets.join(', ')} WHERE shipmentID = @shipmentId`
+    );
+
+    const username = req.session?.user?.username || 'unknown';
+    await writeShipmentEvent(pool, shipmentId, 'CORRECTION',
+      `Dates/status corrected by ${username}: ${sets.map(s => s.split(' = ')[0]).join(', ')}`);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
     const shipmentId = Number(req.params.shipmentId);
@@ -2112,6 +2275,110 @@ router.patch('/:shipmentId/forwarder', async (req, res) => {
 
     res.json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+
+// â”€â”€ Shipment search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Query params: shipmentRef, deliveryNumber, forwarder, customer,
+//               dateField (plannedCollection|actualCollection|plannedDelivery|actualDelivery),
+//               dateFrom, dateTo
+router.get('/search', async (req, res) => {
+  const { shipmentRef, deliveryNumber, forwarder, customer, dateField, dateFrom, dateTo } = req.query;
+
+  const DATE_COLS = {
+    plannedCollection: 'sm.plannedCollection',
+    actualCollection:  'sm.actualCollection',
+    plannedDelivery:   'sm.plannedDelivery',
+    actualDelivery:    'sm.actualDelivery',
+  };
+
+  try {
+    const pool    = await getPool();
+    const request = pool.request();
+    const where   = [`ISNULL(sm.shipmentCancelled, 0) = 0`];
+
+    if (shipmentRef?.trim()) {
+      const ref = parseInt(shipmentRef.trim(), 10);
+      if (!isNaN(ref)) { request.input('shipmentRef', sql.BigInt, ref); where.push('sm.shipmentID = @shipmentRef'); }
+    }
+    if (customer?.trim()) {
+      request.input('customer', sql.NVarChar, `%${customer.trim()}%`);
+      where.push('sm.destinationName LIKE @customer');
+    }
+    if (forwarder?.trim()) {
+      request.input('forwarder', sql.NVarChar, `%${forwarder.trim()}%`);
+      where.push(`EXISTS (
+        SELECT 1 FROM Logistics.dbo.Forwarders f
+        WHERE f.forwarderID = sm.forwarderID AND f.forwarderName LIKE @forwarder
+      )`);
+    }
+    if (req.query.tracking?.trim()) {
+      request.input('tracking', sql.NVarChar, `%${req.query.tracking.trim()}%`);
+      where.push('sm.trackingNumber LIKE @tracking');
+    }
+    if (deliveryNumber?.trim()) {
+      const dn = parseInt(deliveryNumber.trim(), 10);
+      if (!isNaN(dn)) {
+        request.input('deliveryNumber', sql.BigInt, dn);
+        where.push(`EXISTS (
+          SELECT 1 FROM Logistics.dbo.ShipmentLink sl
+          WHERE sl.shipmentID = sm.shipmentID AND sl.deliveryID = @deliveryNumber
+        )`);
+      }
+    }
+    const dateCol = DATE_COLS[dateField];
+    if (dateCol) {
+      if (dateFrom?.trim()) { request.input('dateFrom', sql.DateTime, new Date(dateFrom)); where.push(`${dateCol} >= @dateFrom`); }
+      if (dateTo?.trim())   { request.input('dateTo',   sql.DateTime, new Date(dateTo));   where.push(`${dateCol} <= @dateTo`); }
+    }
+
+    if (where.length === 1) {
+      return res.status(400).json({ success: false, error: 'Please provide at least one search term.' });
+    }
+
+    const result = await request.query(`
+      SELECT
+        sm.shipmentID,
+        sm.destinationID,
+        sm.destinationName,
+        sm.plannedCollection,
+        sm.actualCollection,
+        sm.PlannedDelivery    AS plannedDelivery,
+        sm.ActualDelivery     AS actualDelivery,
+        sm.trackingNumber,
+        sm.incoTerms,
+        sm.forwarderID,
+        sm.customsID,
+        CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
+        CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
+        CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
+        CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
+        (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
+      FROM Logistics.dbo.ShipmentMain sm
+      WHERE ${where.join(' AND ')}
+      ORDER BY sm.shipmentID DESC`);
+
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+// â”€â”€ Events for a shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.get('/:shipmentId/events', async (req, res) => {
+  try {
+    const pool   = await getPool();
+    const result = await pool.request()
+      .input('shipmentId', sql.BigInt, req.params.shipmentId)
+      .query(`SELECT EventID, shipmentID, eventCategory, eventDescription, timeStamp
+              FROM Logistics.dbo.ShipmentEvents
+              WHERE shipmentID = @shipmentId
+              ORDER BY timeStamp DESC`);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 

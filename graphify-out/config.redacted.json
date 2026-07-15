@@ -1,0 +1,81 @@
+{
+  "apiKey": "<REDACTED>",
+  "users": [
+    {
+      "username": "<REDACTED>",
+      "password": "<REDACTED>",
+      "isAdmin": true
+    },
+    {
+      "username": "<REDACTED>",
+      "password": "<REDACTED>",
+      "isAdmin": false
+    },
+    {
+      "username": "<REDACTED>",
+      "password": "<REDACTED>",
+      "isAdmin": false
+    },
+    {
+      "username": "<REDACTED>",
+      "password": "<REDACTED>",
+      "isAdmin": false
+    },
+    {
+      "username": "<REDACTED>",
+      "password": "<REDACTED>",
+      "isAdmin": false
+    }
+  ],
+  "sqlConfig": {
+    "user": "<REDACTED>",
+    "password": "<REDACTED>",
+    "server": "<REDACTED>",
+    "database": "<REDACTED>"
+  },
+  "session": {
+    "secret": "<REDACTED>"
+  },
+  "sapConfig": {
+    "url": "<REDACTED>"
+  },
+  "sessionSecret": "<REDACTED>",
+  "logistics": {
+    "internalBaseUrl": "<REDACTED>",
+    "clearport": {
+      "ddpConsignee": {
+        "name": "<REDACTED>",
+        "streetAndNumber": "<REDACTED>",
+        "cityName": "<REDACTED>",
+        "postcode": "<REDACTED>",
+        "countryCode": "<REDACTED>"
+      }
+    }
+  },
+  "printers": [
+    {
+      "id": "<REDACTED>",
+      "name": "<REDACTED>",
+      "host": "<REDACTED>",
+      "port": 0
+    },
+    {
+      "id": "<REDACTED>",
+      "name": "<REDACTED>",
+      "host": "<REDACTED>",
+      "port": 0
+    },
+    {
+      "id": "<REDACTED>",
+      "name": "<REDACTED>",
+      "host": "<REDACTED>",
+      "port": 0
+    },
+    {
+      "id": "<REDACTED>",
+      "name": "<REDACTED>",
+      "host": "<REDACTED>",
+      "port": 0
+    }
+  ]
+}

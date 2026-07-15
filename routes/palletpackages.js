@@ -1,6 +1,7 @@
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
+import { reverseStagedPackage } from './sapStaging.js';
 
 const router   = express.Router();
 const getPool  = async () => await sql.connect(sqlConfig);
@@ -41,6 +42,7 @@ router.get('/pallet/:palletId', async (req, res) => {
                            pp.sapMaterial, pp.sapQuantity, pp.sapBatch,
                            pp.sapDelivery, pp.sapDeliveryItem,
                            pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
+                           pp.sapSourceStorageType, pp.sapSourceBin, pp.sapStageTransferOrder,
                            pd.packDescription, pd.packMaterial, pd.packWeight, pd.packHeight
                     FROM   Logistics.dbo.PalletPackages pp
                     LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pp.packagingID
@@ -81,12 +83,17 @@ router.get('/sapmaterial/:sapMaterial', async (req, res) => {
 // ── Create new package ──
 // palletItemID is IDENTITY — SQL Server assigns it automatically.
 // packagingID is NVARCHAR(2) referencing PackagingData.packID.
+// sapSourceStorageType/sapSourceBin record where a staged batch's stock came
+// from (its LGTYP/LGPLA before the picksheet-stage-batch transfer order moved
+// it into the picksheet's 916 bin) — required so DELETE below can reverse the
+// transfer order and put the stock back where it was.
 router.post('/', async (req, res) => {
     try {
         const {
             palletID, packagingID, palletLayer, sapMaterial,
             sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
-            sapCustomer, sapCustomerMaterial, scanTime
+            sapCustomer, sapCustomerMaterial, scanTime,
+            sapSourceStorageType, sapSourceBin, sapStageTransferOrder,
         } = req.body;
 
         const pool   = await getPool();
@@ -102,14 +109,19 @@ router.post('/', async (req, res) => {
             .input('sapCustomer',         sql.NVarChar(10), sapCustomer ?? null)
             .input('sapCustomerMaterial', sql.NVarChar(18), sapCustomerMaterial ?? null)
             .input('scanTime',            sql.DateTime,     scanTime ? new Date(scanTime) : null)
+            .input('sapSourceStorageType',sql.NVarChar(3),  sapSourceStorageType ?? null)
+            .input('sapSourceBin',        sql.NVarChar(10), sapSourceBin ?? null)
+            .input('sapStageTransferOrder',sql.NVarChar(10),sapStageTransferOrder ?? null)
             .query(`INSERT INTO Logistics.dbo.PalletPackages
                         (palletID, packagingID, palletLayer, sapMaterial,
                          sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
-                         sapCustomer, sapCustomerMaterial, scanTime)
+                         sapCustomer, sapCustomerMaterial, scanTime,
+                         sapSourceStorageType, sapSourceBin, sapStageTransferOrder)
                     VALUES
                         (@palletID, @packagingID, @palletLayer, @sapMaterial,
                          @sapQuantity, @sapBatch, @sapDelivery, @sapDeliveryItem,
-                         @sapCustomer, @sapCustomerMaterial, @scanTime);
+                         @sapCustomer, @sapCustomerMaterial, @scanTime,
+                         @sapSourceStorageType, @sapSourceBin, @sapStageTransferOrder);
                     SELECT SCOPE_IDENTITY() AS palletItemID;`);
 
         res.status(201).json({ success: true, palletItemID: result.recordset[0].palletItemID });
@@ -118,10 +130,84 @@ router.post('/', async (req, res) => {
     }
 });
 
+// ── Update a single package's layer and/or packaging type ──
+// Lets the builder move a package to a different layer, or change its
+// packaging type (e.g. a batch scanned with the wrong code), in place
+// instead of requiring a remove-then-re-add — which, for a staged batch,
+// would otherwise mean reversing and re-running a SAP transfer order just
+// to fix a layer number or packaging type. Both fields are optional but at
+// least one must be provided; batch/material/SAP staging fields are still
+// remove + re-add only, since those affect the actual SAP transfer order.
+router.patch('/:palletItemId', async (req, res) => {
+    try {
+        const hasLayer = req.body.palletLayer !== undefined;
+        const hasPack  = req.body.packagingID !== undefined;
+        if (!hasLayer && !hasPack) {
+            return res.status(400).json({ success: false, error: 'Provide palletLayer and/or packagingID' });
+        }
+
+        const request = (await getPool()).request()
+            .input('palletItemId', sql.Int, req.params.palletItemId);
+
+        const setClauses = [];
+        if (hasLayer) {
+            const palletLayer = parseInt(req.body.palletLayer, 10);
+            if (!Number.isInteger(palletLayer) || palletLayer < 1) {
+                return res.status(400).json({ success: false, error: 'palletLayer must be a positive integer' });
+            }
+            request.input('palletLayer', sql.Int, palletLayer);
+            setClauses.push('palletLayer = @palletLayer');
+        }
+        if (hasPack) {
+            const packagingID = String(req.body.packagingID || '').trim();
+            if (!packagingID) {
+                return res.status(400).json({ success: false, error: 'packagingID must not be empty' });
+            }
+            request.input('packagingID', sql.NVarChar(3), packagingID);
+            setClauses.push('packagingID = @packagingID');
+        }
+
+        const result = await request.query(`
+            UPDATE Logistics.dbo.PalletPackages
+            SET    ${setClauses.join(', ')}
+            WHERE  palletItemID = @palletItemId`);
+
+        if (!result.rowsAffected[0]) {
+            return res.status(404).json({ success: false, error: 'Package not found' });
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Delete a single package ──
+// If this package was staged in SAP (has sapMaterial/sapBatch/sapDelivery
+// and the source location we recorded at staging time), reverses the
+// picksheet-stage-batch transfer order first — moving the batch's stock
+// back out of the picksheet's 916 bin to wherever it came from — before
+// deleting the DB row. Deliberately fails closed, same reasoning as the
+// stage side: if SAP rejects the reversal, the row is NOT deleted, so the
+// app and physical/SAP reality can't end up disagreeing about where the
+// stock is. A package that was never staged (no SAP fields recorded, e.g.
+// a manually-typed batch with no SAP match) just deletes straight away.
 router.delete('/:palletItemId', async (req, res) => {
     try {
         const pool = await getPool();
+        const rowRes = await pool.request()
+            .input('palletItemId', sql.Int, req.params.palletItemId)
+            .query(`SELECT sapMaterial, sapBatch, sapDelivery, sapSourceStorageType, sapSourceBin
+                    FROM   Logistics.dbo.PalletPackages
+                    WHERE  palletItemID = @palletItemId`);
+
+        const reversal = await reverseStagedPackage(rowRes.recordset[0]);
+        if (reversal.attempted && !reversal.success) {
+            return res.status(422).json({
+                success: false,
+                error: `${reversal.error} — package was not removed`,
+            });
+        }
+
         await pool.request()
             .input('palletItemId', sql.Int, req.params.palletItemId)
             .query('DELETE FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');

@@ -18,6 +18,11 @@
     "secret": "secret-here"
   },
 
+  "printers": [
+    { "id": "line1", "name": "Production Line 1", "host": "192.168.1.100", "port": 9100 },
+    { "id": "line2", "name": "Production Line 2", "host": "192.168.1.101", "port": 9100 }
+  ],
+
   "sapConfig": {
     "system": "SAP",
     "systemNumber": "00",

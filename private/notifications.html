@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Normanton Nexus · Notifications</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./css/logistics.css">
+  <link rel="stylesheet" href="./css/production-nexus.css">
+  <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <link rel="icon" href="/images/logo16.png">
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-left">
+      <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
+      <a href="./landing.html" class="back-link">&larr; Hub</a>
+      <div class="brand-sep"></div>
+      <div class="dept-badge">
+        <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 10A8 8 0 0 0 6 10c0 9-4 12-4 12h24s-4-3-4-12"/>
+          <path d="M18.3 27a3 3 0 0 1-5.2 0"/>
+        </svg>
+      </div>
+      <span class="brand-name">Notifications</span>
+    </div>
+    <div class="header-right">
+      <div class="user-badge">
+        <div class="user-dot"></div>
+        <span id="session-user">Connected</span>
+      </div>
+      <a href="/logout" class="btn-logout">Sign Out</a>
+    </div>
+  </header>
+
+  <!-- PAGE TITLE BAR -->
+  <div class="page-title-bar">
+    <div class="page-title-inner">
+      <h1 class="page-title">Notification History</h1>
+      <p class="page-subtitle">All notifications sent to you · Dismissed items shown at reduced opacity</p>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="sap-main pn-main" style="max-width:860px">
+
+    <div class="nh-filter-bar">
+      <button class="nh-filter-btn active" data-filter="all">All</button>
+      <button class="nh-filter-btn" data-filter="unread">Unread</button>
+      <button class="nh-filter-btn" data-filter="1">Info</button>
+      <button class="nh-filter-btn" data-filter="2">Warning</button>
+      <button class="nh-filter-btn" data-filter="3">Critical</button>
+    </div>
+
+    <div id="nh-content">
+      <div class="pn-loading"><div class="spinner"></div>Loading…</div>
+    </div>
+
+  </div>
+
+  <script src="./js/notifications.js" defer></script>
+  <script src="./js/deploy-banner.js" defer></script>
+  <script src="./js/table-paginate.js" defer></script>
+  <script>
+    'use strict';
+
+    const SEV_LABEL = { 1: 'Info', 2: 'Warning', 3: 'Critical' };
+    let allRows = [];
+    let activeFilter = 'all';
+
+    document.querySelectorAll('.nh-filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.nh-filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeFilter = btn.dataset.filter;
+        render();
+      });
+    });
+
+    async function load() {
+      try {
+        const res  = await fetch('/api/notifications/history');
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error);
+        allRows = json.data;
+        render();
+      } catch (err) {
+        document.getElementById('nh-content').innerHTML =
+          `<div class="pn-empty" style="color:var(--error)">${err.message}</div>`;
+      }
+    }
+
+    function render() {
+      const rows = allRows.filter(n => {
+        if (activeFilter === 'unread') return !n.IsRead;
+        if (['1','2','3'].includes(activeFilter)) return String(n.Severity) === activeFilter;
+        return true;
+      });
+
+      if (!rows.length) {
+        document.getElementById('nh-content').innerHTML =
+          `<div class="pn-empty">No notifications here.</div>`;
+        return;
+      }
+
+      const tbody = rows.map(n => {
+        const dimCls = n.IsDismissed ? 'nh-dismissed' : '';
+        const sevDot = `<span class="nh-sev-dot nh-sev-${n.Severity}"></span>`;
+        const action = n.ActionURL
+          ? `<a href="${esc(n.ActionURL)}" class="notif-action-btn" style="font-size:11.5px">${esc(n.ActionLabel || 'View')}</a>`
+          : '—';
+        const status = n.IsDismissed
+          ? '<span style="color:var(--text-muted);font-size:11px">Dismissed</span>'
+          : n.IsRead
+            ? '<span style="color:var(--text-dim);font-size:11px">Read</span>'
+            : '<span style="color:var(--accent);font-size:11px;font-weight:600">Unread</span>';
+
+        return `<tr class="${dimCls}">
+          <td style="width:130px;white-space:nowrap;color:var(--text-dim);font-size:12px;font-family:'JetBrains Mono',monospace">
+            ${fmtDate(n.CreatedAt)}
+          </td>
+          <td>
+            <div class="nh-title">${sevDot}${esc(n.Title)}</div>
+            <div class="nh-body">${esc(n.Body)}</div>
+          </td>
+          <td style="white-space:nowrap">
+            <span class="notif-cat-pill" style="background:rgba(255,255,255,0.06)">
+              ${esc(SEV_LABEL[n.Severity] || n.Severity)}
+            </span>
+            ${n.Category ? `<span class="notif-cat-pill" style="background:rgba(255,255,255,0.04);margin-left:4px">${esc(n.Category)}</span>` : ''}
+          </td>
+          <td>${action}</td>
+          <td>${status}</td>
+        </tr>`;
+      }).join('');
+
+      document.getElementById('nh-content').innerHTML = `
+        <div class="nh-table-wrap">
+          <table class="nh-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Message</th>
+                <th>Type</th>
+                <th>Action</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>${tbody}</tbody>
+          </table>
+        </div>`;
+    }
+
+    function esc(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function fmtDate(dt) {
+      if (!dt) return '—';
+      return new Date(dt).toLocaleString('en-GB', {
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+      });
+    }
+
+    load();
+  </script>
+</body>
+</html>

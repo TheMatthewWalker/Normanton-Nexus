@@ -1,6 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
+import { reverseStagedPackage } from './sapStaging.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -99,12 +100,52 @@ router.post('/', async (req, res) => {
     }
 });
 
-// ── Update pallet fields (finish, location, weights) ──
+// ── Update pallet fields ──
 router.patch('/:palletId', async (req, res) => {
     const { palletFinish, palletLocation, palletCategory,
-            grossWeight, packagingWeight, palletVolume, palletRemoved, palletHeight } = req.body;
+            grossWeight, packagingWeight, palletVolume, palletRemoved,
+            palletType, palletLength, palletWidth, palletHeight } = req.body;
     try {
-        const pool    = await getPool();
+        const pool = await getPool();
+
+        // Deleting a pallet must also reverse every SAP transfer order it
+        // staged — otherwise the pallet disappears from the app while its
+        // batches are still sitting in the picksheet's 916 bin, blocking
+        // that stock for every other delivery. There's no atomic multi-call
+        // SAP transaction available here, so each package is reversed
+        // independently; if any of them fail, the pallet is NOT marked
+        // removed, so it stays visible (with whatever did reverse already
+        // reversed) and the operator can see exactly what's still stuck.
+        if (palletRemoved) {
+            const pkgsRes = await pool.request()
+                .input('palletId', sql.Int, req.params.palletId)
+                .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
+                               sapSourceStorageType, sapSourceBin
+                        FROM   Logistics.dbo.PalletPackages
+                        WHERE  palletID = @palletId`);
+
+            const failures = [];
+            for (const pkg of pkgsRes.recordset) {
+                const reversal = await reverseStagedPackage(pkg);
+                if (reversal.attempted && !reversal.success) {
+                    failures.push({
+                        palletItemID: pkg.palletItemID,
+                        sapMaterial: pkg.sapMaterial,
+                        sapBatch: pkg.sapBatch,
+                        error: reversal.error,
+                    });
+                }
+            }
+
+            if (failures.length) {
+                return res.status(422).json({
+                    success: false,
+                    error: `Could not reverse SAP staging for ${failures.length} package(s) — pallet not removed.`,
+                    failures,
+                });
+            }
+        }
+
         const request = pool.request().input('palletId', sql.Int, req.params.palletId);
         const sets    = [];
 
@@ -141,6 +182,18 @@ router.patch('/:palletId', async (req, res) => {
             request.input('palletRemoved', sql.Bit, palletRemoved ? 1 : 0);
             sets.push('palletRemoved = @palletRemoved');
         }
+        if (palletType !== undefined) {
+            request.input('palletType', sql.NVarChar, palletType);
+            sets.push('palletType = @palletType');
+        }
+        if (palletLength !== undefined) {
+            request.input('palletLength', sql.Int, palletLength);
+            sets.push('palletLength = @palletLength');
+        }
+        if (palletWidth !== undefined) {
+            request.input('palletWidth', sql.Int, palletWidth);
+            sets.push('palletWidth = @palletWidth');
+        }
 
         if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
 
@@ -148,6 +201,65 @@ router.patch('/:palletId', async (req, res) => {
             `UPDATE Logistics.dbo.PalletMain SET ${sets.join(', ')} WHERE palletID = @palletId`
         );
         res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Landing page sparkline — pallets finished per day (last 7 days) + overdue picksheets ──
+router.get('/landing-sparkline', async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        // Pallets finished per day for the last 7 days
+        const today = 'DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)';
+        const sparkResult = await pool.request().query(`
+            WITH days AS (
+                SELECT DATEADD(day, -6, ${today}) AS day UNION ALL
+                SELECT DATEADD(day, -5, ${today}) UNION ALL
+                SELECT DATEADD(day, -4, ${today}) UNION ALL
+                SELECT DATEADD(day, -3, ${today}) UNION ALL
+                SELECT DATEADD(day, -2, ${today}) UNION ALL
+                SELECT DATEADD(day, -1, ${today}) UNION ALL
+                SELECT ${today}
+            )
+            SELECT d.day, ISNULL(COUNT(pm.palletID), 0) AS cnt
+            FROM days d
+            LEFT JOIN Logistics.dbo.PalletMain pm
+                ON DATEADD(day, DATEDIFF(day, 0, pm.palletFinishDate), 0) = d.day
+               AND pm.palletFinish = 1
+               AND pm.palletRemoved = 0
+            GROUP BY d.day
+            ORDER BY d.day ASC`);
+
+        const dailyValues = sparkResult.recordset.map(r => Number(r.cnt));
+        const thisWeek    = dailyValues.reduce((a, b) => a + b, 0);
+
+        // Previous 7 days for week-over-week
+        const prevResult = await pool.request().query(`
+            SELECT COUNT(*) AS cnt
+            FROM Logistics.dbo.PalletMain
+            WHERE palletFinish = 1
+              AND palletRemoved = 0
+              AND palletFinishDate >= DATEADD(day, -13, DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0))
+              AND palletFinishDate <  DATEADD(day,  -6, DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0))`);
+
+        const prevWeek  = Number(prevResult.recordset[0].cnt);
+        const pctChange = prevWeek === 0
+            ? (thisWeek > 0 ? 100 : 0)
+            : Math.round(((thisWeek - prevWeek) / prevWeek) * 1000) / 10;
+
+        // Overdue picksheets — due date has passed and not yet completed
+        const overdueResult = await pool.request().query(`
+            SELECT COUNT(*) AS cnt
+            FROM Logistics.dbo.DeliveryMain
+            WHERE completionStatus = 0
+              AND ISNULL(deliveryCancelled, 0) = 0
+              AND dispatchDate < DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)`);
+
+        const overduePicksheets = Number(overdueResult.recordset[0].cnt);
+
+        res.json({ success: true, data: { dailyValues, thisWeek, pctChange, overduePicksheets } });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

@@ -4,8 +4,9 @@ import axios   from 'axios';
 import https   from 'https';
 import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
-import { getProductionPool, sapConfig, sapServerSecret } from '../server.js';
+import { getProductionPool, sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 import { requireRole, requirePermission } from '../middleware/auth.js';
+import { notify } from '../lib/notify.js';
 
 // ── SAP caller ────────────────────────────────────────────────────────────────
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
@@ -15,17 +16,35 @@ const sapAgent = fs.existsSync(certPath)
 
 function makeSapToken() {
   return jwt.sign(
+    // TODO: include user info in token if needed for SAP logging; currently just a placeholder
     { userId: 0 },
     sapServerSecret,
     { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' }
   );
 }
 
-async function sapPost(path, body) {
+// ── Audit logger — records SAP call outcomes to PortalAuditLog (fire-and-forget) ─
+async function audit(eventType, username, detail, req) {
+  try {
+    const pool = await sql.connect(sqlConfig);
+    const ip   = req?.ip || req?.socket?.remoteAddress || null;
+    await pool.request()
+      .input('username',  sql.NVarChar(80),  username || null)
+      .input('eventType', sql.NVarChar(50),  eventType)
+      .input('detail',    sql.NVarChar(500), detail   || null)
+      .input('ip',        sql.NVarChar(45),  ip)
+      .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+              VALUES (@username, @eventType, @detail, @ip)`);
+  } catch (err) {
+    console.error('[audit]', err.message);
+  }
+}
+
+async function sapPost(path, body, timeout = 30000) {
   const response = await axios.post(
     `${sapConfig.url}${path}`,
     body,
-    { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+    { timeout, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
   );
   return response.data;
 }
@@ -55,6 +74,61 @@ function processConfig(code) {
 
 // Metre-based linear processes that share a common entry/data pattern
 const METRE_PROCESSES = new Set(['EX','CO','BR','CL','TW']);
+
+// ── Profit-centre validation ──────────────────────────────────────────────────
+// Each process may only post materials belonging to its SAP profit centre(s).
+// MARC-PRCTR is read live via SapServer GET /api/production/check-profit-centre.
+// FW has no material of its own (inspects an Ewald batch) — no entry here, no check.
+const PROFIT_CENTRES = {
+  MX: ['2000'],
+  EX: ['2001', '2021'],
+  CO: ['2002', '2022'],
+  BR: ['2003'],
+  DR: ['2004'],
+  TW: ['2005'],
+  CL: ['2006'],
+  EW: ['2007'],
+  HA: ['2009'],
+};
+
+async function sapGet(path, body, timeout = 30000) {
+  const response = await axios.request({
+    method: 'get',
+    url: `${sapConfig.url}${path}`,
+    data: body,
+    timeout,
+    httpsAgent: sapAgent,
+    headers: { Authorization: `Bearer ${makeSapToken()}`, 'Content-Type': 'application/json' },
+  });
+  return response.data;
+}
+
+// Throws 400 when the material's profit centre doesn't match the process, and
+// 502 when SAP can't confirm it. Fails closed — posting a wrong material into
+// SAP is exactly what this check exists to prevent, so no confirmation = no post.
+async function assertProfitCentre(code, material) {
+  const allowed = PROFIT_CENTRES[code];
+  if (!allowed) return;
+
+  let prctr;
+  try {
+    const raw = await sapGet('/api/production/check-profit-centre', { Material: material });
+    if (raw?.success === false) throw new Error(raw.error?.message || 'SAP profit centre check failed');
+    prctr = String(raw?.data ?? '').trim();
+  } catch (err) {
+    const d   = err.response?.data;
+    const msg = (typeof d === 'string' ? d : null) || d?.error?.message || d?.error || d?.message || err.message;
+    throw Object.assign(
+      new Error(`Unable to verify profit centre for ${material}: ${msg}`),
+      { statusCode: 502 });
+  }
+
+  const prctrShort = prctr.replace(/^0+/, ''); // MARC-PRCTR comes back zero-padded to 10 chars
+  if (!allowed.includes(prctrShort))
+    throw Object.assign(
+      new Error(`Material ${material} belongs to profit centre ${prctrShort || '(none)'} — not valid for ${code} (expects ${allowed.join(' or ')}).`),
+      { statusCode: 400 });
+}
 
 // ── Shared SQL fragments used by reporting endpoints ─────────────────────────
 
@@ -87,7 +161,9 @@ function rptPeriod(col, groupBy) {
 function rptBind(req, pool) {
   const { dateFrom, dateTo, processCode, shiftID, groupBy = 'day', material } = req.query;
   const from   = dateFrom ? new Date(dateFrom) : new Date(Date.now() - 30*86400000);
-  const to     = dateTo   ? new Date(dateTo)   : new Date();
+  // Date-only strings (e.g. "2026-05-11") parse as UTC midnight — extend to end-of-day
+  // so records posted at any time on the selected day are included.
+  const to     = dateTo   ? new Date(dateTo + 'T23:59:59') : new Date();
   const safeBy = ['day','week','month'].includes(groupBy) ? groupBy : 'day';
   const r      = pool.request().input('from', sql.DateTime, from).input('to', sql.DateTime, to);
   const extras = [];
@@ -96,6 +172,42 @@ function rptBind(req, pool) {
   if (material)    { r.input('mat',   sql.NVarChar(18), `%${material}%`);            extras.push(`Material LIKE @mat`); }
   return { from, to, groupBy: safeBy, r, extra: extras.length ? `AND ${extras.join(' AND ')}` : '' };
 }
+
+// ── Landing page sparkline — auth only, no supervisor gate ───────────────────
+
+router.get('/landing-sparkline', async (req, res) => {
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request().query(`
+      SELECT CONVERT(varchar(10), CompletedAt, 120) AS Day,
+             CAST(SUM(Quantity) AS DECIMAL(14,1)) AS TotalMetres
+      FROM   (${RPT_COMPLETED}) AS B
+      WHERE  UOM = N'M'
+        AND  CompletedAt >= DATEADD(DAY,-13, DATEADD(DAY, DATEDIFF(DAY,0,GETDATE()), 0))
+        AND  CompletedAt <  DATEADD(DAY,  1, DATEADD(DAY, DATEDIFF(DAY,0,GETDATE()), 0))
+      GROUP BY CONVERT(varchar(10), CompletedAt, 120)
+      ORDER BY Day`);
+
+    const today = new Date();
+    const days  = Array.from({ length: 14 }, (_, i) => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - (13 - i));
+      return d.toISOString().slice(0, 10);
+    });
+    const map    = Object.fromEntries(r.recordset.map(row => [row.Day, Number(row.TotalMetres)]));
+    const values = days.map(d => map[d] || 0);
+
+    const lastWeek = values.slice(0, 7).reduce((s, n) => s + n, 0);
+    const thisWeek = values.slice(7).reduce((s, n) => s + n, 0);
+    const pctChange = lastWeek === 0 ? null
+      : Math.round(((thisWeek - lastWeek) / lastWeek) * 1000) / 10;
+
+    res.json({ success: true, data: {
+      days: days.slice(7), values: values.slice(7),
+      thisWeek: Math.round(thisWeek), lastWeek: Math.round(lastWeek), pctChange,
+    }});
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
 
 // ── Report 1 — Production Output ─────────────────────────────────────────────
 
@@ -305,6 +417,9 @@ router.post('/process/:processCode/entry', async (req, res) => {
   if (!material || !lengthMetres)
     return res.status(400).json({ success: false, error: 'material and lengthMetres are required.' });
 
+  try { await assertProfitCentre(code, material); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
+
   const pool   = await getProductionPool();
   const uid    = userId(req);
   const cfg    = PROCESS[code];
@@ -352,20 +467,39 @@ router.post('/process/:processCode/entry', async (req, res) => {
       .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
   }
 
-  if (hasScrap && scrapTotalKG && scrapReasons.length) {
-    const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
-    for (const { reasonID, occurrences } of scrapReasons) {
-      const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
-      const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
-      await pool.request()
-        .input('pc',  sql.NVarChar(5),   code)
-        .input('rid', sql.Int,           recordID)
-        .input('r',   sql.Int,           Number(reasonID))
-        .input('qty', sql.Decimal(12,3), qty)
-        .input('uid', sql.Int,           uid)
-        .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+  if (hasScrap && scrapReasons.length) {
+    if (code === 'EX') {
+      for (const { reasonID, kg } of scrapReasons) {
+        const qty   = Math.round(Number(kg || 0) * 1000) / 1000;
+        if (!reasonID || qty <= 0) continue;
+
+        await pool.request()
+          .input('pc',  sql.NVarChar(5),   code)
+          .input('rid', sql.Int,           recordID)
+          .input('r',   sql.Int,           Number(reasonID))
+          .input('qty', sql.Decimal(12,3), qty)
+          .input('uid', sql.Int,           uid)
+          .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+      }
+      const totalKG = scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+      await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+    } 
+    else {
+      const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+      for (const { reasonID, occurrences } of scrapReasons) {
+        const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+        const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+
+        await pool.request()
+          .input('pc',  sql.NVarChar(5),   code)
+          .input('rid', sql.Int,           recordID)
+          .input('r',   sql.Int,           Number(reasonID))
+          .input('qty', sql.Decimal(12,3), qty)
+          .input('uid', sql.Int,           uid)
+          .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+      }
+      await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
     }
-    await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
   }
 
   await writeEvent(pool, code, recordID, 'STARTED', `${code} record created: ${material} ${length.toFixed(3)} M`, 0, uid);
@@ -381,6 +515,7 @@ router.post('/process/:processCode/entry', async (req, res) => {
     });
 
     const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+    audit('SAP_OK', req.session?.user?.username, `'${batchRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
 
     if (messageNumber === '190') {
       await logBackflushAlert(pool, code, recordID, batchRef, sapMatDoc, messageNumber, message);
@@ -412,6 +547,7 @@ router.post('/process/:processCode/entry', async (req, res) => {
       .query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@rid`);
 
     const errMsg = sapErr.response?.data?.error || sapErr.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' FAILED - Message = "${errMsg}"`, req);
 
     await pool.request()
       .input('pc',   sql.NVarChar(5),      code)
@@ -424,11 +560,333 @@ router.post('/process/:processCode/entry', async (req, res) => {
 
     await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
 
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'SAP Backflush Failed',
+      body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
+      severity:    2,
+      category:    'production',
+      actionLabel: 'Open Queue',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
+
     res.status(201).json({
       success: true,
       data: { recordID, batchRef, status: 'SAP_FAILED', error: errMsg },
       warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
     });
+  }
+});
+
+// ── Create open (draft) entry — EX / CO / BR / CL / TW ──────────────────────
+
+router.post('/process/:processCode/draft', async (req, res) => {
+  try {
+    const code = req.params.processCode.toUpperCase();
+    if (!METRE_PROCESSES.has(code))
+      return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+    const { material, machineID, parentBatches = [], notes } = req.body;
+    if (!material)
+      return res.status(400).json({ success: false, error: 'material is required.' });
+
+    // Reject wrong-profit-centre materials at setup, not just at completion —
+    // otherwise the operator creates an open run they can never complete.
+    await assertProfitCentre(code, material); // throws 400/502 — caught below
+
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+    const cfg  = PROCESS[code];
+    const sid  = currentShiftID();
+
+    const ins = await pool.request()
+      .input('shift', sql.TinyInt,           sid)
+      .input('mach',  sql.Int,               machineID ? Number(machineID) : null)
+      .input('mat',   sql.NVarChar(18),      material)
+      .input('uid',   sql.Int,               uid)
+      .input('notes', sql.NVarChar(sql.MAX), notes || null)
+      .query(`INSERT INTO ${cfg.table} (ShiftID,MachineID,Material,LengthMetres,Status,CreatedByUserID,Notes)
+              OUTPUT INSERTED.${cfg.pk}
+              VALUES (@shift,@mach,@mat,0,1,@uid,@notes)`);
+
+    const recordID = ins.recordset[0][cfg.pk];
+    const batchRef = `${code}${String(recordID).padStart(8, '0')}`;
+
+    await pool.request()
+      .input('pc',  sql.NVarChar(5), code)
+      .input('rid', sql.Int,         recordID)
+      .input('uid', sql.Int,         uid)
+      .query(`INSERT INTO prod.BatchOperators (ProcessCode,ProcessRecordID,UserID,IsPrimary,AssignedByUserID) VALUES (@pc,@rid,@uid,1,@uid)`);
+
+    for (const pb of parentBatches) {
+      if (!pb.processCode || !pb.recordID) continue;
+      await pool.request()
+        .input('cc',  sql.NVarChar(5), code)
+        .input('cr',  sql.Int,         recordID)
+        .input('pc',  sql.NVarChar(5), pb.processCode.toUpperCase())
+        .input('pr',  sql.Int,         Number(pb.recordID))
+        .input('uid', sql.Int,         uid)
+        .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
+    }
+
+    await writeEvent(pool, code, recordID, 'STARTED', `${code} open entry created: ${material}`, 0, uid);
+
+    res.status(201).json({ success: true, data: { recordID, batchRef } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Open runs across all processes (supervisor view + cancel) ─────────────────
+// A run stuck at Status=1 (e.g. created before profit-centre validation with a
+// material that can never pass completion) is cancelled here — Status=5.
+
+const OPEN_RUN_PROCESSES = ['MX','EX','CO','BR','CL','TW','DR','EW','HA'];
+const HAS_ISREVERSED     = new Set(['MX','EX','CO','BR','CL','TW','DR']);
+
+router.get('/open-runs', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  try {
+    const pool  = await getProductionPool();
+    const union = OPEN_RUN_PROCESSES.map(code => {
+      const cfg = PROCESS[code];
+      const rev = HAS_ISREVERSED.has(code) ? 'AND t.IsReversed = 0' : '';
+      return `SELECT N'${code}' AS ProcessCode, t.${cfg.pk} AS RecordID, t.${cfg.ref} AS BatchRef,
+                     t.Material, t.CreatedAt, pu.Username AS CreatedBy
+              FROM ${cfg.table} t
+              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+              WHERE t.Status = 1 ${rev}`;
+    }).join('\nUNION ALL\n');
+
+    const result = await pool.request().query(`${union}\nORDER BY CreatedAt DESC`);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/open-runs/:processCode/:recordId/cancel', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const code = req.params.processCode.toUpperCase();
+  const id   = Number(req.params.recordId);
+
+  try {
+    const cfg  = processConfig(code);
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+
+    const upd = await pool.request()
+      .input('id', sql.Int, id)
+      .query(`UPDATE ${cfg.table} SET Status=5 WHERE ${cfg.pk}=@id AND Status=1`);
+
+    if (!upd.rowsAffected[0])
+      return res.status(409).json({ success: false, error: 'Record is not open — it may already be completed or cancelled.' });
+
+    const reason = String(req.body?.reason || '').trim();
+    await writeEvent(pool, code, id, 'CANCELLED',
+      `Open run cancelled by supervisor${reason ? ` — ${reason}` : ''}`, 0, uid);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// ── List open entries — EX / CO / BR / CL / TW ───────────────────────────────
+
+router.get('/process/:processCode/open-entries', async (req, res) => {
+  try {
+    const code = req.params.processCode.toUpperCase();
+    if (!METRE_PROCESSES.has(code))
+      return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+    const cfg  = PROCESS[code];
+    const pool = await getProductionPool();
+
+    const result = await pool.request()
+      .query(`SELECT t.${cfg.pk} AS RecordID, t.${cfg.ref} AS BatchRef,
+                     t.Material, t.MachineID, m.MachineCode, m.MachineName,
+                     t.Notes, t.CreatedAt,
+                     pu.Username AS CreatedBy
+              FROM ${cfg.table} t
+              LEFT JOIN prod.Machines m ON m.MachineID = t.MachineID
+              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+              WHERE t.Status = 1 AND t.IsReversed = 0
+              ORDER BY t.CreatedAt DESC`);
+
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Complete an open entry — EX / CO / BR / CL / TW ──────────────────────────
+
+router.post('/process/:processCode/complete/:recordID', async (req, res) => {
+  try {
+    const code     = req.params.processCode.toUpperCase();
+    const recordID = Number(req.params.recordID);
+    if (!METRE_PROCESSES.has(code))
+      return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+    const {
+      lengthMetres, shiftID,
+      additionalOperatorIDs = [],
+      hasScrap, scrapTotalKG, scrapReasons = [],
+      notes,
+    } = req.body;
+
+    if (!lengthMetres || Number(lengthMetres) <= 0)
+      return res.status(400).json({ success: false, error: 'lengthMetres is required.' });
+
+    const pool   = await getProductionPool();
+    const uid    = userId(req);
+    const cfg    = PROCESS[code];
+    const sid    = shiftID || currentShiftID();
+    const length = Number(lengthMetres);
+
+    const check = await pool.request()
+      .input('rid', sql.Int, recordID)
+      .query(`SELECT ${cfg.pk}, Material, Status FROM ${cfg.table} WHERE ${cfg.pk}=@rid`);
+
+    if (!check.recordset.length)
+      return res.status(404).json({ success: false, error: 'Record not found.' });
+    if (check.recordset[0].Status !== 1)
+      return res.status(409).json({ success: false, error: 'Record is not open — it may already be complete or cancelled.' });
+
+    const material = check.recordset[0].Material;
+    const batchRef = `${code}${String(recordID).padStart(8, '0')}`;
+
+    // Batch may predate the profit-centre rule — validate again before posting
+    try { await assertProfitCentre(code, material); }
+    catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
+
+    await pool.request()
+      .input('rid',   sql.Int,               recordID)
+      .input('len',   sql.Decimal(12, 3),    length)
+      .input('shift', sql.TinyInt,           sid)
+      .input('notes', sql.NVarChar(sql.MAX), notes || null)
+      .query(`UPDATE ${cfg.table} SET LengthMetres=@len, ShiftID=@shift, Status=4, CompletedAt=GETDATE(), Notes=COALESCE(@notes, Notes) WHERE ${cfg.pk}=@rid`);
+
+    for (const addUid of additionalOperatorIDs) {
+      try {
+        await pool.request()
+          .input('pc',  sql.NVarChar(5), code)
+          .input('rid', sql.Int,         recordID)
+          .input('uid', sql.Int,         Number(addUid))
+          .input('by',  sql.Int,         uid)
+          .query(`INSERT INTO prod.BatchOperators (ProcessCode,ProcessRecordID,UserID,IsPrimary,AssignedByUserID) VALUES (@pc,@rid,@uid,0,@by)`);
+      } catch { /* ignore duplicate operator */ }
+    }
+
+    if (hasScrap && scrapReasons.length) {
+      if (code === 'EX') {
+        for (const { reasonID, kg } of scrapReasons) {
+          const qty   = Math.round(Number(kg) * 1000) / 1000;
+          await pool.request()
+            .input('pc',  sql.NVarChar(5),   code)
+            .input('rid', sql.Int,           recordID)
+            .input('r',   sql.Int,           Number(reasonID))
+            .input('qty', sql.Decimal(12,3), qty)
+            .input('uid', sql.Int,           uid)
+            .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+        }
+        await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+      } else {
+        const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+        for (const { reasonID, occurrences } of scrapReasons) {
+          const share = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+          const qty   = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+          await pool.request()
+            .input('pc',  sql.NVarChar(5),   code)
+            .input('rid', sql.Int,           recordID)
+            .input('r',   sql.Int,           Number(reasonID))
+            .input('qty', sql.Decimal(12,3), qty)
+            .input('uid', sql.Int,           uid)
+            .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@r,@qty,'KG',@uid)`);
+        }
+        await writeEvent(pool, code, recordID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+      }
+    }
+
+    await writeEvent(pool, code, recordID, 'STARTED', `${code} completed: ${material} ${length.toFixed(3)} M`, 0, uid);
+
+    if (code === 'BR') {
+      return res.status(200).json({ success: true, data: { recordID, batchRef, status: 'COMPLETE' } });
+    }
+
+    try {
+      const sapRaw = await sapPost('/api/production/backflush', {
+        Material:  material,
+        Quantity:  length,
+        Header:    batchRef,
+        Packaging: '',
+        Charge:    '',
+        Customer:  '',
+      });
+
+      const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+      audit('SAP_OK', req.session?.user?.username, `'${batchRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+
+      if (messageNumber === '190') {
+        await logBackflushAlert(pool, code, recordID, batchRef, sapMatDoc, messageNumber, message);
+        await writeEvent(pool, code, recordID, 'NOTE', `SAP 190: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+      }
+
+      await pool.request()
+        .input('pc',   sql.NVarChar(5),   code)
+        .input('rid',  sql.Int,           recordID)
+        .input('type', sql.NVarChar(20),  'BACKFLUSH')
+        .input('qty',  sql.Decimal(12,3), length)
+        .input('doc',  sql.NVarChar(10),  sapMatDoc)
+        .input('uid',  sql.Int,           uid)
+        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+      await writeEvent(pool, code, recordID, 'SAP_POST', `Backflush posted — MatDoc: ${sapMatDoc}${messageNumber==='190'?' (190: no components consumed)':''}`, 0, uid);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          recordID, batchRef, materialDocument: sapMatDoc, status: 'COMPLETE',
+          ...(messageNumber === '190' ? { warning: 'SAP 190: posted but no components consumed — flagged for data review.' } : {}),
+        },
+      });
+
+    } catch (sapErr) {
+      await pool.request()
+        .input('rid', sql.Int, recordID)
+        .query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@rid`);
+
+      const errMsg = sapErr.response?.data?.error || sapErr.message;
+      audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' FAILED - Message = "${errMsg}"`, req);
+
+      await pool.request()
+        .input('pc',   sql.NVarChar(5),      code)
+        .input('rid',  sql.Int,              recordID)
+        .input('type', sql.NVarChar(20),     'BACKFLUSH')
+        .input('qty',  sql.Decimal(12,3),    length)
+        .input('err',  sql.NVarChar(sql.MAX), errMsg)
+        .input('uid',  sql.Int,              uid)
+        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
+
+      await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+      sql.connect(sqlConfig).then(kPool => notify(kPool, {
+        title:       'SAP Backflush Failed',
+        body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
+        severity:    2,
+        category:    'production',
+        actionLabel: 'Open Queue',
+        actionURL:   '/private/production-nexus.html',
+        target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+      })).catch(() => {});
+
+      res.status(200).json({
+        success: true,
+        data: { recordID, batchRef, status: 'SAP_FAILED', error: errMsg },
+        warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -596,6 +1054,7 @@ router.post('/batch', async (req, res) => {
 
   try {
     processConfig(code); // validates code
+    await assertProfitCentre(code, material); // throws 400/502 — caught below
     const pool = await getProductionPool();
     let insertId;
 
@@ -837,8 +1296,9 @@ router.get('/trace/:processCode/:recordId', async (req, res) => {
 
   try {
     const pool = await getProductionPool();
-    // Recursive CTE — traces all ancestors of a given batch
-    const r = await pool.request()
+
+    // Step 1: recursive CTE — all ancestors of the given batch
+    const traceR = await pool.request()
       .input('cc', sql.NVarChar(5), code)
       .input('cr', sql.Int, id)
       .query(`
@@ -849,11 +1309,58 @@ router.get('/trace/:processCode/:recordId', async (req, res) => {
           UNION ALL
           SELECT t.ChildProcessCode, t.ChildRecordID, t.ParentProcessCode, t.ParentRecordID, tc.Depth + 1
           FROM   prod.ProductionTrace t
-          INNER JOIN TraceChain tc ON t.ChildProcessCode = tc.ParentProcessCode AND t.ChildRecordID = tc.ParentRecordID
+          INNER JOIN TraceChain tc ON t.ChildProcessCode = tc.ParentProcessCode
+                                  AND t.ChildRecordID   = tc.ParentRecordID
         )
         SELECT * FROM TraceChain ORDER BY Depth`);
 
-    res.json({ success: true, data: r.recordset });
+    const chain = traceR.recordset;
+
+    // Step 2: collect every unique (ProcessCode, RecordID) pair in the chain,
+    // always including the searched batch itself even when there are no links.
+    const pcGroups = {}; // { PC: Set(rids) }
+    const addPair = (pc, rid) => {
+      if (!PROCESS[pc]) return;
+      if (!pcGroups[pc]) pcGroups[pc] = new Set();
+      pcGroups[pc].add(rid);
+    };
+    addPair(code, id);
+    chain.forEach(r => {
+      addPair(r.ChildProcessCode,  r.ChildRecordID);
+      addPair(r.ParentProcessCode, r.ParentRecordID);
+    });
+
+    // Step 3: one round-trip UNION query to fetch BatchRef, Material, Quantity,
+    // CreatedAt and primary operator for every pair found above.
+    const req2 = pool.request();
+    const parts = [];
+    let p = 0;
+
+    for (const [pc, ridSet] of Object.entries(pcGroups)) {
+      const cfg = PROCESS[pc];
+      const idParams = [...ridSet].map(rid => {
+        const nm = `id${p++}`;
+        req2.input(nm, sql.Int, rid);
+        return `@${nm}`;
+      }).join(',');
+
+      parts.push(`
+        SELECT '${pc}' AS ProcessCode, t.${cfg.pk} AS RecordID,
+               t.${cfg.ref} AS BatchRef, t.Material,
+               CAST(t.${cfg.qtyCol} AS DECIMAL(14,3)) AS Quantity, '${cfg.uom}' AS UOM,
+               t.CreatedAt, pu.Username AS Operator
+        FROM   ${cfg.table} t
+        LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+        WHERE  t.${cfg.pk} IN (${idParams})`);
+    }
+
+    const details = {};
+    if (parts.length) {
+      const detailR = await req2.query(parts.join('\nUNION ALL\n'));
+      detailR.recordset.forEach(r => { details[`${r.ProcessCode}-${r.RecordID}`] = r; });
+    }
+
+    res.json({ success: true, data: { chain, details } });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
@@ -882,6 +1389,16 @@ router.post('/scrap', async (req, res) => {
 
     await writeEvent(pool, processCode.toUpperCase(), processRecordID, 'SCRAP',
       `Scrap: ${quantity} ${unitOfMeasure} — reason ${reasonID}`, 1, uid);
+
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'Scrap Pending Approval',
+      body:        `${quantity} ${unitOfMeasure} scrap logged on ${processCode.toUpperCase()}-${String(processRecordID).padStart(8,'0')} — awaiting supervisor approval.`,
+      severity:    1,
+      category:    'production',
+      actionLabel: 'Approve Scrap',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
 
     res.status(201).json({ success: true });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
@@ -1052,6 +1569,52 @@ router.get('/reversal/search', async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
+// ── Scrap cleanup triggered by a backflush reversal ──────────────────────────
+// Called whenever a job's backflush is reversed (bulk or single path).
+// • Pending scrap (not yet approved) → voided so it cannot be approved later.
+// • Already SAP-posted scrap → reversed via SapServer, marked in DB.
+async function reverseJobScrap(pool, processCode, recordID, uid) {
+  // Void all non-posted scrap for this job — covers both "awaiting approval"
+  // (IsApproved=0) and "failed to post / retry" (IsApproved=1, SAPPosted=0).
+  // These entries are removed from every active scrap queue by IsVoided=1.
+  await pool.request()
+    .input('pc',  sql.NVarChar(5), processCode)
+    .input('rid', sql.Int,         recordID)
+    .query(`UPDATE prod.ScrapEntries
+            SET IsVoided = 1
+            WHERE ProcessCode = @pc AND ProcessRecordID = @rid
+              AND SAPPosted = 0`);
+
+  // Find all unversed SAP scrap documents for this job
+  const docsR = await pool.request()
+    .input('pc',  sql.NVarChar(5), processCode)
+    .input('rid', sql.Int,         recordID)
+    .query(`SELECT smd.ScrapDocumentID, smd.MaterialDocument
+            FROM   prod.ScrapMaterialDocuments smd
+            JOIN   prod.ScrapEntries se ON se.ScrapID = smd.ScrapID
+            WHERE  se.ProcessCode = @pc AND se.ProcessRecordID = @rid
+              AND  smd.IsReversed = 0
+              AND  smd.MaterialDocument IS NOT NULL`);
+
+  for (const doc of docsR.recordset) {
+    let reversalDoc = null;
+    try {
+      const raw = await sapPost('/api/production/scrap/reverse', { MaterialDocument: doc.MaterialDocument });
+      reversalDoc = raw?.data?.documentNumber || raw?.documentNumber || null;
+    } catch (err) {
+      console.error(`[scrap-reverse] SAP call failed for doc ${doc.MaterialDocument}:`, err.message);
+    }
+    await pool.request()
+      .input('id',  sql.Int,          doc.ScrapDocumentID)
+      .input('rev', sql.NVarChar(10), reversalDoc)
+      .input('uid', sql.Int,          uid)
+      .query(`UPDATE prod.ScrapMaterialDocuments
+              SET IsReversed = 1, ReversalDocument = @rev,
+                  ReversedAt = GETDATE(), ReversedByUserID = @uid
+              WHERE ScrapDocumentID = @id`);
+  }
+}
+
 router.patch('/reversal/:sapPostingId', async (req, res) => {
   const { reversalDocumentSAP } = req.body;
   const postingId = Number(req.params.sapPostingId);
@@ -1085,6 +1648,8 @@ router.patch('/reversal/:sapPostingId', async (req, res) => {
         .query(`UPDATE ${cfg.table} SET IsReversed=1, ReversedAt=GETDATE(), ReversedByUserID=@uid WHERE ${cfg.pk}=@rid`);
     }
 
+    await reverseJobScrap(pool, ProcessCode, ProcessRecordID, uid);
+
     await writeEvent(pool, ProcessCode, ProcessRecordID, 'REVERSAL',
       `SAP posting ${postingId} reversed — reversal doc: ${reversalDocumentSAP}`, 1, uid);
 
@@ -1108,6 +1673,7 @@ router.post('/reversal/execute', requirePermission('PROD_SUPERVISOR'), async (re
     const { type, messageClass, messageNumber, documentNumber, message } = raw?.data ?? raw ?? {};
 
     if (type === 'S' && messageClass === 'RM' && messageNumber === '196') {
+      audit('SAP_OK', req.session?.user?.username, `'${materialDocument}' REVERSED - Reversal Document = '${documentNumber || ''}'`, req);
       return res.json({
         success: true,
         data: { reversalDocument: documentNumber || null, originalDocument: materialDocument },
@@ -1116,21 +1682,26 @@ router.post('/reversal/execute', requirePermission('PROD_SUPERVISOR'), async (re
 
     // Known error codes with user-friendly messages
     if (type === 'E') {
-      if (messageClass === 'RM' && messageNumber === '210')
+      if (messageClass === 'RM' && messageNumber === '210') {
+        audit('SAP_ERROR', req.session?.user?.username, `'${materialDocument}' REVERSAL FAILED - Message = "Already reversed"`, req);
         return res.status(409).json({ success: false, error: 'This document has already been reversed — no further action needed.' });
-
-      if (messageClass === 'M7' && messageNumber === '066')
+      }
+      if (messageClass === 'M7' && messageNumber === '066') {
+        audit('SAP_ERROR', req.session?.user?.username, `'${materialDocument}' REVERSAL FAILED - Message = "Must use MBST"`, req);
         return res.status(422).json({ success: false, error: 'This document needs to be reversed using MBST.' });
-
-      // Any other SAP error — pass the message through
-      return res.status(502).json({ success: false, error: message || `SAP error: ${messageClass} ${messageNumber}` });
+      }
+      const errMsg = message || `SAP error: ${messageClass} ${messageNumber}`;
+      audit('SAP_ERROR', req.session?.user?.username, `'${materialDocument}' REVERSAL FAILED - Message = "${errMsg}"`, req);
+      return res.status(502).json({ success: false, error: errMsg });
     }
 
-    // Unexpected response shape
-    return res.status(502).json({ success: false, error: message || `Unexpected SAP response: ${type} ${messageClass} ${messageNumber}` });
+    const errMsg = message || `Unexpected SAP response: ${type} ${messageClass} ${messageNumber}`;
+    audit('SAP_ERROR', req.session?.user?.username, `'${materialDocument}' REVERSAL FAILED - Message = "${errMsg}"`, req);
+    return res.status(502).json({ success: false, error: errMsg });
 
   } catch (err) {
     const errMsg = err.response?.data?.error || err.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${materialDocument}' REVERSAL FAILED - Message = "${errMsg}"`, req);
     res.status(502).json({ success: false, error: errMsg });
   }
 });
@@ -1185,6 +1756,10 @@ router.get('/scrap/summary', async (req, res) => {
       FROM   prod.ScrapEntries se
       LEFT JOIN prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
       WHERE  se.SAPPosted = 1
+        AND  EXISTS (
+               SELECT 1 FROM prod.ScrapMaterialDocuments smd
+               WHERE  smd.ScrapID = se.ScrapID AND smd.IsReversed = 0
+             )
       GROUP  BY se.ProcessCode, sr.ReasonCode, sr.ReasonDescription, se.UnitOfMeasure
       ORDER  BY se.ProcessCode, TotalScrap DESC`);
     res.json({ success: true, data: r.recordset });
@@ -1218,7 +1793,7 @@ router.get('/scrap/failed', async (req, res) => {
       LEFT JOIN prod.TapeWrap     tw ON tw.TapeWrapID     = se.ProcessRecordID AND se.ProcessCode = 'TW'
       LEFT JOIN prod.Ewald        ew ON ew.EwaldID        = se.ProcessRecordID AND se.ProcessCode = 'EW'
       LEFT JOIN prod.HoseAssembly ha ON ha.HoseAssemblyID = se.ProcessRecordID AND se.ProcessCode = 'HA'
-      WHERE  se.IsApproved = 1 AND se.SAPPosted = 0
+      WHERE  se.IsApproved = 1 AND se.SAPPosted = 0 AND se.IsVoided = 0
       ORDER BY se.ApprovedAt DESC`);
     res.json({ success: true, data: r.recordset });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -1250,10 +1825,10 @@ router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), asyn
                      se.Quantity, se.UnitOfMeasure, sr.ReasonCode
               FROM   prod.ScrapEntries se
               JOIN   prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-              WHERE  se.ScrapID = @id AND se.IsApproved = 1 AND se.SAPPosted = 0`);
+              WHERE  se.ScrapID = @id AND se.IsApproved = 1 AND se.SAPPosted = 0 AND se.IsVoided = 0`);
 
     if (!scrapR.recordset.length)
-      return res.status(404).json({ success: false, error: 'Entry not found or already posted.' });
+      return res.status(404).json({ success: false, error: 'Entry not found, already posted, or voided.' });
 
     const s   = scrapR.recordset[0];
     const cfg = PROCESS[s.ProcessCode];
@@ -1285,6 +1860,7 @@ router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), asyn
       .query(`UPDATE prod.ScrapEntries SET SAPPosted=1, SAPErrorMessage=NULL WHERE ScrapID=@id`);
 
     const docList = responses.map(r => r.documentNumber).filter(Boolean).join(', ');
+    audit('SAP_OK', req.session?.user?.username, `'${batchRef}' SCRAP POSTED - Material Documents = '${docList}'`, req);
     await writeEvent(pool, s.ProcessCode, s.ProcessRecordID, 'NOTE',
       `Scrap retry succeeded — ScrapID ${scrapID} — MatDocs: ${docList}`, 0, uid);
 
@@ -1296,6 +1872,7 @@ router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), asyn
       ? `SAP endpoint not found (404) — /api/production/scrap/post has not been deployed on the SapServer yet.`
       : (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title
         || (d?.errors ? JSON.stringify(d.errors) : null) || err.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' SCRAP FAILED - Message = "${errMsg}"`, req);
     await pool.request()
       .input('id',  sql.Int,              scrapID)
       .input('err', sql.NVarChar(sql.MAX), errMsg)
@@ -1418,13 +1995,42 @@ router.get('/users', async (req, res) => {
 
 router.post('/mixing/entry', async (req, res) => {
   const { mixCode, supplierBatchNo, supplierTubNo, tubs, notes } = req.body;
+  const supplierBatch = String(supplierBatchNo || '').trim();
+  const supplierTub   = String(supplierTubNo   || '').trim();
+
   if (!mixCode || !Array.isArray(tubs) || !tubs.length)
     return res.status(400).json({ success: false, error: 'mixCode and at least one tub are required.' });
+  if (!supplierBatch || !supplierTub)
+    return res.status(400).json({ success: false, error: 'Supplier batch number and supplier tub number are required.' });
+  if (tubs.some(t => {
+    const weightKG = Number(t.weightKG);
+    return !Number.isFinite(weightKG) || weightKG <= 0 || weightKG > 38;
+  }))
+    return res.status(400).json({ success: false, error: 'Each tub weight must be greater than 0 and no more than 38 KG.' });
 
   const pool    = await getProductionPool();
   const uid     = userId(req);
   const shiftID = currentShiftID();
   const totalWeightKG = tubs.reduce((s, t) => s + Number(t.weightKG || 0), 0);
+
+  const dup = await pool.request()
+    .input('sbn', sql.NVarChar(50), supplierBatch)
+    .input('stn', sql.NVarChar(20), supplierTub)
+    .query(`SELECT TOP 1 MixingID, MixRef
+            FROM   prod.Mixing
+            WHERE  LTRIM(RTRIM(SupplierBatchNo)) = @sbn
+              AND  LTRIM(RTRIM(SupplierTubNo))   = @stn
+            ORDER BY MixingID DESC`);
+  if (dup.recordset.length) {
+    const ref = dup.recordset[0].MixRef || `MX${String(dup.recordset[0].MixingID).padStart(8, '0')}`;
+    return res.status(409).json({
+      success: false,
+      error: `Backflush aborted. Supplier batch ${supplierBatch} and tub ${supplierTub} have already been used on ${ref}. Please check the tub details.`,
+    });
+  }
+
+  try { await assertProfitCentre('MX', mixCode); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
 
   // 1. Insert Mixing parent record — set to SAP_FAILED (6) if any tub fails below
   const ins = await pool.request()
@@ -1432,8 +2038,8 @@ router.post('/mixing/entry', async (req, res) => {
     .input('mat',   sql.NVarChar(18),      mixCode)
     .input('mc',    sql.NVarChar(18),      mixCode)
     .input('wt',    sql.Decimal(12,3),     totalWeightKG)
-    .input('sbn',   sql.NVarChar(50),      supplierBatchNo || '')
-    .input('stn',   sql.NVarChar(20),      supplierTubNo   || '')
+    .input('sbn',   sql.NVarChar(50),      supplierBatch)
+    .input('stn',   sql.NVarChar(20),      supplierTub)
     .input('uid',   sql.Int,               uid)
     .input('notes', sql.NVarChar(sql.MAX), notes || null)
     .query(`INSERT INTO prod.Mixing
@@ -1461,9 +2067,10 @@ router.post('/mixing/entry', async (req, res) => {
     const tubIns = await pool.request()
       .input('mid', sql.Int,           mixingID)
       .input('seq', sql.Int,           i + 1)
+      .input('stn', sql.NVarChar(20),  supplierTub)
       .input('wt',  sql.Decimal(10,3), tubWeightKG)
       .query(`INSERT INTO prod.MixingTubs (MixingID,TubSeq,SupplierTubNo,TubWeightKG)
-              OUTPUT INSERTED.TubID VALUES (@mid,@seq,'',@wt)`);
+              OUTPUT INSERTED.TubID VALUES (@mid,@seq,@stn,@wt)`);
     const tubID = tubIns.recordset[0].TubID;
 
     const mixRef = `MX${String(mixingID).padStart(8, '0')}`;
@@ -1473,10 +2080,11 @@ router.post('/mixing/entry', async (req, res) => {
         Quantity:  tubWeightKG,
         Header:    mixRef,
         Packaging: '',
-        Charge:    supplierBatchNo || '',
+        Charge:    supplierBatch,
         Customer:  '',
       });
       const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+      audit('SAP_OK', req.session?.user?.username, `'${mixRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
 
       if (messageNumber === '190') {
         await logBackflushAlert(pool, 'MX', mixingID, mixRef, sapMatDoc, messageNumber, message);
@@ -1502,11 +2110,11 @@ router.post('/mixing/entry', async (req, res) => {
         await sapPost('/api/production/label', {
           processCode: 'MX', recordID: mixingID, tubID, tubSeq: i + 1,
           materialDocument: sapMatDoc, material: mixCode,
-          quantity: tubWeightKG, unitOfMeasure: 'KG', supplierTubNo,
+          quantity: tubWeightKG, unitOfMeasure: 'KG', supplierTubNo: supplierTub,
         });
       } catch (_) {}
 
-      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo, weightKG: tubWeightKG, materialDocument: sapMatDoc, success: true });
+      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo: supplierTub, weightKG: tubWeightKG, materialDocument: sapMatDoc, success: true });
 
     } catch (sapErr) {
       anyFailed = true;
@@ -1527,10 +2135,11 @@ router.post('/mixing/entry', async (req, res) => {
         .input('err', sql.NVarChar(sql.MAX), errMsg).input('uid',  sql.Int,              uid)
         .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'KG',0,@err,@uid)`);
 
+      audit('SAP_ERROR', req.session?.user?.username, `'${mixRef}' FAILED - Message = "${errMsg}"`, req);
       await writeEvent(pool, 'MX', mixingID, 'SAP_FAIL',
-        `Tub ${i+1} (${supplierTubNo || 'no ref'}) SAP failed: ${errMsg}`, 2, uid);
+        `Tub ${i+1} (${supplierTub}) SAP failed: ${errMsg}`, 2, uid);
 
-      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo, weightKG: tubWeightKG, error: errMsg, success: false });
+      tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo: supplierTub, weightKG: tubWeightKG, error: errMsg, success: false });
     }
   }
 
@@ -1539,11 +2148,29 @@ router.post('/mixing/entry', async (req, res) => {
     await pool.request()
       .input('rid', sql.Int, mixingID)
       .query(`UPDATE prod.Mixing SET Status=6 WHERE MixingID=@rid`);
+
+    const mixRef = `MX-${String(mixingID).padStart(8, '0')}`;
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'SAP Backflush Failed',
+      body:        `${mixRef} (Mixing) had one or more tubs fail SAP posting.`,
+      severity:    2,
+      category:    'production',
+      actionLabel: 'Open Queue',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
   }
 
   res.status(201).json({
     success: true,
-    data: { mixingID, status: anyFailed ? 'SAP_FAILED' : 'COMPLETE', totalWeightKG, tubs: tubResults },
+    data: {
+      recordID: mixingID,
+      mixingID,
+      batchRef: `MX${String(mixingID).padStart(8, '0')}`,
+      status: anyFailed ? 'SAP_FAILED' : 'COMPLETE',
+      totalWeightKG,
+      tubs: tubResults,
+    },
     ...(anyFailed ? { warning: 'Some tubs failed SAP posting. See failed backflush queue.' } : {}),
   });
 });
@@ -1579,6 +2206,9 @@ router.post('/drumming/entry', async (req, res) => {
 
   if (!material || !coilLengths.length)
     return res.status(400).json({ success: false, error: 'material and at least one coilLength are required.' });
+
+  try { await assertProfitCentre('DR', material); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
 
   const pool = await getProductionPool();
   const uid  = userId(req);
@@ -1664,6 +2294,7 @@ router.post('/drumming/entry', async (req, res) => {
     });
 
     const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+    audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
 
     // 190 = posted but no component consumption — flag for data analyst review
     if (messageNumber === '190') {
@@ -1707,6 +2338,7 @@ router.post('/drumming/entry', async (req, res) => {
       .query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
 
     const errMsg = sapErr.response?.data?.error || sapErr.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${drumRef}' FAILED - Message = "${errMsg}"`, req);
 
     await pool.request()
       .input('pc',  sql.NVarChar(5),'DR').input('rid',sql.Int,drummingID)
@@ -1723,6 +2355,176 @@ router.post('/drumming/entry', async (req, res) => {
     });
   }
 });
+
+
+// ── DRUMMING — Make-to-Stock / Make-to-Order submissions ─────────────────────
+// Both endpoints share the same DB logic; only the SAP endpoint differs.
+
+async function submitDrumming(req, res, entryType) {
+  const {
+    material, shiftID,
+    customerNumber, orderNumber,
+    packagingID, weightKG,
+    parentBatches = [],
+    coilLengths = [],
+    hasScrap, scrapTotalKG, scrapReasons = [],
+    comments,
+  } = req.body;
+
+  if (!material || !coilLengths.length || !packagingID || !weightKG)
+    return res.status(400).json({ success: false, error: 'material, packagingID, weightKG and at least one coilLength are required.' });
+
+  try { await assertProfitCentre('DR', material); }
+  catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
+
+  const pool = await getProductionPool();
+  const uid  = userId(req);
+  const sid  = shiftID || currentShiftID();
+  const totalLength = coilLengths.reduce((s, l) => s + Number(l), 0);
+
+  const ins = await pool.request()
+    .input('shift', sql.TinyInt,           sid)
+    .input('mat',   sql.NVarChar(18),      material)
+    .input('len',   sql.Decimal(12,3),     totalLength)
+    .input('wt',    sql.Decimal(12,3),     Number(weightKG))
+    .input('pkg',   sql.NVarChar(10),      packagingID)
+    .input('cust',  sql.NVarChar(50),      customerNumber || null)
+    .input('so',    sql.NVarChar(20),      orderNumber    || null)
+    .input('etype', sql.NVarChar(10),      entryType)
+    .input('uid',   sql.Int,               uid)
+    .input('notes', sql.NVarChar(sql.MAX), comments || null)
+    .query(`INSERT INTO prod.Drumming
+              (ShiftID,Material,LengthMetres,WeightKG,PackagingType,CustomerID,SalesOrderSAP,
+               EntryType,Status,StartedAt,CompletedAt,CreatedByUserID,Notes)
+            OUTPUT INSERTED.DrummingID
+            VALUES (@shift,@mat,@len,@wt,@pkg,@cust,@so,@etype,4,GETDATE(),GETDATE(),@uid,@notes)`);
+
+  const drummingID = ins.recordset[0].DrummingID;
+
+  for (let i = 0; i < coilLengths.length; i++) {
+    await pool.request()
+      .input('did', sql.Int,           drummingID)
+      .input('seq', sql.Int,           i + 1)
+      .input('len', sql.Decimal(10,3), Number(coilLengths[i]))
+      .query(`INSERT INTO prod.DrummingCoils (DrummingID,CoilSeq,LengthM) VALUES (@did,@seq,@len)`);
+  }
+
+  await pool.request()
+    .input('rid', sql.Int, drummingID).input('uid', sql.Int, uid)
+    .query(`INSERT INTO prod.BatchOperators (ProcessCode,ProcessRecordID,UserID,IsPrimary,AssignedByUserID) VALUES ('DR',@rid,@uid,1,@uid)`);
+
+  for (const pb of parentBatches) {
+    if (!pb.processCode || !pb.recordID) continue;
+    await pool.request()
+      .input('cc', sql.NVarChar(5), 'DR').input('cr', sql.Int, drummingID)
+      .input('pc', sql.NVarChar(5), pb.processCode.toUpperCase()).input('pr', sql.Int, Number(pb.recordID))
+      .input('uid', sql.Int, uid)
+      .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
+  }
+
+  if (hasScrap && scrapTotalKG && scrapReasons.length) {
+    const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
+    for (const { reasonID, occurrences } of scrapReasons) {
+      const share    = totalOcc > 0 ? Number(occurrences) / totalOcc : 1;
+      const scrapQty = Math.round(Number(scrapTotalKG) * share * 1000) / 1000;
+      await pool.request()
+        .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
+        .input('rid2',sql.Int,           Number(reasonID))
+        .input('qty', sql.Decimal(12,3), scrapQty)
+        .input('uid', sql.Int,           uid)
+        .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID) VALUES (@pc,@rid,@rid2,@qty,'KG',@uid)`);
+    }
+    await writeEvent(pool, 'DR', drummingID, 'SCRAP', `Scrap recorded: ${scrapTotalKG} KG across ${scrapReasons.length} reason(s)`, 1, uid);
+  }
+
+  await writeEvent(pool, 'DR', drummingID, 'STARTED', `Drumming (${entryType}) created: ${material} ${totalLength.toFixed(3)} M ${Number(weightKG)} KG`, 0, uid);
+
+  const drumRef = `DR-${String(drummingID).padStart(8, '0')}`;
+
+  try {
+    const sapRaw = await sapPost(`/drumming/${entryType}`, {
+      Material:    material,
+      TotalLength: totalLength,
+      WeightKG:    Number(weightKG),
+      Header:      drumRef,
+      Packaging:   packagingID,
+      Customer:    customerNumber || '',
+      Order:       orderNumber    || '',
+    });
+
+    const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+    audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+
+    if (messageNumber === '190') {
+      await logBackflushAlert(pool, 'DR', drummingID, drumRef, sapMatDoc, messageNumber, message);
+      await writeEvent(pool, 'DR', drummingID, 'NOTE',
+        `SAP 190: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+    }
+
+    await pool.request()
+      .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
+      .input('type',sql.NVarChar(20),  'BACKFLUSH')
+      .input('qty', sql.Decimal(12,3), totalLength)
+      .input('doc', sql.NVarChar(10),  sapMatDoc)
+      .input('uid', sql.Int,           uid)
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+    await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
+      `Backflush posted — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
+
+    try {
+      await sapPost('/api/production/label', {
+        processCode: 'DR', recordID: drummingID,
+        materialDocument: sapMatDoc, material,
+        quantity: totalLength, unitOfMeasure: 'M',
+        coilLengths, packagingType: packagingID, customerID: customerNumber,
+      });
+    } catch (_) {}
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        drummingID, materialDocument: sapMatDoc, status: 'COMPLETE',
+        ...(messageNumber === '190' ? { warning: 'SAP 190: posted but no components consumed — flagged for data review.' } : {}),
+      },
+    });
+
+  } catch (sapErr) {
+    await pool.request()
+      .input('rid', sql.Int, drummingID)
+      .query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
+
+    const errMsg = sapErr.response?.data?.error || sapErr.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${drumRef}' FAILED - Message = "${errMsg}"`, req);
+
+    await pool.request()
+      .input('pc',  sql.NVarChar(5),'DR').input('rid',sql.Int,drummingID)
+      .input('type',sql.NVarChar(20),'BACKFLUSH').input('qty',sql.Decimal(12,3),totalLength)
+      .input('err', sql.NVarChar(sql.MAX),errMsg).input('uid',sql.Int,uid)
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
+
+    await writeEvent(pool, 'DR', drummingID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      title:       'SAP Backflush Failed',
+      body:        `${drumRef} (Drumming) failed to post to SAP: ${errMsg}`,
+      severity:    2,
+      category:    'production',
+      actionLabel: 'Open Queue',
+      actionURL:   '/private/production-nexus.html',
+      target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+    })).catch(() => {});
+
+    return res.status(201).json({
+      success: true,
+      data: { drummingID, status: 'SAP_FAILED', error: errMsg },
+      warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
+    });
+  }
+}
+
+router.post('/drumming/stock',    async (req, res) => { try { await submitDrumming(req, res, 'stock');    } catch (err) { res.status(500).json({ success: false, error: err.message }); } });
+router.post('/drumming/customer', async (req, res) => { try { await submitDrumming(req, res, 'customer'); } catch (err) { res.status(500).json({ success: false, error: err.message }); } });
 
 
 // ── Mixing — get tub weights and SAP postings for a record ───────────────────
@@ -1845,6 +2647,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
             Customer:  '',
           });
           const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+          audit('SAP_OK', req.session?.user?.username, `'${mixRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
 
           if (messageNumber === '190') {
             await logBackflushAlert(pool, 'MX', id, mixRef, sapMatDoc, messageNumber, message);
@@ -1876,6 +2679,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
         } catch (sapErr) {
           anyFailed = true;
           const errMsg = sapErr.response?.data?.error || sapErr.message;
+          audit('SAP_ERROR', req.session?.user?.username, `'${mixRef}' FAILED - Message = "${errMsg}"`, req);
           await pool.request()
             .input('tid',sql.Int,tub.TubID).input('err',sql.NVarChar(sql.MAX),errMsg)
             .query(`UPDATE prod.MixingTubs SET SAPErrorMessage=@err WHERE TubID=@tid`);
@@ -1893,45 +2697,50 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       return res.json({ success: true, data: { status: 'COMPLETE', tubs: results } });
     }
 
-    // DR — re-post via ZF40N backflush
+    // DR — re-post to /drumming/stock or /drumming/customer based on EntryType
     if (code === 'DR') {
-      const { material, packagingType, testPressurePSI, customerID, salesOrderSAP, notes } = req.body;
+      const { material, packagingID, weightKG, lengthMetres, customerNumber, orderNumber, comments } = req.body;
 
-      // Apply any corrections before re-reading
       await pool.request()
-        .input('rid',  sql.Int,              id)
-        .input('mat',  sql.NVarChar(18),     material      || null)
-        .input('pkg',  sql.NVarChar(3),      packagingType || null)
-        .input('psi',  sql.Decimal(6,2),     testPressurePSI ? Number(testPressurePSI) : null)
-        .input('cust', sql.NVarChar(50),     customerID    || null)
-        .input('so',   sql.NVarChar(12),     salesOrderSAP || null)
-        .input('notes',sql.NVarChar(sql.MAX), notes        || null)
+        .input('rid',  sql.Int,               id)
+        .input('mat',  sql.NVarChar(18),      material       || null)
+        .input('len',  sql.Decimal(12,3),     lengthMetres != null ? Number(lengthMetres) : null)
+        .input('pkg',  sql.NVarChar(10),      packagingID    || null)
+        .input('wt',   sql.Decimal(12,3),     weightKG != null ? Number(weightKG) : null)
+        .input('cust', sql.NVarChar(50),      customerNumber || null)
+        .input('so',   sql.NVarChar(20),      orderNumber    || null)
+        .input('notes',sql.NVarChar(sql.MAX), comments       || null)
         .query(`UPDATE prod.Drumming SET
-          Material        = COALESCE(@mat,  Material),
-          PackagingType   = COALESCE(@pkg,  PackagingType),
-          TestPressurePSI = COALESCE(@psi,  TestPressurePSI),
-          CustomerID      = COALESCE(@cust, CustomerID),
-          SalesOrderSAP   = COALESCE(@so,   SalesOrderSAP),
-          Notes           = COALESCE(@notes,Notes)
+          Material      = COALESCE(@mat,  Material),
+          LengthMetres  = COALESCE(@len,  LengthMetres),
+          PackagingType = COALESCE(@pkg,  PackagingType),
+          WeightKG      = COALESCE(@wt,   WeightKG),
+          CustomerID    = COALESCE(@cust, CustomerID),
+          SalesOrderSAP = COALESCE(@so,   SalesOrderSAP),
+          Notes         = COALESCE(@notes,Notes)
           WHERE DrummingID = @rid`);
 
       const cur = await pool.request().input('id', sql.Int, id)
-        .query(`SELECT DrumRef, Material, LengthMetres, PackagingType, CustomerID FROM prod.Drumming WHERE DrummingID=@id`);
+        .query(`SELECT DrumRef, Material, LengthMetres, WeightKG, PackagingType,
+                       CustomerID, SalesOrderSAP, EntryType FROM prod.Drumming WHERE DrummingID=@id`);
       if (!cur.recordset.length) return res.status(404).json({ success: false, error: 'Record not found.' });
       const d = cur.recordset[0];
 
       await writeEvent(pool, 'DR', id, 'NOTE', `Retry by supervisor ${uid}`, 0, uid);
 
-      const sapRaw = await sapPost('/api/production/backflush', {
-        Material:  d.Material,
-        Quantity:  d.LengthMetres,
-        Header:    d.DrumRef,
-        Packaging: d.PackagingType || '',
-        Charge:    '',
-        Customer:  d.CustomerID || '',
+      const entryType = d.EntryType || 'stock';
+      const sapRaw = await sapPost(`/drumming/${entryType}`, {
+        Material:    d.Material,
+        TotalLength: d.LengthMetres,
+        WeightKG:    d.WeightKG    || 0,
+        Header:      d.DrumRef,
+        Packaging:   d.PackagingType  || '',
+        Customer:    d.CustomerID     || '',
+        Order:       d.SalesOrderSAP  || '',
       });
 
       const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+      audit('SAP_OK', req.session?.user?.username, `'${d.DrumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
 
       if (messageNumber === '190') {
         await logBackflushAlert(pool, 'DR', id, d.DrumRef, sapMatDoc, messageNumber, message);
@@ -1940,9 +2749,9 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       }
 
       await pool.request()
-        .input('pc', sql.NVarChar(5), 'DR').input('rid', sql.Int, id)
-        .input('type', sql.NVarChar(20), 'BACKFLUSH').input('qty', sql.Decimal(12,3), d.LengthMetres)
-        .input('doc', sql.NVarChar(10), sapMatDoc).input('uid', sql.Int, uid)
+        .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, id)
+        .input('type',sql.NVarChar(20),  'BACKFLUSH').input('qty', sql.Decimal(12,3), d.LengthMetres)
+        .input('doc', sql.NVarChar(10),  sapMatDoc).input('uid', sql.Int, uid)
         .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
 
       await pool.request().input('id', sql.Int, id)
@@ -1998,6 +2807,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       });
 
       const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
+      audit('SAP_OK', req.session?.user?.username, `'${d.BatchRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
 
       if (messageNumber === '190') {
         await logBackflushAlert(pool, code, id, d.BatchRef, sapMatDoc, messageNumber, message);
@@ -2020,12 +2830,45 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       return res.json({ success: true, data: { materialDocument: sapMatDoc, status: 'COMPLETE' } });
     }
 
-    // Remaining processes (EW, HA, FW) — not yet implemented
+    if (code === 'EW') {
+      const { material, notes } = req.body;
+      await pool.request()
+        .input('rid',  sql.Int,               id)
+        .input('mat',  sql.NVarChar(18),      material || null)
+        .input('notes',sql.NVarChar(sql.MAX), notes    || null)
+        .query(`UPDATE prod.Ewald SET
+          Material = COALESCE(@mat,  Material),
+          Notes    = COALESCE(@notes,Notes),
+          Status   = 4
+          WHERE EwaldID = @rid`);
+      await writeEvent(pool, 'EW', id, 'NOTE', `Supervisor ${uid} reviewed and marked complete from failed-backflush queue`, 0, uid);
+      return res.json({ success: true, data: { status: 'COMPLETE' } });
+    }
+
+    if (code === 'HA') {
+      const { material, salesOrderSAP, notes } = req.body;
+      await pool.request()
+        .input('rid',  sql.Int,               id)
+        .input('mat',  sql.NVarChar(18),      material      || null)
+        .input('so',   sql.NVarChar(12),      salesOrderSAP || null)
+        .input('notes',sql.NVarChar(sql.MAX), notes         || null)
+        .query(`UPDATE prod.HoseAssembly SET
+          Material      = COALESCE(@mat, Material),
+          SalesOrderSAP = COALESCE(@so,  SalesOrderSAP),
+          Notes         = COALESCE(@notes,Notes),
+          Status        = 4
+          WHERE HoseAssemblyID = @rid`);
+      await writeEvent(pool, 'HA', id, 'NOTE', `Supervisor ${uid} reviewed and marked complete from failed-backflush queue`, 0, uid);
+      return res.json({ success: true, data: { status: 'COMPLETE' } });
+    }
+
+    // FW — not yet implemented
     return res.status(400).json({ success: false, error: `Retry not yet implemented for process ${code}.` });
 
   } catch (sapErr) {
     const pool2 = await getProductionPool();
     const errMsg = sapErr.response?.data?.error || sapErr.message;
+    audit('SAP_ERROR', req.session?.user?.username, `'${code}${String(id).padStart(8,'0')}' FAILED - Message = "${errMsg}"`, req);
     const cfg = PROCESS[code];
     if (cfg) {
       await pool2.request().input('id',sql.Int,id).query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@id`);
@@ -2033,6 +2876,31 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
     await writeEvent(pool2,code,id,'SAP_FAIL',`Retry failed: ${errMsg}`,2,userId(req));
     res.status(502).json({ success: false, error: errMsg });
   }
+});
+
+
+// Cancel a failed backflush record — supervisor action, sets Status=5
+router.patch('/failed-backflush/:processCode/:recordId/cancel', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const code = req.params.processCode.toUpperCase();
+  const id   = Number(req.params.recordId);
+  const uid  = userId(req);
+
+  let table, pk;
+  if (code === 'MX') { table = 'prod.Mixing'; pk = 'MixingID'; }
+  else {
+    const cfg = PROCESS[code];
+    if (!cfg) return res.status(400).json({ success: false, error: `Unknown process code: ${code}.` });
+    table = cfg.table; pk = cfg.pk;
+  }
+
+  try {
+    const pool = await getProductionPool();
+    await pool.request()
+      .input('id', sql.Int, id)
+      .query(`UPDATE ${table} SET Status=5 WHERE ${pk}=@id AND Status=6`);
+    await writeEvent(pool, code, id, 'CANCELLED', `Record cancelled by supervisor ${uid} from failed-backflush queue`, 0, uid);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 
@@ -2104,12 +2972,15 @@ router.get('/scrap/pending', async (req, res) => {
   try {
     const pool = await getProductionPool();
 
-    // IsApproved was added in migration v7. If it doesn't exist yet, return all
-    // scrap entries so the page still works and nothing is silently hidden.
+    // Column-existence guards: both IsApproved and IsVoided were added in migrations.
+    // If either column is absent the filter is omitted so the page still renders.
     const colChk = await pool.request()
-      .query(`SELECT COUNT(1) AS n FROM sys.columns
-              WHERE object_id = OBJECT_ID(N'prod.ScrapEntries') AND name = N'IsApproved'`);
-    const approvedFilter = colChk.recordset[0].n > 0 ? 'AND se.IsApproved = 0' : '';
+      .query(`SELECT name FROM sys.columns
+              WHERE object_id = OBJECT_ID(N'prod.ScrapEntries')
+                AND name IN (N'IsApproved', N'IsVoided')`);
+    const cols = new Set(colChk.recordset.map(r => r.name));
+    const approvedFilter = cols.has('IsApproved') ? 'AND se.IsApproved = 0' : '';
+    const voidedFilter   = cols.has('IsVoided')   ? 'AND se.IsVoided   = 0' : '';
 
     const r = await pool.request().query(`
       SELECT se.ScrapID, se.ProcessCode, se.ProcessRecordID,
@@ -2132,7 +3003,7 @@ router.get('/scrap/pending', async (req, res) => {
       LEFT JOIN prod.TapeWrap     tw ON tw.TapeWrapID     = se.ProcessRecordID AND se.ProcessCode = 'TW'
       LEFT JOIN prod.Ewald        ew ON ew.EwaldID        = se.ProcessRecordID AND se.ProcessCode = 'EW'
       LEFT JOIN prod.HoseAssembly ha ON ha.HoseAssemblyID = se.ProcessRecordID AND se.ProcessCode = 'HA'
-      WHERE  1=1 ${approvedFilter}
+      WHERE  1=1 ${approvedFilter} ${voidedFilter}
       ORDER BY se.EnteredAt DESC`);
     res.json({ success: true, data: r.recordset });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -2156,10 +3027,10 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
                        se.Quantity, se.UnitOfMeasure, sr.ReasonCode
                 FROM   prod.ScrapEntries se
                 JOIN   prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-                WHERE  se.ScrapID = @id AND se.IsApproved = 0`);
+                WHERE  se.ScrapID = @id AND se.IsApproved = 0 AND se.IsVoided = 0`);
 
       if (!scrapR.recordset.length)
-        return { scrapID, success: false, error: 'Not found or already approved.' };
+        return { scrapID, success: false, error: 'Not found, already approved, or voided.' };
 
       const s   = scrapR.recordset[0];
       const cfg = PROCESS[s.ProcessCode];
@@ -2167,9 +3038,12 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
 
       const matR = await pool.request()
         .input('id', sql.Int, s.ProcessRecordID)
-        .query(`SELECT Material, ${cfg.ref} AS BatchRef FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
+        .query(`SELECT Material, ${cfg.ref} AS BatchRef, IsReversed FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
 
       if (!matR.recordset.length) return { scrapID, success: false, error: 'Process record not found.' };
+
+      if (matR.recordset[0].IsReversed)
+        return { scrapID, success: false, error: 'Cannot approve — the parent backflush has been reversed.' };
 
       const { Material: material, BatchRef: batchRef } = matR.recordset[0];
       const reasonCode = s.ReasonCode?.trim();
@@ -2195,6 +3069,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
                 WHERE ScrapID=@id`);
 
       const docList = responses.map(r => r.documentNumber).filter(Boolean).join(', ');
+      audit('SAP_OK', req.session?.user?.username, `'${scrapID}' SCRAP POSTED - Material Documents = '${docList}'`, req);
       await writeEvent(pool, s.ProcessCode, s.ProcessRecordID, 'NOTE',
         `Scrap approved & posted — ScrapID ${scrapID} — MatDocs: ${docList}`, 0, uid);
 
@@ -2207,6 +3082,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
         : (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title
           || (d?.errors ? JSON.stringify(d.errors) : null) || err.message;
 
+      audit('SAP_ERROR', req.session?.user?.username, `'${scrapID}' SCRAP FAILED - Message = "${errMsg}"`, req);
       // Only mark as approved+failed when the SAP server was actually reached.
       // A 404 means the endpoint doesn't exist — leave the entry as pending so
       // it can be retried once the SapServer is updated.
@@ -2248,6 +3124,177 @@ router.get('/scrap/:scrapId/documents', async (req, res) => {
   }
 });
 
+// ── Scrap Reversal — search + missed-reversals + reverse action ──────────────
+
+// Shared query for scrap material documents enriched with batch + process details.
+// @where is a trusted SQL fragment built server-side (never from user input).
+function scrapDocSql(where) {
+  // BackflushReversed is TRUE when EITHER:
+  //   a) the process table's own IsReversed = 1 (set by markReversed on the Drumming/Extrusion/etc record), OR
+  //   b) prod.SAPPostings has a reversed backflush for this job (always updated by markReversed —
+  //      more reliable for historical reversals done before the process-table update was added)
+  return `
+    SELECT smd.ScrapDocumentID, smd.ScrapID, smd.MaterialDocument,
+           smd.IsReversed, smd.ReversalDocument, smd.PostedAt,
+           se.ProcessCode, se.ProcessRecordID,
+           CAST(se.Quantity AS DECIMAL(12,3)) AS Quantity, se.UnitOfMeasure,
+           sr.ReasonCode, sr.ReasonDescription,
+           pu.Username AS PostedBy,
+           prc.BatchRef, prc.Material,
+           CASE WHEN ISNULL(prc.ProcRev, 0) = 1
+                  OR EXISTS (
+                       SELECT 1 FROM prod.SAPPostings sp2
+                       WHERE  sp2.ProcessCode      = se.ProcessCode
+                         AND  sp2.ProcessRecordID  = se.ProcessRecordID
+                         AND  sp2.IsReversed       = 1
+                         AND  sp2.MaterialDocumentSAP IS NOT NULL
+                     )
+                THEN 1 ELSE 0 END AS BackflushReversed
+    FROM   prod.ScrapMaterialDocuments smd
+    JOIN   prod.ScrapEntries se ON se.ScrapID = smd.ScrapID
+    LEFT JOIN prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
+    LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = smd.PostedByUserID
+    LEFT JOIN (
+      SELECT N'MX' AS PC, MixingID    AS RID, MixRef    AS BatchRef, Material, IsReversed AS ProcRev FROM prod.Mixing
+      UNION ALL SELECT N'EX', ExtrusionID,    ExtRef,   Material, IsReversed FROM prod.Extrusion
+      UNION ALL SELECT N'CO', ConvolutingID,  ConvRef,  Material, IsReversed FROM prod.Convoluting
+      UNION ALL SELECT N'BR', BraidingID,     BraidRef, Material, IsReversed FROM prod.Braiding
+      UNION ALL SELECT N'CL', CoverlineID,    CovRef,   Material, IsReversed FROM prod.Coverline
+      UNION ALL SELECT N'TW', TapeWrapID,     TWRef,    Material, IsReversed FROM prod.TapeWrap
+      UNION ALL SELECT N'DR', DrummingID,     DrumRef,  Material, IsReversed FROM prod.Drumming
+    ) prc ON prc.PC = se.ProcessCode AND prc.RID = se.ProcessRecordID
+    WHERE  smd.MaterialDocument IS NOT NULL
+      ${where}
+    ORDER BY smd.PostedAt DESC`;
+}
+
+// Unreversed scrap docs where the parent backflush has since been reversed
+router.get('/scrap-reversal/missed', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request()
+      .query(scrapDocSql(`AND smd.IsReversed = 0
+         AND (ISNULL(prc.ProcRev, 0) = 1
+              OR EXISTS (SELECT 1 FROM prod.SAPPostings sp2
+                         WHERE sp2.ProcessCode = se.ProcessCode
+                           AND sp2.ProcessRecordID = se.ProcessRecordID
+                           AND sp2.IsReversed = 1
+                           AND sp2.MaterialDocumentSAP IS NOT NULL))`));
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// Flexible search — at least one param required
+router.get('/scrap-reversal/search', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const { materialDocument, batchRef, material, processCode, dateFrom, dateTo, operator } = req.query;
+  if (!materialDocument && !batchRef && !material && !processCode && !dateFrom && !dateTo && !operator)
+    return res.status(400).json({ success: false, error: 'At least one search parameter is required.' });
+
+  try {
+    const pool = await getProductionPool();
+    const req2 = pool.request();
+    const conds = [];
+
+    if (materialDocument) { req2.input('doc',  sql.NVarChar(20), `%${materialDocument}%`); conds.push('AND smd.MaterialDocument LIKE @doc'); }
+    if (batchRef)         { req2.input('ref',  sql.NVarChar(25), `%${batchRef}%`);         conds.push('AND prc.BatchRef LIKE @ref'); }
+    if (material)         { req2.input('mat',  sql.NVarChar(18), `%${material}%`);          conds.push('AND prc.Material LIKE @mat'); }
+    if (processCode)      { req2.input('pc',   sql.NVarChar(5),  processCode.toUpperCase()); conds.push('AND se.ProcessCode = @pc'); }
+    if (dateFrom)         { req2.input('from', sql.NVarChar(20), `${dateFrom} 00:00:00`);   conds.push('AND smd.PostedAt >= CONVERT(datetime, @from, 120)'); }
+    if (dateTo)           { req2.input('to',   sql.NVarChar(20), `${dateTo} 23:59:59`);     conds.push('AND smd.PostedAt <= CONVERT(datetime, @to, 120)'); }
+    if (operator)         { req2.input('op',   sql.NVarChar(80), `%${operator}%`);          conds.push('AND pu.Username LIKE @op'); }
+
+    const r = await req2.query(scrapDocSql(conds.join(' ')));
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// Reverse a single scrap material document via SapServer
+router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const { scrapDocumentID, materialDocument } = req.body;
+  if (!scrapDocumentID || !materialDocument)
+    return res.status(400).json({ success: false, error: 'scrapDocumentID and materialDocument are required.' });
+
+  try {
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+
+    const chk = await pool.request()
+      .input('id', sql.Int, Number(scrapDocumentID))
+      .query(`SELECT IsReversed FROM prod.ScrapMaterialDocuments WHERE ScrapDocumentID = @id`);
+    if (!chk.recordset.length)
+      return res.status(404).json({ success: false, error: 'Scrap document not found.' });
+    if (chk.recordset[0].IsReversed)
+      return res.status(409).json({ success: false, error: 'Already reversed.' });
+
+    // Helper: check if SAP response data contains M7/067 (already reversed)
+    const isAlreadyReversed = (data) => {
+      if (!data) return false;
+      const responses = data?.data?.responses;
+      if (Array.isArray(responses)) {
+        return responses.some(r => r.messageClass === 'M7' && r.messageNumber === '067');
+      }
+      const inner = data?.data ?? data;
+      return inner?.messageClass === 'M7' && inner?.messageNumber === '067';
+    };
+
+    const syncDb = async (reversalDoc) => {
+      await pool.request()
+        .input('id',  sql.Int,          Number(scrapDocumentID))
+        .input('rev', sql.NVarChar(10), reversalDoc || null)
+        .input('uid', sql.Int,          uid)
+        .query(`UPDATE prod.ScrapMaterialDocuments
+                SET IsReversed = 1, ReversalDocument = @rev,
+                    ReversedAt = GETDATE(), ReversedByUserID = @uid
+                WHERE ScrapDocumentID = @id`);
+    };
+
+    let raw;
+    try {
+      raw = await sapPost('/api/production/scrap/reverse', { MaterialDocument: String(materialDocument) });
+    } catch (sapErr) {
+      const d = sapErr.response?.data;
+      // M7/067 from SapServer non-2xx response — already reversed in SAP, sync DB
+      if (isAlreadyReversed(d)) {
+        await syncDb(null);
+        audit('SAP_OK', req.session?.user?.username,
+          `'${materialDocument}' SCRAP ALREADY REVERSED IN SAP - synced`, req);
+        return res.json({ success: true, synced: true, data: { reversalDocument: null } });
+      }
+      throw sapErr;
+    }
+
+    // M7/067 in a 200 response body — same treatment
+    if (isAlreadyReversed(raw)) {
+      await syncDb(null);
+      audit('SAP_OK', req.session?.user?.username,
+        `'${materialDocument}' SCRAP ALREADY REVERSED IN SAP - synced`, req);
+      return res.json({ success: true, synced: true, data: { reversalDocument: null } });
+    }
+
+    // Explicit failure from SapServer wrapper (not M7/067)
+    if (raw?.success === false) {
+      throw new Error(raw.error || raw.message || 'SAP server error');
+    }
+
+    const responses = raw?.data?.responses;
+    const reversalDoc = (Array.isArray(responses) ? responses[0]?.documentNumber : null)
+                     || raw?.data?.documentNumber || raw?.documentNumber || null;
+
+    await syncDb(reversalDoc);
+
+    audit('SAP_OK', req.session?.user?.username,
+      `'${materialDocument}' SCRAP REVERSED - Reversal Document = '${reversalDoc || ''}'`, req);
+
+    res.json({ success: true, data: { reversalDocument: reversalDoc } });
+  } catch (err) {
+    const d = err.response?.data;
+    const errMsg = (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title || err.message;
+    audit('SAP_ERROR', req.session?.user?.username,
+      `'${materialDocument}' SCRAP REVERSAL FAILED - Message = "${errMsg}"`, req);
+    res.status(502).json({ success: false, error: errMsg });
+  }
+});
+
 // ── Reversal — SAP postings for a specific batch ─────────────────────────────
 
 router.get('/reversal/by-batch/:processCode/:recordId', async (req, res) => {
@@ -2271,6 +3318,56 @@ router.get('/reversal/by-batch/:processCode/:recordId', async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
+// ── Reversal — flexible search by material / date range / operator ────────────
+
+router.get('/reversal/find', async (req, res) => {
+  const { material, dateFrom, dateTo, operator } = req.query;
+  if (!material && !dateFrom && !dateTo && !operator)
+    return res.status(400).json({ success: false, error: 'At least one search parameter is required.' });
+
+  try {
+    const pool = await getProductionPool();
+
+    // Build full datetime strings so SQL Server can use CONVERT style 120
+    // (yyyy-mm-dd hh:mi:ss — reliably supported in SQL Server 2005).
+    // Style 23 (date-only) is inconsistent with NVarChar params in SS2005.
+    const dateFromStr = dateFrom ? `${dateFrom} 00:00:00` : null;
+    const dateToStr   = dateTo   ? `${dateTo} 23:59:59`   : null;
+
+    const r = await pool.request()
+      .input('material', sql.NVarChar(18), material ? `%${material}%` : null)
+      .input('dateFrom', sql.NVarChar(20), dateFromStr)
+      .input('dateTo',   sql.NVarChar(20), dateToStr)
+      .input('operator', sql.NVarChar(80), operator ? `%${operator}%` : null)
+      .query(`
+        SELECT sp.SAPPostingID, sp.ProcessCode, sp.ProcessRecordID,
+               sp.PostingType, sp.Quantity, sp.UnitOfMeasure,
+               sp.MaterialDocumentSAP, sp.PostedAt, sp.IsReversed,
+               sp.ReversalDocumentSAP, sp.ReversedAt,
+               pu.Username AS PostedBy,
+               mat.Material
+        FROM   prod.SAPPostings sp
+        LEFT JOIN (
+          SELECT N'MX' AS PC, MixingID       AS RID, Material FROM prod.Mixing
+          UNION ALL SELECT N'EX', ExtrusionID,    Material FROM prod.Extrusion
+          UNION ALL SELECT N'CO', ConvolutingID,  Material FROM prod.Convoluting
+          UNION ALL SELECT N'BR', BraidingID,     Material FROM prod.Braiding
+          UNION ALL SELECT N'CL', CoverlineID,    Material FROM prod.Coverline
+          UNION ALL SELECT N'TW', TapeWrapID,     Material FROM prod.TapeWrap
+          UNION ALL SELECT N'DR', DrummingID,     Material FROM prod.Drumming
+        ) mat ON mat.PC = sp.ProcessCode AND mat.RID = sp.ProcessRecordID
+        LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = sp.PostedByUserID
+        WHERE  sp.IsSuccess = 1 AND sp.MaterialDocumentSAP IS NOT NULL
+          AND  (@material IS NULL OR mat.Material LIKE @material)
+          AND  (@dateFrom IS NULL OR sp.PostedAt >= CONVERT(datetime, @dateFrom, 120))
+          AND  (@dateTo   IS NULL OR sp.PostedAt <= CONVERT(datetime, @dateTo,   120))
+          AND  (@operator IS NULL OR pu.Username  LIKE @operator)
+        ORDER BY sp.PostedAt DESC
+      `);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
 // ── Reversal — bulk reverse via SapServer (parallel) ────────────────────────
 
 router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
@@ -2278,12 +3375,29 @@ router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, 
   if (!Array.isArray(materialDocuments) || !materialDocuments.length)
     return res.status(400).json({ success: false, error: 'materialDocuments array required.' });
 
-  const pool = await getProductionPool();
-  const uid  = userId(req);
+  const pool  = await getProductionPool();
+  const uid   = userId(req);
+  const total = materialDocuments.length;
 
-  // Mark both the SAPPosting and the parent process record as reversed
-  const markReversed = async (matDoc, reversalDoc, uid) => {
-    // Look up which process record owns this posting
+  // Disable socket inactivity timeout for this long-running SSE connection
+  req.socket.setTimeout(0);
+
+  res.setHeader('Content-Type',      'text/event-stream');
+  res.setHeader('Cache-Control',     'no-cache');
+  res.setHeader('Connection',        'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  const send = data => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`); };
+  send({ type: 'start', total });
+
+  // Heartbeat every 20s keeps proxies and firewalls from closing an idle connection
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n');
+  }, 20000);
+
+  let done = 0;
+
+  const markReversed = async (matDoc, reversalDoc) => {
     const postR = await pool.request()
       .input('doc', sql.NVarChar(10), String(matDoc))
       .query(`SELECT TOP 1 ProcessCode, ProcessRecordID FROM prod.SAPPostings
@@ -2305,43 +3419,68 @@ router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, 
           .input('id', sql.Int, ProcessRecordID)
           .query(`UPDATE ${cfg.table} SET IsReversed=1 WHERE ${cfg.pk}=@id`);
       }
+      await reverseJobScrap(pool, ProcessCode, ProcessRecordID, uid);
     }
   };
 
-  // Send all to SapServer in parallel — SapServer queues internally (3-thread pool)
-  const results = await Promise.all(materialDocuments.map(async (matDoc) => {
-    try {
-      const raw = await sapPost('/api/production/reverse-backflush', { MaterialDocument: String(matDoc) });
+  try {
+    // Fire all requests to SapServer in parallel — SapServer pools them internally.
+    // Each promise emits an SSE progress event the moment it settles.
+    // Timeout is 120s per call (reversal can be slow under SAP load).
+    await Promise.all(materialDocuments.map(async (matDoc) => {
+      try {
+        const raw = await sapPost('/api/production/reverse-backflush', { MaterialDocument: String(matDoc) }, 120000);
 
-      if (raw?.success === false)
-        return { materialDocument: matDoc, success: false, error: raw.error || 'SAP server error' };
+        if (raw?.success === false) {
+          const errMsg = raw.error || 'SAP server error';
+          audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "${errMsg}"`, req);
+          send({ type: 'progress', done: ++done, total, materialDocument: matDoc, success: false, error: errMsg });
+          return;
+        }
 
-      const zf = raw?.data ?? raw;
-      const { type, messageClass, messageNumber, documentNumber, message } = zf || {};
+        const zf = raw?.data ?? raw;
+        const { type, messageClass, messageNumber, documentNumber, message } = zf || {};
 
-      if (type === 'S' && messageClass === 'RM' && messageNumber === '196') {
-        await markReversed(matDoc, documentNumber, uid);
-        return { materialDocument: matDoc, success: true, reversalDocument: documentNumber };
+        if (type === 'S' && messageClass === 'RM' && messageNumber === '196') {
+          await markReversed(matDoc, documentNumber);
+          audit('SAP_OK', req.session?.user?.username, `'${matDoc}' REVERSED - Reversal Document = '${documentNumber || ''}'`, req);
+          send({ type: 'progress', done: ++done, total, materialDocument: matDoc,
+                 success: true, reversalDocument: documentNumber });
+          return;
+        }
+
+        if (type === 'E' && messageClass === 'RM' && messageNumber === '210') {
+          await markReversed(matDoc, null);
+          audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "Already reversed — synced"`, req);
+          send({ type: 'progress', done: ++done, total, materialDocument: matDoc,
+                 success: false, synced: true, error: 'Already reversed in SAP — record updated.' });
+          return;
+        }
+
+        if (type === 'E' && messageClass === 'M7' && messageNumber === '066') {
+          audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "Must use MBST"`, req);
+          send({ type: 'progress', done: ++done, total, materialDocument: matDoc,
+                 success: false, error: 'Must be reversed using MBST.' });
+          return;
+        }
+
+        const rejMsg = message || `SAP rejected: ${type} ${messageClass} ${messageNumber}`;
+        audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "${rejMsg}"`, req);
+        send({ type: 'progress', done: ++done, total, materialDocument: matDoc, success: false, error: rejMsg });
+
+      } catch (err) {
+        const d = err.response?.data;
+        const errMsg = (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title || err.message;
+        audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "${errMsg}"`, req);
+        send({ type: 'progress', done: ++done, total, materialDocument: matDoc, success: false, error: errMsg });
       }
+    }));
+  } finally {
+    clearInterval(heartbeat);
+  }
 
-      if (type === 'E' && messageClass === 'RM' && messageNumber === '210') {
-        // Document was reversed manually in SAP — sync the DB to match
-        await markReversed(matDoc, null, uid);
-        return { materialDocument: matDoc, success: false, error: 'Already reversed in SAP — record updated.' };
-      }
-      if (type === 'E' && messageClass === 'M7' && messageNumber === '066')
-        return { materialDocument: matDoc, success: false, error: 'Must be reversed using MBST.' };
-
-      return { materialDocument: matDoc, success: false, error: message || `SAP rejected: ${type} ${messageClass} ${messageNumber}` };
-
-    } catch (err) {
-      const d = err.response?.data;
-      const errMsg = (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title || err.message;
-      return { materialDocument: matDoc, success: false, error: errMsg };
-    }
-  }));
-
-  res.json({ success: true, results });
+  send({ type: 'complete', total });
+  res.end();
 });
 
 // ── SAP backflush response validation ────────────────────────────────────────

@@ -4,7 +4,7 @@ import sql from 'mssql';
 const router = express.Router();
 
 // Export your sqlConfig from server.js and import it here
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
 
 // ── Helper to get a connection pool ──
 const getPool = async () => await sql.connect(sqlConfig);

@@ -1,0 +1,464 @@
+/* ── Notification Bell ───────────────────────────────────────────────────── */
+
+.notif-bell-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: 1.5px solid var(--border2, rgba(255,255,255,0.12));
+  border-radius: 9px;
+  color: var(--text-dim, #8899aa);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+.notif-bell-btn:hover {
+  border-color: var(--accent, #3b82f6);
+  color: var(--accent, #3b82f6);
+  background: var(--accent-dim, rgba(59,130,246,0.08));
+}
+.notif-bell-btn svg { width: 18px; height: 18px; }
+
+.notif-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  background: #DC2626;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  pointer-events: none;
+  animation: notif-badge-pop 0.2s cubic-bezier(0.34,1.56,0.64,1);
+}
+@keyframes notif-badge-pop {
+  from { transform: scale(0); }
+  to   { transform: scale(1); }
+}
+
+/* ── Tray Panel ──────────────────────────────────────────────────────────── */
+
+.notif-tray {
+  position: fixed;
+  top: 58px;
+  right: 18px;
+  width: 360px;
+  max-height: calc(100vh - 80px);
+  background: var(--surface, #101c30);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(10,18,36,0.55);
+  display: flex;
+  flex-direction: column;
+  z-index: 8500;
+  overflow: hidden;
+  animation: notif-tray-in 0.18s cubic-bezier(0.34,1.20,0.64,1);
+  transform-origin: top right;
+}
+@keyframes notif-tray-in {
+  from { opacity: 0; transform: scale(0.92) translateY(-8px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+
+.notif-tray-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.07));
+  flex-shrink: 0;
+}
+.notif-tray-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.notif-tray-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.notif-tray-link {
+  font-size: 11.5px;
+  color: var(--accent, #3b82f6);
+  text-decoration: none;
+  font-weight: 500;
+  opacity: 0.85;
+  transition: opacity 0.12s;
+}
+.notif-tray-link:hover { opacity: 1; }
+.notif-tray-close {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #5a6e82);
+  cursor: pointer;
+  font-size: 18px;
+  border-radius: 5px;
+  line-height: 1;
+  transition: color 0.12s, background 0.12s;
+}
+.notif-tray-close:hover {
+  color: var(--text, #e2eaf4);
+  background: rgba(255,255,255,0.06);
+}
+
+.notif-tray-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 8px 0;
+}
+.notif-tray-list::-webkit-scrollbar { width: 4px; }
+.notif-tray-list::-webkit-scrollbar-track { background: transparent; }
+.notif-tray-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
+.notif-empty {
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--text-muted, #5a6e82);
+  font-size: 13px;
+}
+.notif-empty-icon {
+  font-size: 28px;
+  margin-bottom: 8px;
+  opacity: 0.5;
+}
+
+/* ── Notification Card ───────────────────────────────────────────────────── */
+
+.notif-card {
+  position: relative;
+  padding: 12px 14px 11px 18px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.05));
+  cursor: default;
+  transition: background 0.12s;
+}
+.notif-card:last-child { border-bottom: none; }
+.notif-card:hover { background: rgba(255,255,255,0.03); }
+
+/* severity left stripe */
+.notif-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+}
+.notif-sev-1::before { background: var(--accent, #3b82f6); }
+.notif-sev-2::before { background: #D97706; }
+.notif-sev-3::before { background: #DC2626; animation: notif-pulse-stripe 2s infinite; }
+@keyframes notif-pulse-stripe {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+.notif-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.notif-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  flex: 1;
+}
+.notif-card--read .notif-card-title {
+  font-weight: 500;
+  color: var(--text-dim, #7a8fa3);
+}
+.notif-dismiss-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #5a6e82);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+  margin-top: -1px;
+}
+.notif-card:hover .notif-dismiss-btn { opacity: 1; }
+.notif-dismiss-btn:hover { color: #DC2626; }
+
+.notif-card-body {
+  font-size: 12px;
+  color: var(--text-dim, #7a8fa3);
+  line-height: 1.45;
+  margin-bottom: 6px;
+}
+.notif-card--read .notif-card-body { color: var(--text-muted, #5a6e82); }
+
+.notif-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.notif-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted, #5a6e82);
+}
+.notif-cat-pill {
+  padding: 1px 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.notif-action-btn {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent, #3b82f6);
+  text-decoration: none;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--accent-dim, rgba(59,130,246,0.1));
+  transition: background 0.12s;
+  white-space: nowrap;
+}
+.notif-action-btn:hover { background: rgba(59,130,246,0.2); }
+
+/* Unread dot */
+.notif-unread-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, #3b82f6);
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+.notif-sev-2 .notif-unread-dot { background: #D97706; }
+.notif-sev-3 .notif-unread-dot { background: #DC2626; }
+
+/* ── History Page ────────────────────────────────────────────────────────── */
+
+.nh-table-wrap {
+  background: var(--surface, #101c30);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  overflow: hidden;
+}
+.nh-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.nh-table th {
+  padding: 11px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted, #5a6e82);
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.07));
+  white-space: nowrap;
+}
+.nh-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.05));
+  vertical-align: top;
+}
+.nh-table tr:last-child td { border-bottom: none; }
+.nh-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+.nh-sev-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  vertical-align: middle;
+  margin-right: 5px;
+  margin-top: -1px;
+}
+.nh-sev-1 { background: var(--accent, #3b82f6); }
+.nh-sev-2 { background: #D97706; }
+.nh-sev-3 { background: #DC2626; }
+
+.nh-dismissed { opacity: 0.45; }
+.nh-title { font-weight: 600; margin-bottom: 2px; }
+.nh-body  { font-size: 12px; color: var(--text-dim, #7a8fa3); }
+
+.nh-filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.nh-filter-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+  border: 1.5px solid var(--border2, rgba(255,255,255,0.12));
+  border-radius: 7px;
+  color: var(--text-dim, #7a8fa3);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.nh-filter-btn:hover,
+.nh-filter-btn.active {
+  border-color: var(--accent, #3b82f6);
+  color: var(--accent, #3b82f6);
+  background: var(--accent-dim, rgba(59,130,246,0.08));
+}
+
+
+
+/* Bell with unread notifications */
+
+.notif-bell--active {
+
+  color: #F59E0B;
+
+  background: rgba(245,158,11,.12);
+
+  border-color: rgba(245,158,11,.35);
+
+  box-shadow:
+    0 0 0 3px rgba(245,158,11,.08),
+    0 0 16px rgba(245,158,11,.30);
+
+  animation:
+    bellShake 1s ease-in-out infinite,
+    bellPulse 2s ease-in-out infinite;
+}
+
+@keyframes bellPulse {
+
+  0% {
+    box-shadow:
+      0 0 0 0 rgba(245,158,11,.40);
+  }
+
+  70% {
+    box-shadow:
+      0 0 0 10px rgba(245,158,11,0);
+  }
+
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(245,158,11,0);
+  }
+}
+
+
+@keyframes bellShake {
+
+  0%   { transform: rotate(0deg); }
+
+  10%  { transform: rotate(16deg); }
+  20%  { transform: rotate(-14deg); }
+  30%  { transform: rotate(12deg); }
+  40%  { transform: rotate(-10deg); }
+  50%  { transform: rotate(8deg); }
+
+  60%,
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+/* Ring animation */
+
+.notif-bell--ring {
+  animation: bellRing 0.8s ease;
+}
+
+@keyframes bellRing {
+
+  0% {
+    transform: rotate(0deg);
+  }
+
+  15% {
+    transform: rotate(18deg);
+  }
+
+  30% {
+    transform: rotate(-15deg);
+  }
+
+  45% {
+    transform: rotate(12deg);
+  }
+
+  60% {
+    transform: rotate(-8deg);
+  }
+
+  75% {
+    transform: rotate(4deg);
+  }
+
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+.notif-bell--active::after {
+
+  content: '';
+
+  position: absolute;
+
+  inset: -3px;
+
+  border-radius: 50%;
+
+  box-shadow:
+    0 0 12px rgba(245,158,11,.45);
+
+  animation: bellPulse 2s infinite;
+}
+
+@keyframes bellPulse {
+
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.4);
+  }
+}
+
+.notif-bell-btn {
+  position: relative;
+}

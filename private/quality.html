@@ -1,12 +1,18 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Normanton Nexus · Quality</title>
+  <title>Normanton Nexus Â· Quality</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./css/quality.css">
+  <link rel="stylesheet" href="./css/logistics.css">
+  <link rel="stylesheet" href="./css/production-nexus.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <script src="./js/notifications.js" defer></script>
+  <script src="./js/deploy-banner.js" defer></script>
+  <script src="./js/table-paginate.js" defer></script>
+  <link rel="stylesheet" href="./css/quality.css">
   <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
@@ -15,17 +21,22 @@
   <header class="header">
     <div class="header-left">
       <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
-      <a href="./landing.html" class="back-link">← Hub</a>
+      <a href="./landing.html" class="back-link">&larr; Hub</a>
       <div class="brand-sep"></div>
       <div class="dept-badge">
-        <svg viewBox="0 0 28 28" fill="none"><path d="M14 2L4 6v9c0 5.5 4.3 10.4 10 12 5.7-1.6 10-6.5 10-12V6L14 2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><polyline points="9,14 12.5,17.5 19,11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg viewBox="0 0 28 28" fill="none">
+          <path d="M14 2L4 6v9c0 5.5 4.3 10.4 10 12 5.7-1.6 10-6.5 10-12V6L14 2Z"
+            stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+          <polyline points="9,14 12.5,17.5 19,11"
+            stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
       </div>
       <span class="brand-name">Quality</span>
     </div>
     <div class="header-right">
       <div class="user-badge">
         <div class="user-dot"></div>
-        <span>Connected</span>
+        <span id="session-user">Connected</span>
       </div>
       <a href="/logout" class="btn-logout">Sign Out</a>
     </div>
@@ -34,32 +45,116 @@
   <!-- PAGE TITLE BAR -->
   <div class="page-title-bar">
     <div class="page-title-inner">
-      <h1 class="page-title">Quality</h1>
-      <p class="page-subtitle">Inspection, compliance &amp; defect tracking</p>
+      <h1 class="page-title">Quality Nexus</h1>
+      <p class="page-subtitle">Stock inspection &amp; quality blocking Â· Select a function to begin</p>
     </div>
   </div>
 
-  <!-- MAIN CONTENT -->
-  <main class="main-content">
+  <!-- MAIN -->
+  <div class="sap-main pn-main">
 
-    <div class="placeholder-panel">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 28 28" fill="none"><path d="M14 2L4 6v9c0 5.5 4.3 10.4 10 12 5.7-1.6 10-6.5 10-12V6L14 2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><polyline points="9,14 12.5,17.5 19,11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <!-- TILE GRID -->
+    <div class="tile-section" id="tile-section">
+
+      <!-- Stock Information -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Stock Information</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="displayStock">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="7" width="20" height="14" rx="2"/>
+                <path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/>
+                <line x1="12" y1="12" x2="12" y2="17"/>
+                <line x1="9.5" y1="14.5" x2="14.5" y2="14.5"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Display Stock</div>
+            <div class="tile-desc">View warehouse stock Â· right-click to block or unblock</div>
+          </div>
+
+        </div>
       </div>
-      <div class="placeholder-title">Quality — Coming Soon</div>
-      <div class="placeholder-body">
-        This area is reserved for the Quality department.<br>
-        Content, tools and reports will be added here.
+
+      <!-- Quality Blocking â€” requires QUAL_BLOCKING permission -->
+      <div class="pn-section" data-permission="QUAL_BLOCKING">
+        <div class="pn-section-hdr">Quality Blocking</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="blockStock">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Block Stock</div>
+            <div class="tile-desc">Move stock to quality inspection via MB1B movement 344</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="unblockStock">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2L4 6v9c0 5.5 4.3 10.4 10 12 5.7-1.6 10-6.5 10-12V6L14 2Z"/>
+                <polyline points="9,14 12.5,17.5 19,11"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Unblock Stock</div>
+            <div class="tile-desc">Release stock from quality inspection via MB1B movement 343</div>
+          </div>
+
+        </div>
       </div>
-      <a href="./landing.html" class="btn-back">← Return to Hub</a>
+
+    </div><!-- /tile-section -->
+
+    <!-- RESULT PANEL -->
+    <div class="result-section hidden" id="result-section">
+      <div class="result-toolbar">
+        <button type="button" class="btn-back-tiles" onclick="backToTiles()">&larr; Functions</button>
+        <div class="result-title-wrap">
+          <div class="toolbar-title" id="result-title">â€”</div>
+          <div class="toolbar-hint"  id="result-hint"></div>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <div class="row-badge hidden" id="result-row-badge"></div>
+      </div>
+      <div class="result-body" id="result-body">
+        <div class="sap-loading"><div class="spinner"></div>Loadingâ€¦</div>
+      </div>
     </div>
 
-  </main>
+  </div><!-- /sap-main -->
+
+  <!-- Right-click context menu -->
+  <div class="ctx-menu hidden" id="ctx-menu">
+    <div class="ctx-item ctx-item--block hidden" id="ctx-block">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+        stroke-linecap="round"><circle cx="8" cy="8" r="6"/><line x1="3.1" y1="3.1" x2="12.9" y2="12.9"/></svg>
+      Block Stock
+    </div>
+    <div class="ctx-item ctx-item--unblock hidden" id="ctx-unblock">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+        stroke-linecap="round"><path d="M8 1L2 3.5v5.2c0 3.1 2.5 5.8 6 6.8 3.5-1 6-3.7 6-6.8V3.5L8 1z"/><polyline points="5,8.5 7.2,10.5 11,7"/></svg>
+      Unblock Stock
+    </div>
+  </div>
+
+  <!-- Modal overlay -->
+  <div class="ps-modal-overlay hidden" id="modal-overlay"></div>
 
   <footer class="footer">
     <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
     <span class="footer-right">Quality</span>
   </footer>
 
+  <script src="./js/quality.js"></script>
 </body>
 </html>

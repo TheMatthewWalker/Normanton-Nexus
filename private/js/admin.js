@@ -41,10 +41,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.querySelector('[data-section="audit"]')
     .addEventListener('click', () => { if (!allAuditLoaded) loadAudit(); }, { once: true });
 
+  // Load notification history when that section is first opened
+  document.querySelector('[data-section="notifications"]')
+    .addEventListener('click', () => { loadNotifHistory(); setupNotifSend(); }, { once: true });
+
   // Load permissions when that section is first opened (superadmin only)
   const permNav = document.getElementById('nav-permissions');
   if (permNav) {
     permNav.addEventListener('click', () => { if (!allPermissionsLoaded) loadPermissions(); }, { once: true });
+  }
+
+  // Load scheduled deployments when that section is first opened (superadmin only)
+  const deployNav = document.getElementById('nav-deployments');
+  if (deployNav) {
+    deployNav.addEventListener('click', () => { setupDeploySection(); }, { once: true });
   }
 });
 
@@ -65,6 +75,10 @@ function applyRoleVisibility() {
   // Show permissions nav only for superadmin
   const permNav = document.getElementById('nav-permissions');
   if (permNav) permNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
+
+  // Show deployments nav only for superadmin
+  const deployNav = document.getElementById('nav-deployments');
+  if (deployNav) deployNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -717,7 +731,7 @@ async function runSql() {
   resultEl.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Running…</div>';
 
   try {
-    const res  = await fetch('/query', {
+    const res  = await fetch('/sql/query', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ query }),
@@ -771,4 +785,279 @@ function setupSqlConsole() {
       if (exportBtn2) exportBtn2.style.display = 'none';
     });
   }
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+const SEV_LABELS = { 1: 'Info', 2: 'Warning', 3: 'Critical' };
+const SEV_COLOURS = { 1: 'var(--accent,#3b82f6)', 2: '#D97706', 3: '#DC2626' };
+let notifTargetDataLoaded = false;
+
+async function loadNotifHistory() {
+  const wrap = document.getElementById('notif-history-wrap');
+  wrap.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Loading…</div>';
+  try {
+    const data = await api('/api/notifications/admin');
+    if (!data.success) throw new Error(data.error);
+    const rows = data.data || [];
+    if (!rows.length) {
+      wrap.innerHTML = '<div class="empty-state">No notifications sent yet.</div>';
+      return;
+    }
+
+    const tbody = rows.map(n => {
+      const pct = n.TotalSent > 0 ? Math.round((n.TotalRead / n.TotalSent) * 100) : 0;
+      const sev = `<span style="display:inline-flex;align-items:center;gap:5px">
+        <span style="width:8px;height:8px;border-radius:50%;background:${SEV_COLOURS[n.Severity] || '#888'};flex-shrink:0"></span>
+        ${esc(SEV_LABELS[n.Severity] || n.Severity)}
+      </span>`;
+      const target = n.TargetType === 'all'
+        ? 'All users'
+        : `${n.TargetType}: ${n.TargetValue || '—'}`;
+      const expire = n.ExpiresAt ? fmtDate(n.ExpiresAt) : '—';
+      return `<tr>
+        <td style="font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-dim);white-space:nowrap">${fmtDate(n.CreatedAt)}</td>
+        <td><strong style="font-size:13px">${esc(n.Title)}</strong>${n.Category ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(n.Category)}</span>` : ''}</td>
+        <td>${sev}</td>
+        <td style="font-size:12px;color:var(--text-dim)">${esc(target)}</td>
+        <td style="font-size:13px;text-align:center">${n.TotalSent}</td>
+        <td style="font-size:13px;text-align:center">${n.TotalRead} <span style="font-size:11px;color:var(--text-muted)">(${pct}%)</span></td>
+        <td style="font-size:12px;color:var(--text-dim)">${expire}</td>
+        <td>
+          <button class="btn-secondary notif-expire-btn" data-id="${n.NotificationID}"
+            style="font-size:11.5px;padding:4px 10px;color:#DC2626;border-color:rgba(220,38,38,0.3)"
+            ${n.ExpiresAt && new Date(n.ExpiresAt) < new Date() ? 'disabled title="Already expired"' : ''}>
+            Expire
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `<div class="nh-table-wrap">
+      <table class="nh-table">
+        <thead><tr>
+          <th>Sent</th><th>Title</th><th>Severity</th><th>Target</th>
+          <th style="text-align:center">Sent To</th><th style="text-align:center">Read</th>
+          <th>Expires</th><th></th>
+        </tr></thead>
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
+
+    wrap.querySelectorAll('.notif-expire-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Expire this notification immediately? It will disappear from all trays.')) return;
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          const r = await api(`/api/notifications/admin/${btn.dataset.id}`, 'DELETE');
+          if (!r.success) throw new Error(r.error);
+          loadNotifHistory();
+        } catch (err) { btn.disabled = false; btn.textContent = 'Expire'; alert(err.message); }
+      });
+    });
+  } catch (err) {
+    wrap.innerHTML = `<div class="empty-state" style="color:var(--error)">${esc(err.message)}</div>`;
+  }
+}
+
+async function setupNotifSend() {
+  if (notifTargetDataLoaded) return;
+  notifTargetDataLoaded = true;
+
+  // Load departments + permissions for dropdowns
+  try {
+    const data = await api('/api/notifications/admin/targets');
+    if (data.success) {
+      const { departments, permissions } = data.data;
+
+      const deptOpts = departments.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('');
+      const permOpts = permissions.map(p => `<option value="${esc(p.PermissionCode)}">${esc(p.PermissionName)} (${esc(p.PermissionCode)})</option>`).join('');
+
+      document.getElementById('notif-target-type').addEventListener('change', function () {
+        const tv     = document.getElementById('notif-target-value');
+        const ts     = document.getElementById('notif-target-select');
+        const tLabel = document.querySelector('#notif-target-value-wrap label');
+
+        tv.style.display = 'none'; ts.style.display = 'none'; tv.value = ''; ts.innerHTML = '';
+
+        switch (this.value) {
+          case 'all':
+            tLabel.textContent = '—';
+            break;
+          case 'role':
+            ts.innerHTML = '<option value="operator">Operator</option><option value="admin">Admin</option><option value="superadmin">Superadmin</option>';
+            ts.style.display = ''; tLabel.textContent = 'Role';
+            break;
+          case 'department':
+            ts.innerHTML = deptOpts;
+            ts.style.display = ''; tLabel.textContent = 'Department';
+            break;
+          case 'permission':
+            ts.innerHTML = permOpts;
+            ts.style.display = ''; tLabel.textContent = 'Permission';
+            break;
+          case 'user':
+            tv.placeholder = 'Username'; tv.style.display = ''; tLabel.textContent = 'Username';
+            break;
+        }
+      });
+    }
+  } catch (_) {}
+
+  document.getElementById('notif-refresh-btn').addEventListener('click', loadNotifHistory);
+
+  document.getElementById('notif-send-btn').addEventListener('click', async () => {
+    const btn    = document.getElementById('notif-send-btn');
+    const result = document.getElementById('notif-send-result');
+    const type   = document.getElementById('notif-target-type').value;
+    const tv     = document.getElementById('notif-target-value');
+    const ts     = document.getElementById('notif-target-select');
+    const value  = type === 'all' ? null : (tv.style.display !== 'none' ? tv.value.trim() : ts.value);
+
+    const body = {
+      title:       document.getElementById('notif-title').value.trim(),
+      body:        document.getElementById('notif-body').value.trim(),
+      severity:    Number(document.getElementById('notif-severity').value),
+      category:    document.getElementById('notif-category').value.trim() || null,
+      actionLabel: document.getElementById('notif-action-label').value.trim() || null,
+      actionURL:   document.getElementById('notif-action-url').value.trim()   || null,
+      expiresAt:   document.getElementById('notif-expires').value             || null,
+      target:      { type, value },
+    };
+
+    if (!body.title || !body.body) {
+      result.style.color = 'var(--error)'; result.textContent = 'Title and message body are required.'; return;
+    }
+    if (type !== 'all' && !value) {
+      result.style.color = 'var(--error)'; result.textContent = 'Select or enter a target value.'; return;
+    }
+
+    btn.disabled = true; btn.textContent = 'Sending…'; result.textContent = '';
+    try {
+      const r = await api('/api/notifications/admin', 'POST', body);
+      if (!r.success) throw new Error(r.error);
+      result.style.color = 'var(--accent)';
+      result.textContent = `✓ Sent to ${r.data.recipients} recipient${r.data.recipients !== 1 ? 's' : ''}`;
+      // Reset form
+      ['notif-title','notif-body','notif-category','notif-action-label','notif-action-url','notif-expires'].forEach(id => {
+        document.getElementById(id).value = '';
+      });
+      loadNotifHistory();
+    } catch (err) {
+      result.style.color = 'var(--error)'; result.textContent = err.message;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Send Notification';
+    }
+  });
+}
+
+// ── Scheduled Deployments (superadmin only) ──────────────────────────────────
+let deploySectionSetup = false;
+
+async function loadDeployments() {
+  const tbody = document.getElementById('deploy-tbody');
+  tbody.innerHTML = '<tr><td colspan="7" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
+  try {
+    const data = await api('/api/deploy');
+    renderDeployments(data.deployments || []);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="loading-cell">✕ ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function renderDeployments(rows) {
+  const tbody = document.getElementById('deploy-tbody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No deployments scheduled yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(d => {
+    const result = d.Status === 'failed'
+      ? `<span style="color:var(--error)">${esc((d.ErrorMessage || '').slice(0, 120))}</span>`
+      : d.Status === 'completed'
+        ? '<span style="color:var(--success)">OK</span>'
+        : '—';
+
+    const cancelBtn = d.Status === 'pending'
+      ? `<button class="btn-icon btn-icon--delete" title="Cancel" onclick="cancelDeployment(${d.DeploymentID})">✕</button>`
+      : '';
+
+    return `
+      <tr>
+        <td>${formatDateTime(d.ScheduledAt)}</td>
+        <td><span style="font-family:'JetBrains Mono',monospace">${esc(d.GitRef)}</span></td>
+        <td><span class="badge dep-status--${esc(d.Status)}">${esc(d.Status)}</span></td>
+        <td style="max-width:260px">${d.Notes ? esc(d.Notes) : '<span style="color:var(--text-muted)">—</span>'}</td>
+        <td>${esc(d.CreatedByUsername || '—')}</td>
+        <td style="max-width:220px;font-size:11px">${result}</td>
+        <td style="text-align:center">${cancelBtn}</td>
+      </tr>`;
+  }).join('');
+}
+
+async function scheduleDeployment() {
+  const btn    = document.getElementById('deploy-schedule-btn');
+  const result = document.getElementById('deploy-schedule-result');
+  const whenEl = document.getElementById('deploy-when');
+
+  const scheduledAt    = whenEl.value;
+  const gitRef          = document.getElementById('deploy-branch').value.trim() || 'main';
+  const warningMinutes  = document.getElementById('deploy-warning').value;
+  const notes           = document.getElementById('deploy-notes').value.trim();
+
+  if (!scheduledAt) {
+    result.style.color = 'var(--error)'; result.textContent = 'Pick a date and time.'; return;
+  }
+
+  btn.disabled = true; btn.textContent = 'Scheduling…'; result.textContent = '';
+  try {
+    await api('/api/deploy', 'POST', {
+      // Sent as the raw "YYYY-MM-DDTHH:mm" value straight from the datetime-
+      // local input — NOT converted via toISOString(), which would shift it to
+      // UTC and cause it to trigger at the wrong local time server-side (SQL
+      // Server's GETDATE(), which the cron checker compares against, has no
+      // timezone concept and just returns the server's local wall-clock time).
+      scheduledAt,
+      gitRef, warningMinutes: Number(warningMinutes) || 15, notes: notes || null,
+    });
+    result.style.color = 'var(--accent)';
+    result.textContent = '✓ Deployment scheduled';
+    whenEl.value = '';
+    document.getElementById('deploy-notes').value = '';
+    await loadDeployments();
+  } catch (err) {
+    result.style.color = 'var(--error)';
+    result.textContent = err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Schedule Deployment';
+  }
+}
+
+async function cancelDeployment(id) {
+  if (!confirm('Cancel this scheduled deployment?')) return;
+  try {
+    await api(`/api/deploy/${id}/cancel`, 'POST');
+    showToast('Deployment cancelled', 'success');
+    await loadDeployments();
+  } catch (err) {
+    showToast('Cancel failed: ' + err.message, 'error');
+  }
+}
+
+function setupDeploySection() {
+  if (deploySectionSetup) return;
+  deploySectionSetup = true;
+  document.getElementById('deploy-schedule-btn').addEventListener('click', scheduleDeployment);
+  document.getElementById('deploy-refresh-btn').addEventListener('click', loadDeployments);
+  loadDeployments();
+}
+
+function fmtDate(dt) {
+  if (!dt) return '—';
+  return new Date(dt).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

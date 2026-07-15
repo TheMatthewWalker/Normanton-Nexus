@@ -50,7 +50,7 @@ body::before {
 
 /* ── HEADER ──────────────────────────────────────────────────────────────── */
 .header {
-  position: relative; z-index: 100;
+  position: sticky; top: 0; z-index: 100;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   height: 52px;
@@ -359,6 +359,49 @@ body::before {
   background: var(--accent); color: #fff;
   transform: translateX(2px);
 }
+
+/* ── PRODUCTION NEXUS SPARKLINE ──────────────────────────────────────────── */
+.dept-spark {
+  border-top: 1px solid var(--border);
+  padding-top: 9px;
+  flex-shrink: 0;
+}
+
+.dept-spark-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.dept-spark-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+
+.dept-spark-svg {
+  display: block;
+  width: 100%;
+  height: 28px;
+}
+
+.dept-spark-delta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.dept-spark-delta--up   { color: var(--success); background: rgba(5,150,105,0.1); }
+.dept-spark-delta--down { color: var(--error);   background: rgba(220,38,38,0.1); }
+.dept-spark-delta--flat { color: var(--text-muted); background: var(--surface3); }
 
 /* ── FOOTER ──────────────────────────────────────────────────────────────── */
 .footer {

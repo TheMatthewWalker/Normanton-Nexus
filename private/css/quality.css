@@ -41,7 +41,7 @@ body::before {
 
 /* ── HEADER ──────────────────────────────────────────────────────────────── */
 .header {
-  position: relative; z-index: 100;
+  position: sticky; top: 0; z-index: 100;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   height: 52px; padding: 0 32px;
@@ -214,3 +214,184 @@ body::before {
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
+
+/* ── STOCK TABLE ─────────────────────────────────────────────────────────── */
+.pn-batch-table-wrap { overflow-x: auto; }
+
+.q-stock-table tbody tr.q-row { cursor: context-menu; }
+.q-stock-table tbody tr.q-row:hover td { background: var(--accent-dim); }
+.q-stock-table tbody tr.q-row--blocked td { background: rgba(220,38,38,0.04); }
+.q-stock-table tbody tr.q-row--blocked:hover td { background: rgba(220,38,38,0.09); }
+
+/* Stock category badges */
+.q-badge {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 2px 8px; border-radius: 4px;
+}
+.q-badge--blocked { background: rgba(220,38,38,0.12); color: #DC2626; }
+.q-badge--free    { background: rgba(5,150,105,0.1);  color: #059669; }
+
+/* ── CONTEXT MENU ────────────────────────────────────────────────────────── */
+.ctx-menu { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(30,45,69,0.18); padding: 4px; min-width: 160px;
+  position: fixed; z-index: 5000; }
+.ctx-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px; border-radius: 5px;
+  font-size: 13px; cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.ctx-item svg { width: 14px; height: 14px; flex-shrink: 0; }
+.ctx-item--block   { color: #DC2626; }
+.ctx-item--block:hover   { background: rgba(220,38,38,0.08); }
+.ctx-item--unblock { color: #059669; }
+.ctx-item--unblock:hover { background: rgba(5,150,105,0.08); }
+
+/* ── PAGINATION ──────────────────────────────────────────────────────────── */
+.q-pagination {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface2);
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+}
+.q-page-info { color: var(--text-muted); white-space: nowrap; }
+.q-page-controls { display: flex; align-items: center; gap: 3px; }
+
+.q-page-btn {
+  min-width: 30px; height: 26px; padding: 0 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text-dim);
+  cursor: pointer; transition: border-color 0.12s, color 0.12s, background 0.12s;
+  white-space: nowrap;
+}
+.q-page-btn:hover:not(:disabled):not(.q-page-btn--ellipsis) {
+  border-color: var(--accent); color: var(--accent);
+}
+.q-page-btn.active  { background: var(--accent); color: #fff; border-color: var(--accent); }
+.q-page-btn:disabled { opacity: 0.38; cursor: default; }
+.q-page-btn--ellipsis { border: none; background: none; cursor: default; pointer-events: none; }
+
+.q-page-size {
+  margin-left: auto; display: flex; align-items: center; gap: 6px;
+  color: var(--text-muted);
+}
+.q-page-size select {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text); cursor: pointer;
+}
+.q-page-size select:focus { outline: none; border-color: var(--accent); }
+
+/* ── FORM HELPERS (not in logistics.css) ────────────────────────────────── */
+.tf-req      { color: var(--error); margin-left: 2px; }
+.tf-optional { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 4px; }
+
+.tf-actions {
+  display: flex; align-items: center; gap: 10px; justify-content: flex-end;
+  padding-top: 16px; border-top: 1px solid var(--border);
+}
+
+.tf-success {
+  display: flex; align-items: flex-start; gap: 12px;
+  background: var(--green-dim, #D1FAE5);
+  border: 1px solid rgba(5,150,105,0.25);
+  border-radius: 8px; padding: 14px 16px; margin-top: 12px;
+  color: #065F46;
+}
+.tf-success svg       { width: 22px; height: 22px; flex-shrink: 0; }
+.tf-success-title     { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.tf-success-to        { font-family: 'JetBrains Mono', monospace; font-size: 11px; opacity: 0.85; }
+
+/* ── BLOCK/UNBLOCK FORM BUTTONS ──────────────────────────────────────────── */
+.btn-danger-solid  { background: #DC2626 !important; }
+.btn-danger-solid:hover  { background: #B91C1C !important; }
+.btn-success-solid { background: #059669 !important; }
+.btn-success-solid:hover { background: #047857 !important; }
+
+/* ── SELECTION BAR ───────────────────────────────────────────────────────── */
+.q-selection-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 14px;
+  background: #EFF6FF;
+  border-bottom: 1px solid #BFDBFE;
+}
+
+.q-sel-info {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  color: #1D4ED8;
+  white-space: nowrap;
+}
+
+.q-bulk-btn {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px; font-weight: 600;
+  padding: 5px 14px;
+  border: none; border-radius: 5px;
+  color: #fff; cursor: pointer;
+  transition: background 0.15s;
+}
+.q-bulk-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Checked row highlight */
+.q-stock-table tbody tr.q-row--checked td { background: rgba(59,130,246,0.06); }
+.q-stock-table tbody tr.q-row--checked:hover td { background: rgba(59,130,246,0.12); }
+
+/* ── PROGRESS MODAL ──────────────────────────────────────────────────────── */
+.ps-modal-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.q-prog-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.q-prog-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+}
+
+.q-prog-pct {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-muted);
+}
+
+.q-prog-bar-wrap {
+  height: 8px; border-radius: 4px;
+  background: var(--border);
+  overflow: hidden; margin-bottom: 14px;
+}
+
+.q-prog-bar {
+  height: 100%; border-radius: 4px;
+  background: var(--success);
+  transition: width 0.25s ease;
+}
+.q-prog-bar--block { background: var(--accent); }
+.q-prog-bar--done  { background: var(--success) !important; }
+
+.q-prog-results {
+  max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface2);
+}
+
+.q-prog-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 6px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+}
+.q-prog-item:last-child { border-bottom: none; }
+
+.q-prog-item--ok  { color: var(--success); }
+.q-prog-item--err { color: var(--error); }

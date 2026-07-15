@@ -1,6 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
+import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -50,6 +51,33 @@ router.post('/', async (req, res) => {
         res.status(201).json({ message: 'Record created successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Update record ──
+router.put('/:packId', requirePermission('LOG_ADMIN'), async (req, res) => {
+    try {
+        const { packDescription, packMaterial, packWeight, packLength, packWidth, packHeight } = req.body;
+        const pool = await getPool();
+        await pool.request()
+            .input('packId',          sql.NVarChar,  req.params.packId)
+            .input('packDescription', sql.NVarChar,  packDescription)
+            .input('packMaterial',    sql.NVarChar,  packMaterial)
+            .input('packWeight',      sql.Decimal,   packWeight)
+            .input('packLength',      sql.Int,        packLength)
+            .input('packWidth',       sql.Int,        packWidth)
+            .input('packHeight',      sql.Int,        packHeight)
+            .query(`UPDATE Logistics.dbo.PackagingData
+                    SET packDescription = @packDescription,
+                        packMaterial    = @packMaterial,
+                        packWeight      = @packWeight,
+                        packLength      = @packLength,
+                        packWidth       = @packWidth,
+                        packHeight      = @packHeight
+                    WHERE packID = @packId`);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 

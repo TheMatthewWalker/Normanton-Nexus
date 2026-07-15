@@ -17,7 +17,8 @@ import express      from 'express';
 import bcrypt       from 'bcrypt';
 import sql          from 'mssql';
 import rateLimit    from 'express-rate-limit';
-import { sqlConfig } from '../server.js';
+import { sqlConfig } from '../config.js';
+import { notify }    from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -261,6 +262,16 @@ router.post('/register', registerLimiter, async (req, res) => {
               VALUES (@username, @firstName, @lastName, @email, @hash, 'operator', 0)`);
 
     await audit('REGISTER', username, `Registration request submitted by ${firstClean} ${lastClean} — pending approval`, req);
+
+    sql.connect(sqlConfig).then(pool => notify(pool, {
+      title:       'New User Registration',
+      body:        `${firstClean} ${lastClean} (${username}) has requested an account — pending approval.`,
+      severity:    1,
+      category:    'system',
+      actionLabel: 'Review Users',
+      actionURL:   '/private/admin.html',
+      target:      { type: 'role', value: 'admin' },
+    })).catch(() => {});
 
     res.json({
       success: true,

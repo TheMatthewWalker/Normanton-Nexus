@@ -4,3 +4,8 @@ config.json
 hidden
 .env
 manual
+certs
+test.http
+debug
+.deploykey
+deploy-runner.log

@@ -13,8 +13,41 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function api(path, opts) {
-  return fetch('/api/productionnexus' + path, opts).then(r => r.json());
+// Throws on HTTP errors and on { success: false } bodies so a rejected request
+// can never fall through to a caller's success rendering (e.g. profit-centre
+// 400s previously showed "posted successfully — MatDoc: —").
+async function api(path, opts) {
+  const r = await fetch('/api/productionnexus' + path, opts);
+  let json = null;
+  try { json = await r.json(); } catch { /* non-JSON body */ }
+  if (json?.success === false || !r.ok) {
+    throw new Error(json?.error || `Request failed (HTTP ${r.status})`);
+  }
+  return json;
+}
+
+function wConfirm({ title, message, confirmText = 'Confirm', variant = '' }) {
+  return new Promise(resolve => {
+    document.getElementById('wc-pn-modal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'wc-pn-modal'; overlay.className = 'wc-overlay';
+    const icon = variant === 'danger' ? '⚠' : variant === 'success' ? '✓' : '?';
+    overlay.innerHTML = `
+      <div class="wc-modal">
+        <div class="wc-icon">${icon}</div>
+        <div class="wc-title">${esc(title)}</div>
+        <div class="wc-message">${esc(message).replace(/\n/g, '<br>')}</div>
+        <div class="wc-actions">
+          <button class="wc-btn-cancel">Cancel</button>
+          <button class="wc-btn-confirm${variant ? ' wc-btn-confirm--' + variant : ''}">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = r => { overlay.remove(); resolve(r); };
+    overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => close(false));
+    overlay.querySelector('.wc-btn-confirm').addEventListener('click', () => close(true));
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+  });
 }
 
 function fmt(dt) {
@@ -67,6 +100,11 @@ function stateColor(s) {
     if (!session.loggedIn) { window.location.href = '/'; return; }
     document.getElementById('session-user').textContent = session.username;
     applyRoleVisibility(session.role, session.permissions || []);
+    const perms = session.permissions || [];
+    if (session.role === 'superadmin' || perms.includes('PROD_SUPERVISOR')) {
+      pollFailedBackflushCount();
+      setInterval(pollFailedBackflushCount, 60000);
+    }
   } catch { window.location.href = '/'; }
 })();
 
@@ -138,6 +176,7 @@ function openFunction(fn) {
     postedScrap:     ['Posted Scrap',      'Approved and SAP-posted scrap summary by work centre and reason'],
     failedBackflush: ['Failed Backflush',  'Records saved locally but rejected by SAP'],
     sapReversals:    ['SAP Reversals',     'Search by material document or batch ref — select and bulk-reverse postings'],
+    scrapReversal:   ['Scrap Reversal',    'Search and reverse SAP scrap documents · alerts on missed reversals from reversed backflushes'],
     reportOutput:    ['Production Output',  'Metres and KG produced by process, over time'],
     reportScrap:     ['Scrap Analysis',     'Scrap KG by reason, process and trend'],
     reportSapPerf:   ['SAP Performance',    'Backflush success rate, failures and 190 alerts'],
@@ -169,11 +208,13 @@ function openFunction(fn) {
     coverlineData:   runCoverlineData,
     tapewrapData:    runTapeWrapData,
     batchHistory:    runBatchHistory,
+    openRuns:        runOpenRuns,
     traceability:    runTraceability,
     approveScrap:    runApproveScrap,
     postedScrap:     runPostedScrap,
     failedBackflush: runFailedBackflush,
     sapReversals:    runSapReversals,
+    scrapReversal:   runScrapReversal,
     reportOutput:    runReportOutput,
     reportScrap:     runReportScrap,
     reportSapPerf:   runReportSapPerf,
@@ -192,6 +233,99 @@ function backToTiles() {
   document.getElementById('tile-section').classList.remove('hidden');
   document.getElementById('result-row-badge').classList.add('hidden');
   currentFn = null;
+}
+
+// ── Server-side label printing ────────────────────────────────────────────────
+let _printerCache = null;  // { printers: [...], userDefault: string|null }
+
+async function labelPrint(processCode, recordID, btnEl) {
+  const origText = btnEl.textContent;
+  btnEl.disabled = true;
+  btnEl.textContent = 'Loading…';
+
+  const reset = (msg, color = '', delay = 2500) => {
+    btnEl.textContent = msg; btnEl.style.color = color;
+    setTimeout(() => { btnEl.textContent = origText; btnEl.disabled = false; btnEl.style.color = ''; }, delay);
+  };
+
+  try {
+    if (!_printerCache) {
+      const r = await fetch('/api/labels/printers').then(r => r.json());
+      _printerCache = { printers: r.data || [], userDefault: r.userDefault || null };
+    }
+    const { printers, userDefault } = _printerCache;
+
+    if (!printers.length) { reset('No printers configured', 'var(--error)', 3500); return; }
+
+    // Priority: user personal default → process-code match → first printer
+    const defaultId =
+      (userDefault && printers.find(p => p.id === userDefault)) ? userDefault :
+      (printers.find(p => p.id === processCode)?.id ?? printers[0].id);
+
+    let printerId;
+    if (printers.length === 1) {
+      printerId = printers[0].id;
+    } else {
+      // Inline picker pre-selected to the resolved default
+      const sel = document.createElement('select');
+      sel.className = 'tf-input';
+      sel.style.cssText = 'width:150px;font-size:12px;padding:3px 6px;display:inline-block';
+      printers.forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.id; o.textContent = p.name;
+        if (p.id === defaultId) o.selected = true;
+        sel.appendChild(o);
+      });
+
+      // "Save as default" checkbox
+      const chkWrap = document.createElement('label');
+      chkWrap.style.cssText = 'font-size:11px;color:var(--text-muted);cursor:pointer;margin-left:6px;white-space:nowrap;vertical-align:middle';
+      const chk = document.createElement('input');
+      chk.type = 'checkbox'; chk.style.marginRight = '3px'; chk.style.verticalAlign = 'middle';
+      chkWrap.appendChild(chk);
+      chkWrap.appendChild(document.createTextNode('Set as default'));
+
+      const sendBtn = document.createElement('button');
+      sendBtn.className = 'btn-submit';
+      sendBtn.textContent = '🖨 Send';
+      sendBtn.style.cssText = 'font-size:12px;padding:4px 10px;margin-left:6px';
+
+      btnEl.replaceWith(sel);
+      sel.insertAdjacentElement('afterend', chkWrap);
+      chkWrap.insertAdjacentElement('afterend', sendBtn);
+
+      printerId = await new Promise(resolve => {
+        sendBtn.addEventListener('click', () => {
+          sendBtn.disabled = true; sendBtn.textContent = 'Sending…';
+          resolve(sel.value);
+        });
+      });
+
+      // Persist default if checked (fire-and-forget; invalidate cache)
+      if (chk.checked) {
+        _printerCache = null;
+        fetch('/api/labels/printers/default', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ printerId }),
+        }).catch(() => {});
+      }
+
+      sendBtn.remove(); chkWrap.remove();
+      sel.replaceWith(btnEl);
+    }
+
+    btnEl.textContent = 'Sending…';
+    const res = await fetch(`/api/labels/process/${processCode}/${recordID}/print`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ printerId }),
+    }).then(r => r.json());
+
+    const printerName = printers.find(p => p.id === printerId)?.name || printerId;
+    if (res.success) reset(`✓ Sent to ${printerName}`, 'var(--accent)');
+    else             reset(`✗ ${res.error}`, 'var(--error)', 4000);
+  } catch (err) {
+    reset(`✗ ${err.message}`, 'var(--error)', 4000);
+  }
 }
 
 // ── Modal helpers ────────────────────────────────────────────────────────────
@@ -549,29 +683,88 @@ async function runTraceability() {
     const el = document.getElementById('trace-results');
     el.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Tracing…</div>';
     try {
-      // Find the record by ref: search active + history
       const hist = await api(`/history?ref=${encodeURIComponent(ref)}${pc?'&processCode='+pc:''}`);
       const batch = (hist.data || [])[0];
       if (!batch) { el.innerHTML = '<div class="pn-empty">Batch not found.</div>'; return; }
 
       const traceJson = await api(`/trace/${batch.ProcessCode}/${batch.RecordID}`);
-      const chain = traceJson.data || [];
+      const { chain = [], details = {} } = traceJson.data || {};
 
-      if (!chain.length) {
-        el.innerHTML = `<div class="pn-empty"><strong>${esc(batch.BatchRef)}</strong> — no trace links recorded for this batch.</div>`;
-        return;
-      }
+      // Build an ordered, deduplicated list of batches: searched batch first,
+      // then ancestors in depth order up to the root.
+      const seen  = new Set();
+      const nodes = [];
+      const push  = (pc, rid, depth) => {
+        const key = `${pc}-${rid}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        nodes.push({ pc, rid, depth, key });
+      };
 
-      el.innerHTML = `<div style="font-size:13px;margin-bottom:12px">
-        Showing ${chain.length} trace link(s) for <strong>${esc(batch.BatchRef)}</strong></div>
-        <table class="pn-batch-table">
-          <thead><tr><th>Depth</th><th>Child Batch</th><th>Parent Batch</th></tr></thead>
-          <tbody>${chain.map(t => `<tr>
-            <td class="pn-batch-mono">${t.Depth}</td>
-            <td class="pn-batch-ref">${esc(t.ChildProcessCode)}${String(t.ChildRecordID).padStart(8,'0')}</td>
-            <td class="pn-batch-ref">${esc(t.ParentProcessCode)}${String(t.ParentRecordID).padStart(8,'0')}</td>
-          </tr>`).join('')}</tbody>
-        </table>`;
+      push(batch.ProcessCode, batch.RecordID, 0);
+      chain.forEach(t => {
+        push(t.ChildProcessCode,  t.ChildRecordID,  t.Depth);
+        push(t.ParentProcessCode, t.ParentRecordID, t.Depth + 1);
+      });
+
+      const fmtQty = (qty, uom) =>
+        qty != null ? `${Number(qty).toFixed(3)} ${esc(uom || '')}` : '—';
+      const fmtDate = dt => dt ? fmt(dt) : '—';
+
+      const badge = (text, color) =>
+        `<span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;
+          letter-spacing:.5px;padding:2px 7px;border-radius:4px;
+          background:${color}20;color:${color};margin-left:6px">${text}</span>`;
+
+      const rows = nodes.map((n, i) => {
+        const d         = details[n.key] || {};
+        const isStart   = i === 0;
+        const isRoot    = i === nodes.length - 1 && nodes.length > 1;
+        const batchRef  = d.BatchRef  || `${n.pc}${String(n.rid).padStart(8,'0')}`;
+        const rowStyle  = isStart ? 'background:var(--accent-dim)' : '';
+        const label     = isStart ? badge('SEARCHED', 'var(--accent)')
+                        : isRoot  ? badge('ROOT', '#6B7280')
+                        : '';
+
+        return `<tr style="${rowStyle}">
+          <td class="pn-batch-mono" style="white-space:nowrap">
+            ${n.depth}${label}
+          </td>
+          <td>${esc(PROCESS_LABELS[n.pc] || n.pc)}</td>
+          <td class="pn-batch-ref">${esc(batchRef)}</td>
+          <td class="pn-batch-mono">${esc(d.Material || '—')}</td>
+          <td class="pn-batch-mono">${fmtQty(d.Quantity, d.UOM)}</td>
+          <td class="pn-batch-mono">${fmtDate(d.CreatedAt)}</td>
+          <td>${esc(d.Operator || '—')}</td>
+        </tr>`;
+      }).join('');
+
+      const badge2 = document.getElementById('result-row-badge');
+      badge2.textContent = `${nodes.length} component${nodes.length !== 1 ? 's' : ''}`;
+      badge2.classList.remove('hidden');
+
+      const noLinks = chain.length === 0
+        ? `<div style="font-size:12px;color:var(--text-muted);margin-top:10px;
+              font-family:'JetBrains Mono',monospace">
+            No trace links recorded — showing batch details only.
+          </div>`
+        : '';
+
+      el.innerHTML = `
+        <div style="overflow-x:auto">
+          <table class="pn-batch-table">
+            <thead><tr>
+              <th>Level</th>
+              <th>Process</th>
+              <th>Batch Ref</th>
+              <th>Material</th>
+              <th>Quantity</th>
+              <th>Created</th>
+              <th>Operator</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>${noLinks}`;
     } catch (err) { el.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`; }
   });
 }
@@ -1122,14 +1315,6 @@ async function runReportMaterial() {
 // ── METRE PROCESS ENTRY  (EX / CO / BR / CL / TW) ────────────────────────────
 
 async function runMeterProcessEntry(processCode) {
-  const state = {
-    phase: 1,
-    material: '', lengthMetres: null, machineID: null,
-    parentBatches: [], additionalOperators: [],
-    hasScrap: false, scrapTotalKG: 0, scrapReasons: [],
-    notes: '',
-  };
-
   const [wcJson, reasonsJson] = await Promise.all([
     api('/work-centres'),
     api(`/scrap-reasons?pc=${processCode}`),
@@ -1139,239 +1324,540 @@ async function runMeterProcessEntry(processCode) {
     .filter(wc => wc.ProcessCode === processCode && wc.MachineID)
     .sort((a, b) => (a.MachineName||'').localeCompare(b.MachineName||''));
   const reasons = reasonsJson.data || [];
-  const steps   = ['Material & Output', 'Traceability & Operators', 'Scrap', 'Review & Submit'];
 
-  const render = () => {
-    document.getElementById('result-body').innerHTML = `
-      <div style="padding:20px;max-width:600px">
-        <div class="pn-wizard-steps" id="mp-steps"></div>
-        <div id="mp-phase-body"></div>
-        <div style="display:flex;gap:8px;margin-top:16px">
-          ${state.phase > 1 ? `<button class="btn-secondary" id="mp-back">← Back</button>` : ''}
-          <button class="btn-submit" id="mp-next">${state.phase === 4 ? 'Submit & Post to SAP' : 'Next →'}</button>
-          <span id="mp-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
-        </div>
-      </div>`;
+  const body = document.getElementById('result-body');
+  body.innerHTML = `
+    <div style="padding:24px;max-width:580px">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">
+        Choose how you want to record this ${esc(PROCESS_LABELS[processCode]||processCode)} run.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <button id="mp-mode-new" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 16px;text-align:left;cursor:pointer;transition:border-color 0.15s">
+          <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">New Entry</div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">Log the start of a run — material, machine and traceability. Save and close without finishing yet.</div>
+        </button>
+        <button id="mp-mode-complete" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 16px;text-align:left;cursor:pointer;transition:border-color 0.15s">
+          <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Complete Run</div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">Finalise an open entry — add length, operators, scrap and post to SAP.</div>
+        </button>
+      </div>
+    </div>`;
 
-    document.getElementById('mp-steps').innerHTML = steps.map((s, i) => `
-      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;border-radius:20px;
-        background:${i+1===state.phase?'var(--accent)':i+1<state.phase?'rgba(13,148,136,0.15)':'var(--surface2)'};
-        color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
-        border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
+  document.getElementById('mp-mode-new').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
+  document.getElementById('mp-mode-new').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
+  document.getElementById('mp-mode-complete').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
+  document.getElementById('mp-mode-complete').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
 
-    renderMeterProcessPhase(state, machines, reasons, processCode);
-    document.getElementById('mp-next')?.addEventListener('click', () => advanceMeterProcess(state, machines, reasons, processCode, render));
-    document.getElementById('mp-back')?.addEventListener('click', () => { state.phase--; render(); });
-  };
-
-  render();
+  document.getElementById('mp-mode-new').addEventListener('click', () => runNewEntry(processCode, machines));
+  document.getElementById('mp-mode-complete').addEventListener('click', () => runCompleteRun(processCode, machines, reasons));
 }
 
-function renderMeterProcessPhase(state, machines, reasons, processCode) {
-  const body = document.getElementById('mp-phase-body');
+// ── New Entry flow ────────────────────────────────────────────────────────────
 
-  if (state.phase === 1) {
-    body.innerHTML = `
-      <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 1 — Material &amp; Output</div>
-        <div class="tf-field" style="margin-bottom:12px">
-          <label class="tf-label">SAP Material Number</label>
-          <input class="tf-input" id="mp-material" value="${esc(state.material)}" placeholder="e.g. K-NBR-87-1234" autocomplete="off">
+function runNewEntry(processCode, machines) {
+  const state = { material: '', machineID: null, parentBatches: [] };
+
+  const render = () => {
+    const batchTags = state.parentBatches.length
+      ? state.parentBatches.map((pb, i) =>
+          `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
+            ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
+            <button class="ne-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+          </span>`)
+          .join(' ')
+      : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
+
+    document.getElementById('result-body').innerHTML = `
+      <div style="padding:20px;max-width:560px">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">
+          Operator and creation date are recorded automatically.
         </div>
-        <div class="tf-row">
-          <div class="tf-field">
-            <label class="tf-label">Total Length (M)</label>
-            <input class="tf-input" id="mp-length" type="number" step="0.001" min="0.001" placeholder="0.000" value="${state.lengthMetres||''}">
+        <div class="bm-section" style="margin-bottom:14px">
+          <div class="bm-section-title">Starting Info</div>
+          <div class="tf-field" style="margin-bottom:12px">
+            <label class="tf-label">SAP Material Number</label>
+            <input class="tf-input" id="ne-material" value="${esc(state.material)}" autocomplete="off" placeholder="e.g. 
+              ${processCode === 'MX' ? '10101' : ''}
+              ${processCode === 'EX' ? 'TSHV3-4' : ''}
+              ${processCode === 'CO' ? 'TCEL9-9CBT' : ''}
+              ${processCode === 'TW' ? 'MATWV51-2' : ''}
+              ${processCode === 'BR' ? 'TSAV6-8B01' : ''}
+              ${processCode === 'CL' ? 'TSHV3-4B01C01' : ''}
+              ${processCode === 'DR' ? 'SBC16-0B01' : ''}" >
           </div>
           ${machines.length ? `
-          <div class="tf-field">
+          <div class="tf-field" style="margin-bottom:0">
             <label class="tf-label">Machine</label>
-            <select class="tf-input" id="mp-machine">
+            <select class="tf-input" id="ne-machine">
               <option value="">No machine</option>
               ${machines.map(m=>`<option value="${m.MachineID}" ${state.machineID===m.MachineID?'selected':''}>${esc(m.MachineName||m.MachineCode)}</option>`).join('')}
             </select>
           </div>` : ''}
         </div>
+        <div class="bm-section" style="margin-bottom:14px">
+          <div class="bm-section-title">Previous Batch Numbers for Traceability</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Add each input batch this run consumes.</div>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <select class="tf-input" id="ne-parent-pc" style="width:150px">
+              ${Object.entries(PROCESS_LABELS).filter(([k])=>k!==processCode).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+            </select>
+            <input class="tf-input" id="ne-parent-rid" type="number" placeholder="Record ID" style="width:130px">
+            <button class="btn-secondary" id="ne-add-batch">+ Add</button>
+          </div>
+          <div id="ne-batch-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn-secondary" id="ne-back">&larr; Back</button>
+          <button class="btn-submit" id="ne-save">Save &amp; Close</button>
+          <span id="ne-msg" style="font-size:12px;color:var(--error)"></span>
+        </div>
+      </div>`;
+
+    const refreshBatchTags = () => {
+      const el = document.getElementById('ne-batch-tags');
+      if (!el) return;
+      el.innerHTML = state.parentBatches.length
+        ? state.parentBatches.map((pb, i) =>
+            `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
+              ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
+              <button class="ne-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+            </span>`).join(' ')
+        : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
+      el.querySelectorAll('.ne-remove-batch').forEach(btn => {
+        btn.addEventListener('click', () => { state.parentBatches.splice(Number(btn.dataset.idx), 1); refreshBatchTags(); });
+      });
+    };
+    refreshBatchTags();
+
+    document.getElementById('ne-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+    document.getElementById('ne-add-batch').addEventListener('click', () => {
+      const pc  = document.getElementById('ne-parent-pc')?.value;
+      const rid = Number(document.getElementById('ne-parent-rid')?.value);
+      if (!pc || !rid) return;
+      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
+        state.parentBatches.push({ processCode: pc, recordID: rid });
+      document.getElementById('ne-parent-rid').value = '';
+      refreshBatchTags();
+    });
+    document.getElementById('ne-save').addEventListener('click', async () => {
+      const mat = document.getElementById('ne-material')?.value.trim();
+      const msg = document.getElementById('ne-msg');
+      if (!mat) { msg.textContent = 'Material number is required.'; return; }
+
+      state.material  = mat;
+      state.machineID = Number(document.getElementById('ne-machine')?.value) || null;
+
+      const btn = document.getElementById('ne-save');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      msg.textContent = '';
+
+      try {
+        const json = await api(`/process/${processCode}/draft`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches }),
+        });
+        const d = json.data || {};
+        document.getElementById('result-body').innerHTML = `
+          <div style="padding:24px;max-width:480px">
+            <div style="font-size:22px;color:var(--accent);margin-bottom:8px">✓</div>
+            <div style="font-size:15px;font-weight:700;margin-bottom:4px">Entry saved</div>
+            <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+              Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete this run later using <strong>Complete Run</strong>.
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn-secondary" onclick="labelPrint('${processCode}',${d.recordID},this)">🖨 Print Label</button>
+              <button class="btn-secondary" id="ne-another">New Entry</button>
+              <button class="btn-submit" id="ne-done">Done</button>
+            </div>
+          </div>`;
+        document.getElementById('ne-another').addEventListener('click', () => runNewEntry(processCode, machines));
+        document.getElementById('ne-done').addEventListener('click', backToTiles);
+      } catch (err) {
+        msg.textContent = err.message;
+        btn.disabled = false; btn.textContent = 'Save & Close';
+      }
+    });
+  };
+
+  render();
+}
+
+// ── Complete Run flow ─────────────────────────────────────────────────────────
+
+async function runCompleteRun(processCode, machines, reasons) {
+  const body = document.getElementById('result-body');
+  body.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading open entries…</div>';
+
+  let openEntries;
+  try {
+    const json = await api(`/process/${processCode}/open-entries`);
+    openEntries = json.data || [];
+  } catch (err) {
+    body.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+    return;
+  }
+
+  if (!openEntries.length) {
+    body.innerHTML = `
+      <div style="padding:24px;max-width:480px">
+        <div style="font-size:14px;color:var(--text-muted);margin-bottom:16px">
+          No open ${esc(PROCESS_LABELS[processCode]||processCode)} entries found. Create one first using <strong>New Entry</strong>.
+        </div>
+        <button class="btn-secondary" id="cr-back">&larr; Back</button>
+      </div>`;
+    document.getElementById('cr-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+    return;
+  }
+
+  const renderPicker = () => {
+    body.innerHTML = `
+      <div style="padding:20px;max-width:600px">
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Select the open entry you want to complete.</div>
+        <table class="pn-batch-table" style="margin-bottom:14px">
+          <thead><tr><th>Ref</th><th>Material</th><th>Machine</th><th>Created</th><th>By</th><th></th></tr></thead>
+          <tbody>${openEntries.map(e => `
+            <tr>
+              <td class="pn-batch-ref">${esc(e.BatchRef||'')}</td>
+              <td class="pn-batch-mono">${esc(e.Material)}</td>
+              <td>${esc(e.MachineName||e.MachineCode||'—')}</td>
+              <td class="pn-batch-mono">${fmt(e.CreatedAt)}</td>
+              <td>${esc(e.CreatedBy||'—')}</td>
+              <td><button class="btn-submit cr-select-entry" data-idx="${openEntries.indexOf(e)}" style="padding:3px 12px;font-size:12px">Select</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <button class="btn-secondary" id="cr-back">&larr; Back</button>
+      </div>`;
+
+    document.getElementById('cr-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+    document.querySelectorAll('.cr-select-entry').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const entry = openEntries[Number(btn.dataset.idx)];
+        runCompleteWizard(processCode, entry, machines, reasons);
+      });
+    });
+  };
+
+  renderPicker();
+}
+
+function runCompleteWizard(processCode, entry, machines, reasons) {
+  const state = {
+    phase: 1,
+    lengthMetres: null,
+    additionalOperators: [],
+    hasScrap: false, scrapTotalKG: 0, scrapReasons: [],
+    notes: '',
+  };
+
+  const steps = ['Length', 'Operators', 'Scrap', processCode === 'BR' ? 'Review & Save' : 'Review & Submit'];
+
+  const render = () => {
+    const body = document.getElementById('result-body');
+    body.innerHTML = `
+      <div style="padding:20px;max-width:600px">
+        <div style="font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);margin-bottom:12px">
+          ${esc(entry.BatchRef||'')} &nbsp;·&nbsp; ${esc(entry.Material)} &nbsp;·&nbsp; ${esc(entry.MachineName||entry.MachineCode||'No machine')}
+        </div>
+        <div class="pn-wizard-steps" id="cr-steps"></div>
+        <div id="cr-phase-body"></div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn-secondary" id="cr-back">${state.phase === 1 ? '&larr; Back to list' : '&larr; Back'}</button>
+          <button class="btn-submit" id="cr-next">${state.phase === 4 ? (processCode === 'BR' ? 'Save & Complete' : 'Submit & Post to SAP') : 'Next →'}</button>
+          <span id="cr-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
+        </div>
+      </div>`;
+
+    document.getElementById('cr-steps').innerHTML = steps.map((s, i) => `
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;border-radius:20px;
+        background:${i+1===state.phase?'var(--accent)':i+1<state.phase?'rgba(13,148,136,0.15)':'var(--surface2)'};
+        color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
+        border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
+
+    renderCompletePhase(state, entry, reasons, processCode);
+
+    document.getElementById('cr-back').addEventListener('click', () => {
+      if (state.phase === 1) runCompleteRun(processCode, machines, reasons);
+      else { state.phase--; render(); }
+    });
+    document.getElementById('cr-next').addEventListener('click', () => advanceCompleteWizard(state, entry, reasons, processCode, render));
+  };
+
+  render();
+}
+
+function renderCompletePhase(state, entry, reasons, processCode) {
+  const body = document.getElementById('cr-phase-body');
+
+  if (state.phase === 1) {
+    body.innerHTML = `
+      <div class="bm-section" style="margin-bottom:0">
+        <div class="bm-section-title">Step 1 — Length</div>
+        <div class="tf-field">
+          <label class="tf-label">Total Length (M)</label>
+          <input class="tf-input" id="cr-length" type="number" step="0.001" min="0.001" placeholder="0.000" value="${state.lengthMetres||''}" style="width:180px">
+        </div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:8px">Shift is detected automatically from the current time.</div>
       </div>`;
 
   } else if (state.phase === 2) {
-    const batchTags = state.parentBatches.length
-      ? state.parentBatches.map((pb, i) =>
-          `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
-            ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
-            <button class="mp-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-           </span>`).join(' ')
-      : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
-
-    const opTags = state.additionalOperators.map(u =>
-      `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
-        ${esc(u.username)} <button class="mp-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-       </span>`).join(' ');
-
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 2 — Traceability &amp; Operators</div>
-        <div style="margin-bottom:12px">
-          <label class="tf-label">Previous Stage Batches</label>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Add each input batch — this run can consume multiple upstream records.</div>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
-            <select class="tf-input" id="mp-parent-pc" style="width:150px">
-              ${Object.entries(PROCESS_LABELS).filter(([k])=>k!==processCode).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-            </select>
-            <input class="tf-input" id="mp-parent-rid" type="number" placeholder="Record ID" style="width:130px">
-            <button class="btn-secondary" id="mp-add-batch">+ Add</button>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">${batchTags}</div>
+        <div class="bm-section-title">Step 2 — Additional Operators</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">You are already recorded as primary operator. Add anyone else who worked this run.</div>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <input class="tf-input" id="cr-op-q" placeholder="Search username…" style="flex:1">
+          <button class="btn-secondary" id="cr-op-search">Search</button>
         </div>
-        <div>
-          <label class="tf-label">Additional Operators</label>
-          <div style="display:flex;gap:6px;margin-top:4px">
-            <input class="tf-input" id="mp-op-q" placeholder="Search username…" style="flex:1">
-            <button class="btn-secondary" id="mp-op-search">Search</button>
-          </div>
-          <div id="mp-op-results" style="margin-top:6px"></div>
-          <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${opTags}</div>
-        </div>
+        <div id="cr-op-results" style="margin-bottom:8px"></div>
+        <div id="cr-op-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
       </div>`;
 
-    document.getElementById('mp-add-batch')?.addEventListener('click', () => {
-      const pc  = document.getElementById('mp-parent-pc')?.value;
-      const rid = Number(document.getElementById('mp-parent-rid')?.value);
-      if (!pc || !rid) return;
-      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
-        state.parentBatches.push({ processCode: pc, recordID: rid });
-      renderMeterProcessPhase(state, machines, reasons, processCode);
-    });
-    document.querySelectorAll('.mp-remove-batch').forEach(btn => {
-      btn.addEventListener('click', () => { state.parentBatches.splice(Number(btn.dataset.idx), 1); renderMeterProcessPhase(state, machines, reasons, processCode); });
-    });
-    document.querySelectorAll('.mp-remove-op').forEach(btn => {
-      btn.addEventListener('click', () => { state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid)); renderMeterProcessPhase(state, machines, reasons, processCode); });
-    });
-    document.getElementById('mp-op-search')?.addEventListener('click', async () => {
-      const q  = document.getElementById('mp-op-q').value.trim();
-      const el = document.getElementById('mp-op-results');
+    const refreshOpTags = () => {
+      const el = document.getElementById('cr-op-tags');
+      if (!el) return;
+      el.innerHTML = state.additionalOperators.length
+        ? state.additionalOperators.map(u =>
+            `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
+              ${esc(u.username)} <button class="cr-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+            </span>`).join(' ')
+        : '<span style="font-size:12px;color:var(--text-muted)">None added</span>';
+      el.querySelectorAll('.cr-remove-op').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
+          refreshOpTags();
+        });
+      });
+    };
+    refreshOpTags();
+
+    document.getElementById('cr-op-search').addEventListener('click', async () => {
+      const q  = document.getElementById('cr-op-q').value.trim();
+      const el = document.getElementById('cr-op-results');
       const r  = await api(`/users?q=${encodeURIComponent(q)}`);
       el.innerHTML = (r.data||[]).map(u => `
-        <div style="display:flex;justify-content:space-between;padding:3px 0">
+        <div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border)">
           <span style="font-size:13px">${esc(u.DisplayName||u.Username)}</span>
-          <button class="btn-secondary mp-add-op" data-uid="${u.UserID}" data-name="${esc(u.DisplayName||u.Username)}" style="padding:2px 8px;font-size:11px">Add</button>
+          <button class="btn-secondary cr-add-op" data-uid="${u.UserID}" data-name="${esc(u.DisplayName||u.Username)}" style="padding:2px 8px;font-size:11px">Add</button>
         </div>`).join('');
-      el.querySelectorAll('.mp-add-op').forEach(btn => {
+      el.querySelectorAll('.cr-add-op').forEach(btn => {
         btn.addEventListener('click', () => {
           if (!state.additionalOperators.find(u => u.uid === Number(btn.dataset.uid)))
             state.additionalOperators.push({ uid: Number(btn.dataset.uid), username: btn.dataset.name });
-          renderMeterProcessPhase(state, machines, reasons, processCode);
+          refreshOpTags();
         });
       });
     });
 
   } else if (state.phase === 3) {
+    const isDrumming = processCode === 'DR';
+    const isExtrusion = processCode === 'EX';
+    const isConvoluting = processCode === 'CO';
+    const hasScrapBreakdown = !isDrumming;
+    const alwaysScrap = isExtrusion || isConvoluting;
     const reasonRows = state.scrapReasons.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
-        <select class="tf-input mp-scrap-reason" data-idx="${i}" style="flex:1">
+        
+        <select class="tf-input cr-scrap-reason" data-idx="${i}" style="flex:1">
           <option value="">Select reason…</option>
-          ${reasons.map(sr=>`<option value="${sr.ReasonID}" ${Number(r.reasonID)===sr.ReasonID?'selected':''}>${esc(sr.ReasonCode)} — ${esc(sr.ReasonDescription)}</option>`).join('')}
+          ${reasons.map(sr=>`
+            <option value="${sr.ReasonID}" ${Number(r.reasonID)===sr.ReasonID?'selected':''}>
+              ${esc(sr.ReasonCode)} — ${esc(sr.ReasonDescription)}
+            </option>`).join('')}
         </select>
-        <input class="tf-input mp-scrap-occ" type="number" min="1" step="1" value="${r.occurrences||1}" data-idx="${i}" style="width:90px" placeholder="Count">
-        <button class="mp-remove-reason btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>
-      </div>`).join('');
+
+        ${
+          hasScrapBreakdown
+            ? `<input class="tf-input cr-scrap-kg-row" type="number" min="0" step="0.001"
+                value="${r.kg || ''}" data-idx="${i}" style="width:110px"
+                placeholder="KG">`
+            : `<input class="tf-input cr-scrap-occ" type="number" min="1" step="1"
+                value="${r.occurrences||1}" data-idx="${i}" style="width:90px"
+                placeholder="Count">`
+        }
+
+        <button class="cr-remove-reason btn-secondary" data-idx="${i}"
+          style="padding:2px 8px;font-size:11px">×</button>
+
+      </div>
+    `).join('');
+
+    if (alwaysScrap) {
+      state.hasScrap = true
+    }
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 3 — Scrap</div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
-          <input type="checkbox" id="mp-has-scrap" ${state.hasScrap?'checked':''}> Scrap to record for this run
-        </label>
-        <div id="mp-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
-          <div class="tf-field" style="margin-bottom:8px">
-            <label class="tf-label">Total Scrap Weight (KG)</label>
-            <input class="tf-input" id="mp-scrap-kg" type="number" min="0" step="0.001" value="${state.scrapTotalKG||''}" style="width:160px">
-          </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Weight is split proportionally by occurrence count.</div>
-          <div id="mp-reason-rows">${reasonRows}</div>
-          <button class="btn-secondary" id="mp-add-reason" style="margin-top:8px">+ Add Reason</button>
-        </div>
+        <div class="bm-section-title">Step 3 — Scrap</div>
+        ${!alwaysScrap ?
+          `<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
+            <input type="checkbox" id="cr-has-scrap" ${state.hasScrap ? 'checked' : ''}> Scrap to record for this run
+          </label>`
+          : `<input type="hidden" id="cr-has-scrap" value="true">`
+        }
+      <div id="cr-scrap-fields" style="display:${state.hasScrap?'block':'none'}">
+        
+        ${
+          !hasScrapBreakdown
+          ? `
+            <div class="tf-field" style="margin-bottom:8px">
+              <label class="tf-label">Total Scrap Weight (KG)</label>
+              <input class="tf-input" id="cr-scrap-kg" type="number"
+                min="0" step="0.001"
+                value="${state.scrapTotalKG||''}" style="width:160px">
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+              Weight is split proportionally by occurrence count.
+            </div>
+          `
+          : `
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+              Enter scrap weight per reason.
+            </div>
+          `
+        }
+
+        <div id="cr-reason-rows">${reasonRows}</div>
+        <button class="btn-secondary" id="cr-add-reason" style="margin-top:8px">+ Add Reason</button>
       </div>`;
 
-    document.getElementById('mp-has-scrap')?.addEventListener('change', e => {
+    const syncScrapFromDom = () => {
+      state.hasScrap = document.getElementById('cr-has-scrap')?.checked ?? state.hasScrap;
+
+      if (!hasScrapBreakdown) {
+        const kg = document.getElementById('cr-scrap-kg')?.value;
+        if (kg !== '' && kg != null) state.scrapTotalKG = Number(kg);
+      }
+
+      document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
+        const idx = Number(sel.dataset.idx);
+        if (state.scrapReasons[idx]) {
+          state.scrapReasons[idx].reasonID = Number(sel.value);
+        }
+      });
+
+      if (hasScrapBreakdown) {
+        document.querySelectorAll('.cr-scrap-kg-row').forEach(inp => {
+          const idx = Number(inp.dataset.idx);
+          if (state.scrapReasons[idx]) {
+            state.scrapReasons[idx].kg = Number(inp.value) || 0;
+          }
+        });
+      } else {
+        document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
+          const idx = Number(inp.dataset.idx);
+          if (state.scrapReasons[idx]) {
+            state.scrapReasons[idx].occurrences = Number(inp.value) || 1;
+          }
+        });
+      }
+    };
+
+    document.getElementById('cr-has-scrap').addEventListener('change', e => {
       state.hasScrap = e.target.checked;
-      document.getElementById('mp-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
+      document.getElementById('cr-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
     });
-    document.getElementById('mp-add-reason')?.addEventListener('click', () => {
-      state.scrapReasons.push({ reasonID: '', occurrences: 1 });
-      renderMeterProcessPhase(state, machines, reasons, processCode);
+    document.getElementById('cr-add-reason')?.addEventListener('click', () => {
+      syncScrapFromDom();
+      state.scrapReasons.push(
+        hasScrapBreakdown
+          ? { reasonID: '', kg: 0 }
+          : { reasonID: '', occurrences: 1 }
+      );
+      renderCompletePhase(state, entry, reasons, processCode);
     });
-    document.querySelectorAll('.mp-remove-reason').forEach(btn => {
-      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderMeterProcessPhase(state, machines, reasons, processCode); });
+    document.querySelectorAll('.cr-remove-reason').forEach(btn => {
+      btn.addEventListener('click', () => {
+        syncScrapFromDom();
+        state.scrapReasons.splice(Number(btn.dataset.idx), 1);
+        renderCompletePhase(state, entry, reasons, processCode);
+      });
     });
-    document.querySelectorAll('.mp-scrap-reason').forEach(sel => {
+    document.querySelectorAll('.cr-scrap-reason').forEach(sel => {
       sel.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].reasonID = Number(e.target.value); });
     });
-    document.querySelectorAll('.mp-scrap-occ').forEach(inp => {
+    document.querySelectorAll('.cr-scrap-occ').forEach(inp => {
       inp.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].occurrences = Number(e.target.value); });
+    });
+    document.querySelectorAll('.cr-scrap-kg-row').forEach(inp => {
+      inp.addEventListener('change', e => {
+        state.scrapReasons[Number(e.target.dataset.idx)].kg = Number(e.target.value);
+      });
     });
 
   } else if (state.phase === 4) {
-    const machine = machines.find(m => m.MachineID === state.machineID);
+    const isBraiding = processCode === 'BR';
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 4 — Review &amp; Submit</div>
+        <div class="bm-section-title">Step 4 — ${isBraiding ? 'Review &amp; Save' : 'Review &amp; Submit'}</div>
+        ${isBraiding ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Braiding is saved for traceability and labelling only — no SAP backflush. Any scrap entered will go to the Approve Scrap queue as normal.</div>` : ''}
         <div class="tf-field" style="margin-bottom:14px">
           <label class="tf-label">Comments (optional)</label>
-          <input class="tf-input" id="mp-notes" value="${esc(state.notes)}" placeholder="Any notes for this run…">
+          <input class="tf-input" id="cr-notes" value="${esc(state.notes)}" placeholder="Any notes for this run…">
         </div>
-        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px">
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;margin-bottom:10px">
           <div style="font-weight:700;margin-bottom:8px">Summary</div>
-          <div class="pn-batch-mono">Material: ${esc(state.material)}</div>
+          <div class="pn-batch-mono">Entry: ${esc(entry.BatchRef||'')} — ${esc(entry.Material)}</div>
           <div class="pn-batch-mono">Length: ${state.lengthMetres ? Number(state.lengthMetres).toFixed(3)+' M' : '—'}</div>
-          <div class="pn-batch-mono">Machine: ${machine ? esc(machine.MachineName||machine.MachineCode) : 'None'}</div>
-          <div class="pn-batch-mono">Prev batches: ${state.parentBatches.length ? state.parentBatches.map(pb=>`${pb.processCode}${String(pb.recordID).padStart(8,'0')}`).join(', ') : 'None'}</div>
+          <div class="pn-batch-mono">Extra operators: ${state.additionalOperators.length ? state.additionalOperators.map(u=>esc(u.username)).join(', ') : 'None'}</div>
           <div class="pn-batch-mono">Scrap: ${state.hasScrap ? state.scrapTotalKG+' KG across '+state.scrapReasons.length+' reason(s)' : 'None'}</div>
         </div>
-        <div id="mp-submit-result" style="margin-top:10px;font-size:13px"></div>
+        <div id="cr-submit-result" style="font-size:13px"></div>
       </div>`;
   }
 }
 
-async function advanceMeterProcess(state, machines, reasons, processCode, render) {
-  const msg = document.getElementById('mp-msg');
+async function advanceCompleteWizard(state, entry, reasons, processCode, render) {
+  const msg = document.getElementById('cr-msg');
+  const isDrumming = processCode === 'DR';
+  const isExtrusion = processCode === 'EX';
+  const isConvoluting = processCode === 'CO';
+  const hasScrapBreakdown = !isDrumming;
+  const alwaysScrap = isExtrusion || isConvoluting;
   if (msg) msg.textContent = '';
 
   if (state.phase === 1) {
-    const mat = document.getElementById('mp-material')?.value.trim();
-    const len = document.getElementById('mp-length')?.value;
-    if (!mat) { if (msg) msg.textContent = 'Material number is required.'; return; }
+    const len = document.getElementById('cr-length')?.value;
     if (!len || Number(len) <= 0) { if (msg) msg.textContent = 'Total length is required.'; return; }
-    state.material     = mat;
     state.lengthMetres = Number(len);
-    state.machineID    = Number(document.getElementById('mp-machine')?.value) || null;
 
   } else if (state.phase === 2) {
-    // parentBatches + additionalOperators maintained via add/remove buttons
+    // operators maintained via add/remove buttons
 
   } else if (state.phase === 3) {
-    state.hasScrap = document.getElementById('mp-has-scrap')?.checked || false;
+    if (alwaysScrap) {
+      state.hasScrap = document.getElementById('cr-has-scrap')?.value || true;
+    } else {
+      state.hasScrap = document.getElementById('cr-has-scrap')?.checked || false;
+    }
     if (state.hasScrap) {
-      state.scrapTotalKG = Number(document.getElementById('mp-scrap-kg')?.value) || 0;
-      if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Enter total scrap weight.'; return; }
+      state.scrapTotalKG = Number(document.getElementById('cr-scrap-kg')?.value) || 0;
+      if (hasScrapBreakdown) {
+        state.scrapTotalKG = state.scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+      }
+      if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Please ensure scrap weights are entered.'; return; }
+    }
+    const selects = document.querySelectorAll('.cr-scrap-reason');
+    for (const sel of selects) {
+      const value = Number(sel.value);
+      if (!(value > 0)) { if (msg) msg.textContent = 'Select a reason for each scrap entry.'; return; }
     }
 
   } else if (state.phase === 4) {
-    state.notes = document.getElementById('mp-notes')?.value.trim() || '';
-    const submitBtn = document.getElementById('mp-next');
-    const resultEl  = document.getElementById('mp-submit-result');
+    state.notes = document.getElementById('cr-notes')?.value.trim() || '';
+    const submitBtn = document.getElementById('cr-next');
+    const resultEl  = document.getElementById('cr-submit-result');
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
+    if (processCode === 'EX') {
+      state.scrapTotalKG = state.scrapReasons.reduce((s, r) => s + Number(r.kg || 0), 0);
+    }
+
     try {
-      const json = await api(`/process/${processCode}/entry`, {
+      const json = await api(`/process/${processCode}/complete/${entry.RecordID}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          material:              state.material,
           lengthMetres:          state.lengthMetres,
-          machineID:             state.machineID,
-          parentBatches:         state.parentBatches,
           additionalOperatorIDs: state.additionalOperators.map(u => u.uid),
           hasScrap:              state.hasScrap,
           scrapTotalKG:          state.hasScrap ? state.scrapTotalKG : 0,
@@ -1381,17 +1867,24 @@ async function advanceMeterProcess(state, machines, reasons, processCode, render
       });
 
       const d = json.data || {};
+      const printBtn = `<button class="btn-secondary" onclick="labelPrint('${processCode}',${entry.RecordID},this)" style="margin-top:10px;font-size:12px">🖨 Print Label</button>`;
       if (d.status === 'SAP_FAILED') {
         resultEl.style.color = '#D97706';
         resultEl.innerHTML = `⚠ Saved as ${esc(d.batchRef||'')} but SAP failed.<br>
           <span style="font-size:12px">${esc(d.error)}</span><br>
-          <span style="font-size:12px">Now in the Failed Backflush queue for supervisor review.</span>`;
+          <span style="font-size:12px">Now in the Failed Backflush queue for supervisor review.</span><br>${printBtn}`;
+      } else if (processCode === 'BR') {
+        resultEl.style.color = 'var(--accent)';
+        resultEl.innerHTML = `✓ ${esc(d.batchRef||'')} saved — recorded for traceability and labelling.
+          ${state.hasScrap ? `<br><span style="font-size:12px;color:var(--text-muted)">Scrap submitted to the Approve Scrap queue.</span>` : ''}
+          <br>${printBtn}`;
       } else {
         resultEl.style.color = 'var(--accent)';
         resultEl.innerHTML = `✓ ${esc(d.batchRef||'')} posted successfully — MatDoc: ${esc(d.materialDocument||'—')}
-          ${d.warning ? `<br><span style="font-size:12px;color:#D97706">⚠ ${esc(d.warning)}</span>` : ''}`;
+          ${d.warning ? `<br><span style="font-size:12px;color:#D97706">⚠ ${esc(d.warning)}</span>` : ''}
+          <br>${printBtn}`;
       }
-      submitBtn.disabled = false; submitBtn.textContent = 'Submit & Post to SAP';
+      submitBtn.disabled = false; submitBtn.textContent = processCode === 'BR' ? 'Save & Complete' : 'Submit & Post to SAP';
     } catch (err) {
       resultEl.style.color = 'var(--error)';
       resultEl.textContent = err.message;
@@ -1478,7 +1971,10 @@ async function openMeterProcessDetail(processCode, recordID, row) {
         <div class="ps-modal-title">${esc(row?.BatchRef || `${processCode}${String(recordID).padStart(8,'0')}`)}</div>
         <div class="ps-modal-sub">${esc(PROCESS_LABELS[processCode]||processCode)} &nbsp;·&nbsp; ${esc(row?.Material||'')} &nbsp;·&nbsp; ${row?Number(row.LengthMetres).toFixed(3)+' M':''}</div>
       </div>
-      <button class="ps-modal-close" onclick="closeModal()">×</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn-secondary" onclick="labelPrint('${processCode}',${recordID},this)" style="font-size:12px;padding:4px 10px">🖨 Reprint Label</button>
+        <button class="ps-modal-close" onclick="closeModal()">×</button>
+      </div>
     </div>
     <div class="ps-modal-body" id="mpd-detail-body">
       <div class="pn-loading"><div class="spinner"></div>Loading…</div>
@@ -2188,30 +2684,53 @@ async function openScrapDrilldown(processCode, reasonCode, reasonDescription) {
 // ── SAP REVERSALS ─────────────────────────────────────────────────────────────
 
 async function runSapReversals() {
-  let searchMode = 'matdoc'; // 'matdoc' | 'batch'
+  // 'matdoc' | 'batch' | 'material' | 'daterange' | 'operator'
+  let searchMode = 'matdoc';
   let resultRows = [];
 
+  function searchInputsHtml() {
+    switch (searchMode) {
+      case 'matdoc':
+        return `<div class="tf-field"><label class="tf-label">Material Document</label>
+          <input class="tf-input" id="rev-matdoc" placeholder="e.g. 4973004925" style="width:200px" autocomplete="off"></div>`;
+      case 'batch':
+        return `<div class="tf-field"><label class="tf-label">Process</label>
+          <select class="tf-input" id="rev-pc" style="width:150px">
+            ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+          </select></div>
+          <div class="tf-field"><label class="tf-label">Record ID</label>
+          <input class="tf-input" id="rev-rid" type="number" placeholder="Record ID" style="width:140px"></div>`;
+      case 'material':
+        return `<div class="tf-field"><label class="tf-label">Material Number</label>
+          <input class="tf-input" id="rev-material" placeholder="e.g. HOS-12345" style="width:200px" autocomplete="off"></div>`;
+      case 'daterange':
+        return `<div class="tf-field"><label class="tf-label">From</label>
+          <input class="tf-input" id="rev-date-from" type="date" style="width:150px"></div>
+          <div class="tf-field"><label class="tf-label">To</label>
+          <input class="tf-input" id="rev-date-to" type="date" style="width:150px"></div>`;
+      case 'operator':
+        return `<div class="tf-field"><label class="tf-label">Operator / Username</label>
+          <input class="tf-input" id="rev-operator" placeholder="e.g. jsmith" style="width:200px" autocomplete="off"></div>`;
+    }
+  }
+
   function renderSearch() {
+    const modes = [
+      ['matdoc',    'By Material Document'],
+      ['batch',     'By Batch Reference'],
+      ['material',  'By Material'],
+      ['daterange', 'By Date Range'],
+      ['operator',  'By Operator'],
+    ];
     document.getElementById('result-body').innerHTML = `
       <div style="padding:16px 20px">
         <div class="bm-section" style="margin-bottom:14px">
           <div class="bm-section-title">Search Mode</div>
-          <div style="display:flex;gap:8px;margin-bottom:12px">
-            <button class="btn-secondary rev-mode-btn ${searchMode==='matdoc'?'btn-secondary--active':''}" data-mode="matdoc">By Material Document</button>
-            <button class="btn-secondary rev-mode-btn ${searchMode==='batch'?'btn-secondary--active':''}" data-mode="batch">By Batch Reference</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            ${modes.map(([m,l])=>`<button class="btn-secondary rev-mode-btn${searchMode===m?' btn-secondary--active':''}" data-mode="${m}">${l}</button>`).join('')}
           </div>
           <div id="rev-search-inputs" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-            ${searchMode === 'matdoc' ? `
-              <div class="tf-field"><label class="tf-label">Material Document</label>
-              <input class="tf-input" id="rev-matdoc" placeholder="e.g. 4973004925" style="width:200px" autocomplete="off"></div>
-            ` : `
-              <div class="tf-field"><label class="tf-label">Process</label>
-              <select class="tf-input" id="rev-pc" style="width:150px">
-                ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-              </select></div>
-              <div class="tf-field"><label class="tf-label">Record ID</label>
-              <input class="tf-input" id="rev-rid" type="number" placeholder="Record ID" style="width:140px"></div>
-            `}
+            ${searchInputsHtml()}
             <button class="btn-filter-search" id="rev-search-btn">Search</button>
           </div>
         </div>
@@ -2221,12 +2740,9 @@ async function runSapReversals() {
     document.querySelectorAll('.rev-mode-btn').forEach(btn => {
       btn.addEventListener('click', () => { searchMode = btn.dataset.mode; renderSearch(); });
     });
-
     document.getElementById('rev-search-btn').addEventListener('click', doSearch);
-
-    if (searchMode === 'matdoc') {
-      document.getElementById('rev-matdoc')?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-    }
+    document.querySelector('#rev-search-inputs input:not([type=date])')
+      ?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   }
 
   async function doSearch() {
@@ -2239,22 +2755,42 @@ async function runSapReversals() {
         const doc = document.getElementById('rev-matdoc')?.value.trim();
         if (!doc) { el.innerHTML = '<div class="pn-empty">Enter a material document number.</div>'; return; }
         json = await api(`/reversal/search?materialDocument=${encodeURIComponent(doc)}`);
-      } else {
+
+      } else if (searchMode === 'batch') {
         const pc  = document.getElementById('rev-pc')?.value;
         const rid = document.getElementById('rev-rid')?.value.trim();
         if (!pc || !rid) { el.innerHTML = '<div class="pn-empty">Select a process and enter the record ID.</div>'; return; }
         json = await api(`/reversal/by-batch/${encodeURIComponent(pc)}/${encodeURIComponent(rid)}`);
+
+      } else if (searchMode === 'material') {
+        const mat = document.getElementById('rev-material')?.value.trim();
+        if (!mat) { el.innerHTML = '<div class="pn-empty">Enter a material number.</div>'; return; }
+        json = await api(`/reversal/find?material=${encodeURIComponent(mat)}`);
+
+      } else if (searchMode === 'daterange') {
+        const from = document.getElementById('rev-date-from')?.value;
+        const to   = document.getElementById('rev-date-to')?.value;
+        if (!from && !to) { el.innerHTML = '<div class="pn-empty">Enter at least one date.</div>'; return; }
+        const p = new URLSearchParams();
+        if (from) p.set('dateFrom', from);
+        if (to)   p.set('dateTo', to);
+        json = await api(`/reversal/find?${p.toString()}`);
+
+      } else if (searchMode === 'operator') {
+        const op = document.getElementById('rev-operator')?.value.trim();
+        if (!op) { el.innerHTML = '<div class="pn-empty">Enter an operator name.</div>'; return; }
+        json = await api(`/reversal/find?operator=${encodeURIComponent(op)}`);
       }
 
       resultRows = json.data || [];
       if (!resultRows.length) { el.innerHTML = '<div class="pn-empty">No SAP postings found.</div>'; return; }
-
       renderResults(el);
     } catch (err) { el.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`; }
   }
 
   function renderResults(el) {
-    const reversible = resultRows.filter(r => !r.IsReversed && r.MaterialDocumentSAP);
+    const reversible  = resultRows.filter(r => !r.IsReversed && r.MaterialDocumentSAP);
+    const showMaterial = resultRows.some(r => r.Material);
     const badge = document.getElementById('result-row-badge');
     badge.textContent = `${resultRows.length} posting${resultRows.length !== 1 ? 's' : ''}`;
     badge.classList.remove('hidden');
@@ -2267,6 +2803,7 @@ async function runSapReversals() {
             : ''}
         </td>
         <td class="pn-batch-mono" style="font-weight:700">${esc(r.MaterialDocumentSAP || '—')}</td>
+        ${showMaterial ? `<td class="pn-batch-mono">${esc(r.Material || '—')}</td>` : ''}
         <td>${esc(r.PostingType)}</td>
         <td class="pn-batch-mono">${Number(r.Quantity||0).toFixed(3)} ${esc(r.UnitOfMeasure||'')}</td>
         <td class="pn-batch-mono">${fmt(r.PostedAt)}</td>
@@ -2289,7 +2826,12 @@ async function runSapReversals() {
       </div>
       <div style="overflow-x:auto">
       <table class="pn-batch-table">
-        <thead><tr><th style="width:32px"></th><th>Material Doc</th><th>Type</th><th>Quantity</th><th>Posted</th><th>Posted By</th><th>Status</th><th></th></tr></thead>
+        <thead><tr>
+          <th style="width:32px"></th>
+          <th>Material Doc</th>
+          ${showMaterial ? '<th>Material</th>' : ''}
+          <th>Type</th><th>Quantity</th><th>Posted</th><th>Posted By</th><th>Status</th><th></th>
+        </tr></thead>
         <tbody>${tableRows}</tbody>
       </table></div>
       <div id="rev-bulk-msg" style="margin-top:10px;font-size:13px"></div>`;
@@ -2300,49 +2842,386 @@ async function runSapReversals() {
 
     document.getElementById('rev-bulk-btn')?.addEventListener('click', async () => {
       const btn  = document.getElementById('rev-bulk-btn');
-      const msg  = document.getElementById('rev-bulk-msg');
       const docs = [...document.querySelectorAll('.rev-chk:checked')].map(c => c.dataset.matdoc);
-      if (!docs.length) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; return; }
+      if (!docs.length) {
+        const msg = document.getElementById('rev-bulk-msg');
+        if (msg) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; }
+        return;
+      }
 
-      btn.disabled = true; btn.textContent = `Reversing ${docs.length} document${docs.length!==1?'s':''}…`;
-      msg.style.color = 'var(--text-muted)';
-      msg.textContent = `Sending ${docs.length} request${docs.length!==1?'s':''} to SAP — this may take ${Math.ceil(docs.length * 12)}s…`;
+      btn.disabled    = true;
+      btn.textContent = 'Reversing…';
+      const total = docs.length;
+
+      // Inject a prominent progress banner at the very top of the results area
+      const resultsEl = document.getElementById('rev-results');
+      const banner = document.createElement('div');
+      banner.id = 'rev-prog-banner';
+      banner.style.cssText = [
+        'background:var(--surface2)',
+        'border:1px solid var(--border)',
+        'border-radius:8px',
+        'padding:14px 16px',
+        'margin-bottom:14px',
+      ].join(';');
+      banner.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:13px;font-weight:700;color:var(--text)">Reversing documents</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-dim)">
+            <span id="rev-prog-count">0 / ${total}</span>
+            <span id="rev-prog-pct" style="color:var(--text-muted);font-size:11px;margin-left:8px">0%</span>
+          </span>
+        </div>
+        <div style="height:8px;border-radius:4px;background:var(--border);overflow:hidden;margin-bottom:8px">
+          <div id="rev-prog-bar" style="height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width 0.3s ease"></div>
+        </div>
+        <div id="rev-prog-summary" style="font-size:12px;color:var(--text-muted)">
+          Sending to SAP — SapServer is processing in parallel…
+        </div>`;
+      resultsEl.insertBefore(banner, resultsEl.firstChild);
+      // Scroll banner into view so the user definitely sees it
+      banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+      let ok = 0, fail = 0;
 
       try {
-        const res = await api('/reversal/bulk', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ materialDocuments: docs }),
+        const res = await fetch('/api/productionnexus/reversal/bulk', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ materialDocuments: docs }),
         });
 
-        let ok = 0, fail = 0;
-        (res.results || []).forEach(r => {
-          const rowEl = document.getElementById(`rev-row-${r.materialDocument}`);
-          const alreadyReversed = r.error && r.error.includes('Already reversed');
-          if (r.success) {
-            ok++;
-            if (rowEl) rowEl.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(r.reversalDocument||'')}</span>`;
-          } else if (alreadyReversed) {
-            ok++;
-            if (rowEl) rowEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px" title="Was reversed in SAP — DB updated">↺ Synced</span>`;
-          } else {
-            fail++;
-            if (rowEl) rowEl.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(r.error)}">✗ ${esc(r.error)}</span>`;
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let   buffer  = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop();
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const ev = JSON.parse(line.slice(6));
+
+              if (ev.type === 'progress') {
+                const pct = Math.round((ev.done / ev.total) * 100);
+                const bar = document.getElementById('rev-prog-bar');
+                if (bar) bar.style.width = `${pct}%`;
+                const cnt = document.getElementById('rev-prog-count');
+                if (cnt) cnt.textContent = `${ev.done} / ${ev.total}`;
+                const pctEl = document.getElementById('rev-prog-pct');
+                if (pctEl) pctEl.textContent = `${pct}%`;
+                btn.textContent = `Reversing… ${ev.done}/${ev.total}`;
+
+                const rowEl = document.getElementById(`rev-row-${ev.materialDocument}`);
+                if (ev.success) {
+                  ok++;
+                  if (rowEl) rowEl.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(ev.reversalDocument||'')}</span>`;
+                } else if (ev.synced) {
+                  ok++;
+                  if (rowEl) rowEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px" title="${esc(ev.error)}">↺ Synced</span>`;
+                } else {
+                  fail++;
+                  if (rowEl) rowEl.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(ev.error)}">✗ ${esc(ev.error)}</span>`;
+                }
+              }
+
+              if (ev.type === 'complete') {
+                const bar     = document.getElementById('rev-prog-bar');
+                const summary = document.getElementById('rev-prog-summary');
+                if (bar) {
+                  bar.style.width      = '100%';
+                  bar.style.background = fail ? '#D97706' : 'var(--accent)';
+                }
+                if (summary) {
+                  summary.style.color = fail ? '#D97706' : 'var(--accent)';
+                  summary.style.fontWeight = '600';
+                  summary.textContent = fail
+                    ? `${ok} reversed, ${fail} failed — see inline results below.`
+                    : `✓ All ${ok} document${ok !== 1 ? 's' : ''} reversed successfully.`;
+                }
+              }
+            } catch { /* malformed SSE line — skip */ }
           }
-        });
-
-        msg.style.color = fail ? '#D97706' : 'var(--accent)';
-        msg.textContent = fail
-          ? `${ok} reversed successfully, ${fail} failed — see inline results.`
-          : `✓ All ${ok} document${ok!==1?'s':''} reversed successfully.`;
-        btn.disabled = false; btn.textContent = 'Reverse Selected';
+        }
       } catch (err) {
-        msg.style.color = 'var(--error)'; msg.textContent = err.message;
-        btn.disabled = false; btn.textContent = 'Reverse Selected';
+        const summary = document.getElementById('rev-prog-summary');
+        if (summary) { summary.style.color = 'var(--error)'; summary.textContent = `Error: ${err.message}`; }
       }
+
+      btn.disabled    = false;
+      btn.textContent = 'Reverse Selected';
     });
   }
 
   renderSearch();
+}
+
+// ── SCRAP REVERSAL ────────────────────────────────────────────────────────────
+
+async function runScrapReversal() {
+  let searchMode = 'matdoc';
+
+  // ── shared render helpers ─────────────────────────────────────────────────
+
+  function searchInputsHtml() {
+    switch (searchMode) {
+      case 'matdoc':
+        return `<div class="tf-field"><label class="tf-label">Material Document</label>
+          <input class="tf-input" id="sr-matdoc" placeholder="e.g. 4973095655" style="width:200px" autocomplete="off"></div>`;
+      case 'batch':
+        return `<div class="tf-field"><label class="tf-label">Batch Reference</label>
+          <input class="tf-input" id="sr-batch" placeholder="e.g. EX00000031" style="width:200px" autocomplete="off"></div>
+          <div class="tf-field"><label class="tf-label">Process</label>
+          <select class="tf-input" id="sr-pc" style="width:150px">
+            <option value="">All</option>
+            ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+          </select></div>`;
+      case 'material':
+        return `<div class="tf-field"><label class="tf-label">Material Number</label>
+          <input class="tf-input" id="sr-material" placeholder="e.g. HOS-12345" style="width:200px" autocomplete="off"></div>`;
+      case 'daterange':
+        return `<div class="tf-field"><label class="tf-label">From</label>
+          <input class="tf-input" id="sr-date-from" type="date" style="width:150px"></div>
+          <div class="tf-field"><label class="tf-label">To</label>
+          <input class="tf-input" id="sr-date-to" type="date" style="width:150px"></div>`;
+      case 'operator':
+        return `<div class="tf-field"><label class="tf-label">Operator</label>
+          <input class="tf-input" id="sr-operator" placeholder="e.g. jsmith" style="width:200px" autocomplete="off"></div>`;
+    }
+  }
+
+  function renderDocsTable(rows, prefix) {
+    const reversible = rows.filter(r => !r.IsReversed);
+    const tableRows  = rows.map(r => {
+      const batchDisplay = esc(r.BatchRef || `${r.ProcessCode}${String(r.ProcessRecordID).padStart(8,'0')}`);
+      const bfWarn = r.BackflushReversed && !r.IsReversed
+        ? `<span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;
+              padding:2px 5px;border-radius:3px;background:rgba(220,38,38,.12);
+              color:#DC2626;margin-left:5px" title="Parent backflush was reversed">BF REV</span>` : '';
+      const statusCell = r.IsReversed
+        ? `<span class="pn-status pn-status--cancelled">Reversed</span>
+           <span class="pn-batch-mono" style="font-size:10px;margin-left:4px">${esc(r.ReversalDocument||'')}</span>`
+        : `<span class="pn-status pn-status--open">Not Reversed</span>${bfWarn}`;
+      return `<tr>
+        <td style="text-align:center;width:32px">${!r.IsReversed
+          ? `<input type="checkbox" class="${prefix}-chk" data-id="${r.ScrapDocumentID}" data-doc="${esc(r.MaterialDocument)}" checked>`
+          : ''}</td>
+        <td class="pn-batch-mono" style="font-weight:700">${esc(r.MaterialDocument)}</td>
+        <td class="pn-batch-ref">${batchDisplay}</td>
+        <td class="pn-batch-mono">${esc(r.Material||'—')}</td>
+        <td>${esc(r.ReasonCode||'—')}
+            <span style="font-size:11px;color:var(--text-muted);margin-left:3px">${esc(r.ReasonDescription||'')}</span></td>
+        <td class="pn-batch-mono">${r.Quantity != null ? Number(r.Quantity).toFixed(3)+' '+esc(r.UnitOfMeasure||'') : '—'}</td>
+        <td class="pn-batch-mono">${r.PostedAt ? fmt(r.PostedAt) : '—'}</td>
+        <td>${esc(r.PostedBy||'—')}</td>
+        <td>${statusCell}</td>
+        <td id="${prefix}-row-${r.ScrapDocumentID}"></td>
+      </tr>`;
+    }).join('');
+
+    return `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="${prefix}-selall" ${reversible.length?'checked':'disabled'}> Select All
+        </label>
+        <span style="flex:1"></span>
+        <button class="btn-submit" id="${prefix}-rev-btn" ${!reversible.length?'disabled':''}>
+          Reverse Selected
+        </button>
+      </div>
+      <div style="overflow-x:auto">
+      <table class="pn-batch-table">
+        <thead><tr>
+          <th style="width:32px"></th>
+          <th>Material Doc</th><th>Batch</th><th>Material</th><th>Reason</th>
+          <th>Quantity</th><th>Posted</th><th>Operator</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table></div>
+      <div id="${prefix}-msg" style="margin-top:10px;font-size:13px"></div>`;
+  }
+
+  function wireTable(prefix) {
+    document.getElementById(`${prefix}-selall`)?.addEventListener('change', e => {
+      document.querySelectorAll(`.${prefix}-chk`).forEach(c => { c.checked = e.target.checked; });
+    });
+
+    document.getElementById(`${prefix}-rev-btn`)?.addEventListener('click', async () => {
+      const btn      = document.getElementById(`${prefix}-rev-btn`);
+      const msg      = document.getElementById(`${prefix}-msg`);
+      const selected = [...document.querySelectorAll(`.${prefix}-chk:checked`)]
+        .map(c => ({ id: Number(c.dataset.id), doc: c.dataset.doc }));
+      if (!selected.length) {
+        if (msg) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; }
+        return;
+      }
+
+      btn.disabled = true;
+      if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = `Sending ${selected.length} request${selected.length!==1?'s':''} to SAP…`; }
+
+      let ok = 0, fail = 0;
+      for (const { id, doc } of selected) {
+        const rowEl = document.getElementById(`${prefix}-row-${id}`);
+        btn.textContent = `Reversing… ${ok+fail+1}/${selected.length}`;
+        try {
+          const res = await api('/scrap-reversal/reverse', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scrapDocumentID: id, materialDocument: doc }),
+          });
+          if (!res.success) throw new Error(res.error || 'SAP error');
+          ok++;
+          if (rowEl) rowEl.innerHTML = res.synced
+            ? `<span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace"
+                title="Already reversed in SAP — DB synced">↺ Synced</span>`
+            : `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(res.data?.reversalDocument||'')}</span>`;
+        } catch (err) {
+          fail++;
+          if (rowEl) rowEl.innerHTML =
+            `<span style="color:var(--error);font-size:11px" title="${esc(err.message)}">✗ ${esc(err.message)}</span>`;
+        }
+      }
+
+      if (msg) {
+        msg.style.color = fail ? '#D97706' : 'var(--accent)';
+        msg.textContent = fail
+          ? `${ok} reversed, ${fail} failed — see inline results.`
+          : `✓ All ${ok} document${ok!==1?'s':''} reversed successfully.`;
+      }
+      btn.disabled = false; btn.textContent = 'Reverse Selected';
+    });
+  }
+
+  // ── missed reversals (auto-loads) ─────────────────────────────────────────
+
+  async function loadMissed() {
+    const wrap = document.getElementById('sr-missed-wrap');
+    if (!wrap) return;
+    try {
+      const json = await api('/scrap-reversal/missed');
+      if (!json.success) {
+        wrap.innerHTML = `<div class="pn-empty" style="color:var(--error)">Missed reversals check failed: ${esc(json.error || 'Unknown error')}</div>`;
+        return;
+      }
+      const rows = json.data || [];
+      if (!rows.length) { wrap.innerHTML = ''; return; }
+
+      wrap.innerHTML = `
+        <div style="background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.25);
+                    border-radius:8px;padding:14px 16px;margin-bottom:18px">
+          <div style="font-size:13px;font-weight:700;color:#DC2626;margin-bottom:10px">
+            ⚠ ${rows.length} unreversed scrap document${rows.length!==1?'s':''} — parent backflush was reversed
+          </div>
+          ${renderDocsTable(rows, 'sr-missed')}
+        </div>`;
+      wireTable('sr-missed');
+    } catch (err) {
+      wrap.innerHTML = `<div class="pn-empty" style="color:var(--error)">Error loading missed reversals: ${esc(err.message)}</div>`;
+    }
+  }
+
+  // ── search ────────────────────────────────────────────────────────────────
+
+  async function doSearch() {
+    const el = document.getElementById('sr-results');
+    el.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Searching…</div>';
+
+    const params = new URLSearchParams();
+    try {
+      if (searchMode === 'matdoc') {
+        const v = document.getElementById('sr-matdoc')?.value.trim();
+        if (!v) { el.innerHTML = '<div class="pn-empty">Enter a material document number.</div>'; return; }
+        params.set('materialDocument', v);
+      } else if (searchMode === 'batch') {
+        const ref = document.getElementById('sr-batch')?.value.trim();
+        const pc  = document.getElementById('sr-pc')?.value;
+        if (!ref && !pc) { el.innerHTML = '<div class="pn-empty">Enter a batch reference or select a process.</div>'; return; }
+        if (ref) params.set('batchRef', ref);
+        if (pc)  params.set('processCode', pc);
+      } else if (searchMode === 'material') {
+        const v = document.getElementById('sr-material')?.value.trim();
+        if (!v) { el.innerHTML = '<div class="pn-empty">Enter a material number.</div>'; return; }
+        params.set('material', v);
+      } else if (searchMode === 'daterange') {
+        const from = document.getElementById('sr-date-from')?.value;
+        const to   = document.getElementById('sr-date-to')?.value;
+        if (!from && !to) { el.innerHTML = '<div class="pn-empty">Enter at least one date.</div>'; return; }
+        if (from) params.set('dateFrom', from);
+        if (to)   params.set('dateTo', to);
+      } else if (searchMode === 'operator') {
+        const v = document.getElementById('sr-operator')?.value.trim();
+        if (!v) { el.innerHTML = '<div class="pn-empty">Enter an operator name.</div>'; return; }
+        params.set('operator', v);
+      }
+
+      const json = await api(`/scrap-reversal/search?${params.toString()}`);
+      if (!json.success) { el.innerHTML = `<div class="pn-empty" style="color:var(--error)">Search error: ${esc(json.error || 'Unknown error')}</div>`; return; }
+      const rows = json.data || [];
+      if (!rows.length) { el.innerHTML = '<div class="pn-empty">No scrap documents found.</div>'; return; }
+
+      const badge = document.getElementById('result-row-badge');
+      badge.textContent = `${rows.length} doc${rows.length!==1?'s':''}`;
+      badge.classList.remove('hidden');
+
+      el.innerHTML = renderDocsTable(rows, 'sr-search');
+      wireTable('sr-search');
+    } catch (err) { el.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`; }
+  }
+
+  // ── initial render ────────────────────────────────────────────────────────
+
+  const modes = [
+    ['matdoc',    'By Material Document'],
+    ['batch',     'By Batch Reference'],
+    ['material',  'By Material'],
+    ['daterange', 'By Date Range'],
+    ['operator',  'By Operator'],
+  ];
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="padding:16px 20px">
+      <div id="sr-missed-wrap"></div>
+      <div class="bm-section" style="margin-bottom:14px">
+        <div class="bm-section-title">Search Scrap Documents</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          ${modes.map(([m,l])=>`<button class="btn-secondary sr-mode-btn${searchMode===m?' btn-secondary--active':''}" data-mode="${m}">${l}</button>`).join('')}
+        </div>
+        <div id="sr-search-inputs" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          ${searchInputsHtml()}
+          <button class="btn-filter-search" id="sr-search-btn">Search</button>
+        </div>
+      </div>
+      <div id="sr-results"></div>
+    </div>`;
+
+  document.querySelectorAll('.sr-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      searchMode = btn.dataset.mode;
+      document.querySelectorAll('.sr-mode-btn').forEach(b => b.classList.remove('btn-secondary--active'));
+      btn.classList.add('btn-secondary--active');
+      document.getElementById('sr-search-inputs').innerHTML =
+        searchInputsHtml() + `<button class="btn-filter-search" id="sr-search-btn">Search</button>`;
+      document.getElementById('sr-search-btn').addEventListener('click', doSearch);
+      document.querySelector('#sr-search-inputs input:not([type=date])')
+        ?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    });
+  });
+
+  document.getElementById('sr-search-btn').addEventListener('click', doSearch);
+  document.querySelector('#sr-search-inputs input:not([type=date])')
+    ?.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+  loadMissed();
 }
 
 // ── NEW BATCH ─────────────────────────────────────────────────────────────────
@@ -2761,7 +3640,7 @@ function renderBatchModal(batch, pc, recordId, operators, scrapEntries, reasons)
   // Remove operator buttons
   document.querySelectorAll('.bm-remove-op').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Remove this operator from the batch?')) return;
+      if (!await wConfirm({ title: 'Remove Operator', message: 'Remove this operator from the batch?', confirmText: 'Remove', variant: 'danger' })) return;
       btn.disabled = true;
       try {
         const r = await api(`/batch/${pc}/${recordId}/operators/${btn.dataset.uid}`, { method: 'DELETE' });
@@ -2809,13 +3688,14 @@ function renderBatchModal(batch, pc, recordId, operators, scrapEntries, reasons)
 // ── MIXING ENTRY ──────────────────────────────────────────────────────────────
 
 async function runMixingEntry() {
+  const maxTubWeightKG = 38;
   const tubList = [{ supplierTubNo: '', weightKG: '' }];
 
   function renderTubs() {
     const rows = tubList.map((t, i) => `
       <div style="display:flex;align-items:center;gap:8px;padding:4px 0">
         <span class="pn-batch-mono" style="width:22px;text-align:right;color:var(--text-muted)">${i+1}.</span>
-        <input class="tf-input mx-tub-wt" type="number" placeholder="Weight (KG)" value="${t.weightKG}" data-idx="${i}" step="0.001" min="0.001" style="width:160px">
+        <input class="tf-input mx-tub-wt" type="number" placeholder="Weight (KG)" value="${t.weightKG}" data-idx="${i}" step="0.001" min="0.001" max="${maxTubWeightKG.toFixed(3)}" style="width:160px">
         <span style="font-size:12px;color:var(--text-muted)">KG</span>
         ${tubList.length > 1 ? `<button class="mx-remove-tub btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>` : ''}
       </div>`).join('');
@@ -2863,6 +3743,7 @@ async function runMixingEntry() {
             <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--accent)" id="mx-total">0.000 KG</span>
           </div>
           <div id="mx-tub-list"></div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:6px">Maximum ${maxTubWeightKG} KG per tub.</div>
           <button class="btn-secondary" id="mx-add-tub" style="margin-top:8px">+ Add Tub</button>
         </div>
         <div class="tf-row">
@@ -2890,16 +3771,25 @@ async function runMixingEntry() {
     const btn     = document.getElementById('mx-submit-btn');
     const result  = document.getElementById('mx-result');
     const mixCode = document.getElementById('mx-mixcode').value.trim();
+    const supplierBatchNo = document.getElementById('mx-suppbatch').value.trim();
+    const supplierTubNo   = document.getElementById('mx-supptub').value.trim();
 
     // Collect latest values from DOM before submission
     document.querySelectorAll('.mx-tub-wt').forEach(inp => { tubList[Number(inp.dataset.idx)].weightKG = inp.value; });
     const validTubs = tubList.filter(t => Number(t.weightKG) > 0);
+    const overweightTub = validTubs.findIndex(t => Number(t.weightKG) > maxTubWeightKG);
 
     if (!mixCode) {
       result.style.color = 'var(--error)'; result.textContent = 'Mix Code is required.'; return;
     }
+    if (!supplierBatchNo || !supplierTubNo) {
+      result.style.color = 'var(--error)'; result.textContent = 'Supplier batch number and supplier tub number are required.'; return;
+    }
     if (!validTubs.length) {
       result.style.color = 'var(--error)'; result.textContent = 'At least one tub weight is required.'; return;
+    }
+    if (overweightTub !== -1) {
+      result.style.color = 'var(--error)'; result.textContent = `Tub ${overweightTub + 1} cannot exceed ${maxTubWeightKG} KG.`; return;
     }
 
     btn.disabled = true; btn.textContent = 'Posting to SAP…';
@@ -2911,26 +3801,32 @@ async function runMixingEntry() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mixCode,
-          supplierBatchNo: document.getElementById('mx-suppbatch').value.trim(),
-          supplierTubNo:   document.getElementById('mx-supptub').value.trim(),
+          supplierBatchNo,
+          supplierTubNo,
           tubs: validTubs.map(t => ({ weightKG: Number(t.weightKG) })),
           notes: document.getElementById('mx-notes').value.trim() || undefined,
         }),
       });
 
       const d   = json.data || {};
-      const ref = `MX${String(d.MixingID || 0).padStart(8,'0')}`;
+      const recordID = Number(d.recordID ?? d.mixingID ?? d.MixingID);
+      const ref = d.batchRef || d.MixRef || (recordID ? `MX${String(recordID).padStart(8,'0')}` : 'MX');
+      const printBtn = recordID
+        ? `<br><button class="btn-secondary" onclick="labelPrint('MX',${recordID},this)" style="margin-top:10px;font-size:12px">🖨 Print Label</button>`
+        : '';
 
       if (d.status === 'SAP_FAILED') {
         const failCount = (d.tubs || []).filter(t => !t.success).length;
         result.style.color = '#D97706';
         result.innerHTML = `⚠ ${ref} saved but ${failCount} tub(s) failed SAP.<br>
           <span style="font-size:12px">See Failed Backflush queue for supervisor retry.</span>`;
+        result.insertAdjacentHTML('beforeend', printBtn);
         btn.disabled = false; btn.textContent = 'Post to SAP';
       } else if (json.success) {
         const docs = (d.tubs || []).map(t => t.materialDocument).filter(Boolean).join(', ');
         result.style.color = 'var(--accent)';
         result.innerHTML = `✓ ${ref} — ${validTubs.length} tub(s) posted · MatDocs: ${esc(docs || '—')}`;
+        result.insertAdjacentHTML('beforeend', printBtn);
         tubList.length = 0;
         tubList.push({ weightKG: '' });
         ['mx-mixcode','mx-suppbatch','mx-supptub','mx-notes'].forEach(id => { document.getElementById(id).value = ''; });
@@ -2948,77 +3844,172 @@ async function runMixingEntry() {
 
 // ── DRUMMING WIZARD ───────────────────────────────────────────────────────────
 
-const PACKAGING_TYPES = ['SB','MB','LB','XB','SD','MD','LD','XD'];
-const PACKAGING_LABELS = {
-  SB:'Small Box', MB:'Medium Box', LB:'Large Box', XB:'Pizza Box',
-  SD:'Small Drum', MD:'Medium Drum', LD:'Large Drum', XD:'Extra Large Drum',
-};
+function dwShiftFromHour() {
+  const h = new Date().getHours();
+  if (h >= 6  && h < 14) return { id: 1, name: 'Days (06:00–14:00)' };
+  if (h >= 14 && h < 22) return { id: 2, name: 'Afternoons (14:00–22:00)' };
+  return { id: 3, name: 'Nights (22:00–06:00)' };
+}
+
+function dwStepName(state) {
+  const stockSteps    = ['details', 'traceability', 'coils', 'scrap', 'review'];
+  const customerSteps = ['customer', 'details', 'traceability', 'coils', 'scrap', 'review'];
+  const steps = state.type === 'customer' ? customerSteps : stockSteps;
+  return steps[state.phase - 1] || null;
+}
 
 async function runDrummingEntry() {
-  // Wizard state
+  document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
+
+  const [reasonsRes, packagingRes, sessionRes] = await Promise.all([
+    api('/scrap-reasons?pc=DR'),
+    fetch('/api/packagingdata').then(r => r.json()),
+    fetch('/session-check').then(r => r.json()),
+  ]);
+
+  const reasons         = reasonsRes.data || [];
+  const packagingOptions = Array.isArray(packagingRes) ? packagingRes : [];
+  const shift           = dwShiftFromHour();
+
   const state = {
-    phase: 1,
-    material: '', bomComponents: [],
+    type: null,
+    phase: 0,
+    customerNumber: '',
+    orderNumber: '',
+    material: '',
+    operatorName: sessionRes.username || '',
+    shiftID:   shift.id,
+    shiftName: shift.name,
+    packagingID: '',
+    weightKG: '',
     parentBatches: [],
-    additionalOperators: [],
-    packagingType: '', testPressurePSI: null,
     coilLengths: [],
-    hasScrap: false, scrapTotalKG: 0, scrapReasons: [],
-    salesOrderSAP: '', customerID: '', notes: '',
+    hasScrap: false, scrapTotalKG: '', scrapReasons: [],
+    comments: '',
   };
 
-  const reasons = (await api('/scrap-reasons?pc=DR')).data || [];
+  renderDrummingWizard(state, reasons, packagingOptions);
+}
 
-  const render = () => {
-    document.getElementById('result-body').innerHTML = `
+function renderDrummingWizard(state, reasons, packagingOptions) {
+  const body     = document.getElementById('result-body');
+  const maxPhase = state.type === 'customer' ? 6 : 5;
+
+  if (state.phase === 0) {
+    body.innerHTML = `
       <div style="padding:20px;max-width:600px">
-        <div class="pn-wizard-steps" id="dw-steps"></div>
-        <div id="dw-phase-body"></div>
-        <div style="display:flex;gap:8px;margin-top:16px">
-          ${state.phase > 1 ? `<button class="btn-secondary" id="dw-back">← Back</button>` : ''}
-          <button class="btn-submit" id="dw-next">${state.phase === 6 ? 'Submit & Post to SAP' : 'Next →'}</button>
-          <span id="dw-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Select the production type for this drumming entry.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <button class="dw-type-btn" data-type="stock"
+            style="padding:24px 16px;border:2px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;transition:border-color 0.15s">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Make-to-Stock</div>
+            <div style="font-size:12px;color:var(--text-muted)">Standard production run for inventory</div>
+          </button>
+          <button class="dw-type-btn" data-type="customer"
+            style="padding:24px 16px;border:2px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;transition:border-color 0.15s">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Make-to-Order</div>
+            <div style="font-size:12px;color:var(--text-muted)">Production against a specific customer order</div>
+          </button>
         </div>
       </div>`;
 
-    renderDrummingPhase(state, reasons);
+    document.querySelectorAll('.dw-type-btn').forEach(btn => {
+      btn.addEventListener('mouseenter', () => { btn.style.borderColor = 'var(--accent)'; });
+      btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'var(--border)'; });
+      btn.addEventListener('click', () => {
+        state.type  = btn.dataset.type;
+        state.phase = 1;
+        renderDrummingWizard(state, reasons, packagingOptions);
+      });
+    });
+    return;
+  }
 
-    document.getElementById('dw-next')?.addEventListener('click', () => advanceDrumming(state, reasons, render));
-    document.getElementById('dw-back')?.addEventListener('click', () => { state.phase--; render(); });
-  };
+  const steps      = state.type === 'customer'
+    ? ['Customer', 'Details', 'Traceability', 'Coil Lengths', 'Scrap', 'Review']
+    : ['Details', 'Traceability', 'Coil Lengths', 'Scrap', 'Review'];
+  const isLast = state.phase === maxPhase;
 
-  render();
-}
+  body.innerHTML = `
+    <div style="padding:20px;max-width:600px">
+      <div class="pn-wizard-steps" id="dw-steps"></div>
+      <div id="dw-phase-body"></div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn-secondary" id="dw-back">&larr; Back</button>
+        <button class="btn-submit" id="dw-next">${isLast ? 'Submit & Post to SAP' : 'Next →'}</button>
+        <span id="dw-msg" style="font-size:12px;color:var(--error);align-self:center"></span>
+      </div>
+    </div>`;
 
-function renderDrummingPhase(state, reasons) {
-  const steps = ['Material','Traceability & Operators','Packaging','Coil Lengths','Scrap','Review & Submit'];
   document.getElementById('dw-steps').innerHTML = steps.map((s, i) => `
     <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 10px;border-radius:20px;
       background:${i+1===state.phase?'var(--accent)':i+1<state.phase?'rgba(13,148,136,0.15)':'var(--surface2)'};
       color:${i+1===state.phase?'#fff':i+1<state.phase?'var(--accent)':'var(--text-muted)'};
       border:1px solid ${i+1<=state.phase?'var(--accent)':'var(--border)'}">${i+1}. ${s}</span>`).join('');
 
-  const body = document.getElementById('dw-phase-body');
+  renderDrummingPhaseBody(state, reasons, packagingOptions);
 
-  if (state.phase === 1) {
+  document.getElementById('dw-back').addEventListener('click', () => {
+    state.phase = state.phase === 1 ? 0 : state.phase - 1;
+    renderDrummingWizard(state, reasons, packagingOptions);
+  });
+  document.getElementById('dw-next').addEventListener('click', () => {
+    advanceDrummingWizard(state, reasons, packagingOptions);
+  });
+}
+
+function renderDrummingPhaseBody(state, reasons, packagingOptions) {
+  const body = document.getElementById('dw-phase-body');
+  const step = dwStepName(state);
+
+  if (step === 'customer') {
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 1 — Material</div>
+        <div class="bm-section-title">Customer Information</div>
         <div class="tf-field" style="margin-bottom:12px">
-          <label class="tf-label">SAP Material Number</label>
-          <input class="tf-input" id="dw-material" value="${esc(state.material)}" placeholder="e.g. TSHV3-4B01">
+          <label class="tf-label">Customer Number <span style="color:var(--error)">*</span></label>
+          <input class="tf-input" id="dw-cust-num" value="${esc(state.customerNumber)}" placeholder="e.g. 10001234">
         </div>
-        <div id="dw-bom-result" style="font-size:12px;color:var(--text-muted)">
-          ${state.bomComponents.length ? `BOM loaded: ${state.bomComponents.length} component(s)` : ''}
+        <div class="tf-field">
+          <label class="tf-label">Order Number <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
+          <input class="tf-input" id="dw-order-num" value="${esc(state.orderNumber)}" placeholder="e.g. ORD-0012345">
         </div>
       </div>`;
 
-  } else if (state.phase === 2) {
-    const opTags = state.additionalOperators.map(u =>
-      `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px">
-        ${esc(u.username)} <button class="dw-remove-op" data-uid="${u.uid}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-       </span>`).join(' ');
+  } else if (step === 'details') {
+    body.innerHTML = `
+      <div class="bm-section" style="margin-bottom:0">
+        <div class="bm-section-title">Batch Details</div>
+        <div class="tf-field" style="margin-bottom:12px">
+          <label class="tf-label">Material Number <span style="color:var(--error)">*</span></label>
+          <input class="tf-input" id="dw-material" value="${esc(state.material)}" placeholder="e.g. TSHV3-4B01">
+        </div>
+        <div class="tf-row" style="margin-bottom:12px">
+          <div class="tf-field">
+            <label class="tf-label">Operator</label>
+            <div class="tf-input" style="background:var(--surface2);color:var(--text-muted);cursor:default;user-select:none">${esc(state.operatorName)}</div>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Shift</label>
+            <div class="tf-input" style="background:var(--surface2);color:var(--text-muted);cursor:default;user-select:none">${esc(state.shiftName)}</div>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Packaging <span style="color:var(--error)">*</span></label>
+            <select class="tf-input" id="dw-pkg">
+              <option value="">Select…</option>
+              ${packagingOptions.map(p=>`<option value="${esc(p.packID)}" ${state.packagingID===p.packID?'selected':''}>${esc(p.packID)}${p.packDescription?' — '+esc(p.packDescription):''}</option>`).join('')}
+            </select>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Weight (KG) <span style="color:var(--error)">*</span></label>
+            <input class="tf-input" id="dw-weight" type="number" min="0.001" step="0.001" value="${state.weightKG||''}" placeholder="e.g. 125.5">
+          </div>
+        </div>
+      </div>`;
 
+  } else if (step === 'traceability') {
     const batchTags = state.parentBatches.length
       ? state.parentBatches.map((pb, i) =>
           `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
@@ -3027,115 +4018,37 @@ function renderDrummingPhase(state, reasons) {
            </span>`).join(' ')
       : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
 
-    const bomInfo = state.bomComponents.length
-      ? `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12px;margin-bottom:12px">
-          <div style="font-weight:700;margin-bottom:4px">BOM for ${esc(state.material)}</div>
-          ${state.bomComponents.map(c=>`<div class="pn-batch-mono">${esc(c.material || c.componentMaterial || '')} — ${c.quantityPer} per unit</div>`).join('')}
-         </div>` : '';
-
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 2 — Traceability &amp; Operators</div>
-        ${bomInfo}
-        <div style="margin-bottom:12px">
-          <label class="tf-label">Previous Stage Batches</label>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Add each input batch — a drum can consume multiple upstream records.</div>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
-            <select class="tf-input" id="dw-parent-pc" style="width:140px">
-              ${Object.entries(PROCESS_LABELS).filter(([k])=>k!=='DR').map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-            </select>
-            <input class="tf-input" id="dw-parent-rid" type="number" placeholder="Record ID" style="width:130px">
-            <button class="btn-secondary" id="dw-add-batch">+ Add</button>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">${batchTags}</div>
+        <div class="bm-section-title">Traceability — Previous Process Batches</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add each upstream batch that fed into this drum. Leave empty if not applicable.</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <select class="tf-input" id="dw-parent-pc" style="width:150px">
+            ${Object.entries(PROCESS_LABELS).filter(([k])=>k!=='DR').map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+          </select>
+          <input class="tf-input" id="dw-parent-rid" type="number" placeholder="Record ID" style="width:130px">
+          <button class="btn-secondary" id="dw-add-batch">+ Add</button>
         </div>
-        <div style="margin-bottom:10px">
-          <label class="tf-label">Additional Operators</label>
-          <div style="display:flex;gap:6px;margin-top:4px">
-            <input class="tf-input" id="dw-op-q" placeholder="Search username…" style="flex:1">
-            <button class="btn-secondary" id="dw-op-search">Search</button>
-          </div>
-          <div id="dw-op-results" style="margin-top:6px"></div>
-          <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${opTags}</div>
-        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px" id="dw-batch-tags">${batchTags}</div>
       </div>`;
 
-    document.getElementById('dw-add-batch')?.addEventListener('click', () => {
+    document.getElementById('dw-add-batch').addEventListener('click', () => {
       const pc  = document.getElementById('dw-parent-pc')?.value;
       const rid = Number(document.getElementById('dw-parent-rid')?.value);
       if (!pc || !rid) return;
-      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid)) {
+      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
         state.parentBatches.push({ processCode: pc, recordID: rid });
-      }
-      renderDrummingPhase(state, reasons);
+      renderDrummingPhaseBody(state, reasons, packagingOptions);
     });
 
     document.querySelectorAll('.dw-remove-batch').forEach(btn => {
       btn.addEventListener('click', () => {
         state.parentBatches.splice(Number(btn.dataset.idx), 1);
-        renderDrummingPhase(state, reasons);
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
       });
     });
 
-    document.querySelectorAll('.dw-remove-op').forEach(btn => {
-      btn.addEventListener('click', () => {
-        state.additionalOperators = state.additionalOperators.filter(u => u.uid !== Number(btn.dataset.uid));
-        renderDrummingPhase(state, reasons);
-      });
-    });
-
-    document.getElementById('dw-op-search')?.addEventListener('click', async () => {
-      const q = document.getElementById('dw-op-q').value.trim();
-      const el = document.getElementById('dw-op-results');
-      const r = await api(`/users?q=${encodeURIComponent(q)}`);
-      el.innerHTML = (r.data||[]).map(u => `
-        <div style="display:flex;justify-content:space-between;padding:3px 0">
-          <span style="font-size:13px">${esc(u.DisplayName||u.Username)}</span>
-          <button class="btn-secondary dw-add-op" data-uid="${u.UserID}" data-name="${esc(u.DisplayName||u.Username)}" style="padding:2px 8px;font-size:11px">Add</button>
-        </div>`).join('');
-      el.querySelectorAll('.dw-add-op').forEach(btn => {
-        btn.addEventListener('click', () => {
-          if (!state.additionalOperators.find(u => u.uid === Number(btn.dataset.uid))) {
-            state.additionalOperators.push({ uid: Number(btn.dataset.uid), username: btn.dataset.name });
-          }
-          renderDrummingPhase(state, reasons);
-        });
-      });
-    });
-
-  } else if (state.phase === 3) {
-    body.innerHTML = `
-      <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 3 — Packaging &amp; Test Pressure</div>
-        <div class="tf-row">
-          <div class="tf-field">
-            <label class="tf-label">Packaging Type</label>
-            <select class="tf-input" id="dw-pkg">
-              <option value="">Select…</option>
-              ${PACKAGING_TYPES.map(t=>`<option value="${t}" ${state.packagingType===t?'selected':''}>${t} — ${PACKAGING_LABELS[t]}</option>`).join('')}
-            </select>
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Pressure Test</label>
-            <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px">
-              <input type="checkbox" id="dw-test-chk" ${state.testPressurePSI!==null?'checked':''}> Apply pressure test
-            </label>
-          </div>
-        </div>
-        <div id="dw-psi-row" style="display:${state.testPressurePSI!==null?'block':'none'}">
-          <div class="tf-field">
-            <label class="tf-label">Test Pressure (PSI)</label>
-            <input class="tf-input" id="dw-psi" type="number" min="0" step="0.1" value="${state.testPressurePSI||''}" style="width:160px">
-          </div>
-        </div>
-      </div>`;
-
-    document.getElementById('dw-test-chk')?.addEventListener('change', e => {
-      document.getElementById('dw-psi-row').style.display = e.target.checked ? 'block' : 'none';
-      if (!e.target.checked) state.testPressurePSI = null;
-    });
-
-  } else if (state.phase === 4) {
+  } else if (step === 'coils') {
     const coilRows = state.coilLengths.map((l, i) => `
       <div style="display:flex;align-items:center;gap:8px;padding:4px 0">
         <span class="pn-batch-mono" style="width:28px;text-align:right;color:var(--text-muted)">${i+1}.</span>
@@ -3143,12 +4056,11 @@ function renderDrummingPhase(state, reasons) {
         <span style="font-size:12px;color:var(--text-muted)">M</span>
         <button class="dw-remove-coil btn-secondary" data-idx="${i}" style="padding:2px 8px;font-size:11px">×</button>
       </div>`).join('');
-
     const total = state.coilLengths.reduce((s, l) => s + Number(l), 0);
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 4 — Coil Lengths</div>
+        <div class="bm-section-title">Coil Lengths in Drum</div>
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Enter each coil length in metres. The total is calculated automatically.</div>
         <div id="dw-coil-list">${coilRows}</div>
         <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
@@ -3158,18 +4070,21 @@ function renderDrummingPhase(state, reasons) {
         </div>
       </div>`;
 
-    document.getElementById('dw-add-coil')?.addEventListener('click', () => {
+    document.getElementById('dw-add-coil').addEventListener('click', () => {
       const v = Number(document.getElementById('dw-new-coil').value);
-      if (v > 0) { state.coilLengths.push(v); renderDrummingPhase(state, reasons); }
+      if (v > 0) { state.coilLengths.push(v); renderDrummingPhaseBody(state, reasons, packagingOptions); }
     });
     document.querySelectorAll('.dw-coil-input').forEach(inp => {
       inp.addEventListener('change', e => { state.coilLengths[Number(e.target.dataset.idx)] = Number(e.target.value); });
     });
     document.querySelectorAll('.dw-remove-coil').forEach(btn => {
-      btn.addEventListener('click', () => { state.coilLengths.splice(Number(btn.dataset.idx), 1); renderDrummingPhase(state, reasons); });
+      btn.addEventListener('click', () => {
+        state.coilLengths.splice(Number(btn.dataset.idx), 1);
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
+      });
     });
 
-  } else if (state.phase === 5) {
+  } else if (step === 'scrap') {
     const reasonRows = state.scrapReasons.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
         <select class="tf-input dw-scrap-reason" data-idx="${i}" style="flex:1">
@@ -3182,7 +4097,7 @@ function renderDrummingPhase(state, reasons) {
 
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 5 — Scrap</div>
+        <div class="bm-section-title">Scrap</div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px">
           <input type="checkbox" id="dw-has-scrap" ${state.hasScrap?'checked':''}> Scrap to record for this drum
         </label>
@@ -3197,16 +4112,19 @@ function renderDrummingPhase(state, reasons) {
         </div>
       </div>`;
 
-    document.getElementById('dw-has-scrap')?.addEventListener('change', e => {
+    document.getElementById('dw-has-scrap').addEventListener('change', e => {
       state.hasScrap = e.target.checked;
       document.getElementById('dw-scrap-fields').style.display = e.target.checked ? 'block' : 'none';
     });
     document.getElementById('dw-add-reason')?.addEventListener('click', () => {
       state.scrapReasons.push({ reasonID: '', occurrences: 1 });
-      renderDrummingPhase(state, reasons);
+      renderDrummingPhaseBody(state, reasons, packagingOptions);
     });
     document.querySelectorAll('.dw-remove-reason').forEach(btn => {
-      btn.addEventListener('click', () => { state.scrapReasons.splice(Number(btn.dataset.idx),1); renderDrummingPhase(state, reasons); });
+      btn.addEventListener('click', () => {
+        state.scrapReasons.splice(Number(btn.dataset.idx), 1);
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
+      });
     });
     document.querySelectorAll('.dw-scrap-reason').forEach(sel => {
       sel.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].reasonID = Number(e.target.value); });
@@ -3215,114 +4133,103 @@ function renderDrummingPhase(state, reasons) {
       inp.addEventListener('change', e => { state.scrapReasons[Number(e.target.dataset.idx)].occurrences = Number(e.target.value); });
     });
 
-  } else if (state.phase === 6) {
-    const total = state.coilLengths.reduce((s,l) => s+Number(l), 0);
+  } else if (step === 'review') {
+    const total = state.coilLengths.reduce((s, l) => s + Number(l), 0);
+    const typeLine = state.type === 'customer'
+      ? `<div class="pn-batch-mono">Customer: ${esc(state.customerNumber)}${state.orderNumber ? ' / Order: '+esc(state.orderNumber) : ''}</div>`
+      : `<div class="pn-batch-mono">Type: Make-to-Stock</div>`;
+
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Phase 6 — Sales Order, Customer &amp; Comments</div>
-        <div class="tf-row" style="margin-bottom:10px">
-          <div class="tf-field">
-            <label class="tf-label">Sales Order (optional)</label>
-            <input class="tf-input" id="dw-salesorder" value="${esc(state.salesOrderSAP)}" placeholder="e.g. 4500012345">
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Customer (optional)</label>
-            <input class="tf-input" id="dw-customer" value="${esc(state.customerID)}" placeholder="Customer name or ID">
-          </div>
-        </div>
-        <div class="tf-field" style="margin-bottom:14px">
-          <label class="tf-label">Comments (optional)</label>
-          <input class="tf-input" id="dw-comments" value="${esc(state.notes)}" placeholder="Any notes for this drum…">
-        </div>
-        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px">
+        <div class="bm-section-title">Review</div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;margin-bottom:14px">
           <div style="font-weight:700;margin-bottom:8px">Summary</div>
+          ${typeLine}
           <div class="pn-batch-mono">Material: ${esc(state.material)}</div>
-          <div class="pn-batch-mono">Packaging: ${esc(state.packagingType)} (${esc(PACKAGING_LABELS[state.packagingType]||'—')})</div>
-          <div class="pn-batch-mono">Test Pressure: ${state.testPressurePSI ? state.testPressurePSI+' PSI' : 'None'}</div>
-          <div class="pn-batch-mono">Coils: ${state.coilLengths.length} — Total: ${total.toFixed(3)} M</div>
+          <div class="pn-batch-mono">Operator: ${esc(state.operatorName)} &nbsp;·&nbsp; Shift: ${esc(state.shiftName)}</div>
+          <div class="pn-batch-mono">Packaging: ${esc(state.packagingID)} &nbsp;·&nbsp; Weight: ${state.weightKG} KG</div>
+          <div class="pn-batch-mono">Coils: ${state.coilLengths.length} — Total Length: ${total.toFixed(3)} M</div>
+          <div class="pn-batch-mono">Traceability: ${state.parentBatches.length ? state.parentBatches.map(pb=>`${pb.processCode}${String(pb.recordID).padStart(8,'0')}`).join(', ') : 'None'}</div>
           <div class="pn-batch-mono">Scrap: ${state.hasScrap ? state.scrapTotalKG+' KG across '+state.scrapReasons.length+' reason(s)' : 'None'}</div>
-          <div class="pn-batch-mono">Prev batches: ${state.parentBatches.length ? state.parentBatches.map(pb=>`${pb.processCode}${String(pb.recordID).padStart(8,'0')}`).join(', ') : 'None'}</div>
-          <div class="pn-batch-mono">Sales Order: ${esc(state.salesOrderSAP || '—')}</div>
-          <div class="pn-batch-mono">Customer: ${esc(state.customerID || '—')}</div>
         </div>
-        <div id="dw-submit-result" style="margin-top:10px;font-size:13px"></div>
+        <div class="tf-field" style="margin-bottom:10px">
+          <label class="tf-label">Comments <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
+          <input class="tf-input" id="dw-comments" value="${esc(state.comments)}" placeholder="Any notes for this drum…">
+        </div>
+        <div id="dw-submit-result" style="font-size:13px"></div>
       </div>`;
   }
 }
 
-async function advanceDrumming(state, reasons, render) {
-  const msg = document.getElementById('dw-msg');
+async function advanceDrummingWizard(state, reasons, packagingOptions) {
+  const msg  = document.getElementById('dw-msg');
+  const step = dwStepName(state);
   if (msg) msg.textContent = '';
 
-  if (state.phase === 1) {
+  if (step === 'customer') {
+    const custNum = document.getElementById('dw-cust-num')?.value.trim();
+    if (!custNum) { if (msg) msg.textContent = 'Customer number is required.'; return; }
+    state.customerNumber = custNum;
+    state.orderNumber    = document.getElementById('dw-order-num')?.value.trim() || '';
+
+  } else if (step === 'details') {
     const mat = document.getElementById('dw-material')?.value.trim();
-    if (!mat) { if(msg) msg.textContent = 'Material number is required.'; return; }
-    state.material = mat;
-    // Fetch BOM
-    const bomEl = document.getElementById('dw-bom-result');
-    if (bomEl) bomEl.textContent = 'Fetching BOM…';
-    try {
-      const bomJson = await api('/drumming/bom', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ material: mat }),
-      });
-      state.bomComponents = bomJson.data || [];
-      if (bomEl) bomEl.textContent = state.bomComponents.length
-        ? `BOM loaded: ${state.bomComponents.map(c=>`${c.material||c.componentMaterial||''} (${c.quantityPer}/unit)`).join(', ')}`
-        : 'No BOM components returned — proceeding.';
-    } catch (_) {
-      if (bomEl) bomEl.textContent = 'BOM lookup unavailable — proceeding without validation.';
-    }
-
-  } else if (state.phase === 2) {
-    // parentBatches already maintained in state via add/remove buttons — nothing to read here
-
-  } else if (state.phase === 3) {
     const pkg = document.getElementById('dw-pkg')?.value;
-    if (!pkg) { if(msg) msg.textContent = 'Please select a packaging type.'; return; }
-    state.packagingType = pkg;
-    const psiChecked = document.getElementById('dw-test-chk')?.checked;
-    state.testPressurePSI = psiChecked ? (Number(document.getElementById('dw-psi')?.value) || null) : null;
+    const wt  = Number(document.getElementById('dw-weight')?.value);
+    if (!mat) { if (msg) msg.textContent = 'Material number is required.'; return; }
+    if (!pkg) { if (msg) msg.textContent = 'Please select a packaging type.'; return; }
+    if (!wt || wt <= 0) { if (msg) msg.textContent = 'Weight must be greater than zero.'; return; }
+    state.material    = mat;
+    state.packagingID = pkg;
+    state.weightKG    = wt;
 
-  } else if (state.phase === 4) {
-    // Collect latest values from inputs before advancing
+  } else if (step === 'traceability') {
+    // optional — nothing to validate
+
+  } else if (step === 'coils') {
     document.querySelectorAll('.dw-coil-input').forEach(inp => {
       state.coilLengths[Number(inp.dataset.idx)] = Number(inp.value);
     });
-    if (!state.coilLengths.length) { if(msg) msg.textContent = 'At least one coil length is required.'; return; }
+    if (!state.coilLengths.length) { if (msg) msg.textContent = 'At least one coil length is required.'; return; }
 
-  } else if (state.phase === 5) {
+  } else if (step === 'scrap') {
     state.hasScrap = document.getElementById('dw-has-scrap')?.checked || false;
     if (state.hasScrap) {
       state.scrapTotalKG = Number(document.getElementById('dw-scrap-kg')?.value) || 0;
-      if (!state.scrapTotalKG) { if(msg) msg.textContent = 'Enter total scrap weight.'; return; }
+      if (!state.scrapTotalKG) { if (msg) msg.textContent = 'Enter total scrap weight.'; return; }
+      document.querySelectorAll('.dw-scrap-reason').forEach(sel => {
+        state.scrapReasons[Number(sel.dataset.idx)].reasonID = Number(sel.value);
+      });
+      document.querySelectorAll('.dw-scrap-occ').forEach(inp => {
+        state.scrapReasons[Number(inp.dataset.idx)].occurrences = Number(inp.value);
+      });
     }
 
-  } else if (state.phase === 6) {
-    // Final submission
-    state.salesOrderSAP = document.getElementById('dw-salesorder')?.value.trim() || '';
-    state.customerID    = document.getElementById('dw-customer')?.value.trim() || '';
-    state.notes         = document.getElementById('dw-comments')?.value.trim() || '';
+  } else if (step === 'review') {
+    state.comments = document.getElementById('dw-comments')?.value.trim() || '';
 
     const submitBtn = document.getElementById('dw-next');
     const resultEl  = document.getElementById('dw-submit-result');
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
+    const endpoint = state.type === 'customer' ? '/drumming/customer' : '/drumming/stock';
+
     try {
-      const json = await api('/drumming/entry', {
-        method:'POST', headers:{'Content-Type':'application/json'},
+      const json = await api(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          material:             state.material,
-          parentBatches:        state.parentBatches,
-          additionalOperatorIDs: state.additionalOperators.map(u => u.uid),
-          packagingType:        state.packagingType,
-          testPressurePSI:      state.testPressurePSI,
-          coilLengths:          state.coilLengths,
-          hasScrap:             state.hasScrap,
-          scrapTotalKG:         state.hasScrap ? state.scrapTotalKG : 0,
-          scrapReasons:         state.hasScrap ? state.scrapReasons : [],
-          salesOrderSAP:        state.salesOrderSAP || undefined,
-          customerID:           state.customerID    || undefined,
-          notes:                state.notes,
+          material:       state.material,
+          shiftID:        state.shiftID,
+          customerNumber: state.customerNumber || undefined,
+          orderNumber:    state.orderNumber    || undefined,
+          packagingID:    state.packagingID,
+          weightKG:       state.weightKG,
+          parentBatches:  state.parentBatches,
+          coilLengths:    state.coilLengths,
+          hasScrap:       state.hasScrap,
+          scrapTotalKG:   state.hasScrap ? state.scrapTotalKG : 0,
+          scrapReasons:   state.hasScrap ? state.scrapReasons : [],
+          comments:       state.comments,
         }),
       });
 
@@ -3343,20 +4250,116 @@ async function advanceDrumming(state, reasons, render) {
       resultEl.textContent = err.message;
       submitBtn.disabled = false; submitBtn.textContent = 'Submit & Post to SAP';
     }
-    return; // don't advance phase
+    return;
   }
 
   state.phase++;
-  render();
+  renderDrummingWizard(state, reasons, packagingOptions);
 }
 
 // ── FAILED BACKFLUSH QUEUE ────────────────────────────────────────────────────
+
+function setFailedBackflushBadge(count) {
+  const badge = document.getElementById('fbf-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.style.background    = 'rgba(220,38,38,0.12)';
+    badge.style.color         = '#DC2626';
+    badge.style.borderColor   = 'rgba(220,38,38,0.3)';
+  } else {
+    badge.textContent = '✓';
+    badge.style.background    = 'rgba(5,150,105,0.10)';
+    badge.style.color         = 'var(--success)';
+    badge.style.borderColor   = 'rgba(5,150,105,0.3)';
+  }
+}
+
+async function pollFailedBackflushCount() {
+  try {
+    const json = await api('/failed-backflush');
+    setFailedBackflushBadge((json.data || []).length);
+  } catch { }
+}
+
+// ── OPEN RUNS (supervisor) — view and cancel runs that can't be completed ────
+
+async function runOpenRuns() {
+  document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const json = await api('/open-runs');
+    const rows = json.data || [];
+
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${rows.length} open`;
+    badge.classList.remove('hidden');
+
+    if (!rows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="pn-empty" style="color:var(--accent)">✓ No open runs.</div>';
+      return;
+    }
+
+    const tableRows = rows.map(r => {
+      const ref = r.BatchRef || `${r.ProcessCode}${String(r.RecordID).padStart(8,'0')}`;
+      return `<tr>
+        <td>${esc(PROCESS_LABELS[r.ProcessCode] || r.ProcessCode)}</td>
+        <td class="pn-batch-ref">${esc(ref)}</td>
+        <td class="pn-batch-mono">${esc(r.Material || '—')}</td>
+        <td class="pn-batch-mono">${fmt(r.CreatedAt)}</td>
+        <td>${esc(r.CreatedBy || '—')}</td>
+        <td style="text-align:right">
+          <button class="btn-secondary or-cancel-btn" data-pc="${esc(r.ProcessCode)}" data-rid="${r.RecordID}" data-ref="${esc(ref)}"
+                  style="color:#DC2626;border-color:rgba(220,38,38,.4);font-size:12px">Cancel Run</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('result-body').innerHTML = `
+      <div style="padding:16px 20px">
+        <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr>
+            <th>Process</th><th>Batch</th><th>Material</th><th>Created</th><th>Operator</th><th></th>
+          </tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table></div>
+        <div id="or-msg" style="margin-top:10px;font-size:13px"></div>
+      </div>`;
+
+    document.querySelectorAll('.or-cancel-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const ok = await wConfirm({
+          title: 'Cancel open run?',
+          message: `${btn.dataset.ref} will be marked Cancelled and removed from open runs.\nNothing is posted to SAP — this only closes the portal record.`,
+          confirmText: 'Cancel Run', variant: 'danger',
+        });
+        if (!ok) return;
+
+        btn.disabled = true; btn.textContent = 'Cancelling…';
+        const msg = document.getElementById('or-msg');
+        try {
+          await api(`/open-runs/${btn.dataset.pc}/${btn.dataset.rid}/cancel`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+          });
+          if (msg) { msg.style.color = 'var(--accent)'; msg.textContent = `✓ ${btn.dataset.ref} cancelled.`; }
+          runOpenRuns();
+        } catch (err) {
+          if (msg) { msg.style.color = 'var(--error)'; msg.textContent = err.message; }
+          btn.disabled = false; btn.textContent = 'Cancel Run';
+        }
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
+}
 
 async function runFailedBackflush() {
   document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
   try {
     const json = await api('/failed-backflush');
     const rows = json.data || [];
+    setFailedBackflushBadge(rows.length);
 
     const badge = document.getElementById('result-row-badge');
     badge.textContent = `${rows.length} failed`;
@@ -3432,32 +4435,41 @@ async function openRetryModal(processCode, recordId, batchRef) {
     });
 
   } else if (pc === 'DR') {
+    const entryLabel = b.EntryType === 'customer' ? 'Make-to-Order' : 'Make-to-Stock';
+    const isMto     = b.EntryType === 'customer';
     editFields = `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+        SAP endpoint: <strong>${esc(entryLabel)}</strong> — will retry via <code>/drumming/${esc(b.EntryType || 'stock')}</code>
+      </div>
       <div class="tf-row">
         <div class="tf-field tf-field--wide"><label class="tf-label">Material</label>
           <input class="tf-input" id="rt-material" value="${esc(b.Material||'')}"></div>
-        <div class="tf-field"><label class="tf-label">Packaging Type</label>
-          <input class="tf-input" id="rt-pkg" value="${esc(b.PackagingType||'')}" placeholder="e.g. MD" style="width:90px"></div>
+        <div class="tf-field"><label class="tf-label">Packaging ID</label>
+          <input class="tf-input" id="rt-pkg" value="${esc(b.PackagingType||'')}" style="width:90px"></div>
       </div>
       <div class="tf-row">
-        <div class="tf-field"><label class="tf-label">Test Pressure (PSI)</label>
-          <input class="tf-input" id="rt-psi" type="number" step="0.1" value="${b.TestPressurePSI!=null?b.TestPressurePSI:''}" placeholder="—"></div>
-        <div class="tf-field"><label class="tf-label">Sales Order</label>
-          <input class="tf-input" id="rt-so" value="${esc(b.SalesOrderSAP||'')}"></div>
-        <div class="tf-field"><label class="tf-label">Customer</label>
-          <input class="tf-input" id="rt-customer" value="${esc(b.CustomerID||'')}"></div>
+        <div class="tf-field"><label class="tf-label">Total Length (M)</label>
+          <input class="tf-input" id="rt-length" type="number" step="0.001" min="0.001" value="${b.LengthMetres!=null?b.LengthMetres:''}"></div>
+        <div class="tf-field"><label class="tf-label">Weight (KG)</label>
+          <input class="tf-input" id="rt-wt" type="number" step="0.001" min="0" value="${b.WeightKG!=null?b.WeightKG:''}"></div>
+        ${isMto ? `
+        <div class="tf-field"><label class="tf-label">Customer Number</label>
+          <input class="tf-input" id="rt-cust" value="${esc(b.CustomerID||'')}"></div>
+        <div class="tf-field"><label class="tf-label">Order Number</label>
+          <input class="tf-input" id="rt-order" value="${esc(b.SalesOrderSAP||'')}"></div>` : ''}
       </div>
       <div class="tf-row">
-        <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
+        <div class="tf-field tf-field--wide"><label class="tf-label">Comments</label>
           <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
       </div>`;
     collectBody = () => ({
-      material:       document.getElementById('rt-material')?.value.trim() || undefined,
-      packagingType:  document.getElementById('rt-pkg')?.value.trim()      || undefined,
-      testPressurePSI:document.getElementById('rt-psi')?.value             ? Number(document.getElementById('rt-psi').value) : undefined,
-      salesOrderSAP:  document.getElementById('rt-so')?.value.trim()       || undefined,
-      customerID:     document.getElementById('rt-customer')?.value.trim() || undefined,
-      notes:          document.getElementById('rt-notes')?.value.trim()    || undefined,
+      material:       document.getElementById('rt-material')?.value.trim()  || undefined,
+      packagingID:    document.getElementById('rt-pkg')?.value.trim()       || undefined,
+      lengthMetres:   document.getElementById('rt-length')?.value           ? Number(document.getElementById('rt-length').value) : undefined,
+      weightKG:       document.getElementById('rt-wt')?.value               ? Number(document.getElementById('rt-wt').value) : undefined,
+      customerNumber: document.getElementById('rt-cust')?.value?.trim()    || undefined,
+      orderNumber:    document.getElementById('rt-order')?.value?.trim()   || undefined,
+      comments:       document.getElementById('rt-notes')?.value.trim()    || undefined,
     });
 
   } else if (METRE_PCS.has(pc)) {
@@ -3478,9 +4490,47 @@ async function openRetryModal(processCode, recordId, batchRef) {
       notes:       document.getElementById('rt-notes')?.value.trim()   || undefined,
     });
 
+  } else if (pc === 'EW') {
+    editFields = `
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Material</label>
+          <input class="tf-input" id="rt-material" value="${esc(b.Material||'')}"></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
+          <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Confirming will mark this record complete. Box-level entries are managed from the batch view.</div>`;
+    collectBody = () => ({
+      material: document.getElementById('rt-material')?.value.trim() || undefined,
+      notes:    document.getElementById('rt-notes')?.value.trim()   || undefined,
+    });
+
+  } else if (pc === 'HA') {
+    editFields = `
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Material</label>
+          <input class="tf-input" id="rt-material" value="${esc(b.Material||'')}"></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Sales Order</label>
+          <input class="tf-input" id="rt-so" value="${esc(b.SalesOrderSAP||'')}"></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
+          <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
+      </div>`;
+    collectBody = () => ({
+      material:     document.getElementById('rt-material')?.value.trim() || undefined,
+      salesOrderSAP:document.getElementById('rt-so')?.value.trim()      || undefined,
+      notes:        document.getElementById('rt-notes')?.value.trim()   || undefined,
+    });
+
   } else {
     editFields = `<div style="font-size:13px;color:var(--text-muted)">No editable fields available for this process type yet.</div>`;
   }
+
+  const submitLabel = (pc === 'EW' || pc === 'HA') ? 'Confirm &amp; Mark Complete' : 'Re-submit to SAP';
 
   openModal(`<div class="ps-modal" style="max-width:580px">
     <div class="ps-modal-header">
@@ -3496,8 +4546,9 @@ async function openRetryModal(processCode, recordId, batchRef) {
       <div id="rt-result" style="margin-top:10px;font-size:13px"></div>
     </div>
     <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
-      <button class="btn-submit" id="rt-submit">Re-submit to SAP</button>
+      <button class="btn-secondary" id="rt-cancel-record" style="margin-right:auto;color:var(--error);border-color:rgba(220,38,38,0.4)">Cancel Record</button>
+      <button class="btn-secondary" onclick="closeModal()">Close</button>
+      <button class="btn-submit" id="rt-submit">${submitLabel}</button>
     </div>
   </div>`);
 
@@ -3515,12 +4566,29 @@ async function openRetryModal(processCode, recordId, batchRef) {
       result.style.color = 'var(--accent)';
       const docs = (json.data?.tubs || []).map(t => t.materialDocument).filter(Boolean).join(', ');
       result.textContent = `✓ Re-submission successful${docs ? ' — MatDocs: ' + docs : json.data?.materialDocument ? ' — MatDoc: ' + json.data.materialDocument : ''}`;
-      btn.disabled = false; btn.textContent = 'Re-submit to SAP';
+      btn.disabled = false; btn.textContent = submitLabel;
       setTimeout(() => { closeModal(); runFailedBackflush(); }, 1500);
     } catch (err) {
       result.style.color = 'var(--error)';
       result.textContent = err.message;
-      btn.disabled = false; btn.textContent = 'Re-submit to SAP';
+      btn.disabled = false; btn.textContent = submitLabel;
+    }
+  });
+
+  document.getElementById('rt-cancel-record').addEventListener('click', async () => {
+    if (!await wConfirm({ title: 'Cancel Record', message: `Cancel ${batchRef}? This will set its status to Cancelled and remove it from the queue.`, confirmText: 'Cancel Record', variant: 'danger' })) return;
+    const btn    = document.getElementById('rt-cancel-record');
+    const result = document.getElementById('rt-result');
+    btn.disabled = true; btn.textContent = 'Cancelling…';
+    try {
+      const json = await api(`/failed-backflush/${pc}/${recordId}/cancel`, { method: 'PATCH' });
+      if (!json.success) throw new Error(json.error);
+      closeModal();
+      runFailedBackflush();
+    } catch (err) {
+      result.style.color = 'var(--error)';
+      result.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Cancel Record';
     }
   });
 }

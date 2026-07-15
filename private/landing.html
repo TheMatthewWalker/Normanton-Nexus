@@ -7,6 +7,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/landing.css">
   <link rel="icon" href="/images/logo16.png">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <script src="./js/notifications.js" defer></script>
+  <script src="./js/deploy-banner.js" defer></script>
 </head>
 <body>
 
@@ -46,7 +49,7 @@
       <!-- System status ribbon -->
       <div class="hero-ribbon" id="hero-ribbon">
         <div class="hero-pill"><span class="hero-pill-dot hero-pill-dot--ok"></span>Nexus Platform</div>
-        <div class="hero-pill"><span class="hero-pill-dot hero-pill-dot--ok"></span>SAP Integration</div>
+        <div class="hero-pill"><span id="sap-dot" class="hero-pill-dot hero-pill-dot--warn"></span>SAP Availability</div>
         <div class="hero-pill"><span class="hero-pill-dot hero-pill-dot--ok"></span>Database</div>
         <div class="hero-pill"><span class="hero-pill-dot hero-pill-dot--ok"></span>ClearPort</div>
       </div>
@@ -104,6 +107,13 @@
           </div>
           <span class="dept-status-dot dept-status-dot--live"></span>
         </div>
+        <div class="dept-spark" id="log-spark" style="display:none">
+          <div class="dept-spark-meta">
+            <span class="dept-spark-value" id="log-spark-value">—</span>
+            <span class="dept-spark-delta" id="log-spark-delta"></span>
+          </div>
+          <svg class="dept-spark-svg" id="log-spark-svg" viewBox="0 0 280 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
         <div class="dept-card-foot">
           <span class="dept-tag dept-tag--live">Active</span>
           <div class="dept-arrow">→</div>
@@ -125,6 +135,13 @@
             <div class="dept-desc">Stock, inventory &amp; bin locations</div>
           </div>
           <span class="dept-status-dot dept-status-dot--live"></span>
+        </div>
+        <div class="dept-spark" id="wh-spark" style="display:none">
+          <div class="dept-spark-meta">
+            <span class="dept-spark-value" id="wh-spark-value">—</span>
+            <span class="dept-spark-delta" id="wh-spark-delta"></span>
+          </div>
+          <svg class="dept-spark-svg" id="wh-spark-svg" viewBox="0 0 280 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
         <div class="dept-card-foot">
           <span class="dept-tag dept-tag--live">Active</span>
@@ -166,6 +183,13 @@
             <div class="dept-desc">Orders, customers &amp; pipeline</div>
           </div>
           <span class="dept-status-dot dept-status-dot--live"></span>
+        </div>
+        <div class="dept-spark" id="sales-spark" style="display:none">
+          <div class="dept-spark-meta">
+            <span class="dept-spark-value" id="sales-spark-value">—</span>
+            <span class="dept-spark-delta" id="sales-spark-delta"></span>
+          </div>
+          <svg class="dept-spark-svg" id="sales-spark-svg" viewBox="0 0 280 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
         <div class="dept-card-foot">
           <span class="dept-tag dept-tag--live">Active</span>
@@ -256,7 +280,7 @@
         </div>
       </a>
 
-      <a href="./production-nexus.html" class="dept-card" style="--delay:0.36s">
+      <a href="./production-nexus.html" class="dept-card dept-card--nexus" style="--delay:0.36s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -270,6 +294,13 @@
             <div class="dept-desc">Mixing, drumming, SAP backflush &amp; scrap</div>
           </div>
           <span class="dept-status-dot dept-status-dot--live"></span>
+        </div>
+        <div class="dept-spark" id="pn-spark">
+          <div class="dept-spark-meta">
+            <span class="dept-spark-value" id="pn-spark-value">—</span>
+            <span class="dept-spark-delta" id="pn-spark-delta"></span>
+          </div>
+          <svg class="dept-spark-svg" id="pn-spark-svg" viewBox="0 0 280 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
         <div class="dept-card-foot">
           <span class="dept-tag dept-tag--live">Live</span>

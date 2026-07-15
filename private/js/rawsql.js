@@ -76,7 +76,7 @@ async function runRawSql() {
     '<div class="loading-wrap"><div class="spinner"></div>Running query…</div>';
 
   try {
-    const res  = await fetch('/query', {
+    const res  = await fetch('/sql/query', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ query: sqlText }),
@@ -97,7 +97,7 @@ async function runRawSql() {
       lastRows = rows;
       resultEl.innerHTML = buildTableHTML(rows, 'rawsql-dt');
       try {
-        new DataTable('#rawsql-dt', { pageLength: 25, scrollX: true });
+        new DataTable('#rawsql-dt', { pageLength: 20, scrollX: true });
       } catch (_) {}
       const exportBtn = document.getElementById('rawsql-export');
       const countEl  = document.getElementById('rawsql-row-count');

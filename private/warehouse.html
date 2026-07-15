@@ -1,13 +1,18 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Normanton Nexus · Warehouse</title>
+  <title>Normanton Nexus Â· Warehouse</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
+  <link rel="stylesheet" href="./css/production-nexus.css">
   <link rel="stylesheet" href="./css/warehouse.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
+  <link rel="stylesheet" href="./css/notifications.css">
+  <script src="./js/notifications.js" defer></script>
+  <script src="./js/deploy-banner.js" defer></script>
+  <script src="./js/table-paginate.js" defer></script>
   <link rel="icon" href="/images/logo16.png">
 </head>
 <body>
@@ -16,7 +21,7 @@
   <header class="header">
     <div class="header-left">
       <div class="brand-icon"><img src="./images/logo32.png" alt="Kongsberg Logo"></div>
-      <a href="./landing.html" class="back-link">← Hub</a>
+      <a href="./landing.html" class="back-link">&larr; Hub</a>
       <div class="brand-sep"></div>
       <div class="dept-badge">
         <svg viewBox="0 0 28 28" fill="none"><path d="M2 12L14 4l12 8v14H2V12Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><rect x="10" y="16" width="8" height="10" rx="1" stroke="currentColor" stroke-width="1.6"/></svg>
@@ -35,104 +40,167 @@
   <!-- PAGE TITLE BAR -->
   <div class="page-title-bar">
     <div class="page-title-inner">
-      <h1 class="page-title">SAP Warehouse</h1>
-      <p class="page-subtitle">Live inventory &amp; storage data · Select a function to begin</p>
+      <h1 class="page-title">Warehouse Nexus</h1>
+      <p class="page-subtitle">Live inventory, picking &amp; stock movements Â· Select a function to begin</p>
     </div>
   </div>
 
   <!-- SAP MAIN -->
-  <div class="sap-main">
+  <div class="sap-main pn-main">
 
-    <!-- TILE GRID -->
+    <!-- TILE GRID â€” grouped by section -->
     <div class="tile-section" id="tile-section">
-      <div class="tile-grid">
 
-        <div class="sap-tile sap-tile--live" data-fn="displayStock">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="17"/><line x1="9.5" y1="14.5" x2="14.5" y2="14.5"/>
-            </svg>
+      <!-- Stock Information -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Stock Information</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="displayStock">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="17"/><line x1="9.5" y1="14.5" x2="14.5" y2="14.5"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Display Stock</div>
+            <div class="tile-desc">Warehouse stock levels from LQUA via ZRFC_READ_TABLES</div>
           </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Display Stock</div>
-          <div class="tile-desc">Warehouse stock levels from LQUA via ZRFC_READ_TABLES</div>
-        </div>
 
-        <div class="sap-tile sap-tile--placeholder" data-fn="binContents">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
-            </svg>
+          <div class="sap-tile sap-tile--placeholder" data-fn="binContents">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--soon">SOON</span>
+            <div class="tile-title">Bin Contents</div>
+            <div class="tile-desc">Storage bin inventory and capacity overview</div>
           </div>
-          <span class="tile-badge tile-badge--soon">SOON</span>
-          <div class="tile-title">Bin Contents</div>
-          <div class="tile-desc">Storage bin inventory and capacity overview</div>
-        </div>
 
-        <div class="sap-tile sap-tile--placeholder" data-fn="stockOverview">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
-            </svg>
+          <div class="sap-tile sap-tile--placeholder" data-fn="stockOverview">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--soon">SOON</span>
+            <div class="tile-title">Stock Overview</div>
+            <div class="tile-desc">Aggregated material stock levels across all storage locations</div>
           </div>
-          <span class="tile-badge tile-badge--soon">SOON</span>
-          <div class="tile-title">Stock Overview</div>
-          <div class="tile-desc">Aggregated material stock levels across all storage locations</div>
-        </div>
 
-        <div class="sap-tile sap-tile--placeholder" data-fn="goodsReceipts">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-          </div>
-          <span class="tile-badge tile-badge--soon">SOON</span>
-          <div class="tile-title">Goods Receipts</div>
-          <div class="tile-desc">Incoming goods and inbound delivery confirmations</div>
         </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="transferOrders">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
-            </svg>
-          </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Transfer Orders</div>
-          <div class="tile-desc">Create warehouse transfer orders via L_TO_CREATE_SINGLE</div>
-        </div>
-
-        <div class="sap-tile sap-tile--live" data-fn="openPicksheets">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
-            </svg>
-          </div>
-          <span class="tile-badge tile-badge--live">LIVE</span>
-          <div class="tile-title">Open Picksheets</div>
-          <div class="tile-desc">Active deliveries requiring picking — sorted by priority and due date</div>
-        </div>
-
-        <div class="sap-tile sap-tile--placeholder" data-fn="closedPicksheets">
-          <div class="tile-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="9 15 11 17 15 13"/>
-            </svg>
-          </div>
-          <span class="tile-badge tile-badge--soon">SOON</span>
-          <div class="tile-title">Closed Picksheets</div>
-          <div class="tile-desc">Completed delivery history and picking records</div>
-        </div>
-
       </div>
-    </div>
+
+      <!-- Picking Operations -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Picking Operations</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="openPicksheets">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Open Picksheets</div>
+            <div class="tile-desc">Active deliveries requiring picking â€” sorted by priority and due date</div>
+          </div>
+
+          <div class="sap-tile sap-tile--placeholder" data-fn="closedPicksheets">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="9 15 11 17 15 13"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--soon">SOON</span>
+            <div class="tile-title">Closed Picksheets</div>
+            <div class="tile-desc">Completed delivery history and picking records</div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Supervisor (LOG_SUPER permission required â€” shown by JS) -->
+      <div class="pn-section hidden" id="supervisor-section">
+        <div class="pn-section-hdr pn-section-hdr--supervisor">Supervisor</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="addPicksheet">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="13" x2="12" y2="19"/><line x1="9" y1="16" x2="15" y2="16"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Add Picksheet</div>
+            <div class="tile-desc">Create a new delivery picksheet from a SAP delivery number</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="csvUpload">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Bulk CSV Import</div>
+            <div class="tile-desc">Upload a CSV file to add multiple picksheets at once</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="sapSync">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">SAP Sync</div>
+            <div class="tile-desc">Pull open deliveries from SAP and insert any not yet in the database</div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Stock Movements -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Stock Movements</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="transferOrders">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Transfer Orders</div>
+            <div class="tile-desc">Create warehouse transfer orders via L_TO_CREATE_SINGLE</div>
+          </div>
+
+          <div class="sap-tile sap-tile--placeholder" data-fn="goodsReceipts">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--soon">SOON</span>
+            <div class="tile-title">Goods Receipts</div>
+            <div class="tile-desc">Incoming goods and inbound delivery confirmations</div>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /tile-section -->
 
     <!-- RESULT PANEL -->
     <div class="result-section hidden" id="result-section">
       <div class="result-toolbar">
-        <button type="button" class="btn-back-tiles" onclick="backToTiles()">← Functions</button>
+        <button type="button" class="btn-back-tiles" onclick="backToTiles()">&larr; Functions</button>
         <div class="result-title-wrap">
-          <div class="toolbar-title" id="result-title">—</div>
+          <div class="toolbar-title" id="result-title">â€”</div>
           <div class="toolbar-hint"  id="result-hint"></div>
         </div>
         <div class="toolbar-spacer"></div>
@@ -140,7 +208,7 @@
         <button type="button" class="btn-export hidden" id="btn-export-csv" onclick="exportResultCSV()">Export CSV</button>
       </div>
       <div class="result-body" id="result-body">
-        <div class="sap-loading"><div class="spinner"></div>Connecting to SAP…</div>
+        <div class="sap-loading"><div class="spinner"></div>Connecting to SAPâ€¦</div>
       </div>
     </div>
 
