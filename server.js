@@ -265,17 +265,29 @@ app.get('/private/:page', requireLogin, (req, res, next) => {
 });
 
 app.get('/private/js/:file', requireLogin, (req, res) => {
-  const filePath = path.join(__dirname, 'private', 'js', req.params.file);
+  const baseDir = path.resolve(__dirname, 'private', 'js');
+  const filePath = path.resolve(baseDir, req.params.file);
+  if (!filePath.startsWith(baseDir + path.sep)) {
+    return res.status(403).send('Forbidden');
+  }
   res.sendFile(filePath);
 });
 
 app.get('/private/css/:file', requireLogin, (req, res) => {
-  const filePath = path.join(__dirname, 'private', 'css', req.params.file);
+  const baseDir = path.resolve(__dirname, 'private', 'css');
+  const filePath = path.resolve(baseDir, req.params.file);
+  if (!filePath.startsWith(baseDir + path.sep)) {
+    return res.status(403).send('Forbidden');
+  }
   res.sendFile(filePath);
 });
 
 app.get('/private/images/:file', requireLogin, (req, res) => {
-  const filePath = path.join(__dirname, 'private', 'images', req.params.file);
+  const baseDir = path.resolve(__dirname, 'private', 'images');
+  const filePath = path.resolve(baseDir, req.params.file);
+  if (!filePath.startsWith(baseDir + path.sep)) {
+    return res.status(403).send('Forbidden');
+  }
   res.sendFile(filePath);
 });
 
