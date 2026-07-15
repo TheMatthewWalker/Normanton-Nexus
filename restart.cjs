@@ -24,6 +24,7 @@ const path = require('path');
 const { Service } = require('node-windows');
 const {
   sleep,
+  withTimeout,
   getHealth,
   waitForPortFree,
   waitForNewInstance,
@@ -59,7 +60,10 @@ async function main() {
   const portFree = await waitForPortFree(STOP_VERIFY_MAX_WAIT_MS, STOP_VERIFY_POLL_MS);
   if (!portFree) {
     console.warn('[restart] old process is still answering after stop — forcing it to exit…');
-    await forceKillPort443();
+    // Independent outer deadline — see the comment on withTimeout() in
+    // restart-lib.cjs for why this doesn't just trust forceKillPort443()'s
+    // own internal timeouts.
+    await withTimeout(forceKillPort443(), 30000, false);
     await sleep(3000);
     const stillUp = await getHealth();
     if (stillUp) {

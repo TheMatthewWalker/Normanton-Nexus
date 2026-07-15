@@ -76,6 +76,7 @@ const { Service }  = require('node-windows');
 const {
   sleep,
   runCommand,
+  withTimeout,
   getHealth,
   waitForPortFree,
   waitForNewInstance,
@@ -267,7 +268,11 @@ async function main() {
     const portFree = await waitForPortFree(STOP_VERIFY_MAX_WAIT_MS, STOP_VERIFY_POLL_MS);
     if (!portFree) {
       console.warn('[deploy-runner] old process is still answering after stop — forcing it to exit…');
-      await forceKillPort443();
+      // Independent 30s outer deadline — a real deployment once hung well
+      // past forceKillPort443()'s own internal timeouts for reasons that
+      // couldn't be pinned down from the log alone. This guarantees
+      // forward progress regardless of what the underlying cause is.
+      await withTimeout(forceKillPort443(), 30000, false);
       await sleep(3000); // give Windows a moment to actually release the port
       const stillUp = await getHealth();
       if (stillUp) {

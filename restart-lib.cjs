@@ -85,9 +85,16 @@ function runCommand(file, args, { timeoutMs = 15000, cwd, env } = {}) {
     let settled = false;
     let timer = null;
 
+    // Explicitly passing `env: undefined` to execFile is NOT the same as
+    // omitting the key — depending on the Node version this can suppress
+    // the normal "inherit process.env" default and hand the child a
+    // stripped-down environment (missing PATH/SystemRoot, which Windows'
+    // CreateProcess needs to resolve a bare command name and which some
+    // system utilities behave unpredictably without). Always fall back to
+    // process.env explicitly so this can never be a variable.
     const child = execFile(
       file, args,
-      { cwd, env, encoding: 'utf8', windowsHide: true },
+      { cwd, env: env || process.env, encoding: 'utf8', windowsHide: true },
       (err, stdout, stderr) => {
         if (settled) return; // already resolved via the timeout path below
         settled = true;
@@ -105,7 +112,49 @@ function runCommand(file, args, { timeoutMs = 15000, cwd, env } = {}) {
         error: new Error(`${file} ${args.join(' ')} did not complete within ${timeoutMs / 1000}s — killed.`),
       });
     }, timeoutMs);
-    timer.unref?.(); // never let this timer alone keep the process alive
+    // Deliberately NOT unref'd: this timer is the only thing guaranteeing
+    // forward progress if the child process handle doesn't keep the event
+    // loop alive for some reason. An unref'd timer here can let Node exit
+    // the whole process silently before it ever fires (verified directly:
+    // a bare unref'd timer racing a promise with no other pending work
+    // causes an immediate, silent process exit instead of waiting for the
+    // timeout) — a silent exit is worse than a hang, since nothing is left
+    // alive to mark the deployment failed or clean anything up.
+  });
+}
+
+// Races an arbitrary promise against a hard, INDEPENDENT deadline —
+// deliberately not trusting any timeout logic inside the promise itself.
+// A real deployment hung inside forceKillPort443() well past runCommand()'s
+// own 10s timeout on a `taskkill` call, for reasons that couldn't be
+// pinned down from the log alone (a plain netstat call through the exact
+// same runCommand() mechanism completed normally moments earlier). Rather
+// than assume any single timeout mechanism is trustworthy, every call site
+// that invokes forceKillPort443() also wraps it in this — so no matter
+// what the underlying cause turns out to be, the caller is guaranteed to
+// get control back and can fail the deployment cleanly instead of hanging
+// forever.
+function withTimeout(promise, ms, fallbackValue) {
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(fallbackValue);
+    }, ms);
+    // See the comment on runCommand()'s own timer above — deliberately not
+    // unref'd, for the same reason.
+    promise.then(value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(fallbackValue);
+    });
   });
 }
 
@@ -219,6 +268,7 @@ module.exports = {
   HEALTH_REQUEST_TIMEOUT_MS,
   sleep,
   runCommand,
+  withTimeout,
   getHealth,
   waitForPortFree,
   waitForNewInstance,
