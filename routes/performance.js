@@ -36,7 +36,7 @@ async function getPool() {
 // Returns weeks running from "today" through the end of month index 12,
 // each with the stock level AS OF that week's end date (i.e. after that
 // week's share of usage has been deducted).
-function buildWeeklyStockForecast(currentStock, predictedMonthly, today) {
+function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = []) {
   const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
 
   // Calendar-month windows for i = 0..12, each [monthStart, monthEnd).
@@ -56,6 +56,16 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today) {
   while (weekStart < horizonEnd) {
     const weekEnd = new Date(Math.min(weekStart.getTime() + 7 * 86400000, horizonEnd.getTime()));
 
+    // Open orders (accepted-but-not-received) expected to land this week —
+    // added before that week's usage is deducted, since goods arrive then
+    // get consumed. See dbo.PurchaseOrderSuggestion / listOpenIncomingOrders.
+    // Empty array by default, so every existing caller that doesn't pass
+    // incomingDeliveries behaves exactly as before.
+    const incomingThisWeek = incomingDeliveries
+      .filter(d => d.date >= weekStart && d.date < weekEnd)
+      .reduce((sum, d) => sum + d.qty, 0);
+    runningStock += incomingThisWeek;
+
     let weeklyUsage = 0;
     for (const m of months) {
       const overlapStart = weekStart > m.monthStart ? weekStart : m.monthStart;
@@ -70,6 +80,7 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today) {
     weeks.push({
       weekEnding: weekEnd.toISOString().slice(0, 10),
       weeklyUsage: Math.round(weeklyUsage * 100) / 100,
+      incomingQty: Math.round(incomingThisWeek * 100) / 100,
       expectedStock: Math.round(runningStock * 100) / 100,
     });
 
@@ -81,6 +92,155 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today) {
     currentStock: Math.round(currentStock * 100) / 100,
     weeks,
   };
+}
+
+// ── Order suggestions (MRP Phase 2b) — see sql/migrate_order_suggestions.sql for
+// the full design writeup. Not just-in-time: materials are flagged off a
+// maintained safety-stock FLOOR (VendorMaterial.MinSafetyStockQty, falling
+// back to SAP's own MARC-EISBE), not off hitting zero — this business sees
+// frequent supplier date slips, so a buffer is kept on purpose.
+const ORDER_REVIEW_HORIZON_DAYS = 14;   // how far ahead to surface upcoming shortages, not just overdue ones
+const ORDER_COVERAGE_BUFFER_DAYS = 30;  // extra cover beyond lead time, so the next order isn't due immediately
+
+function addDaysUtc(date, days) {
+  return new Date(date.getTime() + days * 86400000);
+}
+
+// Demand between `from` and `from + days`, spread across predictedMonthly the
+// same way buildWeeklyStockForecast spreads it across weeks — used for the
+// suggested-qty calculation, which needs a demand total over an arbitrary
+// day-count rather than the week-by-week series.
+function demandOverDays(predictedMonthly, from, days) {
+  const rangeEnd = addDaysUtc(from, days);
+  let total = 0;
+  predictedMonthly.forEach((qty, i) => {
+    const monthStart = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + i, 1));
+    const monthEnd    = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + i + 1, 1));
+    const daysInMonth  = Math.round((monthEnd - monthStart) / 86400000);
+    const overlapStart = from > monthStart ? from : monthStart;
+    const overlapEnd    = rangeEnd < monthEnd ? rangeEnd : monthEnd;
+    const overlapDays   = (overlapEnd - overlapStart) / 86400000;
+    if (overlapDays > 0 && daysInMonth > 0) {
+      total += (Number(qty) || 0) * (overlapDays / daysInMonth);
+    }
+  });
+  return total;
+}
+
+// First date a weekly forecast's expectedStock drops to/below `threshold`
+// (the material's safety-stock floor, not necessarily zero), with a
+// same-week linear interpolation so the result is a day rather than only
+// ever landing on a week-ending date.
+function findStockBelowThresholdDate(weeklyForecast, asOfDate, threshold) {
+  let prevStock = weeklyForecast.currentStock;
+  let weekStart = asOfDate;
+  for (const w of weeklyForecast.weeks) {
+    const weekEnd = new Date(w.weekEnding + 'T00:00:00Z');
+    if (w.expectedStock <= threshold) {
+      const drop = prevStock - w.expectedStock;
+      const frac = drop > 0 ? Math.max(0, Math.min(1, (prevStock - threshold) / drop)) : 0;
+      const weekMs = weekEnd.getTime() - weekStart.getTime();
+      return new Date(weekStart.getTime() + frac * weekMs);
+    }
+    prevStock = w.expectedStock;
+    weekStart = weekEnd;
+  }
+  return null; // never projected to breach the floor within the 13-month horizon
+}
+
+// The live "what needs ordering" computation. Nothing here is persisted until
+// a suggestion is accepted (db.acceptOrderSuggestion) — this always reflects
+// current stock/usage/vendor data, recomputed fresh on every request.
+async function computeOrderSuggestions() {
+  const [rows, incoming] = await Promise.all([
+    db.listVendorMaterialsForSuggestions(),
+    db.listOpenIncomingOrders(),
+  ]);
+
+  const incomingByMaterial = new Map();
+  incoming.forEach(r => {
+    const list = incomingByMaterial.get(r.Material) || [];
+    list.push(r);
+    incomingByMaterial.set(r.Material, list);
+  });
+
+  const today = new Date();
+  const asOfDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const horizonDate = addDaysUtc(asOfDate, ORDER_REVIEW_HORIZON_DAYS);
+
+  const suggestions = [];
+
+  for (const r of rows) {
+    // Can't compute anything without a matching SAP snapshot (stock + usage).
+    if (r.StockQty == null && r.ConsignmentQty == null) continue;
+
+    const openOrders = incomingByMaterial.get(r.Material) || [];
+    const openQty = openOrders.reduce((sum, o) => sum + (Number(o.OrderQty) || 0), 0);
+
+    // Current stock includes ConsignmentQty (see the comment on the
+    // currentStock aggregate further down this file) and anything already
+    // incoming, so an item on order doesn't keep getting re-flagged.
+    const currentStock = (Number(r.StockQty) || 0) + (Number(r.ConsignmentQty) || 0) + openQty;
+    const predictedMonthly = [
+      r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
+      r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
+    ];
+
+    // Manually-maintained floor takes priority over SAP's EISBE — see
+    // MinSafetyStockQty's column comment in migrate_vendor_master_data.sql.
+    const safetyStockQty = Number(r.MinSafetyStockQty ?? r.SapSafetyStock ?? 0);
+
+    const weeklyForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, today);
+    const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
+    if (!breachDate) continue; // never projected to breach the floor in the 13-month horizon
+
+    const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
+    const orderByDate = addDaysUtc(breachDate, -leadTimeDays);
+    if (orderByDate > horizonDate) continue; // not due for review yet
+
+    const urgency = orderByDate < asOfDate ? 'Overdue' : 'DueSoon';
+
+    // Suggested qty: cover lead time + a review-cycle buffer, rebuild the
+    // safety-stock floor, minus what's already on hand or already incoming.
+    const coverageDays = leadTimeDays + ORDER_COVERAGE_BUFFER_DAYS;
+    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays);
+    let suggestedQty = demandOverCoverage + safetyStockQty - currentStock;
+    if (suggestedQty <= 0) continue; // already covered despite the timing flag (e.g. a large open order)
+    const moq = Number(r.MaterialMoqQty) || 0;
+    if (moq > suggestedQty) suggestedQty = moq;
+    suggestedQty = Math.round(suggestedQty * 1000) / 1000;
+
+    const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
+    const transitTimeDays = isExw ? (Number(r.TransitTimeDays) || 0) : null;
+
+    suggestions.push({
+      vendorMaterialId: r.VendorMaterialId,
+      vendorId: r.VendorId,
+      vendorName: r.VendorName,
+      material: r.Material,
+      materialText: r.MaterialText,
+      uom: r.Uom,
+      mrpController: r.MrpController,
+      currentStock: Math.round(currentStock * 1000) / 1000,
+      openIncomingQty: Math.round(openQty * 1000) / 1000,
+      safetyStockQty,
+      breachDate: breachDate.toISOString().slice(0, 10),
+      leadTimeDays,
+      transitTimeDays,
+      orderByDate: orderByDate.toISOString().slice(0, 10),
+      urgency,
+      suggestedQty,
+      materialMoqQty: r.MaterialMoqQty,
+      orderMoqQty: r.OrderMoqQty,
+      orderMoqUom: r.OrderMoqUom,
+      incoterms: r.Incoterms || null,
+      isSpotPo: !r.ScheduleAgreement,
+      scheduleAgreement: r.ScheduleAgreement || null,
+    });
+  }
+
+  suggestions.sort((a, b) => a.orderByDate.localeCompare(b.orderByDate));
+  return suggestions;
 }
 
 const router = express.Router();
@@ -1125,7 +1285,18 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     );
     const predictedMonthly = new Array(13).fill(0);
     data.forEach(r => r.predictedUsage.forEach((v, i) => { predictedMonthly[i] += Number(v) || 0; }));
-    const stockForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, new Date());
+
+    // Bump the forecast with expected deliveries from accepted-but-not-yet-
+    // received order suggestions (MRP Phase 2b), scoped to whatever material
+    // set this request already resolved to — same filter as everything else
+    // on this route. See buildWeeklyStockForecast's incomingDeliveries param.
+    const materialsInScope = data.map(r => r.material);
+    const openIncomingOrders = await db.listOpenIncomingOrders(materialsInScope.length ? materialsInScope : null);
+    const incomingDeliveries = openIncomingOrders
+      .filter(o => o.DeliveryDate)
+      .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0 }));
+
+    const stockForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, new Date(), incomingDeliveries);
 
     // ── Recorded accuracy overlay (dbo.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen
@@ -1383,6 +1554,86 @@ router.post('/turns-valclass/change-valuation-class', requirePermission('LOG_MRP
       return res.status(422).json({ success: false, error: { message: err.message }, data: err.data });
     }
 
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+
+// ── Order suggestions (MRP Phase 2b) ────────────────────────────────────────
+router.get('/order-suggestions', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await computeOrderSuggestions();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const {
+      vendorMaterialId, vendorId, material, suggestedQty, orderQty,
+      orderDate, leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+    } = req.body;
+
+    if (!vendorMaterialId || !vendorId || !material || !orderQty) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'vendorMaterialId, vendorId, material and orderQty are required.' }
+      });
+    }
+
+    const orderDateObj = orderDate ? new Date(orderDate) : new Date();
+    const leadTime = Number(leadTimeDays) || 0;
+    const deliveryDate = addDaysUtc(orderDateObj, leadTime);
+
+    // EXW: the date actually quoted to the supplier is the ready-to-collect
+    // date, not the delivery date — see migrate_vendor_master_data.sql's DATE
+    // MATH block. Every other Incoterm leaves these columns NULL/unused.
+    const isExw = (incoterms || '').toUpperCase() === 'EXW';
+    const transitTime = isExw ? (Number(transitTimeDays) || 0) : null;
+    const readyToCollectDate = isExw ? addDaysUtc(deliveryDate, -(transitTime || 0)) : null;
+
+    const suggestionId = await db.acceptOrderSuggestion({
+      vendorMaterialId, vendorId, material,
+      suggestedQty: suggestedQty ?? null,
+      orderQty,
+      orderDate: orderDateObj,
+      leadTimeDaysUsed: leadTime,
+      deliveryDate,
+      transitTimeDaysUsed: transitTime,
+      readyToCollectDate,
+      isSpotPo: !!isSpotPo,
+      notes: notes || null,
+    });
+
+    res.json({ success: true, data: { suggestionId } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.listOrderSuggestionsTracked();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!status || !['Accepted', 'Ordered', 'Received', 'Cancelled'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'status must be one of Accepted, Ordered, Received, Cancelled.' }
+      });
+    }
+    await db.updateOrderSuggestionStatus(req.params.suggestionId, req.body);
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
 });

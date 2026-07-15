@@ -105,6 +105,7 @@ function setupTiles() {
       if (fn === 'changeValuationClass')runChangeValuationClass();
       if (fn === 'stockHistoryForecast')runStockHistoryForecast();
       if (fn === 'vendorMasterData')    runVendorMasterData();
+      if (fn === 'orderSuggestions')    runOrderSuggestions();
     });
   });
 
@@ -4502,6 +4503,13 @@ function vmOpenMaterialEditModal(vendor, m) {
         </div>
       </div>
       <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Min Safety Stock</label>
+          <input class="tf-input" type="number" step="0.001" id="vm-mat-safety" value="${m.MinSafetyStockQty ?? ''}" placeholder="${m.SapSafetyStock != null ? `SAP: ${m.SapSafetyStock}` : ''}">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Minimum stock buffer to maintain for this material — order suggestions (Phase 2b) are raised before stock is projected to fall below this floor rather than just-in-time, since supplier dates often slip. Leave blank to fall back to SAP's own safety stock (EISBE) if set, otherwise 0.</div>
+      <div class="tf-row">
         <div class="tf-field tf-field--wide">
           <label class="tf-label">Schedule Agreement</label>
           <input class="tf-input" type="text" id="vm-mat-sched" value="${esc(m.ScheduleAgreement || '')}">
@@ -4521,6 +4529,7 @@ function vmOpenMaterialEditModal(vendor, m) {
     const body = {
       materialMoqQty: vmNumOrNull(document.getElementById('vm-mat-moq').value),
       leadTimeDaysOverride: vmNumOrNull(document.getElementById('vm-mat-lead').value),
+      minSafetyStockQty: vmNumOrNull(document.getElementById('vm-mat-safety').value),
       scheduleAgreement: document.getElementById('vm-mat-sched').value.trim() || null,
     };
     const btn = document.getElementById('vm-mat-save-btn');
@@ -4551,5 +4560,249 @@ async function vmRemoveMaterial(vendor, vendorMaterialId, material) {
     vmShowVendorMaterials(vendor);
   } catch (err) {
     alert(err.message);
+  }
+}
+
+
+// ── Order suggestions (MRP Phase 2b) ────────────────────────────────────────
+// See sql/migrate_order_suggestions.sql / routes/performance.js's
+// computeOrderSuggestions() for the full trigger logic writeup. Two views
+// sharing the same result panel, toggled by a button rather than separate
+// tiles: the live "needs ordering" list, and a tracker for what's already
+// been accepted (so status can be walked forward as it's raised in SAP and
+// received) — same pattern as vmShowVendorMaterials's drill-down, just a
+// toggle instead of a click-through.
+
+async function runOrderSuggestions() {
+  showResultPanel('Order Suggestions', "Materials projected to fall below their safety stock floor before a fresh order could arrive — not just-in-time");
+  try {
+    const suggestions = await osFetchSuggestions();
+    osRenderSuggestionList(suggestions);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function osFetchSuggestions() {
+  const res = await fetch('/api/performance/order-suggestions');
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error?.message || 'Failed to load order suggestions');
+  return json.data;
+}
+
+async function osFetchTracked() {
+  const res = await fetch('/api/performance/order-suggestions/tracked');
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error?.message || 'Failed to load tracked orders');
+  return json.data;
+}
+
+function osRenderSuggestionList(suggestions) {
+  document.getElementById('result-row-badge').textContent = `${suggestions.length} need${suggestions.length === 1 ? 's' : ''} ordering`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const rows = suggestions.map((s, i) => {
+    const urgencyBadge = s.urgency === 'Overdue'
+      ? `<span class="tile-badge" style="background:var(--error,#DC2626);color:#fff">Overdue</span>`
+      : `<span class="tile-badge" style="background:var(--warning,#D97706);color:#fff">Due Soon</span>`;
+    const agreementCell = s.isSpotPo
+      ? `<span style="color:var(--warning,#D97706)">Spot PO</span>`
+      : esc(s.scheduleAgreement || '—');
+    return `
+      <tr class="admin-row">
+        <td><strong>${esc(s.material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(s.materialText || '')}</div></td>
+        <td>${esc(s.vendorName)}</td>
+        <td>${urgencyBadge}<div style="font-size:11px;margin-top:2px">Order by ${formatDisplayDate(s.orderByDate)}</div></td>
+        <td>${Number(s.currentStock).toLocaleString()} ${esc(s.uom || '')}</td>
+        <td>${Number(s.safetyStockQty).toLocaleString()} ${esc(s.uom || '')}</td>
+        <td>${formatDisplayDate(s.breachDate)}</td>
+        <td>${s.leadTimeDays}${s.transitTimeDays != null ? ` (+${s.transitTimeDays} transit)` : ''}d</td>
+        <td><strong>${Number(s.suggestedQty).toLocaleString()}</strong> ${esc(s.uom || '')}${s.materialMoqQty ? `<div style="font-size:11px;color:var(--text-secondary,#666)">MOQ ${Number(s.materialMoqQty).toLocaleString()}</div>` : ''}</td>
+        <td>${agreementCell}</td>
+        <td style="text-align:right"><button class="btn-submit os-accept-btn" data-i="${i}" style="padding:4px 12px;font-size:11px">Accept</button></td>
+      </tr>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px">
+      <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor (Min Safety Stock on the material, falling back to SAP's own safety stock) — deliberately not just-in-time, since supplier dates often slip.</div>
+      <button class="btn-secondary" id="os-view-tracked-btn" style="white-space:nowrap">View Tracked Orders →</button>
+    </div>
+    ${suggestions.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr>
+            <th>Material</th><th>Vendor</th><th>Urgency</th><th>Current Stock</th>
+            <th>Safety Floor</th><th>Breach Date</th><th>Lead Time</th><th>Suggested Qty</th><th>Agreement</th><th></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">Nothing needs ordering right now.</div>'}
+  `;
+
+  document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
+  document.querySelectorAll('.os-accept-btn').forEach(btn => {
+    btn.addEventListener('click', () => osOpenAcceptModal(suggestions[Number(btn.dataset.i)]));
+  });
+}
+
+function osOpenAcceptModal(s) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Accept Order Suggestion</div><div class="ps-modal-sub">${esc(s.material)} — ${esc(s.vendorName)}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Order Qty</label>
+          <input class="tf-input" type="number" step="0.001" id="os-order-qty" value="${s.suggestedQty}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Order Date</label>
+          <input class="tf-input" type="date" id="os-order-date" value="${todayStr}">
+        </div>
+      </div>
+      ${s.isSpotPo
+        ? `<div class="toolbar-hint" style="margin:2px 0 10px">No schedule agreement for this material — this will need a spot PO raised manually in SAP.</div>`
+        : `<div class="toolbar-hint" style="margin:2px 0 10px">Schedule agreement ${esc(s.scheduleAgreement || '')} — release against this in SAP once ordered.</div>`}
+      ${s.orderMoqQty ? `<div class="toolbar-hint" style="margin:2px 0 10px">${esc(s.vendorName)} has a combined order MOQ of ${Number(s.orderMoqQty).toLocaleString()} ${esc(s.orderMoqUom || '')} across all materials — check what else is due if this order alone won't clear it.</div>` : ''}
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="os-notes" value="">
+        </div>
+      </div>
+      <div id="os-accept-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="os-accept-save-btn">Accept Order</button>
+    </div>
+  </div>`);
+
+  document.getElementById('os-accept-save-btn').addEventListener('click', async () => {
+    const body = {
+      vendorMaterialId: s.vendorMaterialId,
+      vendorId: s.vendorId,
+      material: s.material,
+      suggestedQty: s.suggestedQty,
+      orderQty: vmNumOrNull(document.getElementById('os-order-qty').value),
+      orderDate: document.getElementById('os-order-date').value || null,
+      leadTimeDays: s.leadTimeDays,
+      transitTimeDays: s.transitTimeDays,
+      incoterms: s.incoterms,
+      isSpotPo: s.isSpotPo,
+      notes: document.getElementById('os-notes').value.trim() || null,
+    };
+    if (!body.orderQty) {
+      document.getElementById('os-accept-result').innerHTML = '<div class="sap-error">Order qty is required.</div>';
+      return;
+    }
+    const btn = document.getElementById('os-accept-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch('/api/performance/order-suggestions/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to accept suggestion');
+      closePickModal();
+      runOrderSuggestions();
+    } catch (err) {
+      document.getElementById('os-accept-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Accept Order';
+    }
+  });
+}
+
+async function runOrderSuggestionsTracked() {
+  showResultPanel('Tracked Orders', 'Accepted order suggestions — update status as they’re raised in SAP and received');
+  try {
+    const tracked = await osFetchTracked();
+    osRenderTrackedList(tracked);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+const OS_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Received', 'Cancelled'];
+
+function osRenderTrackedList(tracked) {
+  document.getElementById('result-row-badge').textContent = `${tracked.length} tracked`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const rows = tracked.map(t => {
+    const dueLabel = t.IsSpotPo && t.ReadyToCollectDate
+      ? `${formatDisplayDate(t.ReadyToCollectDate)} (ready to collect)`
+      : formatDisplayDate(t.DeliveryDate);
+    return `
+    <tr class="admin-row">
+      <td><strong>${esc(t.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(t.MaterialText || '')}</div></td>
+      <td>${esc(t.VendorName)}</td>
+      <td>${Number(t.OrderQty).toLocaleString()}</td>
+      <td>${formatDisplayDate(t.OrderDate)}</td>
+      <td>${dueLabel}</td>
+      <td>
+        <select class="tf-input os-status-select" data-id="${t.SuggestionId}" style="padding:3px 6px;font-size:12px">
+          ${OS_STATUS_OPTIONS.map(opt => `<option value="${opt}" ${t.Status === opt ? 'selected' : ''}>${opt}</option>`).join('')}
+        </select>
+      </td>
+      <td><input class="tf-input os-po-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.PoNumber || '')}" placeholder="PO number" style="padding:3px 6px;font-size:12px;width:100px"></td>
+      <td style="text-align:right"><button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button></td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
+    </div>
+    ${tracked.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
+  `;
+
+  document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
+  document.querySelectorAll('.os-save-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
+      if (t) osSaveTrackedStatus(t);
+    });
+  });
+}
+
+// Full-row update, matching the backend's convention (see
+// updateOrderSuggestionStatus's comment in performancesql.js) — Notes isn't
+// editable from this table yet, so the existing value is carried through
+// rather than overwritten with null on every save.
+async function osSaveTrackedStatus(t) {
+  const statusSelect = document.querySelector(`.os-status-select[data-id="${t.SuggestionId}"]`);
+  const poInput = document.querySelector(`.os-po-input[data-id="${t.SuggestionId}"]`);
+  const btn = document.querySelector(`.os-save-btn[data-id="${t.SuggestionId}"]`);
+  const body = {
+    status: statusSelect.value,
+    poNumber: poInput.value.trim() || null,
+    notes: t.Notes || null,
+  };
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to update order');
+    runOrderSuggestionsTracked();
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false; btn.textContent = 'Save';
   }
 }

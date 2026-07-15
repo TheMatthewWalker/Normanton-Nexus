@@ -949,8 +949,8 @@ export async function listVendorMaterials(vendorId) {
     .query(`
       SELECT
         vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty,
-        vm.LeadTimeDaysOverride, vm.ScheduleAgreement, vm.SourceHint,
-        t.MaterialText, t.MrpController, t.PlannedDeliveryTime AS SapLeadTimeDays
+        vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement, vm.SourceHint,
+        t.MaterialText, t.MrpController, t.PlannedDeliveryTime AS SapLeadTimeDays, t.SafetyStock AS SapSafetyStock
       FROM dbo.VendorMaterial vm
       LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = vm.Material
       WHERE vm.VendorId = @vendorId
@@ -959,33 +959,36 @@ export async function listVendorMaterials(vendorId) {
   return recordset;
 }
 
-export async function addVendorMaterial(vendorId, { material, materialMoqQty, leadTimeDaysOverride, scheduleAgreement, sourceHint }) {
+export async function addVendorMaterial(vendorId, { material, materialMoqQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement, sourceHint }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorId',             sql.Int,            vendorId)
     .input('material',             sql.NVarChar(18),   material)
     .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
     .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
+    .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
     .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
     .input('sourceHint',           sql.NVarChar(40),   sourceHint || null)
     .query(`
-      INSERT INTO dbo.VendorMaterial (VendorId, Material, MaterialMoqQty, LeadTimeDaysOverride, ScheduleAgreement, SourceHint)
+      INSERT INTO dbo.VendorMaterial (VendorId, Material, MaterialMoqQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, SourceHint)
       OUTPUT INSERTED.VendorMaterialId
-      VALUES (@vendorId, @material, @materialMoqQty, @leadTimeDaysOverride, @scheduleAgreement, @sourceHint)
+      VALUES (@vendorId, @material, @materialMoqQty, @leadTimeDaysOverride, @minSafetyStockQty, @scheduleAgreement, @sourceHint)
     `);
   return recordset[0].VendorMaterialId;
 }
 
-export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, leadTimeDaysOverride, scheduleAgreement }) {
+export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement }) {
   const pool = await getPool();
   await pool.request()
     .input('vendorMaterialId',     sql.Int,            vendorMaterialId)
     .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
     .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
+    .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
     .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
     .query(`
       UPDATE dbo.VendorMaterial SET
         MaterialMoqQty = @materialMoqQty, LeadTimeDaysOverride = @leadTimeDaysOverride,
+        MinSafetyStockQty = @minSafetyStockQty,
         ScheduleAgreement = @scheduleAgreement, UpdatedAtUtc = GETUTCDATE()
       WHERE VendorMaterialId = @vendorMaterialId
     `);
@@ -996,3 +999,137 @@ export async function deleteVendorMaterial(vendorMaterialId) {
   await pool.request().input('vendorMaterialId', sql.Int, vendorMaterialId)
     .query('DELETE FROM dbo.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
 }
+
+// ── Order suggestions (MRP Phase 2b) ──────────────────────────────────────────────────
+// See sql/migrate_order_suggestions.sql for the full design writeup. This
+// file only holds the data layer: the live "what needs ordering" computation
+// itself lives in routes/performance.js (computeOrderSuggestions), which
+// calls listVendorMaterialsForSuggestions()/listOpenIncomingOrders() below and
+// does the forecasting math in JS, the same pattern already used by the
+// /turns-valclass/history route's weekly stock forecast.
+
+// One row per vendor+material assignment, joined with everything the
+// suggestion engine needs from TurnsValClassSnapshot: stock, predicted usage,
+// SAP's own lead time (PLIFZ) and safety stock (EISBE) as fallbacks for the
+// VendorMaterial-level overrides. LEFT JOIN — a material can be assigned to a
+// vendor without (yet) having synced into TurnsValClassSnapshot; those rows
+// come back with NULL stock/usage and computeOrderSuggestions skips them
+// (nothing to compute without SAP data).
+export async function listVendorMaterialsForSuggestions() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT
+      vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty,
+      vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement,
+      v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMoqUom,
+      v.DefaultLeadTimeDays, v.TransitTimeDays,
+      t.MaterialText, t.Uom, t.MrpController, t.StockQty, t.ConsignmentQty,
+      t.SafetyStock AS SapSafetyStock, t.PlannedDeliveryTime AS SapLeadTimeDays,
+      t.PredictedM12, t.PredictedM11, t.PredictedM10, t.PredictedM09, t.PredictedM08, t.PredictedM07,
+      t.PredictedM06, t.PredictedM05, t.PredictedM04, t.PredictedM03, t.PredictedM02, t.PredictedM01, t.PredictedM00
+    FROM dbo.VendorMaterial vm
+    JOIN dbo.Vendor v ON v.VendorId = vm.VendorId
+    LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = vm.Material
+    ORDER BY vm.Material
+  `);
+  return recordset;
+}
+
+// Open (not yet Received/Cancelled) accepted orders — used two ways:
+//  - computeOrderSuggestions() calls this with no filter to net "already
+//    incoming" quantity off the shortfall so a material already on order
+//    doesn't keep getting re-suggested.
+//  - the /turns-valclass/history route calls this scoped to the materials
+//    already resolved for that request, to bump the weekly stock-forecast
+//    chart with expected deliveries.
+export async function listOpenIncomingOrders(materials = null) {
+  const pool = await getPool();
+  const request = pool.request();
+  let whereSql = "WHERE Status IN ('Accepted', 'Ordered')";
+  if (materials && materials.length) {
+    const inClause = materials.map((m, i) => {
+      request.input(`im${i}`, sql.NVarChar(18), m);
+      return `@im${i}`;
+    }).join(',');
+    whereSql += ` AND Material IN (${inClause})`;
+  }
+  const { recordset } = await request.query(`
+    SELECT Material, OrderQty, DeliveryDate, Status
+    FROM dbo.PurchaseOrderSuggestion
+    ${whereSql}
+  `);
+  return recordset;
+}
+
+export async function acceptOrderSuggestion({
+  vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDate,
+  leadTimeDaysUsed, deliveryDate, transitTimeDaysUsed, readyToCollectDate, isSpotPo, notes
+}) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorMaterialId',      sql.Int,            vendorMaterialId)
+    .input('vendorId',              sql.Int,            vendorId)
+    .input('material',              sql.NVarChar(18),   material)
+    .input('suggestedQty',          sql.Decimal(15, 3), suggestedQty ?? null)
+    .input('orderQty',              sql.Decimal(15, 3), orderQty)
+    .input('orderDate',             sql.DateTime,       orderDate)
+    .input('leadTimeDaysUsed',      sql.Decimal(9, 2),  leadTimeDaysUsed ?? null)
+    .input('deliveryDate',          sql.DateTime,       deliveryDate ?? null)
+    .input('transitTimeDaysUsed',   sql.Decimal(9, 2),  transitTimeDaysUsed ?? null)
+    .input('readyToCollectDate',    sql.DateTime,       readyToCollectDate ?? null)
+    .input('isSpotPo',              sql.Bit,            isSpotPo ? 1 : 0)
+    .input('notes',                 sql.NVarChar(500),  notes || null)
+    .query(`
+      INSERT INTO dbo.PurchaseOrderSuggestion
+        (VendorId, VendorMaterialId, Material, Status, SuggestedQty, OrderQty, OrderDate,
+         LeadTimeDaysUsed, DeliveryDate, TransitTimeDaysUsed, ReadyToCollectDate, IsSpotPo, Notes)
+      OUTPUT INSERTED.SuggestionId
+      VALUES
+        (@vendorId, @vendorMaterialId, @material, 'Accepted', @suggestedQty, @orderQty, @orderDate,
+         @leadTimeDaysUsed, @deliveryDate, @transitTimeDaysUsed, @readyToCollectDate, @isSpotPo, @notes)
+    `);
+  return recordset[0].SuggestionId;
+}
+
+// Everything except Cancelled — cancelled rows are kept in the table for
+// audit but don't need to clutter the tracker view. Ordered by status stage
+// then most-recent order first, so the "needs attention" rows (still
+// Accepted, not yet actually raised in SAP) surface at the top.
+export async function listOrderSuggestionsTracked() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT
+      p.SuggestionId, p.VendorId, v.VendorName, p.VendorMaterialId, p.Material,
+      t.MaterialText, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
+      p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
+      p.IsSpotPo, p.PoNumber, p.Notes, p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc
+    FROM dbo.PurchaseOrderSuggestion p
+    JOIN dbo.Vendor v ON v.VendorId = p.VendorId
+    LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
+    WHERE p.Status <> 'Cancelled'
+    ORDER BY
+      CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Received' THEN 2 ELSE 3 END,
+      p.OrderDate DESC
+  `);
+  return recordset;
+}
+
+// Full-row update (same convention as updateVendor/updateVendorMaterial
+// above) — the caller sends the complete current state, not a partial patch,
+// so PoNumber/Notes need to be included even when only Status is changing.
+export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes }) {
+  const pool = await getPool();
+  await pool.request()
+    .input('suggestionId', sql.Int, suggestionId)
+    .input('status',       sql.NVarChar(20),  status)
+    .input('poNumber',     sql.NVarChar(20),  poNumber || null)
+    .input('notes',        sql.NVarChar(500), notes || null)
+    .query(`
+      UPDATE dbo.PurchaseOrderSuggestion SET
+        Status = @status, PoNumber = @poNumber, Notes = @notes,
+        UpdatedAtUtc = GETUTCDATE(),
+        ReceivedAtUtc = CASE WHEN @status = 'Received' THEN GETUTCDATE() ELSE ReceivedAtUtc END
+      WHERE SuggestionId = @suggestionId
+    `);
+}
+

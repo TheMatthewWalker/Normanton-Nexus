@@ -108,6 +108,16 @@ BEGIN
     -- applies.
     MaterialMoqQty        DECIMAL(15,3) NULL,
 
+    -- Manually-set minimum stock buffer for this material, used by the order-
+    -- suggestion engine (Phase 2b) as the floor stock must not be projected to
+    -- fall below before a fresh order could arrive. Deliberately separate from
+    -- SAP's own MARC-EISBE safety stock (TurnsValClassSnapshot.SafetyStock):
+    -- that field is often 0/unset in SAP, and business-side wants a real buffer
+    -- here rather than ordering just-in-time, given how often supplier dates
+    -- slip. NULL = fall back to TurnsValClassSnapshot.SafetyStock, then to 0 if
+    -- that's also blank.
+    MinSafetyStockQty     DECIMAL(15,3) NULL,
+
     -- NULL = fall back to TurnsValClassSnapshot.PlannedDeliveryTime (SAP
     -- MARC-PLIFZ) for this material, then to Vendor.DefaultLeadTimeDays if that's
     -- also blank. Only set this when the real vendor lead time genuinely differs
@@ -160,7 +170,17 @@ IF COL_LENGTH('dbo.Vendor', 'TransitTimeDays') IS NULL
 PRINT 'dbo.Vendor TransitTimeDays column verified/added';
 
 
+/* ── 2b. VendorMaterial — add MinSafetyStockQty column (existing installs) ───
+   Same guarded-ALTER pattern as TransitTimeDays above — safe to re-run. */
+IF COL_LENGTH('dbo.VendorMaterial', 'MinSafetyStockQty') IS NULL
+  ALTER TABLE dbo.VendorMaterial ADD MinSafetyStockQty DECIMAL(15,3) NULL;
+
+PRINT 'dbo.VendorMaterial MinSafetyStockQty column verified/added';
+
+
 /* ── Verify ──────────────────────────────────────────────────────────────── */
+
+
 SELECT 'Vendor'         AS TableName, COUNT(*) AS Rows FROM dbo.Vendor
 UNION ALL
 SELECT 'VendorMaterial',              COUNT(*)         FROM dbo.VendorMaterial;

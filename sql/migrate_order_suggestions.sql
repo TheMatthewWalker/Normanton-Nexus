@@ -1,0 +1,107 @@
+/* ============================================================
+   MRP Phase 2b — order suggestions. Run against the kongsberg database.
+   Compatibility : SQL Server 2005+ (matches create_performance_turnsvalclass_database.sql
+   and migrate_vendor_master_data.sql — no GO, no CONCAT(), no DATETIME2).
+
+   dbo.PurchaseOrderSuggestion is NOT where "what needs ordering" is computed —
+   that list is worked out live, on every request, in Node (routes/performance.js
+   GET /order-suggestions) from TurnsValClassSnapshot (stock + predicted usage)
+   joined against dbo.Vendor / dbo.VendorMaterial (lead time, Incoterms, transit
+   time, MOQ, safety stock). This table only starts existing once a suggestion
+   is ACCEPTED — it's the record of "we decided to order this", not the
+   suggestion engine's working data. Keeping the live computation out of SQL
+   means the trigger logic can change freely without a migration; only
+   accepted decisions are durable.
+
+   TRIGGER LOGIC (Node, for reference — not enforced here). Deliberately NOT
+   just-in-time: this business sees frequent supplier date slips, so ordering
+   is triggered off a maintained safety-stock FLOOR, not off hitting zero.
+     safetyStockQty = VendorMaterial.MinSafetyStockQty
+                       ?? TurnsValClassSnapshot.SafetyStock (SAP MARC-EISBE)
+                       ?? 0
+     Stock is projected forward week-by-week using PredictedUsage (same
+     spreading as buildWeeklyStockForecast in routes/performance.js) to find
+     the date stock is projected to drop to/below safetyStockQty (breachDate).
+     A material needs ordering when placing the order today wouldn't get
+     replacement stock there before that floor is breached:
+       leadTimeDays = VendorMaterial.LeadTimeDaysOverride
+                       ?? TurnsValClassSnapshot.PlannedDeliveryTime (SAP PLIFZ)
+                       ?? Vendor.DefaultLeadTimeDays ?? 0
+       orderByDate  = breachDate - leadTimeDays
+     Surfaced once orderByDate falls within a review window (today + 14 days);
+     flagged "Overdue" if orderByDate has already passed.
+
+   SUGGESTED QTY (Node): demand over (leadTimeDays + 30 day buffer), plus
+   safetyStockQty (the same floor used for the trigger, so the order actually
+   rebuilds the buffer rather than just topping up to it), minus current
+   stock, minus anything already incoming (this table's Accepted/Ordered rows
+   for that material) — floored at the material's own MOQ. The vendor's
+   combined order-level MOQ (dbo.Vendor.OrderMoqQty, spanning multiple
+   materials) is surfaced as an informational note only; grouping multiple
+   materials into one order to clear a combined MOQ is not automated.
+
+   DATES stamped onto this table at accept time (see migrate_vendor_master_data.sql's
+   DATE MATH block for the full reasoning):
+     DeliveryDate       = OrderDate + LeadTimeDaysUsed
+     ReadyToCollectDate = OrderDate + LeadTimeDaysUsed - TransitTimeDaysUsed
+                           (EXW vendors only — the date actually quoted to the
+                           supplier; NULL for every other Incoterm)
+   Snapshotted rather than recalculated live, so a later change to a vendor's
+   lead time or transit time doesn't silently rewrite the dates on an order
+   that's already been placed.
+
+   STATUS LIFECYCLE: Accepted -> Ordered -> Received, or -> Cancelled at any
+   point before Received. A row only exists once a suggestion has been
+   accepted — there is deliberately no "Suggested" status stored here.
+   ============================================================ */
+
+
+/* ── 1. PurchaseOrderSuggestion ───────────────────────────────────────────── */
+IF NOT EXISTS (SELECT 1 FROM sys.objects
+               WHERE object_id = OBJECT_ID(N'dbo.PurchaseOrderSuggestion') AND type = 'U')
+BEGIN
+  CREATE TABLE dbo.PurchaseOrderSuggestion (
+    SuggestionId          INT           NOT NULL IDENTITY(1,1),
+    VendorId              INT           NOT NULL,
+    VendorMaterialId      INT           NOT NULL,
+    Material              NVARCHAR(18)  NOT NULL,   -- denormalised for easy joins against TurnsValClassSnapshot
+
+    Status                NVARCHAR(20)  NOT NULL DEFAULT 'Accepted',  -- Accepted / Ordered / Received / Cancelled
+
+    -- What the engine suggested at accept time vs. what was actually ordered
+    -- (the accept modal lets the qty be adjusted before saving).
+    SuggestedQty           DECIMAL(15,3) NULL,
+    OrderQty                DECIMAL(15,3) NOT NULL,
+    OrderDate                DATETIME      NOT NULL,
+
+    -- Snapshotted at accept time — see header DATES note above for why these
+    -- aren't recalculated live from the current vendor record.
+    LeadTimeDaysUsed          DECIMAL(9,2)  NULL,
+    DeliveryDate               DATETIME      NULL,
+    TransitTimeDaysUsed         DECIMAL(9,2)  NULL,
+    ReadyToCollectDate            DATETIME      NULL,   -- EXW vendors only, NULL otherwise
+
+    -- Snapshotted from VendorMaterial.ScheduleAgreement being blank at accept
+    -- time: this material has no SAP scheduling agreement, so it'll need a
+    -- spot PO raised manually in SAP rather than a release against one.
+    IsSpotPo                       BIT           NOT NULL DEFAULT 0,
+
+    -- Filled in by hand once the PO/release actually exists in SAP — no live
+    -- SAP write-back yet (see Notes below).
+    PoNumber                        NVARCHAR(20)  NULL,
+    Notes                            NVARCHAR(500) NULL,
+
+    CreatedAtUtc                     DATETIME      NOT NULL DEFAULT GETUTCDATE(),
+    UpdatedAtUtc                     DATETIME      NOT NULL DEFAULT GETUTCDATE(),
+    ReceivedAtUtc                    DATETIME      NULL,
+
+    CONSTRAINT PK_PurchaseOrderSuggestion PRIMARY KEY (SuggestionId),
+    CONSTRAINT FK_POS_Vendor FOREIGN KEY (VendorId) REFERENCES dbo.Vendor (VendorId),
+    CONSTRAINT FK_POS_VendorMaterial FOREIGN KEY (VendorMaterialId) REFERENCES dbo.VendorMaterial (VendorMaterialId)
+  );
+
+  -- Used by the suggestion engine to find "already covered" materials (open
+  -- Accepted/Ordered rows) so it doesn't keep re-flagging something already
+  -- on order, and by the forecast-graph incoming-stock overlay.
+  CREATE INDEX IX_POS_Material ON dbo.PurchaseOrderSuggestion (Material) INCLUDE (Status, OrderQty, DeliveryDate);
+  CREATE INDEX IX_POS_Status   ON dbo.PurchaseOrderSugge
