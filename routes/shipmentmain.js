@@ -822,10 +822,10 @@ function unwrapSapArray(body) {
 
 
 async function fetchSapCustomsData(deliveries, req) {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  const trustedOrigin = `http://127.0.0.1:${process.env.PORT || 3000}`;
   const headers = { 'Content-Type': 'application/json', ...(req.headers.cookie ? { Cookie: req.headers.cookie } : {}) };
 
-  const sapPost = (path, body) => fetch(`${baseUrl}${path}`, {
+  const sapPost = (path, body) => fetch(new URL(path, trustedOrigin), {
     method: 'POST', headers, body: JSON.stringify(body),
   }).then(r => r.json());
 
