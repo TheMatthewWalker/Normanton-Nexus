@@ -2371,7 +2371,15 @@ async function submitDrumming(req, res, entryType) {
     comments,
   } = req.body;
 
-  if (!material || !coilLengths.length || !packagingID || !weightKG)
+  const MAX_COIL_LENGTHS = 1000;
+
+  if (!Array.isArray(coilLengths))
+    return res.status(400).json({ success: false, error: 'coilLengths must be an array.' });
+
+  if (coilLengths.length === 0 || coilLengths.length > MAX_COIL_LENGTHS)
+    return res.status(400).json({ success: false, error: `coilLengths must contain between 1 and ${MAX_COIL_LENGTHS} items.` });
+
+  if (!material || !packagingID || !weightKG)
     return res.status(400).json({ success: false, error: 'material, packagingID, weightKG and at least one coilLength are required.' });
 
   try { await assertProfitCentre('DR', material); }
