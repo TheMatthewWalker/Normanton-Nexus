@@ -8,11 +8,12 @@ const getPool = async () => await sql.connect(sqlConfig);
 
 // ── Validate required KN env vars on startup ──────────────────────────────────
 const KN_API_URL      = process.env.KN_API_URL;
-const KN_CUSTOMER_ID  = process.env.KN_CUSTOMER_ID;
-const KN_CUSTOMER_KEY = process.env.KN_CUSTOMER_KEY;
+const KN_CUSTOMER_ID  = process.env.KN_CUSTOMER_ID_TEST;
+const KN_CUSTOMER_KEY = process.env.KN_CUSTOMER_KEY_TEST;
+const KN_SECRET       = process.env.KN_SECRET_64_TEST;
 
-if (!KN_API_URL || !KN_CUSTOMER_ID || !KN_CUSTOMER_KEY) {
-    console.error('[freightbooking] Missing required env vars: KN_API_URL, KN_CUSTOMER_ID, KN_CUSTOMER_KEY');
+if (!KN_API_URL || !KN_CUSTOMER_ID || !KN_CUSTOMER_KEY || !KN_SECRET) {
+    console.error('[freightbooking] Missing required env vars: KN_API_URL, KN_CUSTOMER_ID, KN_CUSTOMER_KEY, KN_SECRET');
 }
 
 // ── Build KN booking payload from DB records ──────────────────────────────────
@@ -27,9 +28,9 @@ function buildBookingPayload(shipment, pallets, options = {}) {
         weightUom:       'KGM',
         volume:          Number(p.palletVolume)  || 0,
         volumeUom:       'MTQ',
-        dimensionLength: Number(p.palletLength)  || 0,
-        dimensionWidth:  Number(p.palletWidth)   || 0,
-        dimensionHeight: Number(p.palletHeight)  || 0,
+        dimensionLength: Number(p.palletLength) * 10  || 0,
+        dimensionWidth:  Number(p.palletWidth) * 10   || 0,
+        dimensionHeight: Number(p.palletHeight) * 10  || 0,
         dimensionsUom:   'MMT',
     }));
 
@@ -125,7 +126,7 @@ function extractTrackingNumber(responseData) {
 export async function getKnAccessToken() {
   const tokenUrl = 'https://portal.api.kuehne-nagel.com/oauth2/token';
 
-  const basicAuth = 'Basic ' + process.env.KN_SECRET_64; // Base64(client_secret)
+  const basicAuth = 'Basic ' + KN_SECRET ; // Base64(client_secret)
 
   try {
     const response = await axios.post(
@@ -142,8 +143,7 @@ export async function getKnAccessToken() {
         timeout: 15000,
       }
     );
-
-    //console.log(`[KN OAuth] Access token ${response.data.access_token} obtained, expires in ${response.data.expires_in} seconds.`);
+    console.log(`[KN OAuth] Access token obtained, expires in ${response.data.expires_in} seconds.`);
     return response.data; // { access_token, token_type, expires_in, ... }
   } catch (err) {
     if (err.response) {
@@ -227,7 +227,8 @@ router.post('/shipment/:shipmentId', async (req, res) => {
             transactionID: knResponse.data?.transactionID ?? null,
             bookingIsSuccessful: knResponse.data?.bookingIsSuccessful ?? null,
             trackingNumber: extractTrackingNumber(knResponse.data),
-            data: knResponse.data
+            data: knResponse.data,
+            requestPayload: payload,
         });
 
     } catch (err) {
