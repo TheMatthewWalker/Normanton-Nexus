@@ -98,6 +98,7 @@ BEGIN
     PlannedDeliveryTime      DECIMAL(9,2)   NULL,       -- PLIFZ
 
     StockQty                 DECIMAL(15,3)  NULL,       -- MBEW-LBKUM
+    ConsignmentQty            DECIMAL(15,3)  NULL,       -- MKOL-SLABS (SOBKZ='K'), NOT part of valuation — MRP planning only
     StockValue                DECIMAL(18,2) NULL,       -- MBEW-SALK3
     UnitPrice                 DECIMAL(15,4) NULL,       -- MBEW-STPRS / PEINH
     BookValue                 DECIMAL(18,2) NULL,       -- StockValue * factor(ValuationClass)
@@ -184,6 +185,19 @@ IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'PredictedM00') IS NULL
   ALTER TABLE dbo.TurnsValClassSnapshot ADD PredictedM00 DECIMAL(15,3) NULL;
 
 PRINT 'dbo.TurnsValClassSnapshot PredictedUsage columns verified/added';
+
+
+/* ── 1c. TurnsValClassSnapshot — add ConsignmentQty column (existing installs) ──────
+   Vendor consignment stock (MKOL, SOBKZ='K') has no value yet from our accounting
+   perspective, so it's deliberately excluded from MBEW and therefore from StockQty/
+   StockValue/BookValue above — those three stay exactly as they always were, for
+   accurate valuation reporting. ConsignmentQty is a separate, additive column used
+   ONLY by MRP planning (the weekly stock forecast's starting "current stock" figure
+   = StockQty + ConsignmentQty), so it can never distort anything valuation-facing. */
+IF COL_LENGTH('dbo.TurnsValClassSnapshot', 'ConsignmentQty') IS NULL
+  ALTER TABLE dbo.TurnsValClassSnapshot ADD ConsignmentQty DECIMAL(15,3) NULL;
+
+PRINT 'dbo.TurnsValClassSnapshot ConsignmentQty column verified/added';
 
 
 /* ── 2. ValuationClassCatalog ─────────────────────────────────────────────

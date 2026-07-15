@@ -334,6 +334,11 @@ function historyForecastCols(prefix, key) {
 // so duplicates carry identical history/forecast arrays (safe to take from either);
 // StockQty/StockValue/BookValue are per-valuation-type and must be summed to get the
 // true material+plant total, with UnitPrice recomputed from the summed totals.
+// consignmentQty is NOT summed here (deliberately untouched, left exactly as the
+// first-seen row carries it): unlike MBEW, MKOL isn't split by valuation type at
+// all — SapServer's ComputeTurnsRows looks it up once per material and stamps the
+// identical value onto every duplicate valuation-type row, so summing across
+// duplicates here would double/triple-count real consignment stock.
 export function dedupeTurnsValClassRows(rows) {
   const map = new Map();
 
@@ -394,6 +399,7 @@ export function replaceTurnsValClassSnapshot(rows) {
     ['PlannedDeliveryTime',    'plannedDeliveryTime',    sql.Decimal(9, 2)],
 
     ['StockQty',               'stockQty',               sql.Decimal(15, 3)],
+    ['ConsignmentQty',         'consignmentQty',         sql.Decimal(15, 3)],
     ['StockValue',             'stockValue',             sql.Decimal(18, 2)],
     ['UnitPrice',              'unitPrice',              sql.Decimal(15, 4)],
     ['BookValue',              'bookValue',              sql.Decimal(18, 2)],

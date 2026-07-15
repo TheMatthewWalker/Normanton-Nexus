@@ -1066,7 +1066,7 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
 
     const { recordset } = await request.query(`
       SELECT
-        Material, MaterialText, Plant, Uom, StockQty,
+        Material, MaterialText, Plant, Uom, StockQty, ConsignmentQty,
         HistoryM12, HistoryM11, HistoryM10, HistoryM09, HistoryM08, HistoryM07,
         HistoryM06, HistoryM05, HistoryM04, HistoryM03, HistoryM02, HistoryM01, HistoryM00,
         ForecastM12, ForecastM11, ForecastM10, ForecastM09, ForecastM08, ForecastM07,
@@ -1084,6 +1084,13 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
       plant: r.Plant,
       uom: r.Uom,
       stockQty: r.StockQty,
+      // Not surfaced as its own column anywhere valuation-facing — MBEW (and therefore
+      // StockQty) never sees consignment stock by design, since it has no value yet.
+      // Kept alongside stockQty here purely so the aggregate below can build an MRP
+      // "current stock" figure that includes it without this route needing a second
+      // query. See the currentStock comment further down for why they're summed there
+      // and nowhere else.
+      consignmentQty: r.ConsignmentQty,
       consumptionHistory: [
         r.HistoryM12, r.HistoryM11, r.HistoryM10, r.HistoryM09, r.HistoryM08, r.HistoryM07,
         r.HistoryM06, r.HistoryM05, r.HistoryM04, r.HistoryM03, r.HistoryM02, r.HistoryM01, r.HistoryM00
@@ -1103,7 +1110,19 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     // materials this request resolved to (one material, an MRP controller's book,
     // or everything), projected forward week by week. See buildWeeklyStockForecast
     // for the month-to-week spreading method.
-    const currentStock = data.reduce((sum, r) => sum + (Number(r.stockQty) || 0), 0);
+    //
+    // currentStock intentionally includes consignmentQty here — this is the ONLY
+    // place StockQty and ConsignmentQty are added together anywhere in the app.
+    // For MRP/shipment planning, what's physically available to consume is what
+    // matters, regardless of who currently owns it on paper. Every other reader of
+    // StockQty (the plain turns-valclass list, aggregates, value-by-price, the
+    // Stock Turns tile) stays on StockQty alone — those are valuation views, and
+    // consignment stock has no value yet from our accounting perspective, so it
+    // must never appear in anything valuation-facing.
+    const currentStock = data.reduce(
+      (sum, r) => sum + (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0),
+      0
+    );
     const predictedMonthly = new Array(13).fill(0);
     data.forEach(r => r.predictedUsage.forEach((v, i) => { predictedMonthly[i] += Number(v) || 0; }));
     const stockForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, new Date());
