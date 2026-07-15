@@ -4259,6 +4259,13 @@ function vmOpenVendorModal(vendor) {
       </div>
       <div class="tf-row">
         <div class="tf-field">
+          <label class="tf-label">Transit Time (days)</label>
+          <input class="tf-input" type="number" step="0.1" id="vm-transit-time" value="${vendor?.TransitTimeDays ?? ''}">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Only used for EXW vendors: subtracted from lead time to get the date to actually quote the supplier (ready-to-collect date), since under EXW you arrange collection and transit yourself rather than the vendor. Ignored for any other Incoterm.</div>
+      <div class="tf-row">
+        <div class="tf-field">
           <label class="tf-label">Order MOQ Qty</label>
           <input class="tf-input" type="number" step="0.001" id="vm-order-moq-qty" value="${vendor?.OrderMoqQty ?? ''}">
         </div>
@@ -4287,6 +4294,7 @@ function vmOpenVendorModal(vendor) {
       vendorName: document.getElementById('vm-name').value.trim(),
       incoterms: document.getElementById('vm-incoterms').value || null,
       defaultLeadTimeDays: vmNumOrNull(document.getElementById('vm-lead-time').value),
+      transitTimeDays: vmNumOrNull(document.getElementById('vm-transit-time').value),
       orderMoqQty: vmNumOrNull(document.getElementById('vm-order-moq-qty').value),
       orderMoqUom: document.getElementById('vm-order-moq-uom').value.trim() || null,
       notes: document.getElementById('vm-notes').value.trim() || null,
@@ -4499,6 +4507,7 @@ function vmOpenMaterialEditModal(vendor, m) {
           <input class="tf-input" type="text" id="vm-mat-sched" value="${esc(m.ScheduleAgreement || '')}">
         </div>
       </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Leave blank if this material is ordered via spot PO rather than against a scheduling agreement.</div>
       ${m.SourceHint ? `<div class="toolbar-hint">Seeded from MRP2.xlsx as "${esc(m.SourceHint)}" — double-check this is the right SAP material.</div>` : ''}
       <div id="vm-mat-result"></div>
     </div>

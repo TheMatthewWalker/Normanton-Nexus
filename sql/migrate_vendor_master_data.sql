@@ -16,14 +16,27 @@
    live in a new admin page rather than be sourced from SAP purchasing info
    records.
 
-   1. dbo.Vendor          — one row per vendor. Incoterms + order-level MOQ live
-                             here since both apply across everything a vendor
-                             supplies, not per material.
+   1. dbo.Vendor          — one row per vendor. Incoterms, order-level MOQ and
+                             transit time live here since all three apply across
+                             everything a vendor supplies, not per material.
    2. dbo.VendorMaterial   — one row per vendor+material assignment. Per-material
                              MOQ, an optional lead-time override (falls back to
                              SAP's own MARC-PLIFZ on TurnsValClassSnapshot when
                              left blank), and the SAP schedule agreement number
-                             where one exists.
+                             where one exists (blank = ordered via spot PO
+                             instead — see the ScheduleAgreement comment below).
+
+   DATE MATH (for the order-suggestion/PO-creation phase that reads this table,
+   not implemented yet — captured here so the schema already has what it needs):
+     deliveryDate (goods arrive at Kongsberg)   = orderDate + leadTime
+     for EXW vendors, the date QUOTED TO THE SUPPLIER is not deliveryDate — under
+     EXW the supplier's job ends when goods are ready for collection, and WE
+     arrange the transit leg. leadTime here is the SAP-planning-style total
+     time until goods are on our shelf (production + transit), so:
+       readyToCollectDate (date to tell an EXW supplier) = orderDate + leadTime - TransitTimeDays
+     For any other Incoterm, transit is the vendor's own problem within their
+     quoted lead time, so the date quoted to the supplier is just deliveryDate
+     and TransitTimeDays is unused.
    ============================================================ */
 
 
@@ -57,6 +70,14 @@ BEGIN
     -- practice but keeps the order-suggestion engine from having a hole to fall
     -- through if both of those are ever missing for a given material.
     DefaultLeadTimeDays  DECIMAL(9,2)  NULL,
+
+    -- Only meaningful for EXW vendors (see the DATE MATH note in the header
+    -- above) — how many days of the total lead time are transit, once goods
+    -- leave the supplier's site under our own arrangement. Subtracted from
+    -- lead time to get the date to actually quote the supplier. NULL/0 for
+    -- any other Incoterm, where the vendor's quoted lead time already covers
+    -- getting it to us and this field is simply ignored.
+    TransitTimeDays      DECIMAL(9,2)  NULL,
 
     Notes                NVARCHAR(500) NULL,
     CreatedAtUtc         DATETIME      NOT NULL DEFAULT GETUTCDATE(),
@@ -94,8 +115,12 @@ BEGIN
     LeadTimeDaysOverride  DECIMAL(9,2)  NULL,
 
     -- SAP scheduling agreement number, where this vendor+material is bought
-    -- against one. Informational only for now (no live SAP data flows through
-    -- this yet — see Notes in the SQL header).
+    -- against one. Left NULL/blank means this material has no scheduling
+    -- agreement and is ordered via a spot PO instead — the order-suggestion/
+    -- PO-creation phase (not implemented yet) branches on exactly this: blank
+    -- ScheduleAgreement means it needs to offer a spot-PO creation option
+    -- rather than releasing against an agreement. Informational only for now
+    -- (no live SAP data flows through this yet — see Notes in the SQL header).
     ScheduleAgreement     NVARCHAR(10)  NULL,
 
     -- Traceability only: the raw material code this row was seeded from when
@@ -121,6 +146,18 @@ BEGIN
 END
 ELSE
   PRINT 'dbo.VendorMaterial already exists — skipped';
+
+
+/* ── 1b. Vendor — add TransitTimeDays column (existing installs) ────────────
+   The CREATE TABLE above only runs on a brand-new install. A database that
+   already had dbo.Vendor before TransitTimeDays was added needs it brought in
+   with ALTER TABLE instead — same COL_LENGTH()-guarded pattern used elsewhere
+   in this codebase (see create_performance_turnsvalclass_database.sql's
+   PredictedUsage columns), safe to re-run every time this script executes. */
+IF COL_LENGTH('dbo.Vendor', 'TransitTimeDays') IS NULL
+  ALTER TABLE dbo.Vendor ADD TransitTimeDays DECIMAL(9,2) NULL;
+
+PRINT 'dbo.Vendor TransitTimeDays column verified/added';
 
 
 /* ── Verify ──────────────────────────────────────────────────────────────── */

@@ -875,7 +875,7 @@ export async function listVendors() {
   const { recordset } = await pool.request().query(`
     SELECT
       v.VendorId, v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMoqUom,
-      v.DefaultLeadTimeDays, v.Notes, v.CreatedAtUtc, v.UpdatedAtUtc,
+      v.DefaultLeadTimeDays, v.TransitTimeDays, v.Notes, v.CreatedAtUtc, v.UpdatedAtUtc,
       (SELECT COUNT(*) FROM dbo.VendorMaterial vm WHERE vm.VendorId = v.VendorId) AS MaterialCount
     FROM dbo.Vendor v
     ORDER BY v.VendorName
@@ -883,7 +883,7 @@ export async function listVendors() {
   return recordset;
 }
 
-export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, notes }) {
+export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorName',          sql.NVarChar(80),  vendorName)
@@ -891,16 +891,17 @@ export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMo
     .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
     .input('orderMoqUom',         sql.NVarChar(3),   orderMoqUom || null)
     .input('defaultLeadTimeDays', sql.Decimal(9, 2), defaultLeadTimeDays ?? null)
+    .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
-      INSERT INTO dbo.Vendor (VendorName, Incoterms, OrderMoqQty, OrderMoqUom, DefaultLeadTimeDays, Notes)
+      INSERT INTO dbo.Vendor (VendorName, Incoterms, OrderMoqQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
       OUTPUT INSERTED.VendorId
-      VALUES (@vendorName, @incoterms, @orderMoqQty, @orderMoqUom, @defaultLeadTimeDays, @notes)
+      VALUES (@vendorName, @incoterms, @orderMoqQty, @orderMoqUom, @defaultLeadTimeDays, @transitTimeDays, @notes)
     `);
   return recordset[0].VendorId;
 }
 
-export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, notes }) {
+export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
   const pool = await getPool();
   await pool.request()
     .input('vendorId',            sql.Int,           vendorId)
@@ -909,12 +910,13 @@ export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQt
     .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
     .input('orderMoqUom',         sql.NVarChar(3),   orderMoqUom || null)
     .input('defaultLeadTimeDays', sql.Decimal(9, 2), defaultLeadTimeDays ?? null)
+    .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
       UPDATE dbo.Vendor SET
         VendorName = @vendorName, Incoterms = @incoterms,
         OrderMoqQty = @orderMoqQty, OrderMoqUom = @orderMoqUom,
-        DefaultLeadTimeDays = @defaultLeadTimeDays, Notes = @notes,
+        DefaultLeadTimeDays = @defaultLeadTimeDays, TransitTimeDays = @transitTimeDays, Notes = @notes,
         UpdatedAtUtc = GETUTCDATE()
       WHERE VendorId = @vendorId
     `);
