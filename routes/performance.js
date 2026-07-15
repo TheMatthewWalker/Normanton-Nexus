@@ -1207,6 +1207,104 @@ router.get('/turns-valclass/mrp-controllers', requirePermission('LOG_MRP'), asyn
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// Vendor master data (MRP Phase 2) — manually-maintained, see
+// sql/migrate_vendor_master_data.sql and performancesql.js's Vendor/
+// VendorMaterial functions for why this isn't sourced from SAP.
+// ══════════════════════════════════════════════════════════════════════════
+
+router.get('/vendors', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.listVendors();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/vendors', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { vendorName } = req.body;
+    if (!vendorName || !String(vendorName).trim()) {
+      return res.status(400).json({ success: false, error: { message: 'vendorName is required.' } });
+    }
+    const vendorId = await db.createVendor(req.body);
+    res.json({ success: true, data: { vendorId } });
+  } catch (err) {
+    // UQ_Vendor_Name violation reads as a generic SQL error otherwise —
+    // surface it plainly since this is the one thing a user is likely to hit.
+    const message = /UQ_Vendor_Name/i.test(err.message)
+      ? `A vendor named "${req.body.vendorName}" already exists.`
+      : err.message;
+    res.status(500).json({ success: false, error: { message } });
+  }
+});
+
+router.put('/vendors/:vendorId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { vendorName } = req.body;
+    if (!vendorName || !String(vendorName).trim()) {
+      return res.status(400).json({ success: false, error: { message: 'vendorName is required.' } });
+    }
+    await db.updateVendor(req.params.vendorId, req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.delete('/vendors/:vendorId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.deleteVendor(req.params.vendorId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.get('/vendors/:vendorId/materials', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.listVendorMaterials(req.params.vendorId);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/vendors/:vendorId/materials', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { material } = req.body;
+    if (!material || !String(material).trim()) {
+      return res.status(400).json({ success: false, error: { message: 'material is required.' } });
+    }
+    const vendorMaterialId = await db.addVendorMaterial(req.params.vendorId, req.body);
+    res.json({ success: true, data: { vendorMaterialId } });
+  } catch (err) {
+    const message = /UQ_VendorMaterial/i.test(err.message)
+      ? `${req.body.material} is already assigned to this vendor.`
+      : err.message;
+    res.status(500).json({ success: false, error: { message } });
+  }
+});
+
+router.put('/vendors/:vendorId/materials/:vendorMaterialId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.updateVendorMaterial(req.params.vendorMaterialId, req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.delete('/vendors/:vendorId/materials/:vendorMaterialId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.deleteVendorMaterial(req.params.vendorMaterialId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // ── Valuation class catalog (cached) — for the change-valuation-class dropdown ──
 router.get('/turns-valclass/valuation-classes', requirePermission('LOG_MRP'), async (req, res) => {
   try {

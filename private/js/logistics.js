@@ -104,6 +104,7 @@ function setupTiles() {
       if (fn === 'stockValueByPrice')   runStockValueByPrice();
       if (fn === 'changeValuationClass')runChangeValuationClass();
       if (fn === 'stockHistoryForecast')runStockHistoryForecast();
+      if (fn === 'vendorMasterData')    runVendorMasterData();
     });
   });
 
@@ -4152,5 +4153,394 @@ async function shfLoadChart(material, title) {
       errDiv.textContent = err.message;
       canvas.replaceWith(errDiv);
     }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Vendor Master Data (MRP Phase 2) — lead time, Incoterms, MOQ per vendor
+// and per vendor+material. Manually maintained (not sourced from SAP — see
+// sql/migrate_vendor_master_data.sql). A later phase reads this to drive the
+// order-suggestion engine; this tile is just the data entry/management UI.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function runVendorMasterData() {
+  showResultPanel('Vendor Master Data', "Lead time, Incoterms & minimum order quantities — click a vendor to manage its materials");
+  try {
+    const vendors = await vmFetchVendors();
+    vmRenderVendorList(vendors);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function vmFetchVendors() {
+  const res = await fetch('/api/performance/vendors');
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error?.message || 'Failed to load vendors');
+  return json.data;
+}
+
+function vmRenderVendorList(vendors) {
+  document.getElementById('result-row-badge').textContent = `${vendors.length} vendor${vendors.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const rows = vendors.map(v => `
+    <tr class="admin-row vm-vendor-row" style="cursor:pointer" data-id="${esc(String(v.VendorId))}">
+      <td><strong>${esc(v.VendorName)}</strong></td>
+      <td>${esc(v.Incoterms || '—')}</td>
+      <td>${v.OrderMoqQty != null ? esc(Number(v.OrderMoqQty).toLocaleString()) + (v.OrderMoqUom ? ' ' + esc(v.OrderMoqUom) : '') : '—'}</td>
+      <td>${v.DefaultLeadTimeDays != null ? esc(String(v.DefaultLeadTimeDays)) + ' days' : '—'}</td>
+      <td>${v.MaterialCount}</td>
+      <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary vm-edit-vendor" data-id="${esc(String(v.VendorId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary vm-delete-vendor" data-id="${esc(String(v.VendorId))}" data-name="${esc(v.VendorName)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="vm-add-vendor-btn">+ Add Vendor</button>
+    </div>
+    ${vendors.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Vendor</th><th>Incoterms</th><th>Order MOQ</th><th>Default Lead Time</th><th>Materials</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No vendors yet — add one to get started.</div>'}
+  `;
+
+  document.getElementById('vm-add-vendor-btn').addEventListener('click', () => vmOpenVendorModal(null));
+  document.querySelectorAll('.vm-vendor-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const v = vendors.find(x => String(x.VendorId) === tr.dataset.id);
+      if (v) vmShowVendorMaterials(v);
+    });
+  });
+  document.querySelectorAll('.vm-edit-vendor').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const v = vendors.find(x => String(x.VendorId) === btn.dataset.id);
+      if (v) vmOpenVendorModal(v);
+    });
+  });
+  document.querySelectorAll('.vm-delete-vendor').forEach(btn => {
+    btn.addEventListener('click', () => vmDeleteVendor(btn.dataset.id, btn.dataset.name));
+  });
+}
+
+const VM_INCOTERMS = ['EXW', 'FCA', 'FOB', 'CPT', 'CIP', 'CFR', 'CIF', 'DAP', 'DPU', 'DDP'];
+
+function vmOpenVendorModal(vendor) {
+  const isEdit = !!vendor;
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Vendor' : 'Add Vendor'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Vendor Name</label>
+          <input class="tf-input" type="text" id="vm-name" value="${esc(vendor?.VendorName || '')}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Incoterms</label>
+          <select class="tf-input" id="vm-incoterms">
+            <option value="">—</option>
+            ${VM_INCOTERMS.map(t => `<option value="${t}" ${vendor?.Incoterms === t ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Default Lead Time (days)</label>
+          <input class="tf-input" type="number" step="0.1" id="vm-lead-time" value="${vendor?.DefaultLeadTimeDays ?? ''}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Order MOQ Qty</label>
+          <input class="tf-input" type="number" step="0.001" id="vm-order-moq-qty" value="${vendor?.OrderMoqQty ?? ''}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Order MOQ UOM</label>
+          <input class="tf-input" type="text" id="vm-order-moq-uom" maxlength="3" value="${esc(vendor?.OrderMoqUom || '')}" placeholder="KG">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Order MOQ is the combined minimum across any mix of this vendor's materials in one order (e.g. a vendor requiring 20,000kg total, made up of any combination of materials). Leave blank if there's no combined minimum — only each material's own MOQ will apply.</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="vm-notes" value="${esc(vendor?.Notes || '')}">
+        </div>
+      </div>
+      <div id="vm-vendor-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="vm-vendor-save-btn">${isEdit ? 'Save Changes' : 'Add Vendor'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('vm-vendor-save-btn').addEventListener('click', async () => {
+    const body = {
+      vendorName: document.getElementById('vm-name').value.trim(),
+      incoterms: document.getElementById('vm-incoterms').value || null,
+      defaultLeadTimeDays: vmNumOrNull(document.getElementById('vm-lead-time').value),
+      orderMoqQty: vmNumOrNull(document.getElementById('vm-order-moq-qty').value),
+      orderMoqUom: document.getElementById('vm-order-moq-uom').value.trim() || null,
+      notes: document.getElementById('vm-notes').value.trim() || null,
+    };
+    if (!body.vendorName) {
+      document.getElementById('vm-vendor-result').innerHTML = '<div class="sap-error">Vendor name is required.</div>';
+      return;
+    }
+    const btn = document.getElementById('vm-vendor-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/performance/vendors/${vendor.VendorId}` : '/api/performance/vendors', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runVendorMasterData();
+    } catch (err) {
+      document.getElementById('vm-vendor-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Vendor';
+    }
+  });
+}
+
+function vmNumOrNull(str) {
+  const v = String(str ?? '').trim();
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function vmDeleteVendor(vendorId, vendorName) {
+  if (!confirm(`Delete vendor "${vendorName}" and all its material assignments? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/performance/vendors/${vendorId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runVendorMasterData();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Vendor materials (assign / edit / remove) ───────────────────────────────
+
+async function vmShowVendorMaterials(vendor) {
+  showResultPanel(`Vendor Master Data — ${vendor.VendorName}`, 'Click a material to edit its MOQ, lead-time override or schedule agreement');
+  try {
+    const res = await fetch(`/api/performance/vendors/${vendor.VendorId}/materials`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load materials');
+    vmRenderVendorMaterials(vendor, json.data);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function vmRenderVendorMaterials(vendor, materials) {
+  document.getElementById('result-row-badge').textContent = `${materials.length} material${materials.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const rows = materials.map(m => `
+    <tr class="admin-row vm-material-row" style="cursor:pointer" data-id="${esc(String(m.VendorMaterialId))}">
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(m.Material)}</td>
+      <td>${esc(m.MaterialText || '—')}</td>
+      <td>${esc(m.MrpController || '—')}</td>
+      <td>${m.MaterialMoqQty != null ? esc(Number(m.MaterialMoqQty).toLocaleString()) : '—'}</td>
+      <td>${vmLeadTimeDisplay(m)}</td>
+      <td>${esc(m.ScheduleAgreement || '—')}</td>
+      <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary vm-remove-material" data-id="${esc(String(m.VendorMaterialId))}" data-material="${esc(m.Material)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Remove</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <a href="javascript:void(0)" onclick="runVendorMasterData()" style="font-size:12px;color:var(--accent)">&larr; All Vendors</a>
+      <button class="btn-submit" id="vm-assign-material-btn">+ Assign Material</button>
+    </div>
+    ${materials.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Description</th><th>MRP Ctrl</th><th>MOQ</th><th>Lead Time</th><th>Sched. Agmt</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No materials assigned yet.</div>'}
+  `;
+
+  document.getElementById('vm-assign-material-btn').addEventListener('click', () => vmOpenAssignMaterialModal(vendor));
+  document.querySelectorAll('.vm-material-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const m = materials.find(x => String(x.VendorMaterialId) === tr.dataset.id);
+      if (m) vmOpenMaterialEditModal(vendor, m);
+    });
+  });
+  document.querySelectorAll('.vm-remove-material').forEach(btn => {
+    btn.addEventListener('click', () => vmRemoveMaterial(vendor, btn.dataset.id, btn.dataset.material));
+  });
+}
+
+// SapLeadTimeDays comes from TurnsValClassSnapshot.PlannedDeliveryTime (SAP MARC-PLIFZ),
+// LEFT JOINed in listVendorMaterials — it's the fallback the order-suggestion engine will
+// use whenever LeadTimeDaysOverride is left blank, so it's worth showing here even though
+// it isn't stored on VendorMaterial itself.
+function vmLeadTimeDisplay(m) {
+  if (m.LeadTimeDaysOverride != null) return `${esc(String(m.LeadTimeDaysOverride))} days`;
+  if (m.SapLeadTimeDays != null) return `${esc(String(m.SapLeadTimeDays))} days (SAP)`;
+  return '—';
+}
+
+function vmOpenAssignMaterialModal(vendor) {
+  openModal(`<div class="ps-modal" style="max-width:560px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Assign Material</div><div class="ps-modal-sub">${esc(vendor.VendorName)}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <input class="tf-input" type="text" id="vm-material-search" placeholder="Search by material number or description…" style="margin-bottom:10px">
+      <div id="vm-material-search-results"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+    </div>
+  </div>`);
+
+  let searchTimer = null;
+  document.getElementById('vm-material-search').addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    const q = this.value.trim();
+    const results = document.getElementById('vm-material-search-results');
+    if (!q) { results.innerHTML = ''; return; }
+    searchTimer = setTimeout(() => vmSearchMaterials(vendor, q), 250);
+  });
+}
+
+// Reuses the same turns-valclass search endpoint the Stock History & Forecast
+// tile's shfSearchMaterials() already uses — no new backend search route needed.
+async function vmSearchMaterials(vendor, q) {
+  const results = document.getElementById('vm-material-search-results');
+  if (!results) return;
+  results.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
+  try {
+    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}`);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Search failed');
+    const rows = json.data.slice(0, 30);
+    if (!rows.length) { results.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
+    results.innerHTML = `
+      <div style="overflow-x:auto;max-height:320px;overflow-y:auto">
+        <table class="pn-batch-table">
+          <thead><tr><th>Material</th><th>Description</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr class="pn-row vm-material-pick" style="cursor:pointer" data-material="${esc(r.material)}">
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.material)}</td>
+                <td>${esc(r.materialText || '—')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    document.querySelectorAll('.vm-material-pick').forEach(tr => {
+      tr.addEventListener('click', () => vmAssignMaterial(vendor, tr.dataset.material));
+    });
+  } catch (err) {
+    results.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function vmAssignMaterial(vendor, material) {
+  try {
+    const res = await fetch(`/api/performance/vendors/${vendor.VendorId}/materials`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ material }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Assign failed');
+    closePickModal();
+    vmShowVendorMaterials(vendor);
+  } catch (err) {
+    const results = document.getElementById('vm-material-search-results');
+    if (results) results.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    else alert(err.message);
+  }
+}
+
+function vmOpenMaterialEditModal(vendor, m) {
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${esc(m.Material)}</div><div class="ps-modal-sub">${esc(m.MaterialText || '')}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Material MOQ</label>
+          <input class="tf-input" type="number" step="0.001" id="vm-mat-moq" value="${m.MaterialMoqQty ?? ''}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Lead Time Override (days)</label>
+          <input class="tf-input" type="number" step="0.1" id="vm-mat-lead" value="${m.LeadTimeDaysOverride ?? ''}" placeholder="${m.SapLeadTimeDays != null ? `SAP: ${m.SapLeadTimeDays}` : ''}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Schedule Agreement</label>
+          <input class="tf-input" type="text" id="vm-mat-sched" value="${esc(m.ScheduleAgreement || '')}">
+        </div>
+      </div>
+      ${m.SourceHint ? `<div class="toolbar-hint">Seeded from MRP2.xlsx as "${esc(m.SourceHint)}" — double-check this is the right SAP material.</div>` : ''}
+      <div id="vm-mat-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="vm-mat-save-btn">Save</button>
+    </div>
+  </div>`);
+
+  document.getElementById('vm-mat-save-btn').addEventListener('click', async () => {
+    const body = {
+      materialMoqQty: vmNumOrNull(document.getElementById('vm-mat-moq').value),
+      leadTimeDaysOverride: vmNumOrNull(document.getElementById('vm-mat-lead').value),
+      scheduleAgreement: document.getElementById('vm-mat-sched').value.trim() || null,
+    };
+    const btn = document.getElementById('vm-mat-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(`/api/performance/vendors/${vendor.VendorId}/materials/${m.VendorMaterialId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      vmShowVendorMaterials(vendor);
+    } catch (err) {
+      document.getElementById('vm-mat-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Save';
+    }
+  });
+}
+
+async function vmRemoveMaterial(vendor, vendorMaterialId, material) {
+  if (!confirm(`Remove ${material} from ${vendor.VendorName}?`)) return;
+  try {
+    const res = await fetch(`/api/performance/vendors/${vendor.VendorId}/materials/${vendorMaterialId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Remove failed');
+    vmShowVendorMaterials(vendor);
+  } catch (err) {
+    alert(err.message);
   }
 }

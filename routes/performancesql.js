@@ -860,3 +860,137 @@ export async function getPtfeInvoicedMonthToDate() {
 
   return Number(recordset[0]?.InvoicedToDate || 0);
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// Vendor master data (MRP Phase 2) — dbo.Vendor / dbo.VendorMaterial
+// ══════════════════════════════════════════════════════════════════════════
+// Manually-maintained business data (lead time, Incoterms, MOQ), NOT sourced
+// from SAP — see sql/migrate_vendor_master_data.sql for why. Plain parameterised
+// queries throughout (this is small, hand-edited admin data — a handful of rows
+// per call — not the bulk snapshot tables above, so none of the batched
+// replaceTable()/upsertBatch() machinery is needed here).
+
+export async function listVendors() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT
+      v.VendorId, v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMoqUom,
+      v.DefaultLeadTimeDays, v.Notes, v.CreatedAtUtc, v.UpdatedAtUtc,
+      (SELECT COUNT(*) FROM dbo.VendorMaterial vm WHERE vm.VendorId = v.VendorId) AS MaterialCount
+    FROM dbo.Vendor v
+    ORDER BY v.VendorName
+  `);
+  return recordset;
+}
+
+export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, notes }) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorName',          sql.NVarChar(80),  vendorName)
+    .input('incoterms',           sql.NVarChar(3),   incoterms || null)
+    .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
+    .input('orderMoqUom',         sql.NVarChar(3),   orderMoqUom || null)
+    .input('defaultLeadTimeDays', sql.Decimal(9, 2), defaultLeadTimeDays ?? null)
+    .input('notes',               sql.NVarChar(500), notes || null)
+    .query(`
+      INSERT INTO dbo.Vendor (VendorName, Incoterms, OrderMoqQty, OrderMoqUom, DefaultLeadTimeDays, Notes)
+      OUTPUT INSERTED.VendorId
+      VALUES (@vendorName, @incoterms, @orderMoqQty, @orderMoqUom, @defaultLeadTimeDays, @notes)
+    `);
+  return recordset[0].VendorId;
+}
+
+export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, notes }) {
+  const pool = await getPool();
+  await pool.request()
+    .input('vendorId',            sql.Int,           vendorId)
+    .input('vendorName',          sql.NVarChar(80),  vendorName)
+    .input('incoterms',           sql.NVarChar(3),   incoterms || null)
+    .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
+    .input('orderMoqUom',         sql.NVarChar(3),   orderMoqUom || null)
+    .input('defaultLeadTimeDays', sql.Decimal(9, 2), defaultLeadTimeDays ?? null)
+    .input('notes',               sql.NVarChar(500), notes || null)
+    .query(`
+      UPDATE dbo.Vendor SET
+        VendorName = @vendorName, Incoterms = @incoterms,
+        OrderMoqQty = @orderMoqQty, OrderMoqUom = @orderMoqUom,
+        DefaultLeadTimeDays = @defaultLeadTimeDays, Notes = @notes,
+        UpdatedAtUtc = GETUTCDATE()
+      WHERE VendorId = @vendorId
+    `);
+}
+
+// Deletes the vendor's material assignments first — SQL Server 2005 will
+// otherwise reject the delete outright on the FK_VendorMaterial_Vendor
+// constraint. Done as two explicit statements (not ON DELETE CASCADE on the
+// FK) so this is visible/auditable in one place rather than an implicit DB
+// side-effect — same reasoning as the rest of this file's "no transactions,
+// explicit steps" approach (see the big comment above replaceTable()).
+export async function deleteVendor(vendorId) {
+  const pool = await getPool();
+  await pool.request().input('vendorId', sql.Int, vendorId)
+    .query('DELETE FROM dbo.VendorMaterial WHERE VendorId = @vendorId');
+  await pool.request().input('vendorId', sql.Int, vendorId)
+    .query('DELETE FROM dbo.Vendor WHERE VendorId = @vendorId');
+}
+
+// Joined with TurnsValClassSnapshot so the admin page can show material
+// description, MRP controller and SAP's own PLIFZ lead time alongside each
+// assignment without a second round-trip. LEFT JOIN, not INNER — a material
+// can be assigned to a vendor before/without ever having synced into
+// TurnsValClassSnapshot (e.g. newly set up in SAP, not yet in the plant's
+// material master pull), and should still show up here rather than vanish.
+export async function listVendorMaterials(vendorId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorId', sql.Int, vendorId)
+    .query(`
+      SELECT
+        vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty,
+        vm.LeadTimeDaysOverride, vm.ScheduleAgreement, vm.SourceHint,
+        t.MaterialText, t.MrpController, t.PlannedDeliveryTime AS SapLeadTimeDays
+      FROM dbo.VendorMaterial vm
+      LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = vm.Material
+      WHERE vm.VendorId = @vendorId
+      ORDER BY vm.Material
+    `);
+  return recordset;
+}
+
+export async function addVendorMaterial(vendorId, { material, materialMoqQty, leadTimeDaysOverride, scheduleAgreement, sourceHint }) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorId',             sql.Int,            vendorId)
+    .input('material',             sql.NVarChar(18),   material)
+    .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
+    .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
+    .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
+    .input('sourceHint',           sql.NVarChar(40),   sourceHint || null)
+    .query(`
+      INSERT INTO dbo.VendorMaterial (VendorId, Material, MaterialMoqQty, LeadTimeDaysOverride, ScheduleAgreement, SourceHint)
+      OUTPUT INSERTED.VendorMaterialId
+      VALUES (@vendorId, @material, @materialMoqQty, @leadTimeDaysOverride, @scheduleAgreement, @sourceHint)
+    `);
+  return recordset[0].VendorMaterialId;
+}
+
+export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, leadTimeDaysOverride, scheduleAgreement }) {
+  const pool = await getPool();
+  await pool.request()
+    .input('vendorMaterialId',     sql.Int,            vendorMaterialId)
+    .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
+    .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
+    .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
+    .query(`
+      UPDATE dbo.VendorMaterial SET
+        MaterialMoqQty = @materialMoqQty, LeadTimeDaysOverride = @leadTimeDaysOverride,
+        ScheduleAgreement = @scheduleAgreement, UpdatedAtUtc = GETUTCDATE()
+      WHERE VendorMaterialId = @vendorMaterialId
+    `);
+}
+
+export async function deleteVendorMaterial(vendorMaterialId) {
+  const pool = await getPool();
+  await pool.request().input('vendorMaterialId', sql.Int, vendorMaterialId)
+    .query('DELETE FROM dbo.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
+}
