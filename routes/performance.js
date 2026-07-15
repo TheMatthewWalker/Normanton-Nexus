@@ -11,6 +11,78 @@ async function getPool() {
   return await sql.connect(sqlConfig);
 }
 
+// ── Weekly expected-stock-level forecast ────────────────────────────────────
+// Projects stock forward week by week from a current total, driven by the 13
+// monthly PredictedUsage buckets already computed by the seasonal-index model
+// (performanceforecast.js). PredictedUsage is monthly; ordering decisions need
+// weekly resolution (delivered mid-month still needs a stock line for the
+// weeks either side of it), so each month's total is spread across the
+// calendar weeks that overlap it, in proportion to how many days of that week
+// fall inside the month — a week split across a month boundary gets its usage
+// split the same way. This is Phase 1: no confirmed-delivery data exists yet
+// (that's a later phase), so the line only ever goes down; it does not yet
+// show deliveries putting stock back up.
+//
+// predictedMonthly[i] is month i's total, where i=0 is the CURRENT calendar
+// month and i=12 is 12 months out — see the big comment on PredictedUsage
+// in create_performance_turnsvalclass_database.sql and the frontend's
+// shfLoadChart() for why array index 0 (DB column PredictedM12) means
+// "current month" rather than "12 months ago" the way HistoryM12 does: both
+// series reuse the same 13-column physical layout for the shared batch-insert
+// helper, but History counts backward from "now" while Forecast/Predicted
+// count forward from "now", so the same column names end up meaning opposite
+// ends of the two timelines.
+//
+// Returns weeks running from "today" through the end of month index 12,
+// each with the stock level AS OF that week's end date (i.e. after that
+// week's share of usage has been deducted).
+function buildWeeklyStockForecast(currentStock, predictedMonthly, today) {
+  const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+
+  // Calendar-month windows for i = 0..12, each [monthStart, monthEnd).
+  const months = predictedMonthly.map((qty, i) => {
+    const monthStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
+    const monthEnd    = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1));
+    const daysInMonth  = Math.round((monthEnd - monthStart) / 86400000);
+    return { qty: Number(qty) || 0, monthStart, monthEnd, daysInMonth };
+  });
+
+  const horizonEnd = months[months.length - 1].monthEnd;
+
+  const weeks = [];
+  let runningStock = currentStock;
+  let weekStart = start;
+
+  while (weekStart < horizonEnd) {
+    const weekEnd = new Date(Math.min(weekStart.getTime() + 7 * 86400000, horizonEnd.getTime()));
+
+    let weeklyUsage = 0;
+    for (const m of months) {
+      const overlapStart = weekStart > m.monthStart ? weekStart : m.monthStart;
+      const overlapEnd    = weekEnd   < m.monthEnd    ? weekEnd   : m.monthEnd;
+      const overlapDays   = (overlapEnd - overlapStart) / 86400000;
+      if (overlapDays > 0 && m.daysInMonth > 0) {
+        weeklyUsage += m.qty * (overlapDays / m.daysInMonth);
+      }
+    }
+
+    runningStock -= weeklyUsage;
+    weeks.push({
+      weekEnding: weekEnd.toISOString().slice(0, 10),
+      weeklyUsage: Math.round(weeklyUsage * 100) / 100,
+      expectedStock: Math.round(runningStock * 100) / 100,
+    });
+
+    weekStart = weekEnd;
+  }
+
+  return {
+    asOfDate: start.toISOString().slice(0, 10),
+    currentStock: Math.round(currentStock * 100) / 100,
+    weeks,
+  };
+}
+
 const router = express.Router();
 
 // ── Manual trigger for SAP refresh ─────────────────────────────────────────────────────────
@@ -965,7 +1037,7 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
   try {
     const pool = await getPool();
     const request = pool.request();
-    let whereSql = '';
+    const where = [];
     let materials = [];
 
     if (req.query.materials) {
@@ -975,13 +1047,26 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
           request.input(`m${i}`, sql.VarChar(18), m);
           return `@m${i}`;
         }).join(',');
-        whereSql = `WHERE Material IN (${inClause})`;
+        where.push(`Material IN (${inClause})`);
       }
     }
 
+    // MRP Controller filter — lets the stock history/forecast view (and its
+    // weekly stock-forecast line below) be scoped to one controller's book of
+    // materials, same as the plain turns-valclass list route already supports,
+    // so someone planning shipments isn't wading through every material in the
+    // plant to find the ones they're responsible for.
+    const mrpController = req.query.mrpController ? String(req.query.mrpController).trim() : '';
+    if (mrpController) {
+      where.push('MrpController = @mrpController');
+      request.input('mrpController', sql.VarChar(3), mrpController);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
     const { recordset } = await request.query(`
       SELECT
-        Material, MaterialText, Plant, Uom,
+        Material, MaterialText, Plant, Uom, StockQty,
         HistoryM12, HistoryM11, HistoryM10, HistoryM09, HistoryM08, HistoryM07,
         HistoryM06, HistoryM05, HistoryM04, HistoryM03, HistoryM02, HistoryM01, HistoryM00,
         ForecastM12, ForecastM11, ForecastM10, ForecastM09, ForecastM08, ForecastM07,
@@ -998,6 +1083,7 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
       materialText: r.MaterialText,
       plant: r.Plant,
       uom: r.Uom,
+      stockQty: r.StockQty,
       consumptionHistory: [
         r.HistoryM12, r.HistoryM11, r.HistoryM10, r.HistoryM09, r.HistoryM08, r.HistoryM07,
         r.HistoryM06, r.HistoryM05, r.HistoryM04, r.HistoryM03, r.HistoryM02, r.HistoryM01, r.HistoryM00
@@ -1011,6 +1097,16 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
       ]
     }));
+
+    // ── Weekly expected-stock-level forecast ──────────────────────────────────
+    // Aggregate current stock + aggregate predicted usage across whatever set of
+    // materials this request resolved to (one material, an MRP controller's book,
+    // or everything), projected forward week by week. See buildWeeklyStockForecast
+    // for the month-to-week spreading method.
+    const currentStock = data.reduce((sum, r) => sum + (Number(r.stockQty) || 0), 0);
+    const predictedMonthly = new Array(13).fill(0);
+    data.forEach(r => r.predictedUsage.forEach((v, i) => { predictedMonthly[i] += Number(v) || 0; }));
+    const stockForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, new Date());
 
     // ── Recorded accuracy overlay (dbo.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen
@@ -1065,8 +1161,28 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     res.json({
       success: true,
       data,
-      accuracy: { recordedSapDemand, recordedPredicted, recordedActual }
+      accuracy: { recordedSapDemand, recordedPredicted, recordedActual },
+      stockForecast
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// ── Distinct MRP controllers — for filter dropdowns on the Material Planning
+// tiles (stock table, stock history/forecast, and eventually the MRP tile
+// itself). Small, cheap query; not worth its own snapshot table.             ──
+router.get('/turns-valclass/mrp-controllers', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const pool = await getPool();
+    const { recordset } = await pool.request().query(`
+      SELECT MrpController AS controller, COUNT(*) AS materialCount
+      FROM dbo.TurnsValClassSnapshot
+      WHERE MrpController IS NOT NULL AND MrpController <> ''
+      GROUP BY MrpController
+      ORDER BY MrpController
+    `);
+    res.json({ success: true, data: recordset });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }

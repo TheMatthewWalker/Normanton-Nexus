@@ -3884,9 +3884,12 @@ async function cvcSubmit() {
 }
 
 // ── Tile 5: history / forecast, by material or combined ─────────────────────
+let shfMrpController = '';
+
 async function runStockHistoryForecast() {
-  showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast — search for a material, or view the combined trend for all materials');
+  showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast, plus a weekly expected-stock-level projection — search for a material, or view the combined trend for all materials');
   destroyTurnsCharts();
+  shfMrpController = '';
   const body = document.getElementById('result-body');
 
   body.innerHTML = `
@@ -3894,6 +3897,10 @@ async function runStockHistoryForecast() {
       <div class="tf-field tf-field--wide">
         <label class="tf-label">Material search</label>
         <input class="tf-input" id="shf-search" type="text" placeholder="Material code or description" autocomplete="off">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">MRP Controller</label>
+        <select class="tf-input" id="shf-mrp-controller"><option value="">All controllers</option></select>
       </div>
       <div class="tf-field" style="justify-content:flex-end">
         <label class="tf-label">&nbsp;</label>
@@ -3908,6 +3915,11 @@ async function runStockHistoryForecast() {
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
       <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">Select a material or press &ldquo;Show All&rdquo;</div>
       <canvas id="shf-chart" style="max-height:320px"></canvas>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
+      <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Expected Stock Level (Weekly)</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks. Confirmed deliveries are not shown yet — the line only goes down.</div>
+      <canvas id="shf-stock-chart" style="max-height:280px"></canvas>
     </div>`;
 
   document.getElementById('shf-search-btn').addEventListener('click', shfSearchMaterials);
@@ -3915,6 +3927,27 @@ async function runStockHistoryForecast() {
     if (e.key === 'Enter') { e.preventDefault(); shfSearchMaterials(); }
   });
   document.getElementById('shf-all-btn').addEventListener('click', () => shfLoadChart(null, 'All Materials (combined)'));
+  document.getElementById('shf-mrp-controller').addEventListener('change', e => {
+    shfMrpController = e.target.value;
+    shfLoadChart(null, shfMrpController ? `All Materials — MRP Controller ${shfMrpController} (combined)` : 'All Materials (combined)');
+  });
+
+  shfLoadMrpControllers();
+}
+
+async function shfLoadMrpControllers() {
+  const sel = document.getElementById('shf-mrp-controller');
+  try {
+    const resp = await fetch('/api/performance/turns-valclass/mrp-controllers');
+    const json = await resp.json();
+    if (!json.success) return;
+    json.data.forEach(row => {
+      const opt = document.createElement('option');
+      opt.value = row.controller;
+      opt.textContent = `${row.controller} (${row.materialCount})`;
+      sel.appendChild(opt);
+    });
+  } catch (_) { /* dropdown just stays at "All controllers" */ }
 }
 
 async function shfSearchMaterials() {
@@ -3925,7 +3958,8 @@ async function shfSearchMaterials() {
   picker.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
 
   try {
-    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}`);
+    const ctrlParam = shfMrpController ? `&mrpController=${encodeURIComponent(shfMrpController)}` : '';
+    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}${ctrlParam}`);
     const json = await resp.json();
     if (!json.success) throw new Error(json.error?.message || 'Search failed');
 
@@ -3980,9 +4014,10 @@ async function shfLoadChart(material, title) {
   titleEl.textContent = 'Loading…';
 
   try {
-    const url = material
-      ? `/api/performance/turns-valclass/history?materials=${encodeURIComponent(material)}`
-      : '/api/performance/turns-valclass/history';
+    const ctrlParam = shfMrpController ? `mrpController=${encodeURIComponent(shfMrpController)}` : '';
+    const materialParam = material ? `materials=${encodeURIComponent(material)}` : '';
+    const qs = [materialParam, ctrlParam].filter(Boolean).join('&');
+    const url = `/api/performance/turns-valclass/history${qs ? '?' + qs : ''}`;
     const resp = await fetch(url);
     const json = await resp.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load history');
@@ -4077,6 +4112,36 @@ async function shfLoadChart(material, title) {
         },
       },
     }));
+
+    // ── Weekly expected stock level (Phase 1 — see routes/performance.js
+    // buildWeeklyStockForecast for the month-to-week spreading method; no
+    // confirmed-delivery data exists yet, so this line only ever goes down). ──
+    const stockForecast = json.stockForecast;
+    const stockCanvas = document.getElementById('shf-stock-chart');
+    if (stockForecast && stockCanvas) {
+      const stockLabels = [stockForecast.asOfDate, ...stockForecast.weeks.map(w => w.weekEnding)];
+      const stockSeries  = [stockForecast.currentStock, ...stockForecast.weeks.map(w => w.expectedStock)];
+      const usageSeries   = [null, ...stockForecast.weeks.map(w => w.weeklyUsage)];
+
+      turnsCharts.push(new Chart(stockCanvas, {
+        type: 'line',
+        data: {
+          labels: stockLabels,
+          datasets: [
+            { label: 'Expected Stock Level', data: stockSeries, borderColor: '#7C3AED', backgroundColor: 'rgba(124,58,237,0.10)', fill: true, tension: 0.2, pointRadius: 2, pointBackgroundColor: '#7C3AED', yAxisID: 'y' },
+            { label: 'Weekly Usage', data: usageSeries, borderColor: '#DC2626', backgroundColor: 'transparent', fill: false, borderDash: [3, 3], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y1' },
+          ],
+        },
+        options: {
+          plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
+          scales: {
+            x: { ticks: { color: '#8DA3BE', font: { size: 10 }, maxRotation: 60, minRotation: 60 }, grid: { color: 'rgba(0,0,0,0.06)' } },
+            y:  { position: 'left',  ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' }, title: { display: true, text: 'Stock', color: '#8DA3BE', font: { size: 10 } } },
+            y1: { position: 'right', ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { display: false }, title: { display: true, text: 'Weekly Usage', color: '#8DA3BE', font: { size: 10 } } },
+          },
+        },
+      }));
+    }
 
   } catch (err) {
     titleEl.textContent = 'Error';
