@@ -99,6 +99,11 @@ async function syncTurnsValClass(rows) {
 
     await db.replaceTurnsValClassSnapshot(deduped);
     await db.upsertForecastAccuracyLog(deduped);
+    // Lightweight daily append-only trend (Material/MaterialType/StockQty/StockValue/
+    // ConsignmentQty only) -- see dbo.StockValuationHistory in the SQL script. Needed
+    // because replaceTurnsValClassSnapshot above is TRUNCATE + reinsert every run, so
+    // without this call there would be no record of how stock/value moved day to day.
+    await db.upsertStockValuationHistory(deduped);
     await db.completeRefresh(runId, deduped.length);
     return { name: 'TurnsValClass', status: 'success', rowCount: deduped.length };
   } catch (err) {

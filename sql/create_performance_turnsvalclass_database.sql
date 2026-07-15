@@ -27,6 +27,12 @@
                                      prediction were for a month right up until it
                                      started, plus actual consumption once known —
                                      for comparing forecast accuracy over time.
+   6. dbo.StockValuationHistory   — append-only, one row per material/plant/day.
+                                     Written daily by the same sync; a lightweight daily
+                                     snapshot (Material, MaterialType, StockQty, StockValue,
+                                     ConsignmentQty only — deliberately not the full row) so
+                                     stock/valuation trends over time don't require keeping
+                                     every column of every daily TurnsValClassSnapshot pull.
 
    dbo.RefreshLog already exists (written by the Stock/Agreements/
    Invoicing/Otif sync) and is reused here with two new DatasetName
@@ -327,6 +333,48 @@ ELSE
   PRINT 'dbo.ForecastAccuracyLog already exists — skipped';
 
 
+/* ── 6. StockValuationHistory ─────────────────────────────────────────────
+   Append-only, one row per Material+Plant+SnapshotDate — NEVER truncated (same
+   "keep history" principle as ForecastAccuracyLog just above, but for the daily
+   stock/valuation position itself rather than the forecast). TurnsValClassSnapshot
+   only ever holds the LATEST pull (TRUNCATE + reinsert every sync), so without this
+   table there is no way to see how stock quantity or value moved over time — every
+   refresh silently overwrote the previous day's figures.
+
+   Deliberately narrow: only Material, MaterialType, StockQty, StockValue and
+   ConsignmentQty are kept, not every column TurnsValClassSnapshot carries. Storing
+   the full row daily would multiply the storage cost of this history for no benefit
+   — everything else (forecasts, lead times, MOQ, etc.) is either already covered by
+   ForecastAccuracyLog or isn't something that needs a historical trend.
+
+   Written daily by the same sync that refreshes TurnsValClassSnapshot
+   (routes/performancesync.js), keyed on SnapshotDate = today's date at UTC midnight,
+   so a same-day re-run of the sync updates today's row in place (via the same
+   upsertBatch mechanism as ForecastAccuracyLog) instead of creating a duplicate. */
+IF NOT EXISTS (SELECT 1 FROM sys.objects
+               WHERE object_id = OBJECT_ID(N'dbo.StockValuationHistory') AND type = 'U')
+BEGIN
+  CREATE TABLE dbo.StockValuationHistory (
+    Material       NVARCHAR(18)  NOT NULL,   -- MATNR
+    Plant          NVARCHAR(4)   NOT NULL,   -- WERKS
+    SnapshotDate   DATETIME      NOT NULL,   -- date of the sync run, UTC midnight (SQL Server 2005 has no DATE type)
+    MaterialType   NVARCHAR(4)   NULL,       -- MTART
+    StockQty       DECIMAL(15,3) NULL,       -- MBEW-LBKUM, as of this snapshot
+    StockValue     DECIMAL(18,2) NULL,       -- MBEW-SALK3, as of this snapshot
+    ConsignmentQty DECIMAL(15,3) NULL,       -- MKOL-SLABS (SOBKZ='K'), as of this snapshot
+    LastUpdatedUtc DATETIME      NOT NULL DEFAULT GETUTCDATE(),
+
+    CONSTRAINT PK_StockValuationHistory PRIMARY KEY (Material, Plant, SnapshotDate)
+  );
+
+  CREATE INDEX IX_SVH_SnapshotDate ON dbo.StockValuationHistory (SnapshotDate) INCLUDE (Material, StockQty, StockValue, ConsignmentQty);
+
+  PRINT 'Created dbo.StockValuationHistory';
+END
+ELSE
+  PRINT 'dbo.StockValuationHistory already exists — skipped';
+
+
 /* ── Verify ──────────────────────────────────────────────────────────────── */
 SELECT 'TurnsValClassSnapshot'      AS TableName, COUNT(*) AS Rows FROM dbo.TurnsValClassSnapshot
 UNION ALL
@@ -336,4 +384,6 @@ SELECT 'ValuationClassChangeBatch',               COUNT(*)         FROM dbo.Valu
 UNION ALL
 SELECT 'ValuationClassChangeDetail',              COUNT(*)         FROM dbo.ValuationClassChangeDetail
 UNION ALL
-SELECT 'ForecastAccuracyLog',                     COUNT(*)         FROM dbo.ForecastAccuracyLog;
+SELECT 'ForecastAccuracyLog',                     COUNT(*)         FROM dbo.ForecastAccuracyLog
+UNION ALL
+SELECT 'StockValuationHistory',                   COUNT(*)         FROM dbo.StockValuationHistory;

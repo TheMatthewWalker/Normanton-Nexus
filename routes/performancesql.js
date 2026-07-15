@@ -459,6 +459,53 @@ function addMonthsUtc(d, n) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, 1));
 }
 
+function firstOfDayUtc(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+// ── Stock valuation history ───────────────────────────────────────────────
+// Append-only — never truncated (see dbo.StockValuationHistory comment in the SQL
+// script for the full design rationale). Called once per sync, right alongside
+// upsertForecastAccuracyLog above and for the same reason: TurnsValClassSnapshot
+// itself is TRUNCATE + reinsert on every run (replaceTurnsValClassSnapshot), so
+// without a separate append-only table there is no way to see stock quantity or
+// value move over time — every day's figures simply overwrite the last.
+//
+// Deliberately narrow columns (Material, MaterialType, StockQty, StockValue,
+// ConsignmentQty only) — kept lightweight on purpose, per the same reasoning as
+// the SQL script: storing every TurnsValClassSnapshot column daily would multiply
+// the storage cost of this history for no real benefit.
+//
+// Keyed on SnapshotDate = today at UTC midnight, so re-running the sync again on
+// the same day updates today's row in place via upsertBatch rather than creating
+// a duplicate — one row per material per plant per calendar day, forever.
+export async function upsertStockValuationHistory(rows) {
+  const snapshotDate = firstOfDayUtc(new Date());
+
+  const historyRows = rows.map(row => ({
+    material:       row.material,
+    plant:          row.plant,
+    snapshotDate,
+    materialType:   row.materialType,
+    stockQty:       row.stockQty,
+    stockValue:     row.stockValue,
+    consignmentQty: row.consignmentQty,
+  }));
+
+  const keyColumns = [
+    ['Material',     'material',     sql.VarChar(18)],
+    ['Plant',        'plant',        sql.VarChar(4)],
+    ['SnapshotDate', 'snapshotDate', sql.DateTime],
+  ];
+
+  await upsertBatch('dbo.StockValuationHistory', keyColumns, [
+    ['MaterialType',   'materialType',   sql.VarChar(4)],
+    ['StockQty',       'stockQty',       sql.Decimal(15, 3)],
+    ['StockValue',     'stockValue',     sql.Decimal(18, 2)],
+    ['ConsignmentQty', 'consignmentQty', sql.Decimal(15, 3)],
+  ], historyRows);
+}
+
 export async function upsertForecastAccuracyLog(rows) {
   const thisMonth = firstOfMonthUtc(new Date());
 
