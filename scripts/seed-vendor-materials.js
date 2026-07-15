@@ -36,6 +36,12 @@
  *   node scripts/seed-vendor-materials.js
  */
 
+// Must come before importing config.js: config.js reads process.env.SAP_SERVER_SECRET
+// at module-load time and throws if it's unset. server.js gets that for free because
+// it's launched via the Windows service wrapper with .env already loaded, but a script
+// run directly (`node scripts/...`) starts with a bare environment -- same as any other
+// standalone script in this repo would need if it imports config.js.
+import 'dotenv/config';
 import sql from 'mssql';
 import { sqlConfig } from '../config.js';
 
