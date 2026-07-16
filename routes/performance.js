@@ -2018,10 +2018,10 @@ router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (re
 router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const { status } = req.body;
-    if (!status || !['Accepted', 'Ordered', 'Received', 'Cancelled'].includes(status)) {
+    if (!status || !['Accepted', 'Ordered', 'Booked', 'Received', 'Cancelled'].includes(status)) {
       return res.status(400).json({
         success: false,
-        error: { message: 'status must be one of Accepted, Ordered, Received, Cancelled.' }
+        error: { message: 'status must be one of Accepted, Ordered, Booked, Received, Cancelled.' }
       });
     }
     await db.updateOrderSuggestionStatus(req.params.suggestionId, req.body);
@@ -2044,10 +2044,27 @@ router.get('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (
   }
 });
 
+// Create-shipment-from-selected-lines, mirroring Open Deliveries: body is
+// { dispatchDate, expectedEta, haulier, modeOfTransport, trackingNumber,
+// billOfLading, containerNumber, notes, suggestionIds }. Creation and
+// line-assignment happen together in db.createOrderShipment — the
+// reference is generated server-side, not supplied by the caller.
 router.post('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const shipmentId = await db.createOrderShipment(req.body);
-    res.json({ success: true, data: { shipmentId } });
+    const data = await db.createOrderShipment(req.body);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Inbound Log's shipment detail view — header fields plus every linked
+// order line.
+router.get('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.getOrderShipmentWithOrders(req.params.shipmentId);
+    if (!data) return res.status(404).json({ success: false, error: { message: 'Shipment not found.' } });
+    res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
@@ -2062,10 +2079,27 @@ router.put('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MR
   }
 });
 
-// Links (or unlinks, with shipmentId: null) a tracked order to a shipment.
+// Inbound Log's "Mark Received" action — stamps the shipment received and
+// bulk-flips every linked order to 'Booked' (see markShipmentReceived's
+// comment for why that's a distinct status, and the SAP-booking placeholder
+// it calls per order). Body: { receivedAt? } — defaults to now.
+router.post('/order-suggestions/shipments/:shipmentId/receive', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const receivedBy = req.session?.user?.username || 'unknown';
+    const data = await db.markShipmentReceived(req.params.shipmentId, {
+      receivedBy,
+      receivedAt: req.body?.receivedAt || null,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Links (or unlinks, with shipmentId: null) a tracked order to a shipment —
+// for adding a stray order to an already-created shipment after the fact.
 // Kept separate from the general PUT /order-suggestions/:suggestionId
-// above since assigning a shipment is its own workflow (pick existing vs.
-// create new) rather than part of the plain status/PO-number edit.
+// above since assigning a shipment is its own workflow.
 router.patch('/order-suggestions/:suggestionId/shipment', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const { shipmentId } = req.body;

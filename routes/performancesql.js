@@ -1109,14 +1109,15 @@ export async function listOrderSuggestionsTracked() {
       p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
       p.IsSpotPo, p.PoNumber, p.Notes, p.SupplierReference,
       p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc,
-      p.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport, s.TrackingNumber AS ShipmentTrackingNumber
+      p.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport,
+      s.TrackingNumber AS ShipmentTrackingNumber, s.ExpectedEta, s.ReceivedAtUtc AS ShipmentReceivedAtUtc
     FROM dbo.PurchaseOrderSuggestion p
     JOIN dbo.Vendor v ON v.VendorId = p.VendorId
     LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
     LEFT JOIN dbo.PurchaseOrderShipment s ON s.ShipmentId = p.ShipmentId
     WHERE p.Status <> 'Cancelled'
     ORDER BY
-      CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Received' THEN 2 ELSE 3 END,
+      CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Booked' THEN 2 WHEN 'Received' THEN 3 ELSE 4 END,
       p.OrderDate DESC
   `);
   return recordset;
@@ -1145,26 +1146,55 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
 }
 
 // ── Inbound shipment tracking (haulier / mode of transport / tracking
-// number), and self-delivering-supplier reconciliation via SupplierReference
-// above — see sql/migrate_order_shipments.sql for why this is a separate,
-// much lighter table than Logistics.dbo.ShipmentMain. Several
-// PurchaseOrderSuggestion rows can share one shipment (a consolidated load),
-// so this is create/list/update on the shipment plus a separate assign call
-// on the order.
-export async function createOrderShipment({ shipmentReference, haulier, modeOfTransport, trackingNumber, notes }) {
+// number, dispatch date / ETA, B/L & container), and self-delivering-
+// supplier reconciliation via SupplierReference above — see
+// sql/migrate_order_shipments.sql for why this is a separate, much lighter
+// table than Logistics.dbo.ShipmentMain, and for the Booked status this
+// section introduces. Mirrors the Open Deliveries pattern: select order
+// lines, Create Shipment — so creation and line-assignment happen in one
+// call (createOrderShipment), not two.
+export async function createOrderShipment({
+  dispatchDate, expectedEta, haulier, modeOfTransport, trackingNumber,
+  billOfLading, containerNumber, notes, suggestionIds
+}) {
   const pool = await getPool();
   const { recordset } = await pool.request()
-    .input('shipmentReference', sql.NVarChar(50),  shipmentReference || null)
-    .input('haulier',           sql.NVarChar(100), haulier || null)
-    .input('modeOfTransport',   sql.NVarChar(20),  modeOfTransport || null)
-    .input('trackingNumber',    sql.NVarChar(100), trackingNumber || null)
-    .input('notes',             sql.NVarChar(500), notes || null)
+    .input('dispatchDate',    sql.DateTime,      dispatchDate ?? null)
+    .input('expectedEta',     sql.DateTime,      expectedEta ?? null)
+    .input('haulier',         sql.NVarChar(100), haulier || null)
+    .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport || null)
+    .input('trackingNumber',  sql.NVarChar(100), trackingNumber || null)
+    .input('billOfLading',    sql.NVarChar(50),  billOfLading || null)
+    .input('containerNumber', sql.NVarChar(50),  containerNumber || null)
+    .input('notes',           sql.NVarChar(500), notes || null)
     .query(`
-      INSERT INTO dbo.PurchaseOrderShipment (ShipmentReference, Haulier, ModeOfTransport, TrackingNumber, Notes)
+      INSERT INTO dbo.PurchaseOrderShipment
+        (DispatchDate, ExpectedEta, Haulier, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber, Notes)
       OUTPUT INSERTED.ShipmentId
-      VALUES (@shipmentReference, @haulier, @modeOfTransport, @trackingNumber, @notes)
+      VALUES (@dispatchDate, @expectedEta, @haulier, @modeOfTransport, @trackingNumber, @billOfLading, @containerNumber, @notes)
     `);
-  return recordset[0].ShipmentId;
+  const shipmentId = recordset[0].ShipmentId;
+
+  // Reference is derived from the identity value, not supplied by the
+  // caller — see sql/migrate_order_shipments.sql's header note on
+  // ShipmentReference for why this is auto-generated rather than free text.
+  const shipmentReference = `INB-${String(shipmentId).padStart(6, '0')}`;
+  await pool.request()
+    .input('shipmentId',        sql.Int, shipmentId)
+    .input('shipmentReference', sql.NVarChar(50), shipmentReference)
+    .query('UPDATE dbo.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
+
+  const ids = (suggestionIds || []).map(Number).filter(Boolean);
+  if (ids.length) {
+    const request = pool.request().input('shipmentId', sql.Int, shipmentId);
+    const inClause = ids.map((id, i) => { request.input(`sid${i}`, sql.Int, id); return `@sid${i}`; }).join(',');
+    await request.query(`
+      UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
+      WHERE SuggestionId IN (${inClause})
+    `);
+  }
+
+  return { shipmentId, shipmentReference, orderCount: ids.length };
 }
 
 // Ordered most-recent first, with a count of orders currently linked — lets
@@ -1175,8 +1205,9 @@ export async function listOrderShipments() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      s.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport, s.TrackingNumber,
-      s.Notes, s.CreatedAtUtc, s.UpdatedAtUtc,
+      s.ShipmentId, s.ShipmentReference, s.DispatchDate, s.ExpectedEta,
+      s.Haulier, s.ModeOfTransport, s.TrackingNumber, s.BillOfLading, s.ContainerNumber,
+      s.Notes, s.ReceivedAtUtc, s.ReceivedBy, s.CreatedAtUtc, s.UpdatedAtUtc,
       (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount
     FROM dbo.PurchaseOrderShipment s
     ORDER BY s.CreatedAtUtc DESC
@@ -1184,19 +1215,56 @@ export async function listOrderShipments() {
   return recordset;
 }
 
-export async function updateOrderShipment(shipmentId, { shipmentReference, haulier, modeOfTransport, trackingNumber, notes }) {
+// Single shipment plus its linked order lines — the Inbound Log detail view.
+export async function getOrderShipmentWithOrders(shipmentId) {
+  const pool = await getPool();
+  const { recordset: shipmentRows } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`
+      SELECT ShipmentId, ShipmentReference, DispatchDate, ExpectedEta,
+             Haulier, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber,
+             Notes, ReceivedAtUtc, ReceivedBy, CreatedAtUtc, UpdatedAtUtc
+      FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId
+    `);
+  const shipment = shipmentRows[0] || null;
+  if (!shipment) return null;
+
+  const { recordset: orders } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`
+      SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.Status, p.SupplierReference
+      FROM dbo.PurchaseOrderSuggestion p
+      JOIN dbo.Vendor v ON v.VendorId = p.VendorId
+      LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
+      WHERE p.ShipmentId = @shipmentId
+      ORDER BY p.Material
+    `);
+
+  return { ...shipment, orders };
+}
+
+// ShipmentReference is intentionally excluded here — it's auto-generated at
+// creation and permanent (see createOrderShipment), never user-editable.
+export async function updateOrderShipment(shipmentId, {
+  dispatchDate, expectedEta, haulier, modeOfTransport, trackingNumber,
+  billOfLading, containerNumber, notes
+}) {
   const pool = await getPool();
   await pool.request()
-    .input('shipmentId',        sql.Int, shipmentId)
-    .input('shipmentReference', sql.NVarChar(50),  shipmentReference || null)
-    .input('haulier',           sql.NVarChar(100), haulier || null)
-    .input('modeOfTransport',   sql.NVarChar(20),  modeOfTransport || null)
-    .input('trackingNumber',    sql.NVarChar(100), trackingNumber || null)
-    .input('notes',             sql.NVarChar(500), notes || null)
+    .input('shipmentId',      sql.Int, shipmentId)
+    .input('dispatchDate',    sql.DateTime,      dispatchDate ?? null)
+    .input('expectedEta',     sql.DateTime,      expectedEta ?? null)
+    .input('haulier',         sql.NVarChar(100), haulier || null)
+    .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport || null)
+    .input('trackingNumber',  sql.NVarChar(100), trackingNumber || null)
+    .input('billOfLading',    sql.NVarChar(50),  billOfLading || null)
+    .input('containerNumber', sql.NVarChar(50),  containerNumber || null)
+    .input('notes',           sql.NVarChar(500), notes || null)
     .query(`
       UPDATE dbo.PurchaseOrderShipment SET
-        ShipmentReference = @shipmentReference, Haulier = @haulier,
-        ModeOfTransport = @modeOfTransport, TrackingNumber = @trackingNumber, Notes = @notes,
+        DispatchDate = @dispatchDate, ExpectedEta = @expectedEta, Haulier = @haulier,
+        ModeOfTransport = @modeOfTransport, TrackingNumber = @trackingNumber,
+        BillOfLading = @billOfLading, ContainerNumber = @containerNumber, Notes = @notes,
         UpdatedAtUtc = GETUTCDATE()
       WHERE ShipmentId = @shipmentId
     `);
@@ -1213,6 +1281,59 @@ export async function assignOrderShipment(suggestionId, shipmentId) {
       UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
       WHERE SuggestionId = @suggestionId
     `);
+}
+
+// PLACEHOLDER — real SAP goods-receipt posting (MIGO-equivalent RFC via
+// SapServer, matching the pattern used by sap.postChangeValuationClass
+// elsewhere in this app) goes here later. Deliberately a no-op stub for
+// now: markShipmentReceived below calls this once per order so the future
+// implementation has an obvious, already-wired hook, but doesn't yet gate
+// the Status='Booked' update on its result — once real posting exists, only
+// a successful call should flip an order's status.
+async function postGoodsReceiptToSap(order) {
+  return { success: true, placeholder: true, suggestionId: order.SuggestionId };
+}
+
+// Marks a shipment received (Inbound Log's "Mark Received" action) and
+// bulk-flips every non-cancelled order on it to 'Booked' — see
+// sql/migrate_order_shipments.sql's STATUS LIFECYCLE ADDITION note for why
+// this is a distinct status from 'Received', not a reuse of it.
+export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt } = {}) {
+  const pool = await getPool();
+  const { recordset: shipmentRows } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query('SELECT ShipmentId, ReceivedAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+  const shipment = shipmentRows[0];
+  if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
+  if (shipment.ReceivedAtUtc) { const err = new Error('This shipment has already been marked received.'); err.statusCode = 400; throw err; }
+
+  const receivedDate = receivedAt ? new Date(receivedAt) : new Date();
+
+  await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .input('receivedAt', sql.DateTime, receivedDate)
+    .input('receivedBy', sql.NVarChar(100), receivedBy || null)
+    .query(`
+      UPDATE dbo.PurchaseOrderShipment SET ReceivedAtUtc = @receivedAt, ReceivedBy = @receivedBy, UpdatedAtUtc = GETUTCDATE()
+      WHERE ShipmentId = @shipmentId
+    `);
+
+  const { recordset: orders } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`SELECT SuggestionId FROM dbo.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'`);
+
+  for (const order of orders) {
+    await postGoodsReceiptToSap(order);
+  }
+
+  await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`
+      UPDATE dbo.PurchaseOrderSuggestion SET Status = 'Booked', UpdatedAtUtc = GETUTCDATE()
+      WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'
+    `);
+
+  return { orderCount: orders.length };
 }
 
 

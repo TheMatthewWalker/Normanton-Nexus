@@ -7,17 +7,31 @@
    Two independent ways to reconcile a PurchaseOrderSuggestion order against
    what actually happens in the real world, added at the user's request:
 
-   1. dbo.PurchaseOrderShipment — a lightweight inbound shipment/load
-      record: Haulier, ModeOfTransport, TrackingNumber, ShipmentReference,
-      Notes. Deliberately separate from Logistics.dbo.ShipmentMain, which
-      models OUTBOUND deliveries to customers (KN booking API integration,
-      pallets, customs declarations, PDF documents) — inbound purchase
-      orders need none of that, just who's hauling it and a tracking
-      number. Several PurchaseOrderSuggestion rows can point at the same
+   1. dbo.PurchaseOrderShipment — an inbound shipment/load record, modelled
+      after Logistics.dbo.ShipmentMain's role in the Open Deliveries / TMS
+      workflow (select lines, Create Shipment) but much lighter — no
+      pallets, customs, or PDF documents, since none of that applies to a
+      purchase order arriving from a vendor:
+        ShipmentReference — AUTO-GENERATED at creation as "INB-NNNNNN" from
+          the identity value (see performancesql.js's createOrderShipment),
+          NOT user-entered, matching the read-only shipmentRef convention
+          used for outbound shipments (formatShipmentRef).
+        DispatchDate / ExpectedEta — when the load left the vendor / when
+          it's due at Kongsberg.
+        Haulier / ModeOfTransport / TrackingNumber — who's carrying it, how
+          (Road/Sea/Air/Rail/Courier/Other), and their tracking reference.
+        BillOfLading / ContainerNumber — for sea/rail freight.
+        ReceivedAtUtc / ReceivedBy — stamped when an operator marks the
+          shipment received (see STATUS LIFECYCLE below); NULL until then.
+      Deliberately separate from Logistics.dbo.ShipmentMain (outbound
+      customer deliveries, KN booking API integration) — this is inbound
+      only. Several PurchaseOrderSuggestion rows can point at the same
       shipment (several materials/orders consolidated onto one load), via
-      the new PurchaseOrderSuggestion.ShipmentId FK — nullable, since most
-      orders won't have a shipment yet at accept time; it's filled in once
-      the order is actually collected/dispatched.
+      the PurchaseOrderSuggestion.ShipmentId FK — nullable, since most
+      orders won't have a shipment yet at accept time; a shipment is
+      created later by selecting order lines in the Tracked Orders view
+      (mirrors Open Deliveries' select-lines-then-Create-Shipment flow) and
+      is then managed from the Inbound Log tile.
 
    2. PurchaseOrderSuggestion.SupplierReference — for vendors who deliver
       themselves rather than going through a haulier (no shipment record
@@ -26,6 +40,19 @@
       confirmation. Lives on the order itself, not the shipment, since each
       order line usually carries its own confirmation number even when
       several ship together.
+
+   STATUS LIFECYCLE ADDITION (see migrate_order_suggestions.sql for the
+   original Accepted -> Ordered -> Received -> Cancelled chain): a new
+   'Booked' status sits between Ordered and Received. Marking a shipment
+   received (Inbound Log's "Mark Received" action, routes/performancesql.js's
+   markShipmentReceived) bulk-flips every non-cancelled order on that
+   shipment to 'Booked' — meaning "physically arrived and logged as
+   received, SAP goods-receipt posting is pending/placeholder". The
+   existing 'Received' status is left as a manual step for once that SAP
+   posting is confirmed. postGoodsReceiptToSap() in performancesql.js is a
+   deliberate placeholder — real SAP RFC integration comes later; for now
+   it's a no-op called once per order so the real implementation has an
+   obvious, already-wired hook to fill in.
    ============================================================ */
 
 
@@ -35,11 +62,18 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects
 BEGIN
   CREATE TABLE dbo.PurchaseOrderShipment (
     ShipmentId        INT           NOT NULL IDENTITY(1,1),
-    ShipmentReference NVARCHAR(50)  NULL,   -- free text — forwarder's booking ref, or just a label
+    ShipmentReference NVARCHAR(50)  NULL,   -- auto-generated "INB-NNNNNN" — see header note, not user-entered
+    DispatchDate      DATETIME      NULL,
+    ExpectedEta       DATETIME      NULL,
     Haulier           NVARCHAR(100) NULL,
     ModeOfTransport   NVARCHAR(20)  NULL,   -- Road / Sea / Air / Rail / Courier / Other
     TrackingNumber    NVARCHAR(100) NULL,
+    BillOfLading      NVARCHAR(50)  NULL,
+    ContainerNumber   NVARCHAR(50)  NULL,
     Notes             NVARCHAR(500) NULL,
+
+    ReceivedAtUtc     DATETIME      NULL,   -- stamped by Mark Received — see STATUS LIFECYCLE note above
+    ReceivedBy        NVARCHAR(100) NULL,
 
     CreatedAtUtc      DATETIME      NOT NULL DEFAULT GETUTCDATE(),
     UpdatedAtUtc      DATETIME      NOT NULL DEFAULT GETUTCDATE(),
@@ -51,6 +85,26 @@ BEGIN
 END
 ELSE
   PRINT 'dbo.PurchaseOrderShipment already exists — skipped';
+
+
+/* ── 1b. PurchaseOrderShipment — add dispatch/ETA/B-L/container/received
+   columns (existing installs — e.g. if the CREATE TABLE above already ran
+   before this update). Same COL_LENGTH()-guarded pattern used elsewhere;
+   safe to re-run. */
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'DispatchDate') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD DispatchDate DATETIME NULL;
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'ExpectedEta') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD ExpectedEta DATETIME NULL;
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'BillOfLading') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD BillOfLading NVARCHAR(50) NULL;
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'ContainerNumber') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD ContainerNumber NVARCHAR(50) NULL;
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'ReceivedAtUtc') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD ReceivedAtUtc DATETIME NULL;
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'ReceivedBy') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD ReceivedBy NVARCHAR(100) NULL;
+
+PRINT 'dbo.PurchaseOrderShipment dispatch/ETA/B-L/container/received columns verified/added';
 
 
 /* ── 2. PurchaseOrderSuggestion — add ShipmentId column (existing installs)

@@ -18,6 +18,9 @@ let currentBookingRows = [];
 let currentBookingHaulier = '';
 let selectedCustomsShipmentIds = new Set();
 let selectedCollectionIds = new Set();
+let trackedRows = [];
+let selectedTrackedIds = new Set();
+let inboundShipmentRows = [];
 let latestShipment = null;
 let currentShipmentView = null;
 let approvedForwarders = null;
@@ -116,6 +119,7 @@ function setupTiles() {
       if (fn === 'stockHistoryForecast')runStockHistoryForecast();
       if (fn === 'vendorMasterData')    runVendorMasterData();
       if (fn === 'orderSuggestions')    runOrderSuggestions();
+      if (fn === 'inboundLog')         runInboundLog();
     });
   });
 
@@ -163,6 +167,9 @@ function backToTiles() {
   shipmentRows = [];
   selectedBookingShipmentIds = new Set();
   selectedCustomsShipmentIds = new Set();
+  trackedRows = [];
+  selectedTrackedIds = new Set();
+  inboundShipmentRows = [];
   latestShipment = null;
   currentShipmentView = null;
   customsBatchNotice = null;
@@ -5331,9 +5338,11 @@ async function runOrderSuggestionsTracked() {
   }
 }
 
-const OS_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Received', 'Cancelled'];
+const OS_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Booked', 'Received', 'Cancelled'];
 
 function osRenderTrackedList(tracked) {
+  trackedRows = tracked;
+  selectedTrackedIds = new Set();
   document.getElementById('result-row-badge').textContent = `${tracked.length} tracked`;
   document.getElementById('result-row-badge').classList.remove('hidden');
 
@@ -5343,6 +5352,7 @@ function osRenderTrackedList(tracked) {
       : formatDisplayDate(t.DeliveryDate);
     return `
     <tr class="admin-row">
+      <td class="lg-check-cell"><input type="checkbox" class="lg-check os-check" data-id="${t.SuggestionId}"></td>
       <td><strong>${esc(t.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(t.MaterialText || '')}</div></td>
       <td>${esc(t.VendorName)}</td>
       <td>${Number(t.OrderQty).toLocaleString()}</td>
@@ -5357,7 +5367,7 @@ function osRenderTrackedList(tracked) {
       <td><input class="tf-input os-supplier-ref-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.SupplierReference || '')}" placeholder="Supplier ref" style="padding:3px 6px;font-size:12px;width:100px"></td>
       <td>
         <button class="btn-secondary os-shipment-btn" data-id="${t.SuggestionId}" style="padding:3px 8px;font-size:11px;white-space:nowrap" title="${t.ShipmentId ? esc([t.Haulier, t.ModeOfTransport, t.ShipmentTrackingNumber].filter(Boolean).join(' · ')) : ''}">
-          ${t.ShipmentId ? esc(t.Haulier || t.ShipmentReference || t.ShipmentTrackingNumber || 'Assigned') : '+ Assign'}
+          ${t.ShipmentId ? esc(t.ShipmentReference || t.Haulier || 'Assigned') : '+ Assign'}
         </button>
       </td>
       <td style="text-align:right"><button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button></td>
@@ -5365,14 +5375,17 @@ function osRenderTrackedList(tracked) {
   }).join('');
 
   document.getElementById('result-body').innerHTML = `
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+    <div class="lg-actions">
+      <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment, or manage individually below.</div></div>
+      <div class="toolbar-spacer"></div>
       <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
+      <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
     </div>
     ${tracked.length ? `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
@@ -5380,6 +5393,8 @@ function osRenderTrackedList(tracked) {
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
   document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
+  document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
+  document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
@@ -5392,6 +5407,17 @@ function osRenderTrackedList(tracked) {
       if (t) openAssignShipmentModal(t);
     });
   });
+}
+
+function onTrackedCheckToggle(e) {
+  const id = Number(e.target.dataset.id);
+  if (e.target.checked) selectedTrackedIds.add(id); else selectedTrackedIds.delete(id);
+  const hint = document.getElementById('os-selection-hint');
+  if (hint) hint.textContent = selectedTrackedIds.size
+    ? `${selectedTrackedIds.size} order line${selectedTrackedIds.size === 1 ? '' : 's'} selected`
+    : 'Select order lines to create a shipment, or manage individually below.';
+  const btn = document.getElementById('os-create-shipment-btn');
+  if (btn) btn.disabled = selectedTrackedIds.size === 0;
 }
 
 // Full-row update, matching the backend's convention (see
@@ -5427,53 +5453,24 @@ async function osSaveTrackedStatus(t) {
 
 const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
 
-// Links a tracked order to an inbound shipment/load (haulier, mode of
-// transport, tracking number) — several orders arriving on the same load
-// can share one shipment, so this offers "link to an existing shipment" as
-// well as "create a new one", and edits made here update the shared record
-// for every order already linked to it.
+// Links (or unlinks) a single tracked order to an already-created shipment
+// — for adding a stray order to a load after the fact. Shipment CREATION
+// itself now happens in bulk from the Tracked Orders selection (see
+// openCreateShipmentModal below), mirroring Open Deliveries — so this modal
+// only picks from existing shipments, it doesn't build new ones.
 async function openAssignShipmentModal(t) {
   const hasShipment = Boolean(t.ShipmentId);
-  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+  openModal(`<div class="ps-modal" style="max-width:440px;width:92vw">
     <div class="ps-modal-header">
       <div><div class="ps-modal-title">Assign Shipment</div><div class="ps-modal-sub">${esc(t.Material)} — ${esc(t.VendorName)}</div></div>
       <button class="ps-modal-close" onclick="closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
       <div class="tf-field">
-        <label class="tf-label">Link to Existing Shipment</label>
+        <label class="tf-label">Shipment</label>
         <select class="tf-input" id="as-existing"><option value="">Loading…</option></select>
       </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Pick an existing shipment if this order is travelling on a load with other orders, or leave as "Create New" and fill in the details below.</div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Shipment Reference</label>
-          <input class="tf-input" type="text" id="as-reference" value="${esc(t.ShipmentReference || '')}">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Haulier</label>
-          <input class="tf-input" type="text" id="as-haulier" value="${esc(t.Haulier || '')}">
-        </div>
-      </div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Mode of Transport</label>
-          <select class="tf-input" id="as-mode">
-            <option value="">—</option>
-            ${OS_TRANSPORT_MODES.map(m => `<option value="${m}" ${t.ModeOfTransport === m ? 'selected' : ''}>${m}</option>`).join('')}
-          </select>
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Tracking Number</label>
-          <input class="tf-input" type="text" id="as-tracking" value="${esc(t.ShipmentTrackingNumber || '')}">
-        </div>
-      </div>
-      <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">Notes</label>
-          <input class="tf-input" type="text" id="as-notes">
-        </div>
-      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Only existing shipments are listed here — create a new one from the Tracked Orders selection instead.</div>
       <div id="as-result"></div>
     </div>
     <div class="ps-modal-actions">
@@ -5484,40 +5481,18 @@ async function openAssignShipmentModal(t) {
   </div>`);
 
   const existingSelect = document.getElementById('as-existing');
-  const referenceInput = document.getElementById('as-reference');
-  const haulierInput   = document.getElementById('as-haulier');
-  const modeSelect      = document.getElementById('as-mode');
-  const trackingInput  = document.getElementById('as-tracking');
-  const notesInput      = document.getElementById('as-notes');
 
-  let shipments = [];
   try {
     const res  = await fetch('/api/performance/order-suggestions/shipments');
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load shipments');
-    shipments = json.data;
-    const optionsHtml = shipments.map(s => {
-      const label = [s.ShipmentReference, s.Haulier, s.TrackingNumber].filter(Boolean).join(' · ') || `Shipment #${s.ShipmentId}`;
-      return `<option value="${s.ShipmentId}" ${hasShipment && Number(t.ShipmentId) === s.ShipmentId ? 'selected' : ''}>${esc(label)} (${s.OrderCount} order${s.OrderCount === 1 ? '' : 's'})</option>`;
-    }).join('');
-    existingSelect.innerHTML = `<option value="">— Create New Shipment —</option>${optionsHtml}`;
+    const optionsHtml = json.data.map(s =>
+      `<option value="${s.ShipmentId}" ${hasShipment && Number(t.ShipmentId) === s.ShipmentId ? 'selected' : ''}>${esc(s.ShipmentReference || `Shipment #${s.ShipmentId}`)} — ${esc(s.Haulier || 'no haulier set')} (${s.OrderCount} order${s.OrderCount === 1 ? '' : 's'})</option>`
+    ).join('');
+    existingSelect.innerHTML = `<option value="">— None —</option>${optionsHtml}`;
   } catch (err) {
     existingSelect.innerHTML = '<option value="">Failed to load shipments</option>';
   }
-
-  function fillFromShipment(shipmentId) {
-    const s = shipments.find(x => String(x.ShipmentId) === String(shipmentId));
-    if (!s) return;
-    referenceInput.value = s.ShipmentReference || '';
-    haulierInput.value = s.Haulier || '';
-    modeSelect.value = s.ModeOfTransport || '';
-    trackingInput.value = s.TrackingNumber || '';
-    notesInput.value = s.Notes || '';
-  }
-
-  existingSelect.addEventListener('change', () => {
-    if (existingSelect.value) fillFromShipment(existingSelect.value);
-  });
 
   if (document.getElementById('as-unassign-btn')) {
     document.getElementById('as-unassign-btn').addEventListener('click', async () => {
@@ -5546,35 +5521,8 @@ async function openAssignShipmentModal(t) {
     result.innerHTML = '';
     btn.disabled = true; btn.textContent = 'Saving…';
 
-    const shipmentPayload = {
-      shipmentReference: referenceInput.value.trim() || null,
-      haulier: haulierInput.value.trim() || null,
-      modeOfTransport: modeSelect.value || null,
-      trackingNumber: trackingInput.value.trim() || null,
-      notes: notesInput.value.trim() || null,
-    };
-
     try {
-      let shipmentId = existingSelect.value ? Number(existingSelect.value) : null;
-      if (shipmentId) {
-        // Editing here updates the shared record for every order already
-        // linked to this shipment, not just this one.
-        await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(shipmentPayload),
-        });
-      } else {
-        const createRes = await fetch('/api/performance/order-suggestions/shipments', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(shipmentPayload),
-        });
-        const createJson = await createRes.json();
-        if (!createJson.success) throw new Error(createJson.error?.message || 'Failed to create shipment');
-        shipmentId = createJson.data.shipmentId;
-      }
-
+      const shipmentId = existingSelect.value ? Number(existingSelect.value) : null;
       const assignRes = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}/shipment`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -5590,6 +5538,128 @@ async function openAssignShipmentModal(t) {
       btn.disabled = false; btn.textContent = 'Save';
     }
   });
+}
+
+// Bulk "select lines, Create Shipment" flow — mirrors openShipmentModal for
+// outbound Open Deliveries, but for inbound purchase orders. The reference
+// is generated server-side (createOrderShipment), so there's no field for
+// it here.
+async function openCreateShipmentModal() {
+  const ids = [...selectedTrackedIds];
+  if (!ids.length) return;
+  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+
+  openModal(`<div class="ps-modal lg-modal" style="max-width:560px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Create Shipment</div><div class="ps-modal-sub">${rows.length} order line${rows.length === 1 ? '' : 's'} selected</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Dispatch Date</label>
+          <input class="tf-input" type="date" id="cs-dispatch">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Expected ETA</label>
+          <input class="tf-input" type="date" id="cs-eta">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Haulier</label>
+          <input class="tf-input" type="text" id="cs-haulier">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Mode of Transport</label>
+          <select class="tf-input" id="cs-mode">
+            <option value="">—</option>
+            ${OS_TRANSPORT_MODES.map(m => `<option value="${m}">${m}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Tracking Number</label>
+          <input class="tf-input" type="text" id="cs-tracking">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Container Number</label>
+          <input class="tf-input" type="text" id="cs-container">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">B/L Number</label>
+          <input class="tf-input" type="text" id="cs-bl">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="cs-notes">
+        </div>
+      </div>
+      <div id="cs-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="cs-save-btn">Create Shipment</button>
+    </div>
+  </div>`);
+
+  document.getElementById('cs-save-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('cs-save-btn');
+    const result = document.getElementById('cs-result');
+    result.innerHTML = '';
+    btn.disabled = true; btn.textContent = 'Creating…';
+
+    const body = {
+      dispatchDate: document.getElementById('cs-dispatch').value || null,
+      expectedEta: document.getElementById('cs-eta').value || null,
+      haulier: document.getElementById('cs-haulier').value.trim() || null,
+      modeOfTransport: document.getElementById('cs-mode').value || null,
+      trackingNumber: document.getElementById('cs-tracking').value.trim() || null,
+      containerNumber: document.getElementById('cs-container').value.trim() || null,
+      billOfLading: document.getElementById('cs-bl').value.trim() || null,
+      notes: document.getElementById('cs-notes').value.trim() || null,
+      suggestionIds: ids,
+    };
+
+    try {
+      const res = await fetch('/api/performance/order-suggestions/shipments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to create shipment');
+      closePickModal();
+      selectedTrackedIds = new Set();
+      showCreateShipmentSuccess(json.data);
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Create Shipment';
+    }
+  });
+}
+
+function showCreateShipmentSuccess(data) {
+  openModal(`<div class="ps-modal lg-modal">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${esc(data.shipmentReference)}</div><div class="ps-modal-sub">Shipment created — ${data.orderCount} order${data.orderCount === 1 ? '' : 's'} linked</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint">Manage dispatch/ETA, add Bill of Lading or container details, and mark it received once it arrives from the Inbound Log tile.</div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+      <button type="button" class="btn-submit" id="cs-view-inbound-btn">Open Inbound Log</button>
+    </div>
+  </div>`);
+  document.getElementById('cs-view-inbound-btn').addEventListener('click', () => { closePickModal(); runInboundLog(); });
+  runOrderSuggestionsTracked();
 }
 
 // Records an order that already exists outside the suggestion engine — the
@@ -5736,4 +5806,223 @@ async function openManualOrderModal() {
       btn.disabled = false; btn.textContent = 'Add Order';
     }
   });
+}
+
+
+// ── Inbound Log — lists PurchaseOrderShipment records created from Tracked
+// Orders' bulk selection, and lets an operator mark one received. Mirrors
+// the outbound Completed Shipments / Search tiles' list style.
+async function runInboundLog() {
+  if (!await checkSession()) return;
+  showResultPanel('Inbound Log', 'Inbound shipments created from tracked orders');
+  try {
+    const res = await fetch('/api/performance/order-suggestions/shipments');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load shipments');
+    inboundShipmentRows = json.data || [];
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${inboundShipmentRows.length} shipments`;
+    badge.classList.remove('hidden');
+    renderInboundLog();
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function renderInboundLog() {
+  if (!inboundShipmentRows.length) {
+    document.getElementById('result-body').innerHTML = '<div class="sap-empty">No inbound shipments yet — create one from Tracked Orders by selecting order lines.</div>';
+    return;
+  }
+  const rows = inboundShipmentRows.map(s => `
+    <tr class="admin-row lg-row" data-id="${s.ShipmentId}">
+      <td><strong>${esc(s.ShipmentReference || `#${s.ShipmentId}`)}</strong></td>
+      <td>${esc(s.Haulier || '-')}</td>
+      <td>${esc(s.ModeOfTransport || '-')}</td>
+      <td>${formatDisplayDate(s.DispatchDate)}</td>
+      <td>${formatDisplayDate(s.ExpectedEta)}</td>
+      <td>${esc(s.TrackingNumber || '-')}</td>
+      <td>${s.OrderCount}</td>
+      <td>${s.ReceivedAtUtc ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Reference</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  document.querySelectorAll('.lg-row').forEach(row => {
+    row.addEventListener('click', () => openInboundShipmentDetail(Number(row.dataset.id)));
+  });
+}
+
+// Detail/edit view for one inbound shipment — header fields (editable via
+// PUT), linked order lines (read-only), and Mark Received when not yet
+// received. Mark Received bulk-flips every linked order to 'Booked' server
+// side (markShipmentReceived) and calls the SAP goods-receipt placeholder —
+// see that function's comment in performancesql.js.
+async function openInboundShipmentDetail(shipmentId) {
+  openModal(`<div class="ps-modal lg-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Shipment</div><div class="ps-modal-sub">Loading…</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body" id="isd-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
+    <div class="ps-modal-actions" id="isd-actions"></div>
+  </div>`);
+  await refreshInboundShipmentDetail(shipmentId);
+}
+
+async function refreshInboundShipmentDetail(shipmentId) {
+  const body = document.getElementById('isd-body');
+  const actions = document.getElementById('isd-actions');
+  if (!body) return;
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load shipment');
+    const s = json.data;
+
+    document.querySelector('.ps-modal-title').textContent = s.ShipmentReference || `Shipment #${s.ShipmentId}`;
+    document.querySelector('.ps-modal-sub').textContent = s.ReceivedAtUtc
+      ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}${s.ReceivedBy ? ' by ' + s.ReceivedBy : ''}`
+      : `${s.orders.length} order line${s.orders.length === 1 ? '' : 's'} — not yet received`;
+
+    const ordersRows = s.orders.map(o => `
+      <tr class="admin-row">
+        <td><strong>${esc(o.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(o.MaterialText || '')}</div></td>
+        <td>${esc(o.VendorName)}</td>
+        <td>${Number(o.OrderQty).toLocaleString()}</td>
+        <td>${esc(o.Status)}</td>
+        <td>${esc(o.SupplierReference || '-')}</td>
+      </tr>`).join('');
+
+    body.innerHTML = `
+      <form id="isd-form" class="transfer-form">
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Dispatch Date</label>
+            <input class="tf-input" type="date" id="isd-dispatch" value="${s.DispatchDate ? String(s.DispatchDate).slice(0, 10) : ''}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Expected ETA</label>
+            <input class="tf-input" type="date" id="isd-eta" value="${s.ExpectedEta ? String(s.ExpectedEta).slice(0, 10) : ''}">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Haulier</label>
+            <input class="tf-input" type="text" id="isd-haulier" value="${esc(s.Haulier || '')}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Mode of Transport</label>
+            <select class="tf-input" id="isd-mode">
+              <option value="">—</option>
+              ${OS_TRANSPORT_MODES.map(m => `<option value="${m}" ${s.ModeOfTransport === m ? 'selected' : ''}>${m}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Tracking Number</label>
+            <input class="tf-input" type="text" id="isd-tracking" value="${esc(s.TrackingNumber || '')}">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Container Number</label>
+            <input class="tf-input" type="text" id="isd-container" value="${esc(s.ContainerNumber || '')}">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">B/L Number</label>
+            <input class="tf-input" type="text" id="isd-bl" value="${esc(s.BillOfLading || '')}">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Notes</label>
+            <input class="tf-input" type="text" id="isd-notes" value="${esc(s.Notes || '')}">
+          </div>
+        </div>
+        <div id="isd-result"></div>
+      </form>
+      <div class="tf-section-label">Order Lines</div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Status</th><th>Supplier Ref</th></tr></thead>
+          <tbody>${ordersRows}</tbody>
+        </table>
+      </div>`;
+
+    actions.innerHTML = `
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+      <button type="button" class="btn-secondary" id="isd-save-btn">Save Details</button>
+      ${s.ReceivedAtUtc ? '' : '<button type="button" class="btn-submit" id="isd-receive-btn">Mark Received</button>'}
+    `;
+
+    document.getElementById('isd-save-btn').addEventListener('click', () => saveInboundShipmentDetail(shipmentId));
+    if (!s.ReceivedAtUtc) {
+      document.getElementById('isd-receive-btn').addEventListener('click', () => markInboundShipmentReceived(shipmentId, s));
+    }
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function saveInboundShipmentDetail(shipmentId) {
+  const btn = document.getElementById('isd-save-btn');
+  const result = document.getElementById('isd-result');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const body = {
+    dispatchDate: document.getElementById('isd-dispatch').value || null,
+    expectedEta: document.getElementById('isd-eta').value || null,
+    haulier: document.getElementById('isd-haulier').value.trim() || null,
+    modeOfTransport: document.getElementById('isd-mode').value || null,
+    trackingNumber: document.getElementById('isd-tracking').value.trim() || null,
+    containerNumber: document.getElementById('isd-container').value.trim() || null,
+    billOfLading: document.getElementById('isd-bl').value.trim() || null,
+    notes: document.getElementById('isd-notes').value.trim() || null,
+  };
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to save shipment');
+    runInboundLog();
+    await refreshInboundShipmentDetail(shipmentId);
+  } catch (err) {
+    if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    btn.disabled = false; btn.textContent = 'Save Details';
+  }
+}
+
+// Bulk-flips every linked order to 'Booked' server-side — a significant,
+// hard-to-reverse action affecting every order on the shipment, so this
+// gets an explicit confirm() rather than firing straight away.
+async function markInboundShipmentReceived(shipmentId, shipment) {
+  const orderCount = shipment.orders?.length || 0;
+  if (!confirm(`Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Booked.`)) return;
+  const btn = document.getElementById('isd-receive-btn');
+  const result = document.getElementById('isd-result');
+  if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/receive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to mark shipment received');
+    runInboundLog();
+    await refreshInboundShipmentDetail(shipmentId);
+  } catch (err) {
+    if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Mark Received'; }
+  }
 }
