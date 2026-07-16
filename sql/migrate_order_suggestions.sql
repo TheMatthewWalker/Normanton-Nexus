@@ -27,25 +27,40 @@
        leadTimeDays = VendorMaterial.LeadTimeDaysOverride
                        ?? TurnsValClassSnapshot.PlannedDeliveryTime (SAP PLIFZ)
                        ?? Vendor.DefaultLeadTimeDays ?? 0
-       orderByDate  = breachDate - leadTimeDays
-     Surfaced once orderByDate falls within a review window (today + 14 days);
-     flagged "Overdue" if orderByDate has already passed.
+       orderByDate  = breachDate - leadTimeDays (WORKING days — see
+                       addWorkingDaysUtc in routes/performance.js; SAP's
+                       PLIFZ and this app's lead/transit time fields are all
+                       working-day figures, so the date math skips weekends)
+     Surfaced once orderByDate falls within a review window (today + 14
+     calendar days — the review window itself is not a lead-time figure, so
+     it stays on calendar days); flagged "Overdue" if orderByDate has
+     already passed.
 
-   SUGGESTED QTY (Node): demand over (leadTimeDays + 30 day buffer), plus
-   safetyStockQty (the same floor used for the trigger, so the order actually
-   rebuilds the buffer rather than just topping up to it), minus current
-   stock, minus anything already incoming (this table's Accepted/Ordered rows
-   for that material) — floored at the material's own MOQ. The vendor's
-   combined order-level MOQ (dbo.Vendor.OrderMoqQty, spanning multiple
-   materials) is surfaced as an informational note only; grouping multiple
-   materials into one order to clear a combined MOQ is not automated.
+   SUGGESTED QTY (Node): demand over (leadTimeDays + 30 calendar-day buffer),
+   plus safetyStockQty (the same floor used for the trigger, so the order
+   actually rebuilds the buffer rather than just topping up to it), minus
+   current stock, minus anything already incoming (this table's Accepted/
+   Ordered rows for that material) — then, if the material has a MOQ
+   (VendorMaterial.MaterialMoqQty), rounded UP to the next whole multiple of
+   it. MOQ here is a LOT SIZE, not just a floor: a vendor supplying in 1000kg
+   lots gets ordered 1000/2000/3000kg etc, never a raw shortfall like 1300kg.
+
+   The vendor's combined order-level MOQ (dbo.Vendor.OrderMoqQty, spanning
+   multiple materials) IS actively managed: GET /order-suggestions groups the
+   list by vendor and tallies the combined suggested quantity against it
+   (groupSuggestionsByVendor), and the Build Order modal (GET /order-
+   suggestions/vendor/:vendorId/build, POST /order-suggestions/accept-batch)
+   lets a buyer pull in materials that aren't urgent yet to close a gap and
+   accept several materials from one vendor as a single batch under one
+   OrderDate.
 
    DATES stamped onto this table at accept time (see migrate_vendor_master_data.sql's
    DATE MATH block for the full reasoning):
-     DeliveryDate       = OrderDate + LeadTimeDaysUsed
+     DeliveryDate       = OrderDate + LeadTimeDaysUsed (working days)
      ReadyToCollectDate = OrderDate + LeadTimeDaysUsed - TransitTimeDaysUsed
-                           (EXW vendors only — the date actually quoted to the
-                           supplier; NULL for every other Incoterm)
+                           (working days; EXW vendors only — the date
+                           actually quoted to the supplier; NULL for every
+                           other Incoterm)
    Snapshotted rather than recalculated live, so a later change to a vendor's
    lead time or transit time doesn't silently rewrite the dates on an order
    that's already been placed.

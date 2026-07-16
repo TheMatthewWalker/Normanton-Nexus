@@ -4709,13 +4709,14 @@ function osOpenAcceptModal(s) {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Order Qty</label>
-          <input class="tf-input" type="number" step="0.001" id="os-order-qty" value="${s.suggestedQty}">
+          <input class="tf-input" type="number" step="${s.materialMoqQty || 0.001}" id="os-order-qty" value="${s.suggestedQty}">
         </div>
         <div class="tf-field">
           <label class="tf-label">Order Date</label>
           <input class="tf-input" type="date" id="os-order-date" value="${todayStr}">
         </div>
       </div>
+      ${s.materialMoqQty ? `<div class="toolbar-hint" style="margin:2px 0 10px">This vendor only supplies in ${Number(s.materialMoqQty).toLocaleString()} ${esc(s.uom || '')} lots — order in whole multiples.</div>` : ''}
       ${s.isSpotPo
         ? `<div class="toolbar-hint" style="margin:2px 0 10px">No schedule agreement for this material — this will need a spot PO raised manually in SAP.</div>`
         : `<div class="toolbar-hint" style="margin:2px 0 10px">Schedule agreement ${esc(s.scheduleAgreement || '')} — release against this in SAP once ordered.</div>`}
@@ -4814,7 +4815,10 @@ function osRenderBuildOrderForm(build) {
         <td><strong>${esc(m.material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.materialText || '')}</div></td>
         <td>${esc(OS_URGENCY_LABEL[m.urgency] || m.urgency)}${m.orderByDate ? `<div style="font-size:11px">by ${formatDisplayDate(m.orderByDate)}</div>` : ''}</td>
         <td>${Number(m.currentStock).toLocaleString()} ${esc(m.uom || '')}</td>
-        <td><input class="tf-input os-build-qty" type="number" step="0.001" data-i="${i}" value="${checked ? m.suggestedQty : ''}" style="width:90px;padding:3px 6px;font-size:12px"></td>
+        <td>
+          <input class="tf-input os-build-qty" type="number" step="${m.materialMoqQty || 0.001}" data-i="${i}" value="${checked ? m.suggestedQty : ''}" style="width:90px;padding:3px 6px;font-size:12px">
+          ${m.materialMoqQty ? `<div style="font-size:10px;color:var(--text-secondary,#666)">lots of ${Number(m.materialMoqQty).toLocaleString()}</div>` : ''}
+        </td>
       </tr>`;
   }).join('');
 

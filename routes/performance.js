@@ -106,6 +106,29 @@ function addDaysUtc(date, days) {
   return new Date(date.getTime() + days * 86400000);
 }
 
+// SAP's PLIFZ and this app's manually-maintained lead/transit time fields
+// are working days, not calendar days (per SAP convention here) — so every
+// date calculation actually driven by a lead or transit time (order-by
+// date, delivery date, EXW ready-to-collect date) needs to skip Saturdays
+// and Sundays. Calendar-day math is kept everywhere else in this file:
+// demand/coverage spreading (demandOverDays, buildWeeklyStockForecast) and
+// the order-review horizon aren't lead-time figures — stock keeps depleting
+// over a weekend regardless of whether a supplier is open, so those stay on
+// addDaysUtc. Fractional lead times (e.g. 2.5 days) are rounded to the
+// nearest whole day before stepping, since fractional working days aren't
+// meaningfully steppable.
+function addWorkingDaysUtc(date, days) {
+  const result = new Date(date.getTime());
+  const step = days >= 0 ? 1 : -1;
+  let remaining = Math.abs(Math.round(days));
+  while (remaining > 0) {
+    result.setUTCDate(result.getUTCDate() + step);
+    const dow = result.getUTCDay(); // 0 = Sunday, 6 = Saturday
+    if (dow !== 0 && dow !== 6) remaining -= 1;
+  }
+  return result;
+}
+
 // Demand between `from` and `from + days`, spread across predictedMonthly the
 // same way buildWeeklyStockForecast spreads it across weeks — used for the
 // suggested-qty calculation, which needs a demand total over an arbitrary
@@ -190,7 +213,7 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
   const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
 
   const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
-  const orderByDate = breachDate ? addDaysUtc(breachDate, -leadTimeDays) : null;
+  const orderByDate = breachDate ? addWorkingDaysUtc(breachDate, -leadTimeDays) : null;
   const dueNow = !!(orderByDate && orderByDate <= horizonDate);
   const urgency = !breachDate ? 'NotDue' : (orderByDate < asOfDate ? 'Overdue' : (dueNow ? 'DueSoon' : 'Upcoming'));
 
@@ -205,11 +228,16 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays);
     const qty = demandOverCoverage + safetyStockQty - currentStock;
     if (qty > 0) {
-      // Only force the material's own MOQ floor when it's actually due —
-      // don't inflate an "upcoming" material's number just because it has a
-      // small MOQ of its own.
+      // MaterialMoqQty is a LOT SIZE, not just a floor — this vendor only
+      // supplies the material in multiples of it (e.g. MOQ 1000kg means
+      // 1000/2000/3000..., never 1300), so a raw shortfall gets rounded UP
+      // to the next whole multiple rather than just topped up to the MOQ
+      // when it's below one lot. Only applied when actually due — don't
+      // inflate an "upcoming" material's number just because it has a lot
+      // size of its own.
       const moq = Number(r.MaterialMoqQty) || 0;
-      suggestedQty = Math.round((dueNow && moq > qty ? moq : qty) * 1000) / 1000;
+      const rounded = (dueNow && moq > 0) ? Math.ceil(qty / moq) * moq : qty;
+      suggestedQty = Math.round(rounded * 1000) / 1000;
     }
   }
 
@@ -348,14 +376,14 @@ function buildAcceptPayload({
   leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
 }) {
   const leadTime = Number(leadTimeDays) || 0;
-  const deliveryDate = addDaysUtc(orderDateObj, leadTime);
+  const deliveryDate = addWorkingDaysUtc(orderDateObj, leadTime);
 
   // EXW: the date actually quoted to the supplier is the ready-to-collect
   // date, not the delivery date — see migrate_vendor_master_data.sql's DATE
   // MATH block. Every other Incoterm leaves these columns NULL/unused.
   const isExw = (incoterms || '').toUpperCase() === 'EXW';
   const transitTime = isExw ? (Number(transitTimeDays) || 0) : null;
-  const readyToCollectDate = isExw ? addDaysUtc(deliveryDate, -(transitTime || 0)) : null;
+  const readyToCollectDate = isExw ? addWorkingDaysUtc(deliveryDate, -(transitTime || 0)) : null;
 
   return {
     vendorMaterialId, vendorId, material,

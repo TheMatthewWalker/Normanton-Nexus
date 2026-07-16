@@ -26,8 +26,8 @@
                              where one exists (blank = ordered via spot PO
                              instead — see the ScheduleAgreement comment below).
 
-   DATE MATH (for the order-suggestion/PO-creation phase that reads this table,
-   not implemented yet — captured here so the schema already has what it needs):
+   DATE MATH (implemented in routes/performance.js's buildAcceptPayload,
+   used by the order-suggestion engine — Phase 2b):
      deliveryDate (goods arrive at Kongsberg)   = orderDate + leadTime
      for EXW vendors, the date QUOTED TO THE SUPPLIER is not deliveryDate — under
      EXW the supplier's job ends when goods are ready for collection, and WE
@@ -37,6 +37,10 @@
      For any other Incoterm, transit is the vendor's own problem within their
      quoted lead time, so the date quoted to the supplier is just deliveryDate
      and TransitTimeDays is unused.
+     Both leadTime and TransitTimeDays are WORKING days (Mon-Fri), matching
+     SAP's own PLIFZ convention — the "+"/"-" above skip Saturdays/Sundays,
+     they don't just add N calendar days. See addWorkingDaysUtc in
+     routes/performance.js.
    ============================================================ */
 
 
@@ -103,9 +107,12 @@ BEGIN
     Material             NVARCHAR(18)  NOT NULL,   -- MATNR, matches TurnsValClassSnapshot.Material
 
     -- Per-material MOQ (e.g. Raaj Ratna: each material also has its own 1000kg
-    -- floor, on top of the 20,000kg combined order MOQ on dbo.Vendor above).
-    -- NULL = no per-material minimum, only the vendor's order-level MOQ (if any)
-    -- applies.
+    -- lot size, on top of the 20,000kg combined order MOQ on dbo.Vendor
+    -- above). This is a LOT SIZE, not just a floor: the vendor only supplies
+    -- in whole multiples of it (order suggestions round a shortfall UP to
+    -- the next multiple — e.g. MOQ 1000kg means 1000/2000/3000kg etc, never
+    -- 1300kg). NULL = no per-material minimum/lot size, only the vendor's
+    -- order-level MOQ (if any) applies.
     MaterialMoqQty        DECIMAL(15,3) NULL,
 
     -- Manually-set minimum stock buffer for this material, used by the order-
