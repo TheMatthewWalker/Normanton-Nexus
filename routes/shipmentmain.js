@@ -1080,10 +1080,38 @@ async function downloadClearPortPdf(correlationId) {
 }
 
 
+// exportRoot must resolve to a real absolute Windows path (drive letter or
+// UNC share) before we ever hand it to fs.mkdir/path.join. Without this
+// check, a malformed value collapses silently into something like the
+// bare string "\\?" (Node's Windows long-path prefix with nothing after
+// it) and the only symptom is a cryptic "ENOENT ... mkdir '\\?'" — which
+// gives no clue that the real problem is upstream config, not a disk/
+// permissions issue. The most common cause: LOGISTICS_EXPORT_ROOT set in
+// .env, but a stray Machine-scope Windows environment variable of the
+// same name (visible to the LocalSystem account the service runs as)
+// shadows it, since dotenv never overrides an already-set process.env
+// value. Check with:
+//   [Environment]::GetEnvironmentVariable('LOGISTICS_EXPORT_ROOT','Machine')
+function assertValidExportRoot(exportRoot) {
+  const value = String(exportRoot || '').trim();
+  const looksValid = /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^?\\]/.test(value);
+  if (!looksValid) {
+    const err = new Error(
+      `Logistics export folder path is misconfigured (LOGISTICS_EXPORT_ROOT resolved to "${value}"). ` +
+      `This is usually a stray Windows environment variable of that name shadowing the .env value — check ` +
+      `[Environment]::GetEnvironmentVariable('LOGISTICS_EXPORT_ROOT','Machine') on the server, fix or remove it, then restart the service.`
+    );
+    err.statusCode = 500;
+    throw err;
+  }
+  return value;
+}
+
 function getShipmentFolderInfo(shipment) {
   const settings = getLogisticsSettings();
+  const exportRoot = assertValidExportRoot(settings.exportRoot);
   const shipmentRef = formatShipmentRef(shipment.shipmentID);
-  const customerPath = path.join(settings.exportRoot, sanitizeFolderSegment(shipment.destinationName || 'Unknown Customer'));
+  const customerPath = path.join(exportRoot, sanitizeFolderSegment(shipment.destinationName || 'Unknown Customer'));
   return { shipmentRef, customerPath, shipmentPath: path.join(customerPath, shipmentRef) };
 }
 
