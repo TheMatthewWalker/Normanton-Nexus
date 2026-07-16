@@ -1985,21 +1985,6 @@ router.post('/:shipmentId/generate-packing-list', requirePermission('LOG_PLANNIN
 });
 
 
-router.get('/:shipmentId/documents/:fileName', async (req, res) => {
-  try {
-    const context = await getShipmentContext(req.params.shipmentId); 
-    const folder = getShipmentFolderInfo(context.shipment); 
-    const fileName = path.basename(req.params.fileName || '');
-    if (!fileName.toLowerCase().endsWith('.pdf')) 
-      return res.status(400).json({ success: false, error: 'Only PDF documents are available.' });
-
-    const target = path.join(folder.shipmentPath, fileName); 
-    await fsp.access(target, fs.constants.F_OK); 
-    return res.sendFile(target);
-  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
-});
-
-
 // ── List every document currently sitting in a shipment's export folder ──────
 // Regenerates the packing list first so it's always current, then lists the
 // whole folder — an operator-uploaded invoice and a ClearPort customs PDF
@@ -2008,6 +1993,13 @@ router.get('/:shipmentId/documents/:fileName', async (req, res) => {
 // requires invoice + packing list on every shipment, plus a customs
 // declaration when customsRequired is set, before a booking is allowed to
 // proceed at all.
+//
+// Registered BEFORE the generic /documents/:fileName route below —
+// Express matches routes in registration order, so if that route came
+// first, a request for /documents/folder would be caught by it with
+// fileName="folder" (failing the .pdf check with a misleading "Only PDF
+// documents are available." 400) and this handler would never run at
+// all. This bug shipped with the original feature; fixed by reordering.
 router.get('/:shipmentId/documents/folder', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const context = await getShipmentContext(req.params.shipmentId);
@@ -2045,6 +2037,21 @@ router.get('/:shipmentId/documents/folder', requirePermission('LOG_PLANNING'), a
         files,
       },
     });
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
+
+
+router.get('/:shipmentId/documents/:fileName', async (req, res) => {
+  try {
+    const context = await getShipmentContext(req.params.shipmentId); 
+    const folder = getShipmentFolderInfo(context.shipment); 
+    const fileName = path.basename(req.params.fileName || '');
+    if (!fileName.toLowerCase().endsWith('.pdf')) 
+      return res.status(400).json({ success: false, error: 'Only PDF documents are available.' });
+
+    const target = path.join(folder.shipmentPath, fileName); 
+    await fsp.access(target, fs.constants.F_OK); 
+    return res.sendFile(target);
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
 
