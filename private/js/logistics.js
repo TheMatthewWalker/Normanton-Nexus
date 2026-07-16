@@ -5378,31 +5378,62 @@ function osRenderTrackedList(tracked) {
 
   const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
 
-  // Orders already on a shipment are done as far as this table's concerned —
-  // tuck them into a collapsed group so the "needs action" rows aren't
-  // buried, reusing the same ps-section pattern as Open Deliveries.
-  const unassigned = tracked.filter(t => !t.ShipmentId);
-  const assigned = tracked.filter(t => t.ShipmentId);
+  // Three-level hierarchy: bucket (Needs Shipment / Assigned to Shipment /
+  // Cancelled) -> supplier -> order rows. Cancelled status takes priority
+  // over ShipmentId when bucketing, since a cancelled order can still be
+  // sat on a (now-orphaned or reused) ShipmentId value in edge cases and the
+  // user wants it out of the way regardless. Every level starts collapsed —
+  // the point is to let the user open exactly one supplier at a time rather
+  // than face the whole list, reusing the ps-section pattern from Open
+  // Deliveries, nested this time.
+  const BUCKET_DEFS = [
+    { key: 'needs',     label: 'Needs Shipment',        dot: 'backlog', match: t => t.Status !== 'Cancelled' && !t.ShipmentId },
+    { key: 'assigned',  label: 'Assigned to Shipment',   dot: 'today',   match: t => t.Status !== 'Cancelled' && !!t.ShipmentId },
+    { key: 'cancelled', label: 'Cancelled',              dot: 'other',   match: t => t.Status === 'Cancelled' },
+  ];
 
-  const sections = [];
-  if (unassigned.length) {
-    sections.push(`<div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">Needs Shipment</span><span class="ps-section-count">${unassigned.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${unassigned.map(renderTrackedRow).join('')}</tbody></table></div></div></div>`);
-  }
-  if (assigned.length) {
-    sections.push(`<div class="ps-section ps-section--collapsed"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">Assigned to Shipment</span><span class="ps-section-count">${assigned.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${assigned.map(renderTrackedRow).join('')}</tbody></table></div></div></div>`);
-  }
+  const renderSupplierGroup = (name, rows) => `<div class="ps-section ps-section--collapsed ps-section--nested">
+    <div class="ps-section-header">
+      <span class="ps-section-dot ps-section-dot--other"></span>
+      <span class="ps-section-title">${esc(name)}</span>
+      <span class="ps-section-count">${rows.length}</span>
+      <span class="ps-chevron">v</span>
+    </div>
+    <div class="ps-section-body">
+      <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${rows.map(renderTrackedRow).join('')}</tbody></table></div>
+    </div>
+  </div>`;
+
+  const bucketSections = BUCKET_DEFS.map(bd => {
+    const bucketRows = tracked.filter(bd.match);
+    if (!bucketRows.length) return '';
+    const byVendor = {};
+    bucketRows.forEach(t => { const key = t.VendorName || 'Unknown Vendor'; (byVendor[key] = byVendor[key] || []).push(t); });
+    const vendorGroups = Object.keys(byVendor).sort((a, b) => a.localeCompare(b))
+      .map(name => renderSupplierGroup(name, byVendor[name])).join('');
+    return `<div class="ps-section ps-section--collapsed">
+      <div class="ps-section-header">
+        <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
+        <span class="ps-section-title">${bd.label}</span>
+        <span class="ps-section-count">${bucketRows.length}</span>
+        <span class="ps-chevron">v</span>
+      </div>
+      <div class="ps-section-body"><div class="ps-sections ps-sections--nested">${vendorGroups}</div></div>
+    </div>`;
+  }).join('');
 
   document.getElementById('result-body').innerHTML = `
     <div class="lg-actions">
-      <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment, or manage individually below.</div></div>
+      <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment, auto-ship, or save edits across several lines at once.</div></div>
       <div class="toolbar-spacer"></div>
       <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
       <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
       <button type="button" class="btn-secondary" id="os-auto-shipment-btn" disabled>Auto-Shipment</button>
+      <button type="button" class="btn-secondary" id="os-save-selected-btn" disabled>Save Selected</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
     </div>
-    ${tracked.length ? `<div class="ps-sections">${sections.join('')}</div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
+    ${tracked.length ? `<div class="ps-sections">${bucketSections}</div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
   `;
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
@@ -5410,6 +5441,7 @@ function osRenderTrackedList(tracked) {
   document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
   document.getElementById('os-auto-shipment-btn').addEventListener('click', () => autoCreateShipments());
+  document.getElementById('os-save-selected-btn').addEventListener('click', () => saveSelectedTrackedOrders());
   document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
@@ -5432,27 +5464,32 @@ function onTrackedCheckToggle(e) {
   const hint = document.getElementById('os-selection-hint');
   if (hint) hint.textContent = selectedTrackedIds.size
     ? `${selectedTrackedIds.size} order line${selectedTrackedIds.size === 1 ? '' : 's'} selected`
-    : 'Select order lines to create a shipment, or manage individually below.';
+    : 'Select order lines to create a shipment, auto-ship, or save edits across several lines at once.';
   const btn = document.getElementById('os-create-shipment-btn');
   if (btn) btn.disabled = selectedTrackedIds.size === 0;
   const autoBtn = document.getElementById('os-auto-shipment-btn');
   if (autoBtn) autoBtn.disabled = selectedTrackedIds.size === 0;
+  const saveSelBtn = document.getElementById('os-save-selected-btn');
+  if (saveSelBtn) saveSelBtn.disabled = selectedTrackedIds.size === 0;
 }
 
-// Full-row update, matching the backend's convention (see
-// updateOrderSuggestionStatus's comment in performancesql.js) — Notes isn't
-// editable from this table yet, so the existing value is carried through
-// rather than overwritten with null on every save.
-async function osSaveTrackedStatus(t) {
+// Reads the on-screen inputs for one tracked row and PUTs them — shared by
+// the per-row Save button and the multi-select "Save Selected" bulk action,
+// so editing several lines (qty, status, PO, supplier ref) and saving them
+// together doesn't require clicking Save once per row. Returns a result
+// object rather than throwing/alerting itself, so the bulk caller can
+// collect per-row failures instead of the first one stopping the batch.
+async function osSaveOneTracked(t) {
   const statusSelect = document.querySelector(`.os-status-select[data-id="${t.SuggestionId}"]`);
   const poInput = document.querySelector(`.os-po-input[data-id="${t.SuggestionId}"]`);
   const supplierRefInput = document.querySelector(`.os-supplier-ref-input[data-id="${t.SuggestionId}"]`);
   const qtyInput = document.querySelector(`.os-qty-input[data-id="${t.SuggestionId}"]`);
-  const btn = document.querySelector(`.os-save-btn[data-id="${t.SuggestionId}"]`);
+  if (!statusSelect || !poInput || !supplierRefInput || !qtyInput) {
+    return { success: false, error: 'Row is not on screen (try expanding its group).' };
+  }
   const qtyValue = Number(qtyInput.value);
   if (!qtyValue || qtyValue <= 0) {
-    alert('Quantity must be greater than 0.');
-    return;
+    return { success: false, error: 'Quantity must be greater than 0.' };
   }
   const body = {
     status: statusSelect.value,
@@ -5461,7 +5498,6 @@ async function osSaveTrackedStatus(t) {
     notes: t.Notes || null,
     orderQty: qtyValue,
   };
-  btn.disabled = true; btn.textContent = 'Saving…';
   try {
     const res = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}`, {
       method: 'PUT',
@@ -5470,11 +5506,52 @@ async function osSaveTrackedStatus(t) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to update order');
-    runOrderSuggestionsTracked();
+    return { success: true };
   } catch (err) {
-    alert(err.message);
-    btn.disabled = false; btn.textContent = 'Save';
+    return { success: false, error: err.message };
   }
+}
+
+// Full-row update, matching the backend's convention (see
+// updateOrderSuggestionStatus's comment in performancesql.js) — Notes isn't
+// editable from this table yet, so the existing value is carried through
+// rather than overwritten with null on every save.
+async function osSaveTrackedStatus(t) {
+  const btn = document.querySelector(`.os-save-btn[data-id="${t.SuggestionId}"]`);
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const result = await osSaveOneTracked(t);
+  if (!result.success) {
+    alert(result.error);
+    btn.disabled = false; btn.textContent = 'Save';
+    return;
+  }
+  runOrderSuggestionsTracked();
+}
+
+// Bulk save — for editing several rows (any mix of qty/status/PO/supplier
+// ref, across different suppliers/buckets) then ticking their checkboxes
+// and saving in one go, instead of hitting each row's own Save button.
+// Reuses the same .os-check selection already used for Create
+// Shipment/Auto-Shipment, since "tick the lines you're working on" is the
+// same gesture for all three actions.
+async function saveSelectedTrackedOrders() {
+  const btn = document.getElementById('os-save-selected-btn');
+  if (!btn || selectedTrackedIds.size === 0) return;
+  const ids = [...selectedTrackedIds];
+  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+  btn.disabled = true; btn.textContent = 'Saving…';
+
+  const results = [];
+  for (const t of rows) {
+    const r = await osSaveOneTracked(t);
+    results.push({ material: t.Material, ...r });
+  }
+
+  const failed = results.filter(r => !r.success);
+  if (failed.length) {
+    alert(`Saved ${results.length - failed.length} of ${results.length} line(s).\n\nFailed:\n` + failed.map(f => `${f.material}: ${f.error}`).join('\n'));
+  }
+  runOrderSuggestionsTracked();
 }
 
 const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
@@ -5721,6 +5798,7 @@ async function autoCreateShipments() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           haulier: 'Supplier Transport',
+          modeOfTransport: 'Road',
           expectedEta: getOrderDueDateIso(t),
           suggestionIds: [t.SuggestionId],
         }),
@@ -5937,6 +6015,7 @@ function renderInboundLog() {
   const rows = inboundShipmentRows.map(s => `
     <tr class="admin-row lg-row" data-id="${s.ShipmentId}">
       <td><strong>${esc(s.ShipmentReference || `#${s.ShipmentId}`)}</strong></td>
+      <td>${esc(s.Suppliers || '-')}</td>
       <td>${esc(s.Haulier || '-')}</td>
       <td>${esc(s.ModeOfTransport || '-')}</td>
       <td>${formatDisplayDate(s.DispatchDate)}</td>
@@ -5951,7 +6030,7 @@ function renderInboundLog() {
   document.getElementById('result-body').innerHTML = `
     <div style="overflow-x:auto">
       <table class="pn-batch-table admin-table">
-        <thead><tr><th>Reference</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>
+        <thead><tr><th>Reference</th><th>Supplier</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;

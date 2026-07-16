@@ -1219,7 +1219,18 @@ export async function listOrderShipments() {
       s.Haulier, s.ModeOfTransport, s.TrackingNumber, s.BillOfLading, s.ContainerNumber,
       s.Notes, s.ReceivedAtUtc, s.ReceivedBy, s.CancelledAtUtc, s.CancelledBy,
       s.CreatedAtUtc, s.UpdatedAtUtc,
-      (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount
+      (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount,
+      -- Distinct vendor names of orders currently linked to this shipment,
+      -- comma-joined. No STRING_AGG on SQL Server 2005+, so FOR XML PATH is
+      -- the compatible way to concatenate — same constraint as everywhere
+      -- else in this codebase (see migrate_*.sql header notes).
+      STUFF((
+        SELECT DISTINCT ', ' + v.VendorName
+        FROM dbo.PurchaseOrderSuggestion p2
+        JOIN dbo.Vendor v ON v.VendorId = p2.VendorId
+        WHERE p2.ShipmentId = s.ShipmentId
+        FOR XML PATH('')
+      ), 1, 2, '') AS Suppliers
     FROM dbo.PurchaseOrderShipment s
     ORDER BY s.CreatedAtUtc DESC
   `);

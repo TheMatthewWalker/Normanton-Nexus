@@ -600,6 +600,12 @@ body::before {
 .ps-section--collapsed .ps-chevron { transform: rotate(-90deg); }
 .ps-section--collapsed .ps-section-body { display: none; }
 
+/* Nested groups (e.g. supplier sub-buckets inside a Tracked Orders bucket) —
+   smaller, indented, and inset so the hierarchy reads clearly. */
+.ps-sections--nested { padding: 10px 14px; gap: 8px; }
+.ps-section--nested .ps-section-header { padding: 7px 12px; }
+.ps-section--nested .ps-section-title { font-size: 12px; }
+
 .ps-table,
 .ps-pallet-table {
   width: 100%;
