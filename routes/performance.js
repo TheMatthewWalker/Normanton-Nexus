@@ -1935,74 +1935,143 @@ router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), asy
 // documenting something that already happened in the real world, not
 // proposing a new order, so a real order that predates or falls outside
 // today's MOQ/max settings must still be recorded as-is.
+//
+// Shared by both the single-row route and the bulk CSV upload below —
+// `allRows` is passed in rather than re-fetched here so a bulk upload of
+// many rows only hits listVendorMaterialsForSuggestions() once.
+async function insertManualOrderRow({ vendorMaterialId, orderQty, orderDate, deliveryDate, poNumber, notes, status, supplierReference }, allRows) {
+  const qty = Number(orderQty);
+  if (!qty || qty <= 0) {
+    const err = new Error('orderQty must be greater than 0.'); err.statusCode = 400; throw err;
+  }
+
+  const r = allRows.find(row => Number(row.VendorMaterialId) === Number(vendorMaterialId));
+  if (!r) {
+    const err = new Error('Vendor material not found.'); err.statusCode = 404; throw err;
+  }
+
+  const orderDateObj = orderDate ? new Date(orderDate) : new Date();
+  const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
+  const transitTimeDays = Number(r.TransitTimeDays) || 0;
+  const isSpotPo = !r.ScheduleAgreement;
+
+  let payload;
+  if (deliveryDate) {
+    // The operator already knows the real delivery date (the order's
+    // already been placed) — use it as given rather than recomputing from
+    // the vendor's lead time, which may not match what was actually
+    // agreed for this specific order.
+    const deliveryDateObj = new Date(deliveryDate);
+    const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
+    payload = {
+      vendorMaterialId: r.VendorMaterialId,
+      vendorId: r.VendorId,
+      material: r.Material,
+      suggestedQty: null,
+      orderQty: qty,
+      orderDate: orderDateObj,
+      leadTimeDaysUsed: leadTimeDays,
+      deliveryDate: deliveryDateObj,
+      transitTimeDaysUsed: isExw ? transitTimeDays : null,
+      readyToCollectDate: isExw ? addWorkingDaysUtc(deliveryDateObj, -transitTimeDays) : null,
+      isSpotPo,
+      notes: notes || null,
+    };
+  } else {
+    payload = buildAcceptPayload({
+      vendorMaterialId: r.VendorMaterialId, vendorId: r.VendorId, material: r.Material,
+      suggestedQty: null, orderQty: qty, orderDateObj,
+      leadTimeDays, transitTimeDays, incoterms: r.Incoterms, isSpotPo, notes,
+    });
+  }
+
+  const suggestionId = await db.acceptOrderSuggestion(payload);
+
+  // acceptOrderSuggestion always inserts as 'Accepted' — flip it on if the
+  // caller says this is further along (already raised in SAP / already
+  // booked in / already arrived), and persist PO number / supplier
+  // reference in the same call.
+  const finalStatus = ['Ordered', 'Booked', 'Received'].includes(status) ? status : 'Accepted';
+  if (finalStatus !== 'Accepted' || poNumber || supplierReference) {
+    await db.updateOrderSuggestionStatus(suggestionId, {
+      status: finalStatus, poNumber: poNumber || null, notes: notes || null, supplierReference: supplierReference || null,
+    });
+  }
+
+  return suggestionId;
+}
+
 router.post('/order-suggestions/manual', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const { vendorMaterialId, orderQty, orderDate, deliveryDate, poNumber, notes, status } = req.body;
+    const { vendorMaterialId } = req.body;
     if (!vendorMaterialId) {
       return res.status(400).json({ success: false, error: { message: 'vendorMaterialId is required.' } });
     }
-    const qty = Number(orderQty);
-    if (!qty || qty <= 0) {
-      return res.status(400).json({ success: false, error: { message: 'orderQty must be greater than 0.' } });
-    }
-
-    // No dedicated single-row lookup for this — computeVendorOrderBuild uses
-    // the same "fetch everything, filter in JS" approach against this same
-    // list, so this isn't a new pattern.
     const allRows = await db.listVendorMaterialsForSuggestions();
-    const r = allRows.find(row => Number(row.VendorMaterialId) === Number(vendorMaterialId));
-    if (!r) {
-      return res.status(404).json({ success: false, error: { message: 'Vendor material not found.' } });
-    }
-
-    const orderDateObj = orderDate ? new Date(orderDate) : new Date();
-    const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
-    const transitTimeDays = Number(r.TransitTimeDays) || 0;
-    const isSpotPo = !r.ScheduleAgreement;
-
-    let payload;
-    if (deliveryDate) {
-      // The operator already knows the real delivery date (the order's
-      // already been placed) — use it as given rather than recomputing from
-      // the vendor's lead time, which may not match what was actually
-      // agreed for this specific order.
-      const deliveryDateObj = new Date(deliveryDate);
-      const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
-      payload = {
-        vendorMaterialId: r.VendorMaterialId,
-        vendorId: r.VendorId,
-        material: r.Material,
-        suggestedQty: null,
-        orderQty: qty,
-        orderDate: orderDateObj,
-        leadTimeDaysUsed: leadTimeDays,
-        deliveryDate: deliveryDateObj,
-        transitTimeDaysUsed: isExw ? transitTimeDays : null,
-        readyToCollectDate: isExw ? addWorkingDaysUtc(deliveryDateObj, -transitTimeDays) : null,
-        isSpotPo,
-        notes: notes || null,
-      };
-    } else {
-      payload = buildAcceptPayload({
-        vendorMaterialId: r.VendorMaterialId, vendorId: r.VendorId, material: r.Material,
-        suggestedQty: null, orderQty: qty, orderDateObj,
-        leadTimeDays, transitTimeDays, incoterms: r.Incoterms, isSpotPo, notes,
-      });
-    }
-
-    const suggestionId = await db.acceptOrderSuggestion(payload);
-
-    // acceptOrderSuggestion always inserts as 'Accepted' — flip it on if the
-    // operator says this is further along (already raised in SAP / already
-    // arrived), and persist the PO number in the same call.
-    const finalStatus = ['Ordered', 'Received'].includes(status) ? status : 'Accepted';
-    if (finalStatus !== 'Accepted' || poNumber) {
-      await db.updateOrderSuggestionStatus(suggestionId, { status: finalStatus, poNumber: poNumber || null, notes: notes || null });
-    }
-
+    const suggestionId = await insertManualOrderRow(req.body, allRows);
     res.json({ success: true, data: { suggestionId } });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Bulk CSV upload — same fields as the single-row route above, but rows
+// reference a vendor by NAME and a material by CODE (not vendorMaterialId,
+// which an operator filling in a spreadsheet has no way to know), and the
+// whole batch is resolved against one fetch of listVendorMaterialsForSuggestions()
+// rather than one query per row. Every row is attempted independently — a
+// typo in row 12 shouldn't block rows 1-11 from saving — so the response
+// reports success/failure per row rather than all-or-nothing.
+router.post('/order-suggestions/manual/bulk', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ success: false, error: { message: 'rows must be a non-empty array.' } });
+    }
+
+    const allRows = await db.listVendorMaterialsForSuggestions();
+    const findVendorMaterial = (vendorName, material) => {
+      const vn  = String(vendorName || '').trim().toLowerCase();
+      const mat = String(material || '').trim().toLowerCase();
+      if (!vn || !mat) return null;
+      return allRows.find(row =>
+        String(row.VendorName || '').trim().toLowerCase() === vn &&
+        String(row.Material || '').trim().toLowerCase() === mat
+      );
+    };
+
+    const results = [];
+    for (let i = 0; i < rows.length; i++) {
+      const csvRow = rows[i] || {};
+      const rowNum = i + 2; // +1 for 1-indexing, +1 for the header row
+      try {
+        const match = findVendorMaterial(csvRow.vendor, csvRow.material);
+        if (!match) {
+          throw new Error(`No vendor material configured for "${csvRow.vendor || '?'}" / "${csvRow.material || '?'}" — add it in Vendor Master Data first.`);
+        }
+        const suggestionId = await insertManualOrderRow({
+          vendorMaterialId: match.VendorMaterialId,
+          orderQty: csvRow.orderQty,
+          orderDate: csvRow.orderDate,
+          deliveryDate: csvRow.deliveryDate,
+          poNumber: csvRow.poNumber,
+          supplierReference: csvRow.supplierReference,
+          notes: csvRow.notes,
+          status: csvRow.status,
+        }, allRows);
+        results.push({ row: rowNum, success: true, suggestionId });
+      } catch (err) {
+        results.push({ row: rowNum, success: false, error: err.message });
+      }
+    }
+
+    const succeeded = results.filter(r => r.success).length;
+    res.json({
+      success: true,
+      data: { total: rows.length, succeeded, failed: rows.length - succeeded, results },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
   }
 });
 

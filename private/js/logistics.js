@@ -4994,6 +4994,7 @@ function osRenderSuggestionList(groups) {
       <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor — not just-in-time. Vendors with a combined order MOQ are grouped so you can see whether one order clears it; use Build Order to combine materials and hit the minimum.</div>
       <div style="display:flex;gap:8px;white-space:nowrap">
         <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
+        <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
         <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
       </div>
     </div>
@@ -5002,6 +5003,7 @@ function osRenderSuggestionList(groups) {
 
   document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
   document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
+  document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.querySelectorAll('.os-accept-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const g = groups[Number(btn.dataset.gi)];
@@ -5379,6 +5381,7 @@ function osRenderTrackedList(tracked) {
       <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment, or manage individually below.</div></div>
       <div class="toolbar-spacer"></div>
       <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
+      <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
     </div>
@@ -5393,6 +5396,7 @@ function osRenderTrackedList(tracked) {
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
   document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
+  document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
@@ -6025,4 +6029,146 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
     if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = 'Mark Received'; }
   }
+}
+
+
+// ── Bulk CSV upload for manual orders — same fields as openManualOrderModal,
+// but for pasting in a whole pipeline's worth of orders at once instead of
+// one at a time. Parsed entirely client-side (no CSV library bundled for
+// this app; the format is simple enough to hand-roll correctly, including
+// quoted fields with embedded commas) and posted as JSON rows to
+// /order-suggestions/manual/bulk, which resolves Vendor/Material by name.
+const MANUAL_ORDER_CSV_HEADERS = {
+  'vendor': 'vendor', 'vendor name': 'vendor',
+  'material': 'material', 'material code': 'material', 'material number': 'material',
+  'qty': 'orderQty', 'order qty': 'orderQty', 'order quantity': 'orderQty', 'orderqty': 'orderQty',
+  'order date': 'orderDate', 'orderdate': 'orderDate',
+  'delivery date': 'deliveryDate', 'deliverydate': 'deliveryDate',
+  'status': 'status',
+  'po': 'poNumber', 'po number': 'poNumber', 'ponumber': 'poNumber',
+  'supplier ref': 'supplierReference', 'supplier reference': 'supplierReference', 'supplierreference': 'supplierReference',
+  'notes': 'notes',
+};
+
+// Minimal RFC4180-style parser: handles quoted fields (embedded commas,
+// embedded newlines, "" for an escaped quote) and both CRLF and LF row
+// endings, since a spreadsheet export could produce either.
+function parseCsvText(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  const pushField = () => { row.push(field); field = ''; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; } }
+      else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      pushField();
+    } else if (c === '\n') {
+      pushRow();
+    } else if (c === '\r') {
+      // skip — the following \n (or EOF) ends the row
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) pushRow();
+  return rows.filter(r => r.some(v => String(v).trim() !== ''));
+}
+
+function parseManualOrderCsv(text) {
+  const rows = parseCsvText(text);
+  if (!rows.length) return [];
+  const headerKeys = rows[0].map(h => MANUAL_ORDER_CSV_HEADERS[h.trim().toLowerCase()] || null);
+  if (!headerKeys.some(Boolean)) throw new Error('No recognised columns in the header row — see the template for expected column names.');
+  return rows.slice(1).map(cols => {
+    const obj = {};
+    headerKeys.forEach((key, i) => { if (key) obj[key] = (cols[i] || '').trim(); });
+    return obj;
+  }).filter(obj => obj.vendor || obj.material);
+}
+
+function downloadManualOrderCsvTemplate() {
+  const header  = 'Vendor,Material,Order Qty,Order Date,Delivery Date,Status,PO Number,Supplier Reference,Notes';
+  const example = 'Example Vendor Ltd,100123,5000,2026-07-16,,Ordered,PO-12345,SUP-REF-001,';
+  const blob = new Blob([`${header}\r\n${example}\r\n`], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'manual-orders-template.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function openManualOrderCsvModal() {
+  openModal(`<div class="ps-modal" style="max-width:560px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Upload Orders CSV</div><div class="ps-modal-sub">Bulk-add manual orders instead of one at a time</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint">Columns: Vendor, Material, Order Qty, Order Date, Delivery Date (optional), Status (optional — Accepted/Ordered/Booked/Received), PO Number (optional), Supplier Reference (optional), Notes (optional). Vendor and Material must already be configured together in Vendor Master Data.</div>
+      <div style="margin:10px 0"><button type="button" class="btn-secondary" id="mc-template-btn">Download Template</button></div>
+      <input type="file" id="mc-file-input" accept=".csv,text/csv" style="margin-bottom:10px">
+      <div id="mc-preview"></div>
+      <div id="mc-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="mc-upload-btn" disabled>Upload</button>
+    </div>
+  </div>`);
+
+  let parsedRows = [];
+
+  document.getElementById('mc-template-btn').addEventListener('click', downloadManualOrderCsvTemplate);
+
+  document.getElementById('mc-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    const preview = document.getElementById('mc-preview');
+    const uploadBtn = document.getElementById('mc-upload-btn');
+    parsedRows = [];
+    preview.innerHTML = '';
+    uploadBtn.disabled = true;
+    if (!file) return;
+    try {
+      const text = await file.text();
+      parsedRows = parseManualOrderCsv(text);
+      if (!parsedRows.length) throw new Error('No data rows found in that file.');
+      preview.innerHTML = `<div class="toolbar-hint">${parsedRows.length} row${parsedRows.length === 1 ? '' : 's'} ready to upload.</div>`;
+      uploadBtn.disabled = false;
+    } catch (err) {
+      parsedRows = [];
+      preview.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    }
+  });
+
+  document.getElementById('mc-upload-btn').addEventListener('click', async () => {
+    if (!parsedRows.length) return;
+    const btn = document.getElementById('mc-upload-btn');
+    const result = document.getElementById('mc-result');
+    result.innerHTML = '';
+    btn.disabled = true; btn.textContent = 'Uploading…';
+    try {
+      const res = await fetch('/api/performance/order-suggestions/manual/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: parsedRows }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Upload failed');
+      const { succeeded, failed, results } = json.data;
+      const failures = results.filter(r => !r.success);
+      result.innerHTML = `
+        <div class="${failed ? 'sap-error' : 'toolbar-hint'}">${succeeded} of ${results.length} row${results.length === 1 ? '' : 's'} added${failed ? `, ${failed} failed` : ''}.</div>
+        ${failures.length ? `<ul style="margin:6px 0 0;padding-left:18px;font-size:12px">${failures.map(f => `<li>Row ${f.row}: ${esc(f.error)}</li>`).join('')}</ul>` : ''}
+      `;
+      if (succeeded) runOrderSuggestionsTracked();
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Upload';
+    }
+  });
 }
