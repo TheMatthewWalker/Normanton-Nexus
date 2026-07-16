@@ -1127,7 +1127,15 @@ export async function listOrderSuggestionsTracked() {
 // above) — the caller sends the complete current state, not a partial patch,
 // so PoNumber/Notes/SupplierReference need to be included even when only
 // Status is changing.
-export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes, supplierReference }) {
+// orderQty is optional and only touches the row when supplied (COALESCE) —
+// insertManualOrderRow's call into this same function at creation time
+// doesn't pass it, and must leave the just-inserted OrderQty alone. When the
+// Tracked Orders qty field IS edited, it's applied with no MOQ/lot-size
+// re-validation: the order already exists in the real world and the actual
+// delivered quantity can land a few kg either side of what was ordered
+// (product-dependent), so this is a correction to match reality, not a new
+// proposed order that needs to clear the vendor's constraints again.
+export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes, supplierReference, orderQty }) {
   const pool = await getPool();
   await pool.request()
     .input('suggestionId',      sql.Int, suggestionId)
@@ -1135,10 +1143,12 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
     .input('poNumber',          sql.NVarChar(20),  poNumber || null)
     .input('notes',             sql.NVarChar(500), notes || null)
     .input('supplierReference', sql.NVarChar(50),  supplierReference || null)
+    .input('orderQty',          sql.Decimal(15, 3), orderQty != null ? orderQty : null)
     .query(`
       UPDATE dbo.PurchaseOrderSuggestion SET
         Status = @status, PoNumber = @poNumber, Notes = @notes,
         SupplierReference = @supplierReference,
+        OrderQty = COALESCE(@orderQty, OrderQty),
         UpdatedAtUtc = GETUTCDATE(),
         ReceivedAtUtc = CASE WHEN @status = 'Received' THEN GETUTCDATE() ELSE ReceivedAtUtc END
       WHERE SuggestionId = @suggestionId

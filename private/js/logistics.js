@@ -5348,7 +5348,7 @@ function osRenderTrackedList(tracked) {
   document.getElementById('result-row-badge').textContent = `${tracked.length} tracked`;
   document.getElementById('result-row-badge').classList.remove('hidden');
 
-  const rows = tracked.map(t => {
+  const renderTrackedRow = (t) => {
     const dueLabel = t.IsSpotPo && t.ReadyToCollectDate
       ? `${formatDisplayDate(t.ReadyToCollectDate)} (ready to collect)`
       : formatDisplayDate(t.DeliveryDate);
@@ -5357,7 +5357,7 @@ function osRenderTrackedList(tracked) {
       <td class="lg-check-cell"><input type="checkbox" class="lg-check os-check" data-id="${t.SuggestionId}"></td>
       <td><strong>${esc(t.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(t.MaterialText || '')}</div></td>
       <td>${esc(t.VendorName)}</td>
-      <td>${Number(t.OrderQty).toLocaleString()}</td>
+      <td><input class="tf-input os-qty-input" data-id="${t.SuggestionId}" type="number" step="0.001" min="0.001" value="${Number(t.OrderQty)}" style="padding:3px 6px;font-size:12px;width:90px"></td>
       <td>${formatDisplayDate(t.OrderDate)}</td>
       <td>${dueLabel}</td>
       <td>
@@ -5374,7 +5374,23 @@ function osRenderTrackedList(tracked) {
       </td>
       <td style="text-align:right"><button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button></td>
     </tr>`;
-  }).join('');
+  };
+
+  const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
+
+  // Orders already on a shipment are done as far as this table's concerned —
+  // tuck them into a collapsed group so the "needs action" rows aren't
+  // buried, reusing the same ps-section pattern as Open Deliveries.
+  const unassigned = tracked.filter(t => !t.ShipmentId);
+  const assigned = tracked.filter(t => t.ShipmentId);
+
+  const sections = [];
+  if (unassigned.length) {
+    sections.push(`<div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">Needs Shipment</span><span class="ps-section-count">${unassigned.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${unassigned.map(renderTrackedRow).join('')}</tbody></table></div></div></div>`);
+  }
+  if (assigned.length) {
+    sections.push(`<div class="ps-section ps-section--collapsed"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">Assigned to Shipment</span><span class="ps-section-count">${assigned.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${assigned.map(renderTrackedRow).join('')}</tbody></table></div></div></div>`);
+  }
 
   document.getElementById('result-body').innerHTML = `
     <div class="lg-actions">
@@ -5386,13 +5402,7 @@ function osRenderTrackedList(tracked) {
       <button type="button" class="btn-secondary" id="os-auto-shipment-btn" disabled>Auto-Shipment</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
     </div>
-    ${tracked.length ? `
-      <div style="overflow-x:auto">
-        <table class="pn-batch-table admin-table">
-          <thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
+    ${tracked.length ? `<div class="ps-sections">${sections.join('')}</div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
   `;
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
@@ -5400,6 +5410,7 @@ function osRenderTrackedList(tracked) {
   document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
   document.getElementById('os-auto-shipment-btn').addEventListener('click', () => autoCreateShipments());
+  document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -5436,12 +5447,19 @@ async function osSaveTrackedStatus(t) {
   const statusSelect = document.querySelector(`.os-status-select[data-id="${t.SuggestionId}"]`);
   const poInput = document.querySelector(`.os-po-input[data-id="${t.SuggestionId}"]`);
   const supplierRefInput = document.querySelector(`.os-supplier-ref-input[data-id="${t.SuggestionId}"]`);
+  const qtyInput = document.querySelector(`.os-qty-input[data-id="${t.SuggestionId}"]`);
   const btn = document.querySelector(`.os-save-btn[data-id="${t.SuggestionId}"]`);
+  const qtyValue = Number(qtyInput.value);
+  if (!qtyValue || qtyValue <= 0) {
+    alert('Quantity must be greater than 0.');
+    return;
+  }
   const body = {
     status: statusSelect.value,
     poNumber: poInput.value.trim() || null,
     supplierReference: supplierRefInput.value.trim() || null,
     notes: t.Notes || null,
+    orderQty: qtyValue,
   };
   btn.disabled = true; btn.textContent = 'Saving…';
   try {

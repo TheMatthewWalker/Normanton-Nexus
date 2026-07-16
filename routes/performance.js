@@ -2086,12 +2086,19 @@ router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (re
 
 router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, orderQty } = req.body;
     if (!status || !['Accepted', 'Ordered', 'Booked', 'Received', 'Cancelled'].includes(status)) {
       return res.status(400).json({
         success: false,
         error: { message: 'status must be one of Accepted, Ordered, Booked, Received, Cancelled.' }
       });
+    }
+    // Optional — only present when the Tracked Orders qty field was edited.
+    // No MOQ/max re-check here, same reasoning as manual order entry: this
+    // corrects an order that already happened (deliveries can land a few kg
+    // either side of what was placed) rather than proposing a new one.
+    if (orderQty != null && (!Number(orderQty) || Number(orderQty) <= 0)) {
+      return res.status(400).json({ success: false, error: { message: 'orderQty must be greater than 0.' } });
     }
     await db.updateOrderSuggestionStatus(req.params.suggestionId, req.body);
     res.json({ success: true });
