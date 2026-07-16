@@ -5354,6 +5354,12 @@ function osRenderTrackedList(tracked) {
         </select>
       </td>
       <td><input class="tf-input os-po-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.PoNumber || '')}" placeholder="PO number" style="padding:3px 6px;font-size:12px;width:100px"></td>
+      <td><input class="tf-input os-supplier-ref-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.SupplierReference || '')}" placeholder="Supplier ref" style="padding:3px 6px;font-size:12px;width:100px"></td>
+      <td>
+        <button class="btn-secondary os-shipment-btn" data-id="${t.SuggestionId}" style="padding:3px 8px;font-size:11px;white-space:nowrap" title="${t.ShipmentId ? esc([t.Haulier, t.ModeOfTransport, t.ShipmentTrackingNumber].filter(Boolean).join(' · ')) : ''}">
+          ${t.ShipmentId ? esc(t.Haulier || t.ShipmentReference || t.ShipmentTrackingNumber || 'Assigned') : '+ Assign'}
+        </button>
+      </td>
       <td style="text-align:right"><button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button></td>
     </tr>`;
   }).join('');
@@ -5366,7 +5372,7 @@ function osRenderTrackedList(tracked) {
     ${tracked.length ? `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th></th></tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
@@ -5380,6 +5386,12 @@ function osRenderTrackedList(tracked) {
       if (t) osSaveTrackedStatus(t);
     });
   });
+  document.querySelectorAll('.os-shipment-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
+      if (t) openAssignShipmentModal(t);
+    });
+  });
 }
 
 // Full-row update, matching the backend's convention (see
@@ -5389,10 +5401,12 @@ function osRenderTrackedList(tracked) {
 async function osSaveTrackedStatus(t) {
   const statusSelect = document.querySelector(`.os-status-select[data-id="${t.SuggestionId}"]`);
   const poInput = document.querySelector(`.os-po-input[data-id="${t.SuggestionId}"]`);
+  const supplierRefInput = document.querySelector(`.os-supplier-ref-input[data-id="${t.SuggestionId}"]`);
   const btn = document.querySelector(`.os-save-btn[data-id="${t.SuggestionId}"]`);
   const body = {
     status: statusSelect.value,
     poNumber: poInput.value.trim() || null,
+    supplierReference: supplierRefInput.value.trim() || null,
     notes: t.Notes || null,
   };
   btn.disabled = true; btn.textContent = 'Saving…';
@@ -5409,6 +5423,173 @@ async function osSaveTrackedStatus(t) {
     alert(err.message);
     btn.disabled = false; btn.textContent = 'Save';
   }
+}
+
+const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
+
+// Links a tracked order to an inbound shipment/load (haulier, mode of
+// transport, tracking number) — several orders arriving on the same load
+// can share one shipment, so this offers "link to an existing shipment" as
+// well as "create a new one", and edits made here update the shared record
+// for every order already linked to it.
+async function openAssignShipmentModal(t) {
+  const hasShipment = Boolean(t.ShipmentId);
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Assign Shipment</div><div class="ps-modal-sub">${esc(t.Material)} — ${esc(t.VendorName)}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-field">
+        <label class="tf-label">Link to Existing Shipment</label>
+        <select class="tf-input" id="as-existing"><option value="">Loading…</option></select>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Pick an existing shipment if this order is travelling on a load with other orders, or leave as "Create New" and fill in the details below.</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Shipment Reference</label>
+          <input class="tf-input" type="text" id="as-reference" value="${esc(t.ShipmentReference || '')}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Haulier</label>
+          <input class="tf-input" type="text" id="as-haulier" value="${esc(t.Haulier || '')}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Mode of Transport</label>
+          <select class="tf-input" id="as-mode">
+            <option value="">—</option>
+            ${OS_TRANSPORT_MODES.map(m => `<option value="${m}" ${t.ModeOfTransport === m ? 'selected' : ''}>${m}</option>`).join('')}
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Tracking Number</label>
+          <input class="tf-input" type="text" id="as-tracking" value="${esc(t.ShipmentTrackingNumber || '')}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="as-notes">
+        </div>
+      </div>
+      <div id="as-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      ${hasShipment ? '<button type="button" class="btn-secondary" id="as-unassign-btn">Unassign</button>' : ''}
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="as-save-btn">Save</button>
+    </div>
+  </div>`);
+
+  const existingSelect = document.getElementById('as-existing');
+  const referenceInput = document.getElementById('as-reference');
+  const haulierInput   = document.getElementById('as-haulier');
+  const modeSelect      = document.getElementById('as-mode');
+  const trackingInput  = document.getElementById('as-tracking');
+  const notesInput      = document.getElementById('as-notes');
+
+  let shipments = [];
+  try {
+    const res  = await fetch('/api/performance/order-suggestions/shipments');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load shipments');
+    shipments = json.data;
+    const optionsHtml = shipments.map(s => {
+      const label = [s.ShipmentReference, s.Haulier, s.TrackingNumber].filter(Boolean).join(' · ') || `Shipment #${s.ShipmentId}`;
+      return `<option value="${s.ShipmentId}" ${hasShipment && Number(t.ShipmentId) === s.ShipmentId ? 'selected' : ''}>${esc(label)} (${s.OrderCount} order${s.OrderCount === 1 ? '' : 's'})</option>`;
+    }).join('');
+    existingSelect.innerHTML = `<option value="">— Create New Shipment —</option>${optionsHtml}`;
+  } catch (err) {
+    existingSelect.innerHTML = '<option value="">Failed to load shipments</option>';
+  }
+
+  function fillFromShipment(shipmentId) {
+    const s = shipments.find(x => String(x.ShipmentId) === String(shipmentId));
+    if (!s) return;
+    referenceInput.value = s.ShipmentReference || '';
+    haulierInput.value = s.Haulier || '';
+    modeSelect.value = s.ModeOfTransport || '';
+    trackingInput.value = s.TrackingNumber || '';
+    notesInput.value = s.Notes || '';
+  }
+
+  existingSelect.addEventListener('change', () => {
+    if (existingSelect.value) fillFromShipment(existingSelect.value);
+  });
+
+  if (document.getElementById('as-unassign-btn')) {
+    document.getElementById('as-unassign-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('as-unassign-btn');
+      btn.disabled = true; btn.textContent = 'Removing…';
+      try {
+        const res = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}/shipment`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shipmentId: null }),
+        });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error?.message || 'Failed to unassign shipment');
+        closePickModal();
+        runOrderSuggestionsTracked();
+      } catch (err) {
+        document.getElementById('as-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = 'Unassign';
+      }
+    });
+  }
+
+  document.getElementById('as-save-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('as-save-btn');
+    const result = document.getElementById('as-result');
+    result.innerHTML = '';
+    btn.disabled = true; btn.textContent = 'Saving…';
+
+    const shipmentPayload = {
+      shipmentReference: referenceInput.value.trim() || null,
+      haulier: haulierInput.value.trim() || null,
+      modeOfTransport: modeSelect.value || null,
+      trackingNumber: trackingInput.value.trim() || null,
+      notes: notesInput.value.trim() || null,
+    };
+
+    try {
+      let shipmentId = existingSelect.value ? Number(existingSelect.value) : null;
+      if (shipmentId) {
+        // Editing here updates the shared record for every order already
+        // linked to this shipment, not just this one.
+        await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(shipmentPayload),
+        });
+      } else {
+        const createRes = await fetch('/api/performance/order-suggestions/shipments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(shipmentPayload),
+        });
+        const createJson = await createRes.json();
+        if (!createJson.success) throw new Error(createJson.error?.message || 'Failed to create shipment');
+        shipmentId = createJson.data.shipmentId;
+      }
+
+      const assignRes = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}/shipment`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shipmentId }),
+      });
+      const assignJson = await assignRes.json();
+      if (!assignJson.success) throw new Error(assignJson.error?.message || 'Failed to assign shipment');
+
+      closePickModal();
+      runOrderSuggestionsTracked();
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Save';
+    }
+  });
 }
 
 // Records an order that already exists outside the suggestion engine — the

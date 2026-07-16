@@ -1107,10 +1107,13 @@ export async function listOrderSuggestionsTracked() {
       p.SuggestionId, p.VendorId, v.VendorName, p.VendorMaterialId, p.Material,
       t.MaterialText, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
       p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
-      p.IsSpotPo, p.PoNumber, p.Notes, p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc
+      p.IsSpotPo, p.PoNumber, p.Notes, p.SupplierReference,
+      p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc,
+      p.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport, s.TrackingNumber AS ShipmentTrackingNumber
     FROM dbo.PurchaseOrderSuggestion p
     JOIN dbo.Vendor v ON v.VendorId = p.VendorId
     LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
+    LEFT JOIN dbo.PurchaseOrderShipment s ON s.ShipmentId = p.ShipmentId
     WHERE p.Status <> 'Cancelled'
     ORDER BY
       CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Received' THEN 2 ELSE 3 END,
@@ -1121,19 +1124,93 @@ export async function listOrderSuggestionsTracked() {
 
 // Full-row update (same convention as updateVendor/updateVendorMaterial
 // above) — the caller sends the complete current state, not a partial patch,
-// so PoNumber/Notes need to be included even when only Status is changing.
-export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes }) {
+// so PoNumber/Notes/SupplierReference need to be included even when only
+// Status is changing.
+export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes, supplierReference }) {
   const pool = await getPool();
   await pool.request()
-    .input('suggestionId', sql.Int, suggestionId)
-    .input('status',       sql.NVarChar(20),  status)
-    .input('poNumber',     sql.NVarChar(20),  poNumber || null)
-    .input('notes',        sql.NVarChar(500), notes || null)
+    .input('suggestionId',      sql.Int, suggestionId)
+    .input('status',            sql.NVarChar(20),  status)
+    .input('poNumber',          sql.NVarChar(20),  poNumber || null)
+    .input('notes',             sql.NVarChar(500), notes || null)
+    .input('supplierReference', sql.NVarChar(50),  supplierReference || null)
     .query(`
       UPDATE dbo.PurchaseOrderSuggestion SET
         Status = @status, PoNumber = @poNumber, Notes = @notes,
+        SupplierReference = @supplierReference,
         UpdatedAtUtc = GETUTCDATE(),
         ReceivedAtUtc = CASE WHEN @status = 'Received' THEN GETUTCDATE() ELSE ReceivedAtUtc END
+      WHERE SuggestionId = @suggestionId
+    `);
+}
+
+// ── Inbound shipment tracking (haulier / mode of transport / tracking
+// number), and self-delivering-supplier reconciliation via SupplierReference
+// above — see sql/migrate_order_shipments.sql for why this is a separate,
+// much lighter table than Logistics.dbo.ShipmentMain. Several
+// PurchaseOrderSuggestion rows can share one shipment (a consolidated load),
+// so this is create/list/update on the shipment plus a separate assign call
+// on the order.
+export async function createOrderShipment({ shipmentReference, haulier, modeOfTransport, trackingNumber, notes }) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('shipmentReference', sql.NVarChar(50),  shipmentReference || null)
+    .input('haulier',           sql.NVarChar(100), haulier || null)
+    .input('modeOfTransport',   sql.NVarChar(20),  modeOfTransport || null)
+    .input('trackingNumber',    sql.NVarChar(100), trackingNumber || null)
+    .input('notes',             sql.NVarChar(500), notes || null)
+    .query(`
+      INSERT INTO dbo.PurchaseOrderShipment (ShipmentReference, Haulier, ModeOfTransport, TrackingNumber, Notes)
+      OUTPUT INSERTED.ShipmentId
+      VALUES (@shipmentReference, @haulier, @modeOfTransport, @trackingNumber, @notes)
+    `);
+  return recordset[0].ShipmentId;
+}
+
+// Ordered most-recent first, with a count of orders currently linked — lets
+// the assign-shipment picker show "3 orders already on this load" so a
+// second/third material arriving on the same delivery gets linked to the
+// existing shipment instead of a duplicate one being created by mistake.
+export async function listOrderShipments() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT
+      s.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport, s.TrackingNumber,
+      s.Notes, s.CreatedAtUtc, s.UpdatedAtUtc,
+      (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount
+    FROM dbo.PurchaseOrderShipment s
+    ORDER BY s.CreatedAtUtc DESC
+  `);
+  return recordset;
+}
+
+export async function updateOrderShipment(shipmentId, { shipmentReference, haulier, modeOfTransport, trackingNumber, notes }) {
+  const pool = await getPool();
+  await pool.request()
+    .input('shipmentId',        sql.Int, shipmentId)
+    .input('shipmentReference', sql.NVarChar(50),  shipmentReference || null)
+    .input('haulier',           sql.NVarChar(100), haulier || null)
+    .input('modeOfTransport',   sql.NVarChar(20),  modeOfTransport || null)
+    .input('trackingNumber',    sql.NVarChar(100), trackingNumber || null)
+    .input('notes',             sql.NVarChar(500), notes || null)
+    .query(`
+      UPDATE dbo.PurchaseOrderShipment SET
+        ShipmentReference = @shipmentReference, Haulier = @haulier,
+        ModeOfTransport = @modeOfTransport, TrackingNumber = @trackingNumber, Notes = @notes,
+        UpdatedAtUtc = GETUTCDATE()
+      WHERE ShipmentId = @shipmentId
+    `);
+}
+
+// shipmentId may be null to unassign (e.g. an order was linked to the wrong
+// load by mistake).
+export async function assignOrderShipment(suggestionId, shipmentId) {
+  const pool = await getPool();
+  await pool.request()
+    .input('suggestionId', sql.Int, suggestionId)
+    .input('shipmentId',   sql.Int, shipmentId || null)
+    .query(`
+      UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
       WHERE SuggestionId = @suggestionId
     `);
 }

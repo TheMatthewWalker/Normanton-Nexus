@@ -2031,5 +2031,50 @@ router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), asy
   }
 });
 
+// ── Inbound shipment tracking + supplier reference (haulier / mode of
+// transport / tracking numbers for orders that travel via a haulier;
+// SupplierReference above for vendors who deliver themselves) — see
+// sql/migrate_order_shipments.sql for the full reasoning.
+router.get('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.listOrderShipments();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const shipmentId = await db.createOrderShipment(req.body);
+    res.json({ success: true, data: { shipmentId } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.put('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.updateOrderShipment(req.params.shipmentId, req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Links (or unlinks, with shipmentId: null) a tracked order to a shipment.
+// Kept separate from the general PUT /order-suggestions/:suggestionId
+// above since assigning a shipment is its own workflow (pick existing vs.
+// create new) rather than part of the plain status/PO-number edit.
+router.patch('/order-suggestions/:suggestionId/shipment', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { shipmentId } = req.body;
+    await db.assignOrderShipment(req.params.suggestionId, shipmentId ?? null);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 
 export default router;
