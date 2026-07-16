@@ -4897,11 +4897,13 @@ function osRenderSuggestionList(groups) {
 
   if (!groups.length) {
     document.getElementById('result-body').innerHTML = `
-      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+        <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
         <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
       </div>
       <div class="sap-empty">Nothing needs ordering right now.</div>`;
     document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
+    document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
     return;
   }
 
@@ -4983,12 +4985,16 @@ function osRenderSuggestionList(groups) {
   document.getElementById('result-body').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px">
       <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor — not just-in-time. Vendors with a combined order MOQ are grouped so you can see whether one order clears it; use Build Order to combine materials and hit the minimum.</div>
-      <button class="btn-secondary" id="os-view-tracked-btn" style="white-space:nowrap">View Tracked Orders →</button>
+      <div style="display:flex;gap:8px;white-space:nowrap">
+        <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
+        <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
+      </div>
     </div>
     ${sections}
   `;
 
   document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
+  document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
   document.querySelectorAll('.os-accept-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const g = groups[Number(btn.dataset.gi)];
@@ -5353,7 +5359,8 @@ function osRenderTrackedList(tracked) {
   }).join('');
 
   document.getElementById('result-body').innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+      <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
     </div>
     ${tracked.length ? `
@@ -5366,6 +5373,7 @@ function osRenderTrackedList(tracked) {
   `;
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
+  document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
   document.querySelectorAll('.os-save-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
@@ -5401,4 +5409,150 @@ async function osSaveTrackedStatus(t) {
     alert(err.message);
     btn.disabled = false; btn.textContent = 'Save';
   }
+}
+
+// Records an order that already exists outside the suggestion engine — the
+// user already has a lot in the pipeline, ordered before this feature
+// existed (or simply ahead of what the engine has flagged). Vendor and
+// material must already be configured together (Vendor Master Data) since
+// PurchaseOrderSuggestion.VendorMaterialId is a required FK; this modal
+// doesn't create new vendor/material rows, only orders against existing
+// ones.
+const MANUAL_ORDER_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Received'];
+
+async function openManualOrderModal() {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Add Manual Order</div><div class="ps-modal-sub">Record an order already placed outside the suggestion engine</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Vendor</label>
+          <select class="tf-input" id="mo-vendor"><option value="">Loading…</option></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Material</label>
+          <select class="tf-input" id="mo-material" disabled><option value="">Select vendor first</option></select>
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px" id="mo-material-hint"></div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Order Qty</label>
+          <input class="tf-input" type="number" step="0.001" id="mo-qty">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Order Date</label>
+          <input class="tf-input" type="date" id="mo-order-date" value="${todayStr}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Delivery Date (optional)</label>
+          <input class="tf-input" type="date" id="mo-delivery-date">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Status</label>
+          <select class="tf-input" id="mo-status">
+            ${MANUAL_ORDER_STATUS_OPTIONS.map(s => `<option value="${s}" ${s === 'Ordered' ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Leave Delivery Date blank to calculate it automatically from the vendor/material's lead time — set it if you already know the confirmed date.</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">PO Number</label>
+          <input class="tf-input" type="text" id="mo-po">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="mo-notes">
+        </div>
+      </div>
+      <div id="mo-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="mo-save-btn">Add Order</button>
+    </div>
+  </div>`);
+
+  const vendorSelect   = document.getElementById('mo-vendor');
+  const materialSelect = document.getElementById('mo-material');
+  const materialHint   = document.getElementById('mo-material-hint');
+
+  try {
+    const res  = await fetch('/api/performance/vendors');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load vendors');
+    const vendors = json.data;
+    vendorSelect.innerHTML = `<option value="">Select vendor</option>${vendors.map(v => `<option value="${esc(String(v.VendorId))}">${esc(v.VendorName)}</option>`).join('')}`;
+  } catch (err) {
+    vendorSelect.innerHTML = '<option value="">Failed to load vendors</option>';
+  }
+
+  vendorSelect.addEventListener('change', async () => {
+    const vendorId = vendorSelect.value;
+    materialHint.textContent = '';
+    materialSelect.disabled = true;
+    if (!vendorId) { materialSelect.innerHTML = '<option value="">Select vendor first</option>'; return; }
+    materialSelect.innerHTML = '<option value="">Loading…</option>';
+    try {
+      const res  = await fetch(`/api/performance/vendors/${encodeURIComponent(vendorId)}/materials`);
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to load materials');
+      const materials = json.data;
+      if (!materials.length) {
+        materialSelect.innerHTML = '<option value="">No materials configured for this vendor</option>';
+        materialHint.textContent = 'This vendor has no materials assigned yet — add one via Vendor Master Data first.';
+        return;
+      }
+      materialSelect.innerHTML = `<option value="">Select material</option>${materials.map(m => `<option value="${esc(String(m.VendorMaterialId))}">${esc(m.Material)}${m.MaterialText ? ' — ' + esc(m.MaterialText) : ''}</option>`).join('')}`;
+      materialSelect.disabled = false;
+    } catch (err) {
+      materialSelect.innerHTML = '<option value="">Failed to load materials</option>';
+    }
+  });
+
+  document.getElementById('mo-save-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('mo-save-btn');
+    const result = document.getElementById('mo-result');
+    result.innerHTML = '';
+
+    const vendorMaterialId = materialSelect.value;
+    const orderQty = document.getElementById('mo-qty').value;
+    if (!vendorMaterialId) { result.innerHTML = '<div class="sap-error">Select a vendor and material.</div>'; return; }
+    if (!orderQty || Number(orderQty) <= 0) { result.innerHTML = '<div class="sap-error">Order qty must be greater than 0.</div>'; return; }
+
+    const body = {
+      vendorMaterialId,
+      orderQty: Number(orderQty),
+      orderDate: document.getElementById('mo-order-date').value || null,
+      deliveryDate: document.getElementById('mo-delivery-date').value || null,
+      status: document.getElementById('mo-status').value,
+      poNumber: document.getElementById('mo-po').value.trim() || null,
+      notes: document.getElementById('mo-notes').value.trim() || null,
+    };
+
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch('/api/performance/order-suggestions/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to add order');
+      closePickModal();
+      runOrderSuggestionsTracked();
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Add Order';
+    }
+  });
 }

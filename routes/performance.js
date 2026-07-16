@@ -1926,6 +1926,86 @@ router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), asy
   }
 });
 
+// Records an order that already exists outside the suggestion engine — the
+// user already has stock on order placed before this feature existed, or
+// simply prefers to order ahead of what the engine flagged. Vendor + material
+// must already be configured (VendorMaterial is a required FK on
+// PurchaseOrderSuggestion), but the order itself isn't checked against
+// MOQ/max lot-size rules the way an accepted suggestion is — this is
+// documenting something that already happened in the real world, not
+// proposing a new order, so a real order that predates or falls outside
+// today's MOQ/max settings must still be recorded as-is.
+router.post('/order-suggestions/manual', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { vendorMaterialId, orderQty, orderDate, deliveryDate, poNumber, notes, status } = req.body;
+    if (!vendorMaterialId) {
+      return res.status(400).json({ success: false, error: { message: 'vendorMaterialId is required.' } });
+    }
+    const qty = Number(orderQty);
+    if (!qty || qty <= 0) {
+      return res.status(400).json({ success: false, error: { message: 'orderQty must be greater than 0.' } });
+    }
+
+    // No dedicated single-row lookup for this — computeVendorOrderBuild uses
+    // the same "fetch everything, filter in JS" approach against this same
+    // list, so this isn't a new pattern.
+    const allRows = await db.listVendorMaterialsForSuggestions();
+    const r = allRows.find(row => Number(row.VendorMaterialId) === Number(vendorMaterialId));
+    if (!r) {
+      return res.status(404).json({ success: false, error: { message: 'Vendor material not found.' } });
+    }
+
+    const orderDateObj = orderDate ? new Date(orderDate) : new Date();
+    const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
+    const transitTimeDays = Number(r.TransitTimeDays) || 0;
+    const isSpotPo = !r.ScheduleAgreement;
+
+    let payload;
+    if (deliveryDate) {
+      // The operator already knows the real delivery date (the order's
+      // already been placed) — use it as given rather than recomputing from
+      // the vendor's lead time, which may not match what was actually
+      // agreed for this specific order.
+      const deliveryDateObj = new Date(deliveryDate);
+      const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
+      payload = {
+        vendorMaterialId: r.VendorMaterialId,
+        vendorId: r.VendorId,
+        material: r.Material,
+        suggestedQty: null,
+        orderQty: qty,
+        orderDate: orderDateObj,
+        leadTimeDaysUsed: leadTimeDays,
+        deliveryDate: deliveryDateObj,
+        transitTimeDaysUsed: isExw ? transitTimeDays : null,
+        readyToCollectDate: isExw ? addWorkingDaysUtc(deliveryDateObj, -transitTimeDays) : null,
+        isSpotPo,
+        notes: notes || null,
+      };
+    } else {
+      payload = buildAcceptPayload({
+        vendorMaterialId: r.VendorMaterialId, vendorId: r.VendorId, material: r.Material,
+        suggestedQty: null, orderQty: qty, orderDateObj,
+        leadTimeDays, transitTimeDays, incoterms: r.Incoterms, isSpotPo, notes,
+      });
+    }
+
+    const suggestionId = await db.acceptOrderSuggestion(payload);
+
+    // acceptOrderSuggestion always inserts as 'Accepted' — flip it on if the
+    // operator says this is further along (already raised in SAP / already
+    // arrived), and persist the PO number in the same call.
+    const finalStatus = ['Ordered', 'Received'].includes(status) ? status : 'Accepted';
+    if (finalStatus !== 'Accepted' || poNumber) {
+      await db.updateOrderSuggestionStatus(suggestionId, { status: finalStatus, poNumber: poNumber || null, notes: notes || null });
+    }
+
+    res.json({ success: true, data: { suggestionId } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const data = await db.listOrderSuggestionsTracked();
