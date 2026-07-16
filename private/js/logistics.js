@@ -4189,7 +4189,7 @@ function vmRenderVendorList(vendors) {
     <tr class="admin-row vm-vendor-row" style="cursor:pointer" data-id="${esc(String(v.VendorId))}">
       <td><strong>${esc(v.VendorName)}</strong></td>
       <td>${esc(v.Incoterms || '—')}</td>
-      <td>${v.OrderMoqQty != null ? esc(Number(v.OrderMoqQty).toLocaleString()) + (v.OrderMoqUom ? ' ' + esc(v.OrderMoqUom) : '') : '—'}</td>
+      <td>${vmOrderQtyLabel(v)}</td>
       <td>${v.DefaultLeadTimeDays != null ? esc(String(v.DefaultLeadTimeDays)) + ' days' : '—'}</td>
       <td>${v.MaterialCount}</td>
       <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
@@ -4205,7 +4205,7 @@ function vmRenderVendorList(vendors) {
     ${vendors.length ? `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Vendor</th><th>Incoterms</th><th>Order MOQ</th><th>Default Lead Time</th><th>Materials</th><th></th></tr></thead>
+          <thead><tr><th>Vendor</th><th>Incoterms</th><th>Order Qty</th><th>Default Lead Time</th><th>Materials</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>` : '<div class="sap-empty">No vendors yet — add one to get started.</div>'}
@@ -4230,6 +4230,20 @@ function vmRenderVendorList(vendors) {
 }
 
 const VM_INCOTERMS = ['EXW', 'FCA', 'FOB', 'CPT', 'CIP', 'CFR', 'CIF', 'DAP', 'DPU', 'DDP'];
+
+// Order Min/Max collapse to one label: an exact-quantity vendor (min ===
+// max, e.g. Raaj Ratna: exactly 20,000kg) reads differently from a plain
+// minimum or a min/max range.
+function vmOrderQtyLabel(v) {
+  const uom = v.OrderMoqUom ? ' ' + esc(v.OrderMoqUom) : '';
+  const min = v.OrderMoqQty != null ? Number(v.OrderMoqQty) : null;
+  const max = v.OrderMaxQty != null ? Number(v.OrderMaxQty) : null;
+  if (min == null && max == null) return '—';
+  if (min != null && max != null && min === max) return `Exactly ${min.toLocaleString()}${uom}`;
+  if (min != null && max != null) return `${min.toLocaleString()}–${max.toLocaleString()}${uom}`;
+  if (min != null) return `Min ${min.toLocaleString()}${uom}`;
+  return `Max ${max.toLocaleString()}${uom}`;
+}
 
 function vmOpenVendorModal(vendor) {
   const isEdit = !!vendor;
@@ -4267,15 +4281,21 @@ function vmOpenVendorModal(vendor) {
       <div class="toolbar-hint" style="margin:2px 0 10px">Only used for EXW vendors: subtracted from lead time to get the date to actually quote the supplier (ready-to-collect date), since under EXW you arrange collection and transit yourself rather than the vendor. Ignored for any other Incoterm.</div>
       <div class="tf-row">
         <div class="tf-field">
-          <label class="tf-label">Order MOQ Qty</label>
+          <label class="tf-label">Order Min Qty</label>
           <input class="tf-input" type="number" step="0.001" id="vm-order-moq-qty" value="${vendor?.OrderMoqQty ?? ''}">
         </div>
+        <div class="tf-field">
+          <label class="tf-label">Order Max Qty</label>
+          <input class="tf-input" type="number" step="0.001" id="vm-order-max-qty" value="${vendor?.OrderMaxQty ?? ''}">
+        </div>
+      </div>
+      <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Order MOQ UOM</label>
           <input class="tf-input" type="text" id="vm-order-moq-uom" maxlength="3" value="${esc(vendor?.OrderMoqUom || '')}" placeholder="KG">
         </div>
       </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Order MOQ is the combined minimum across any mix of this vendor's materials in one order (e.g. a vendor requiring 20,000kg total, made up of any combination of materials). Leave blank if there's no combined minimum — only each material's own MOQ will apply.</div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Combined across any mix of this vendor's materials in one order (e.g. a vendor requiring 20,000kg total). Leave Min blank if there's no combined minimum. Set Max equal to Min for a vendor that requires an EXACT combined quantity, not just a minimum (e.g. Raaj Ratna: exactly 20,000kg, no more, no less) — this is enforced when accepting an order, not just a hint.</div>
       <div class="tf-row">
         <div class="tf-field tf-field--wide">
           <label class="tf-label">Notes</label>
@@ -4297,6 +4317,7 @@ function vmOpenVendorModal(vendor) {
       defaultLeadTimeDays: vmNumOrNull(document.getElementById('vm-lead-time').value),
       transitTimeDays: vmNumOrNull(document.getElementById('vm-transit-time').value),
       orderMoqQty: vmNumOrNull(document.getElementById('vm-order-moq-qty').value),
+      orderMaxQty: vmNumOrNull(document.getElementById('vm-order-max-qty').value),
       orderMoqUom: document.getElementById('vm-order-moq-uom').value.trim() || null,
       notes: document.getElementById('vm-notes').value.trim() || null,
     };
@@ -4365,7 +4386,7 @@ function vmRenderVendorMaterials(vendor, materials) {
       <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(m.Material)}</td>
       <td>${esc(m.MaterialText || '—')}</td>
       <td>${esc(m.MrpController || '—')}</td>
-      <td>${m.MaterialMoqQty != null ? esc(Number(m.MaterialMoqQty).toLocaleString()) : '—'}</td>
+      <td>${vmMaterialQtyLabel(m)}</td>
       <td>${vmLeadTimeDisplay(m)}</td>
       <td>${esc(m.ScheduleAgreement || '—')}</td>
       <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
@@ -4381,7 +4402,7 @@ function vmRenderVendorMaterials(vendor, materials) {
     ${materials.length ? `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Description</th><th>MRP Ctrl</th><th>MOQ</th><th>Lead Time</th><th>Sched. Agmt</th><th></th></tr></thead>
+          <thead><tr><th>Material</th><th>Description</th><th>MRP Ctrl</th><th>MOQ / Max</th><th>Lead Time</th><th>Sched. Agmt</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>` : '<div class="sap-empty">No materials assigned yet.</div>'}
@@ -4407,6 +4428,17 @@ function vmLeadTimeDisplay(m) {
   if (m.LeadTimeDaysOverride != null) return `${esc(String(m.LeadTimeDaysOverride))} days`;
   if (m.SapLeadTimeDays != null) return `${esc(String(m.SapLeadTimeDays))} days (SAP)`;
   return '—';
+}
+
+// Same min/max/exact collapsing as vmOrderQtyLabel, at the per-material level.
+function vmMaterialQtyLabel(m) {
+  const min = m.MaterialMoqQty != null ? Number(m.MaterialMoqQty) : null;
+  const max = m.MaterialMaxQty != null ? Number(m.MaterialMaxQty) : null;
+  if (min == null && max == null) return '—';
+  if (min != null && max != null && min === max) return `Exactly ${min.toLocaleString()}`;
+  if (min != null && max != null) return `${min.toLocaleString()}–${max.toLocaleString()}`;
+  if (min != null) return `Lots of ${min.toLocaleString()}`;
+  return `Max ${max.toLocaleString()}`;
 }
 
 function vmOpenAssignMaterialModal(vendor) {
@@ -4494,14 +4526,21 @@ function vmOpenMaterialEditModal(vendor, m) {
     <div class="ps-modal-body">
       <div class="tf-row">
         <div class="tf-field">
-          <label class="tf-label">Material MOQ</label>
+          <label class="tf-label">Material MOQ (lot size)</label>
           <input class="tf-input" type="number" step="0.001" id="vm-mat-moq" value="${m.MaterialMoqQty ?? ''}">
         </div>
+        <div class="tf-field">
+          <label class="tf-label">Material Max Qty</label>
+          <input class="tf-input" type="number" step="0.001" id="vm-mat-max" value="${m.MaterialMaxQty ?? ''}">
+        </div>
+      </div>
+      <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Lead Time Override (days)</label>
           <input class="tf-input" type="number" step="0.1" id="vm-mat-lead" value="${m.LeadTimeDaysOverride ?? ''}" placeholder="${m.SapLeadTimeDays != null ? `SAP: ${m.SapLeadTimeDays}` : ''}">
         </div>
       </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">MOQ is a lot size, not just a floor — order suggestions round up to whole multiples of it, and quantities you enter are snapped to the nearest multiple automatically. Max Qty is a hard cap. Leave either blank if it doesn't apply.</div>
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Min Safety Stock</label>
@@ -4528,6 +4567,7 @@ function vmOpenMaterialEditModal(vendor, m) {
   document.getElementById('vm-mat-save-btn').addEventListener('click', async () => {
     const body = {
       materialMoqQty: vmNumOrNull(document.getElementById('vm-mat-moq').value),
+      materialMaxQty: vmNumOrNull(document.getElementById('vm-mat-max').value),
       leadTimeDaysOverride: vmNumOrNull(document.getElementById('vm-mat-lead').value),
       minSafetyStockQty: vmNumOrNull(document.getElementById('vm-mat-safety').value),
       scheduleAgreement: document.getElementById('vm-mat-sched').value.trim() || null,
@@ -4618,11 +4658,27 @@ function osRenderSuggestionList(groups) {
   // Accept — accepting one material alone would silently leave the order
   // short of the minimum, which defeats the point of tracking it at all.
   const sections = groups.map((g, gi) => {
-    const hasMoq = !!g.orderMoqQty;
+    // hasMoq covers a plain minimum, a plain maximum, or an exact quantity
+    // (min === max) — any of these forces the vendor through Build Order
+    // rather than a per-row quick Accept, since a single material alone
+    // can't be trusted to satisfy a combined constraint.
+    const hasMoq = !!(g.orderMoqQty || g.orderMaxQty);
+    let moqLabel = '';
+    if (hasMoq) {
+      if (g.moqMet) {
+        moqLabel = g.isExactQty ? 'Exact qty met' : 'MOQ met';
+      } else if (g.isExactQty) {
+        moqLabel = g.moqShortfall > 0
+          ? `Short ${g.moqShortfall.toLocaleString()} ${esc(g.orderMoqUom || '')} of exact ${Number(g.orderMoqQty).toLocaleString()}`
+          : `Over exact ${Number(g.orderMoqQty).toLocaleString()} by ${g.moqOverage.toLocaleString()} ${esc(g.orderMoqUom || '')}`;
+      } else if (g.moqOverage > 0) {
+        moqLabel = `Over max by ${g.moqOverage.toLocaleString()} ${esc(g.orderMoqUom || '')}`;
+      } else {
+        moqLabel = `Short ${g.moqShortfall.toLocaleString()} ${esc(g.orderMoqUom || '')} of MOQ`;
+      }
+    }
     const moqBadge = hasMoq
-      ? `<span class="tile-badge" style="background:${g.moqMet ? 'var(--success,#16A34A)' : 'var(--error,#DC2626)'};color:#fff">
-           ${g.moqMet ? 'MOQ met' : `Short ${g.moqShortfall.toLocaleString()} ${esc(g.orderMoqUom || '')} of MOQ`}
-         </span>`
+      ? `<span class="tile-badge" style="background:${g.moqMet ? 'var(--success,#16A34A)' : 'var(--error,#DC2626)'};color:#fff">${moqLabel}</span>`
       : '';
 
     const rows = g.materials.map((s, mi) => {
@@ -4698,6 +4754,29 @@ function osRenderSuggestionList(groups) {
   });
 }
 
+// Mirrors routes/performance.js's enforceMaterialQty — snaps to the nearest
+// whole MaterialMoqQty lot and clamps to MaterialMaxQty. Client-side so a
+// lot-size/max violation gets corrected before the request even goes out;
+// the server re-derives the constraints fresh from the DB and enforces
+// again regardless (defence against a stale page or a direct API call), so
+// this is a convenience, not the source of truth. Returns null for a
+// non-positive qty (caller should treat that as "missing").
+function osEnforceQty(rawQty, materialMoqQty, materialMaxQty) {
+  let q = Number(rawQty) || 0;
+  if (q <= 0) return null;
+  const moq = Number(materialMoqQty) || 0;
+  if (moq > 0) {
+    q = Math.round(q / moq) * moq;
+    if (q <= 0) q = moq;
+  }
+  const max = Number(materialMaxQty) || 0;
+  if (max > 0 && q > max) {
+    q = moq > 0 ? Math.floor(max / moq) * moq : max;
+    if (q <= 0) q = max;
+  }
+  return Math.round(q * 1000) / 1000;
+}
+
 function osOpenAcceptModal(s) {
   const todayStr = new Date().toISOString().slice(0, 10);
   openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
@@ -4717,6 +4796,7 @@ function osOpenAcceptModal(s) {
         </div>
       </div>
       ${s.materialMoqQty ? `<div class="toolbar-hint" style="margin:2px 0 10px">This vendor only supplies in ${Number(s.materialMoqQty).toLocaleString()} ${esc(s.uom || '')} lots — order in whole multiples.</div>` : ''}
+      ${s.materialMaxQty ? `<div class="toolbar-hint" style="margin:2px 0 10px">Capped at ${Number(s.materialMaxQty).toLocaleString()} ${esc(s.uom || '')} maximum — entered/adjusted quantities above this are clamped down automatically.</div>` : ''}
       ${s.isSpotPo
         ? `<div class="toolbar-hint" style="margin:2px 0 10px">No schedule agreement for this material — this will need a spot PO raised manually in SAP.</div>`
         : `<div class="toolbar-hint" style="margin:2px 0 10px">Schedule agreement ${esc(s.scheduleAgreement || '')} — release against this in SAP once ordered.</div>`}
@@ -4735,13 +4815,24 @@ function osOpenAcceptModal(s) {
     </div>
   </div>`);
 
+  // Enforced (not hinted): snap/clamp on blur so the field reflects the
+  // real quantity that will be submitted, before the user even hits Save.
+  document.getElementById('os-order-qty').addEventListener('blur', function () {
+    const enforced = osEnforceQty(this.value, s.materialMoqQty, s.materialMaxQty);
+    if (enforced != null) this.value = enforced;
+  });
+
   document.getElementById('os-accept-save-btn').addEventListener('click', async () => {
+    // Re-enforce right before submit too — covers Enter-to-submit and any
+    // path that skips the blur handler above.
+    const enforcedQty = osEnforceQty(document.getElementById('os-order-qty').value, s.materialMoqQty, s.materialMaxQty);
+    if (enforcedQty != null) document.getElementById('os-order-qty').value = enforcedQty;
     const body = {
       vendorMaterialId: s.vendorMaterialId,
       vendorId: s.vendorId,
       material: s.material,
       suggestedQty: s.suggestedQty,
-      orderQty: vmNumOrNull(document.getElementById('os-order-qty').value),
+      orderQty: enforcedQty,
       orderDate: document.getElementById('os-order-date').value || null,
       leadTimeDays: s.leadTimeDays,
       transitTimeDays: s.transitTimeDays,
@@ -4843,6 +4934,13 @@ function osRenderBuildOrderForm(build) {
     </div>
   `;
 
+  // Enforced (not hinted): handles plain minimum, plain maximum, a
+  // min/max range, and the exact-quantity case (min === max, e.g. Raaj
+  // Ratna: exactly 20,000kg). Unlike a single material's lot size, a
+  // multi-material combined total can't be auto-corrected — there's no
+  // non-arbitrary way to decide which material to bump or trim — so this
+  // disables the Accept Order button instead, a hard block rather than a
+  // dismissible warning.
   function updateMoqStatus() {
     let total = 0;
     document.querySelectorAll('.os-build-check').forEach(cb => {
@@ -4851,28 +4949,57 @@ function osRenderBuildOrderForm(build) {
         total += Number(qtyInput.value) || 0;
       }
     });
+    total = Math.round(total * 1000) / 1000;
     const statusEl = document.getElementById('os-build-moq-status');
-    if (!build.orderMoqQty) {
-      statusEl.style.background = 'var(--bg-secondary,#F3F4F6)';
-      statusEl.textContent = `Combined qty: ${total.toLocaleString()} — this vendor has no combined order MOQ.`;
+    const saveBtn = document.getElementById('os-build-save-btn');
+    const min = build.orderMoqQty != null ? Number(build.orderMoqQty) : null;
+    const max = build.orderMaxQty != null ? Number(build.orderMaxQty) : null;
+    const uom = build.orderMoqUom || '';
+    const hasConstraint = !!(min || max);
+
+    let ok = true;
+    let msg;
+    if (!hasConstraint) {
+      msg = `Combined qty: ${total.toLocaleString()} — this vendor has no combined order MOQ.`;
+    } else if (min && max && min === max) {
+      ok = Math.abs(total - min) <= 0.001;
+      msg = ok
+        ? `Combined qty: ${total.toLocaleString()} ${uom} — matches the required exact quantity.`
+        : `Combined qty: ${total.toLocaleString()} — ${esc(build.vendorName)} requires EXACTLY ${min.toLocaleString()} ${uom}, not just a minimum. ${total < min ? `Add ${(min - total).toLocaleString()} more` : `Remove ${(total - min).toLocaleString()}`} to match.`;
     } else {
-      const shortfall = Number(build.orderMoqQty) - total;
-      if (shortfall > 0) {
-        statusEl.style.background = 'rgba(220,38,38,0.1)';
-        statusEl.style.color = 'var(--error,#DC2626)';
-        statusEl.textContent = `Combined qty: ${total.toLocaleString()} / ${Number(build.orderMoqQty).toLocaleString()} ${build.orderMoqUom || ''} MOQ — short by ${shortfall.toLocaleString()}. Check more materials or increase quantities to clear the minimum.`;
+      const shortfall = min ? Math.max(0, min - total) : 0;
+      const overage = max ? Math.max(0, total - max) : 0;
+      ok = shortfall <= 0.001 && overage <= 0.001;
+      if (shortfall > 0.001) {
+        msg = `Combined qty: ${total.toLocaleString()} / ${min.toLocaleString()} ${uom} MOQ — short by ${shortfall.toLocaleString()}. Check more materials or increase quantities to clear the minimum.`;
+      } else if (overage > 0.001) {
+        msg = `Combined qty: ${total.toLocaleString()} / ${max.toLocaleString()} ${uom} max — over by ${overage.toLocaleString()}. Uncheck materials or reduce quantities to fit under the cap.`;
       } else {
-        statusEl.style.background = 'rgba(22,163,74,0.1)';
-        statusEl.style.color = 'var(--success,#16A34A)';
-        statusEl.textContent = `Combined qty: ${total.toLocaleString()} / ${Number(build.orderMoqQty).toLocaleString()} ${build.orderMoqUom || ''} MOQ — met.`;
+        msg = `Combined qty: ${total.toLocaleString()}${min ? ` / ${min.toLocaleString()}` : ''}${max ? ` \u2013 ${max.toLocaleString()}` : ''} ${uom} — met.`;
       }
     }
+
+    statusEl.style.background = !hasConstraint ? 'var(--bg-secondary,#F3F4F6)' : (ok ? 'rgba(22,163,74,0.1)' : 'rgba(220,38,38,0.1)');
+    statusEl.style.color = !hasConstraint ? '' : (ok ? 'var(--success,#16A34A)' : 'var(--error,#DC2626)');
+    statusEl.textContent = msg;
+    if (saveBtn) saveBtn.disabled = !ok;
     return total;
   }
 
   document.querySelectorAll('.os-build-check, .os-build-qty').forEach(el => {
     el.addEventListener('input', updateMoqStatus);
     el.addEventListener('change', updateMoqStatus);
+  });
+
+  // Per-material enforcement (not hinted): snap to the nearest MOQ lot and
+  // clamp to the material's max on blur, same as the single accept modal.
+  document.querySelectorAll('.os-build-qty').forEach(el => {
+    el.addEventListener('blur', () => {
+      const m = build.materials[Number(el.dataset.i)];
+      const enforced = osEnforceQty(el.value, m.materialMoqQty, m.materialMaxQty);
+      if (enforced != null) el.value = enforced;
+      updateMoqStatus();
+    });
   });
   updateMoqStatus();
 
@@ -4882,13 +5009,16 @@ function osRenderBuildOrderForm(build) {
       if (!cb.checked) return;
       const m = build.materials[Number(cb.dataset.i)];
       const qtyInput = document.querySelector(`.os-build-qty[data-i="${cb.dataset.i}"]`);
-      const orderQty = Number(qtyInput.value) || 0;
-      if (orderQty <= 0) return;
+      // Re-enforce right before submit too — covers Enter-to-submit and any
+      // row whose blur handler never fired.
+      const enforced = osEnforceQty(qtyInput.value, m.materialMoqQty, m.materialMaxQty);
+      if (enforced == null) return;
+      qtyInput.value = enforced;
       items.push({
         vendorMaterialId: m.vendorMaterialId,
         material: m.material,
         suggestedQty: m.suggestedQty,
-        orderQty,
+        orderQty: enforced,
         leadTimeDays: m.leadTimeDays,
         transitTimeDays: m.transitTimeDays,
         incoterms: m.incoterms,
@@ -4901,11 +5031,13 @@ function osRenderBuildOrderForm(build) {
       return;
     }
 
-    const total = updateMoqStatus();
-    if (build.orderMoqQty && total < Number(build.orderMoqQty)) {
-      const shortBy = (Number(build.orderMoqQty) - total).toLocaleString();
-      const proceed = confirm(`This order is short of ${build.vendorName}'s ${Number(build.orderMoqQty).toLocaleString()} ${build.orderMoqUom || ''} combined MOQ by ${shortBy}. Accept anyway?`);
-      if (!proceed) return;
+    // Combined min/max/exact is enforced (not hinted) via the disabled
+    // Accept Order button, not a dismissible confirm() — this check is a
+    // defensive backstop in case the button state is somehow stale.
+    updateMoqStatus();
+    if (document.getElementById('os-build-save-btn').disabled) {
+      document.getElementById('os-build-result').innerHTML = '<div class="sap-error">This combination doesn\u2019t satisfy ' + esc(build.vendorName) + '\u2019s combined order requirement above \u2014 adjust quantities or materials.</div>';
+      return;
     }
 
     const btn = document.getElementById('os-build-save-btn');

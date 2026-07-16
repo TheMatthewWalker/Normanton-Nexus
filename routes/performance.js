@@ -234,10 +234,13 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
       // to the next whole multiple rather than just topped up to the MOQ
       // when it's below one lot. Only applied when actually due — don't
       // inflate an "upcoming" material's number just because it has a lot
-      // size of its own.
+      // size of its own. MaterialMaxQty (if set) is then enforced as a hard
+      // cap via the same helper the accept routes use, so the auto-suggested
+      // number is never something the accept flow would have to correct.
       const moq = Number(r.MaterialMoqQty) || 0;
+      const max = Number(r.MaterialMaxQty) || 0;
       const rounded = (dueNow && moq > 0) ? Math.ceil(qty / moq) * moq : qty;
-      suggestedQty = Math.round(rounded * 1000) / 1000;
+      suggestedQty = (dueNow && max > 0) ? enforceMaterialQty(rounded, moq, max) : Math.round(rounded * 1000) / 1000;
     }
   }
 
@@ -263,7 +266,9 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     dueNow,
     suggestedQty,
     materialMoqQty: r.MaterialMoqQty,
+    materialMaxQty: r.MaterialMaxQty,
     orderMoqQty: r.OrderMoqQty,
+    orderMaxQty: r.OrderMaxQty,
     orderMoqUom: r.OrderMoqUom,
     incoterms: r.Incoterms || null,
     isSpotPo: !r.ScheduleAgreement,
@@ -308,6 +313,7 @@ function groupSuggestionsByVendor(suggestions) {
         vendorId: s.vendorId,
         vendorName: s.vendorName,
         orderMoqQty: s.orderMoqQty,
+        orderMaxQty: s.orderMaxQty,
         orderMoqUom: s.orderMoqUom,
         materials: [],
       });
@@ -317,15 +323,21 @@ function groupSuggestionsByVendor(suggestions) {
 
   const result = Array.from(groups.values()).map(g => {
     const combinedQty = g.materials.reduce((sum, m) => sum + (Number(m.suggestedQty) || 0), 0);
+    // Exact-quantity vendor (e.g. Raaj Ratna: exactly 20,000kg, not just at
+    // least) — a min that equals the max, not two independent checks.
+    const isExactQty = !!(g.orderMoqQty && g.orderMaxQty && Number(g.orderMoqQty) === Number(g.orderMaxQty));
     const moqShortfall = g.orderMoqQty ? Math.max(0, Number(g.orderMoqQty) - combinedQty) : 0;
+    const moqOverage = g.orderMaxQty ? Math.max(0, combinedQty - Number(g.orderMaxQty)) : 0;
     const earliestOrderByDate = g.materials.reduce(
       (min, m) => (!min || m.orderByDate < min) ? m.orderByDate : min, null
     );
     return {
       ...g,
       combinedQty: Math.round(combinedQty * 1000) / 1000,
-      moqMet: !g.orderMoqQty || moqShortfall <= 0,
+      isExactQty,
+      moqMet: moqShortfall <= 0.001 && moqOverage <= 0.001,
       moqShortfall: Math.round(moqShortfall * 1000) / 1000,
+      moqOverage: Math.round(moqOverage * 1000) / 1000,
       earliestOrderByDate,
     };
   });
@@ -350,11 +362,12 @@ async function computeVendorOrderBuild(vendorId) {
 
   const vendorRows = rows.filter(r => r.VendorId === vendorId);
   const materials = [];
-  let vendorName = null, orderMoqQty = null, orderMoqUom = null;
+  let vendorName = null, orderMoqQty = null, orderMaxQty = null, orderMoqUom = null;
 
   for (const r of vendorRows) {
     vendorName = r.VendorName;
     orderMoqQty = r.OrderMoqQty;
+    orderMaxQty = r.OrderMaxQty;
     orderMoqUom = r.OrderMoqUom;
     const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate);
     if (built) materials.push(built);
@@ -365,7 +378,59 @@ async function computeVendorOrderBuild(vendorId) {
     return (a.orderByDate || '9999').localeCompare(b.orderByDate || '9999');
   });
 
-  return { vendorId, vendorName, orderMoqQty, orderMoqUom, materials };
+  return { vendorId, vendorName, orderMoqQty, orderMaxQty, orderMoqUom, materials };
+}
+
+// A material's own lot size (MaterialMoqQty) and cap (MaterialMaxQty) are
+// ENFORCED, not just hinted at in the UI — a quantity that isn't a whole
+// number of lots literally can't be supplied, so it's snapped rather than
+// left for a human to notice and fix. Used both when auto-computing a
+// suggestion (buildSuggestionForRow) and, authoritatively, when a quantity
+// is actually accepted (the /accept and /accept-batch routes re-derive moq/
+// max fresh from the DB rather than trusting whatever the client sent).
+// Snaps to the NEAREST multiple (not always up) since this also runs against
+// manually-typed quantities, where a buyer may deliberately want fewer lots
+// than the auto-suggestion — rounding up unconditionally would fight them.
+function enforceMaterialQty(qty, materialMoqQty, materialMaxQty) {
+  let q = Number(qty) || 0;
+  const moq = Number(materialMoqQty) || 0;
+  if (moq > 0) {
+    q = Math.round(q / moq) * moq;
+    if (q <= 0) q = moq; // never snap a genuinely-entered qty all the way to zero
+  }
+  const max = Number(materialMaxQty) || 0;
+  if (max > 0 && q > max) {
+    // Clamp to the largest whole lot that still fits under the cap, if the
+    // lot size divides in; otherwise just clamp straight to the cap.
+    q = moq > 0 ? Math.floor(max / moq) * moq : max;
+    if (q <= 0) q = max;
+  }
+  return Math.round(q * 1000) / 1000;
+}
+
+// Vendor-level combined min/max/exact can't be auto-corrected the way a
+// single material's lot size can — there's no non-arbitrary way to decide
+// which material's quantity to bump (or trim) to close a multi-material
+// gap. Enforced as a hard block instead: returns an error message when the
+// total doesn't satisfy the vendor's requirement, or null when it does.
+function validateVendorCombinedQty(totalQty, orderMoqQty, orderMaxQty) {
+  const total = Math.round((Number(totalQty) || 0) * 1000) / 1000;
+  const min = orderMoqQty != null && orderMoqQty !== '' ? Number(orderMoqQty) : null;
+  const max = orderMaxQty != null && orderMaxQty !== '' ? Number(orderMaxQty) : null;
+
+  if (min && max && min === max) {
+    if (Math.abs(total - min) > 0.001) {
+      return `This vendor requires an exact combined order of ${min.toLocaleString()} — this order totals ${total.toLocaleString()}.`;
+    }
+    return null;
+  }
+  if (min && total < min - 0.001) {
+    return `This vendor requires a combined order of at least ${min.toLocaleString()} — this order totals ${total.toLocaleString()}.`;
+  }
+  if (max && total > max + 0.001) {
+    return `This vendor's combined order cannot exceed ${max.toLocaleString()} — this order totals ${total.toLocaleString()}.`;
+  }
+  return null;
 }
 
 // Shared date-math for accepting a suggestion, used by both the single-item
@@ -1749,14 +1814,42 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
       });
     }
 
+    // Enforced fresh from the DB, not trusted from the client — see
+    // enforceMaterialQty's comment above.
+    const [materialConstraints, vendorConstraints] = await Promise.all([
+      db.getVendorMaterialConstraints(vendorMaterialId),
+      db.getVendorOrderConstraints(vendorId),
+    ]);
+    const enforcedQty = enforceMaterialQty(
+      orderQty,
+      materialConstraints?.MaterialMoqQty,
+      materialConstraints?.MaterialMaxQty
+    );
+
+    // A single-material accept can only ever satisfy a vendor's combined
+    // requirement if this one material's qty alone clears it — there's
+    // nothing else in the "order" to add up. If it doesn't, block and point
+    // at Build Order rather than silently accepting a short/over order.
+    if (vendorConstraints && (vendorConstraints.OrderMoqQty || vendorConstraints.OrderMaxQty)) {
+      const vendorError = validateVendorCombinedQty(
+        enforcedQty, vendorConstraints.OrderMoqQty, vendorConstraints.OrderMaxQty
+      );
+      if (vendorError) {
+        return res.status(400).json({
+          success: false,
+          error: { message: `${vendorError} Use Build Order to combine materials from this vendor into one order.` }
+        });
+      }
+    }
+
     const orderDateObj = orderDate ? new Date(orderDate) : new Date();
     const payload = buildAcceptPayload({
-      vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
+      vendorMaterialId, vendorId, material, suggestedQty, orderQty: enforcedQty, orderDateObj,
       leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
     });
     const suggestionId = await db.acceptOrderSuggestion(payload);
 
-    res.json({ success: true, data: { suggestionId } });
+    res.json({ success: true, data: { suggestionId, orderQty: enforcedQty } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
@@ -1764,12 +1857,14 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
 
 // Combines several materials from one vendor into a single accepted order —
 // the Build Order modal's submit path, for clearing a vendor's combined
-// order-level MOQ (dbo.Vendor.OrderMoqQty) rather than accepting materials
-// one at a time and hoping they happen to add up. Every item gets its own
-// PurchaseOrderSuggestion row (lead time/dates/spot-PO can differ per
-// material even within one vendor) but shares the same OrderDate. Items
+// order-level MOQ (dbo.Vendor.OrderMoqQty/OrderMaxQty) rather than accepting
+// materials one at a time and hoping they happen to add up. Every item gets
+// its own PurchaseOrderSuggestion row (lead time/dates/spot-PO can differ
+// per material even within one vendor) but shares the same OrderDate. Items
 // missing required fields are skipped rather than failing the whole batch,
-// since a partially-filled row in the modal shouldn't block the rest.
+// since a partially-filled row in the modal shouldn't block the rest — but
+// the vendor-level combined check runs BEFORE anything is persisted, so a
+// batch that doesn't satisfy it is rejected outright, not partially saved.
 router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const { vendorId, orderDate, items } = req.body;
@@ -1780,16 +1875,44 @@ router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), asy
       });
     }
 
+    const validItems = items.filter(item => item && item.vendorMaterialId && item.material && item.orderQty);
+    if (!validItems.length) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'No valid items to accept — each item needs vendorMaterialId, material and orderQty > 0.' }
+      });
+    }
+
+    // Enforce each item's own lot size/max first (fresh from the DB), then
+    // validate the enforced total against the vendor's combined requirement
+    // — all before anything is written, so this is all-or-nothing.
+    const constraintsByVmId = new Map();
+    await Promise.all(validItems.map(async item => {
+      constraintsByVmId.set(item.vendorMaterialId, await db.getVendorMaterialConstraints(item.vendorMaterialId));
+    }));
+
+    const enforcedItems = validItems.map(item => {
+      const c = constraintsByVmId.get(item.vendorMaterialId);
+      return { ...item, orderQty: enforceMaterialQty(item.orderQty, c?.MaterialMoqQty, c?.MaterialMaxQty) };
+    });
+
+    const vendorConstraints = await db.getVendorOrderConstraints(vendorId);
+    const total = enforcedItems.reduce((sum, item) => sum + (Number(item.orderQty) || 0), 0);
+    if (vendorConstraints && (vendorConstraints.OrderMoqQty || vendorConstraints.OrderMaxQty)) {
+      const vendorError = validateVendorCombinedQty(total, vendorConstraints.OrderMoqQty, vendorConstraints.OrderMaxQty);
+      if (vendorError) {
+        return res.status(400).json({ success: false, error: { message: vendorError } });
+      }
+    }
+
     const orderDateObj = orderDate ? new Date(orderDate) : new Date();
     const suggestionIds = [];
 
-    for (const item of items) {
+    for (const item of enforcedItems) {
       const {
         vendorMaterialId, material, suggestedQty, orderQty,
         leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
-      } = item || {};
-      if (!vendorMaterialId || !material || !orderQty) continue;
-
+      } = item;
       const payload = buildAcceptPayload({
         vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
         leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
@@ -1797,14 +1920,7 @@ router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), asy
       suggestionIds.push(await db.acceptOrderSuggestion(payload));
     }
 
-    if (!suggestionIds.length) {
-      return res.status(400).json({
-        success: false,
-        error: { message: 'No valid items to accept — each item needs vendorMaterialId, material and orderQty > 0.' }
-      });
-    }
-
-    res.json({ success: true, data: { suggestionIds } });
+    res.json({ success: true, data: { suggestionIds, totalQty: Math.round(total * 1000) / 1000 } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }

@@ -874,7 +874,7 @@ export async function listVendors() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      v.VendorId, v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMoqUom,
+      v.VendorId, v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMaxQty, v.OrderMoqUom,
       v.DefaultLeadTimeDays, v.TransitTimeDays, v.Notes, v.CreatedAtUtc, v.UpdatedAtUtc,
       (SELECT COUNT(*) FROM dbo.VendorMaterial vm WHERE vm.VendorId = v.VendorId) AS MaterialCount
     FROM dbo.Vendor v
@@ -883,31 +883,33 @@ export async function listVendors() {
   return recordset;
 }
 
-export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
+export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorName',          sql.NVarChar(80),  vendorName)
     .input('incoterms',           sql.NVarChar(3),   incoterms || null)
     .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
+    .input('orderMaxQty',         sql.Decimal(15, 3), orderMaxQty ?? null)
     .input('orderMoqUom',         sql.NVarChar(3),   orderMoqUom || null)
     .input('defaultLeadTimeDays', sql.Decimal(9, 2), defaultLeadTimeDays ?? null)
     .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
-      INSERT INTO dbo.Vendor (VendorName, Incoterms, OrderMoqQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
+      INSERT INTO dbo.Vendor (VendorName, Incoterms, OrderMoqQty, OrderMaxQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
       OUTPUT INSERTED.VendorId
-      VALUES (@vendorName, @incoterms, @orderMoqQty, @orderMoqUom, @defaultLeadTimeDays, @transitTimeDays, @notes)
+      VALUES (@vendorName, @incoterms, @orderMoqQty, @orderMaxQty, @orderMoqUom, @defaultLeadTimeDays, @transitTimeDays, @notes)
     `);
   return recordset[0].VendorId;
 }
 
-export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
+export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
   const pool = await getPool();
   await pool.request()
     .input('vendorId',            sql.Int,           vendorId)
     .input('vendorName',          sql.NVarChar(80),  vendorName)
     .input('incoterms',           sql.NVarChar(3),   incoterms || null)
     .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
+    .input('orderMaxQty',         sql.Decimal(15, 3), orderMaxQty ?? null)
     .input('orderMoqUom',         sql.NVarChar(3),   orderMoqUom || null)
     .input('defaultLeadTimeDays', sql.Decimal(9, 2), defaultLeadTimeDays ?? null)
     .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
@@ -915,7 +917,7 @@ export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQt
     .query(`
       UPDATE dbo.Vendor SET
         VendorName = @vendorName, Incoterms = @incoterms,
-        OrderMoqQty = @orderMoqQty, OrderMoqUom = @orderMoqUom,
+        OrderMoqQty = @orderMoqQty, OrderMaxQty = @orderMaxQty, OrderMoqUom = @orderMoqUom,
         DefaultLeadTimeDays = @defaultLeadTimeDays, TransitTimeDays = @transitTimeDays, Notes = @notes,
         UpdatedAtUtc = GETUTCDATE()
       WHERE VendorId = @vendorId
@@ -948,7 +950,7 @@ export async function listVendorMaterials(vendorId) {
     .input('vendorId', sql.Int, vendorId)
     .query(`
       SELECT
-        vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty,
+        vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty, vm.MaterialMaxQty,
         vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement, vm.SourceHint,
         t.MaterialText, t.MrpController, t.PlannedDeliveryTime AS SapLeadTimeDays, t.SafetyStock AS SapSafetyStock
       FROM dbo.VendorMaterial vm
@@ -959,35 +961,38 @@ export async function listVendorMaterials(vendorId) {
   return recordset;
 }
 
-export async function addVendorMaterial(vendorId, { material, materialMoqQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement, sourceHint }) {
+export async function addVendorMaterial(vendorId, { material, materialMoqQty, materialMaxQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement, sourceHint }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorId',             sql.Int,            vendorId)
     .input('material',             sql.NVarChar(18),   material)
     .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
+    .input('materialMaxQty',       sql.Decimal(15, 3), materialMaxQty ?? null)
     .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
     .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
     .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
     .input('sourceHint',           sql.NVarChar(40),   sourceHint || null)
     .query(`
-      INSERT INTO dbo.VendorMaterial (VendorId, Material, MaterialMoqQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, SourceHint)
+      INSERT INTO dbo.VendorMaterial (VendorId, Material, MaterialMoqQty, MaterialMaxQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, SourceHint)
       OUTPUT INSERTED.VendorMaterialId
-      VALUES (@vendorId, @material, @materialMoqQty, @leadTimeDaysOverride, @minSafetyStockQty, @scheduleAgreement, @sourceHint)
+      VALUES (@vendorId, @material, @materialMoqQty, @materialMaxQty, @leadTimeDaysOverride, @minSafetyStockQty, @scheduleAgreement, @sourceHint)
     `);
   return recordset[0].VendorMaterialId;
 }
 
-export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement }) {
+export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, materialMaxQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement }) {
   const pool = await getPool();
   await pool.request()
     .input('vendorMaterialId',     sql.Int,            vendorMaterialId)
     .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
+    .input('materialMaxQty',       sql.Decimal(15, 3), materialMaxQty ?? null)
     .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
     .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
     .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
     .query(`
       UPDATE dbo.VendorMaterial SET
-        MaterialMoqQty = @materialMoqQty, LeadTimeDaysOverride = @leadTimeDaysOverride,
+        MaterialMoqQty = @materialMoqQty, MaterialMaxQty = @materialMaxQty,
+        LeadTimeDaysOverride = @leadTimeDaysOverride,
         MinSafetyStockQty = @minSafetyStockQty,
         ScheduleAgreement = @scheduleAgreement, UpdatedAtUtc = GETUTCDATE()
       WHERE VendorMaterialId = @vendorMaterialId
@@ -1019,9 +1024,9 @@ export async function listVendorMaterialsForSuggestions() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty,
+      vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty, vm.MaterialMaxQty,
       vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement,
-      v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMoqUom,
+      v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMaxQty, v.OrderMoqUom,
       v.DefaultLeadTimeDays, v.TransitTimeDays,
       t.MaterialText, t.Uom, t.MrpController, t.StockQty, t.ConsignmentQty,
       t.SafetyStock AS SapSafetyStock, t.PlannedDeliveryTime AS SapLeadTimeDays,
@@ -1133,3 +1138,24 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
     `);
 }
 
+
+// Fresh, authoritative lookups used by the accept/accept-batch routes'
+// server-side enforcement (routes/performance.js) — deliberately re-read
+// from the DB rather than trusting whatever the client submitted, so a
+// stale page or a direct API call can't bypass a material's lot size/max or
+// a vendor's combined min/max/exact requirement.
+export async function getVendorMaterialConstraints(vendorMaterialId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorMaterialId', sql.Int, vendorMaterialId)
+    .query('SELECT MaterialMoqQty, MaterialMaxQty FROM dbo.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
+  return recordset[0] || null;
+}
+
+export async function getVendorOrderConstraints(vendorId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorId', sql.Int, vendorId)
+    .query('SELECT VendorName, OrderMoqQty, OrderMaxQty, OrderMoqUom FROM dbo.Vendor WHERE VendorId = @vendorId');
+  return recordset[0] || null;
+}

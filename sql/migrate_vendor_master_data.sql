@@ -60,12 +60,20 @@ BEGIN
     -- else in the schema encodes that split, it's derived from the Incoterm code.
     Incoterms           NVARCHAR(3)   NULL,
 
-    -- Combined MOQ across ANY combination of this vendor's materials in a single
-    -- order (e.g. Raaj Ratna: 20,000kg total, made up of any mix of materials,
-    -- each of which ALSO carries its own smaller per-material MOQ on
-    -- VendorMaterial.MaterialMoqQty below). NULL = no order-level minimum, only
-    -- each material's own MOQ (if any) applies.
+    -- Combined minimum across ANY combination of this vendor's materials in a
+    -- single order, made up of any mix of materials, each of which ALSO
+    -- carries its own smaller per-material MOQ on VendorMaterial.
+    -- MaterialMoqQty below. NULL = no order-level minimum, only each
+    -- material's own MOQ (if any) applies.
     OrderMoqQty          DECIMAL(15,3) NULL,
+
+    -- Combined ceiling across the same combination of materials. NULL = no
+    -- cap. When this equals OrderMoqQty, the combined order must be an EXACT
+    -- amount, not just a minimum — e.g. Raaj Ratna: exactly 20,000kg per
+    -- order, no more, no less. Enforced by the order-suggestion engine's
+    -- Build Order flow (routes/performance.js's validateVendorCombinedQty),
+    -- not just noted for a human to check.
+    OrderMaxQty          DECIMAL(15,3) NULL,
     OrderMoqUom          NVARCHAR(3)   NULL,
 
     -- Fallback lead time (days) used only when a VendorMaterial row has no
@@ -114,6 +122,13 @@ BEGIN
     -- 1300kg). NULL = no per-material minimum/lot size, only the vendor's
     -- order-level MOQ (if any) applies.
     MaterialMoqQty        DECIMAL(15,3) NULL,
+
+    -- Per-material ceiling — this material can't be ordered above this
+    -- quantity in one order, regardless of demand. NULL = no cap. Enforced
+    -- (not just hinted) by the order-suggestion engine: a suggested/entered
+    -- quantity above this is clamped down, snapping to the largest whole
+    -- MaterialMoqQty multiple that still fits under the cap where possible.
+    MaterialMaxQty        DECIMAL(15,3) NULL,
 
     -- Manually-set minimum stock buffer for this material, used by the order-
     -- suggestion engine (Phase 2b) as the floor stock must not be projected to
@@ -183,6 +198,22 @@ IF COL_LENGTH('dbo.VendorMaterial', 'MinSafetyStockQty') IS NULL
   ALTER TABLE dbo.VendorMaterial ADD MinSafetyStockQty DECIMAL(15,3) NULL;
 
 PRINT 'dbo.VendorMaterial MinSafetyStockQty column verified/added';
+
+
+/* ── 1c. Vendor — add OrderMaxQty column (existing installs) ──────
+   Same guarded-ALTER pattern as TransitTimeDays above — safe to re-run. */
+IF COL_LENGTH('dbo.Vendor', 'OrderMaxQty') IS NULL
+  ALTER TABLE dbo.Vendor ADD OrderMaxQty DECIMAL(15,3) NULL;
+
+PRINT 'dbo.Vendor OrderMaxQty column verified/added';
+
+
+/* ── 2c. VendorMaterial — add MaterialMaxQty column (existing installs) ──
+   Same guarded-ALTER pattern as TransitTimeDays above — safe to re-run. */
+IF COL_LENGTH('dbo.VendorMaterial', 'MaterialMaxQty') IS NULL
+  ALTER TABLE dbo.VendorMaterial ADD MaterialMaxQty DECIMAL(15,3) NULL;
+
+PRINT 'dbo.VendorMaterial MaterialMaxQty column verified/added';
 
 
 /* ── Verify ──────────────────────────────────────────────────────────────── */

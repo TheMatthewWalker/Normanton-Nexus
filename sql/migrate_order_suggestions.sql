@@ -44,6 +44,19 @@
    (VendorMaterial.MaterialMoqQty), rounded UP to the next whole multiple of
    it. MOQ here is a LOT SIZE, not just a floor: a vendor supplying in 1000kg
    lots gets ordered 1000/2000/3000kg etc, never a raw shortfall like 1300kg.
+   If the material also has a ceiling (VendorMaterial.MaterialMaxQty), the
+   result is clamped down to the largest whole lot that still fits under it.
+
+   Both MaterialMoqQty/MaterialMaxQty (per material) and OrderMoqQty/
+   OrderMaxQty (per vendor, see below) are ENFORCED, not just hinted at in
+   the UI: enforceMaterialQty()/validateVendorCombinedQty() in routes/
+   performance.js re-derive the current constraints fresh from the DB at
+   accept time (not trusting whatever the client submitted) and either
+   auto-snap the quantity (material level — always correctable, since
+   there's only one number to adjust) or hard-block the request with a 400
+   (vendor combined level — NOT auto-correctable, since there's no
+   non-arbitrary way to decide which material in a multi-material order to
+   bump or trim).
 
    The vendor's combined order-level MOQ (dbo.Vendor.OrderMoqQty, spanning
    multiple materials) IS actively managed: GET /order-suggestions groups the
@@ -52,7 +65,11 @@
    suggestions/vendor/:vendorId/build, POST /order-suggestions/accept-batch)
    lets a buyer pull in materials that aren't urgent yet to close a gap and
    accept several materials from one vendor as a single batch under one
-   OrderDate.
+   OrderDate. dbo.Vendor.OrderMaxQty is the same idea as a ceiling; when
+   OrderMaxQty equals OrderMoqQty the combined order must be an EXACT amount
+   (e.g. Raaj Ratna: exactly 20,000kg per order, no more, no less) rather
+   than just a minimum — groupSuggestionsByVendor's isExactQty flag and the
+   Build Order modal both branch on this case specifically.
 
    DATES stamped onto this table at accept time (see migrate_vendor_master_data.sql's
    DATE MATH block for the full reasoning):
@@ -119,4 +136,15 @@ BEGIN
   -- Accepted/Ordered rows) so it doesn't keep re-flagging something already
   -- on order, and by the forecast-graph incoming-stock overlay.
   CREATE INDEX IX_POS_Material ON dbo.PurchaseOrderSuggestion (Material) INCLUDE (Status, OrderQty, DeliveryDate);
-  CREATE INDEX IX_POS_Status   ON dbo.PurchaseOrderSugge
+  CREATE INDEX IX_POS_Status   ON dbo.PurchaseOrderSuggestion (Status) INCLUDE (OrderDate, Material, OrderQty, DeliveryDate, VendorId);
+
+  PRINT 'Created dbo.PurchaseOrderSuggestion';
+END
+ELSE
+  PRINT 'dbo.PurchaseOrderSuggestion already exists — skipped';
+
+
+/* ── Verify ───────────────────────────────────────────────────────────────────── */
+
+
+SELECT 'PurchaseOrderSuggestion' AS TableName, COUNT(*) AS Rows FROM dbo.PurchaseOrderSuggestion;
