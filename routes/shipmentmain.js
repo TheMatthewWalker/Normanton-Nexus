@@ -1439,7 +1439,7 @@ router.get('/', async (req, res) => {
 });
 
 
-// â”€â”€ Shipment queues â”€â”€
+// ── Shipment queues ──
 router.get('/queue/:mode', async (req, res) => {
   try {
     const settings = getLogisticsSettings();
@@ -1470,7 +1470,7 @@ router.get('/queue/:mode', async (req, res) => {
 });
 
 
-// â”€â”€ Bulk mark collected â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Bulk mark collected ───────────────────────────────────────────────────────
 router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
@@ -1506,7 +1506,7 @@ router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (re
 });
 
 
-// â”€â”€ Loading list PDF (streams directly to browser) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Loading list PDF (streams directly to browser) ────────────────────────────
 router.post('/loading-list', async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
@@ -1550,7 +1550,7 @@ router.post('/loading-list', async (req, res) => {
 });
 
 
-// â”€â”€ Update planned collection date for multiple shipments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Update planned collection date for multiple shipments ─────────────────────
 router.post('/update-planned-collection', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   const date        = req.body.date;
@@ -1572,7 +1572,7 @@ router.post('/update-planned-collection', requirePermission('LOG_PLANNING'), asy
 });
 
 
-// â”€â”€ Write ShipmentEvents entries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Write ShipmentEvents entries ──────────────────────────────────────────────
 router.post('/events', async (req, res) => {
   const events = req.body.events;
   if (!Array.isArray(events) || !events.length) return res.status(400).json({ success: false, error: 'events array required.' });
@@ -1838,7 +1838,7 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
     const uniqueIncoterms = [...new Set(effectiveIncoterms.filter(Boolean))];
     if (uniqueIncoterms.length > 1) {
       const detail = deliveries.map(row =>
-        `#${row.deliveryID} â†’ ${String(row.incoterms || row.defaultIncoterms || '?').toUpperCase()}`
+        `#${row.deliveryID} → ${String(row.incoterms || row.defaultIncoterms || '?').toUpperCase()}`
       ).join(', ');
       const err = new Error(`Deliveries have conflicting incoterms (${uniqueIncoterms.join(' vs ')}): ${detail}. All deliveries in a shipment must share the same incoterms.`);
       err.statusCode = 400;
@@ -2027,7 +2027,7 @@ router.post('/customs/create', requirePermission('LOG_PLANNING'), async (req, re
 });
 
 
-// â”€â”€ Shipment detail (standard modal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Shipment detail (standard modal) ─────────────────────────────────────────
 router.get('/:shipmentId/details', async (req, res) => {
   try {
     const pool = await getPool();
@@ -2083,7 +2083,7 @@ router.get('/:shipmentId/details', async (req, res) => {
 });
 
 
-// â”€â”€ Toggle customsRequired (blocked if customsComplete) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Toggle customsRequired (blocked if customsComplete) ───────────────────────
 router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
@@ -2109,7 +2109,7 @@ router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'),
 });
 
 
-// â”€â”€ Remove a delivery from a shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Remove a delivery from a shipment ────────────────────────────────────────
 router.delete('/:shipmentId/deliveries/:deliveryId', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
@@ -2138,7 +2138,7 @@ router.delete('/:shipmentId/deliveries/:deliveryId', requirePermission('LOG_PLAN
 });
 
 
-// â”€â”€ Add deliveries to an existing shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Add deliveries to an existing shipment ────────────────────────────────────
 router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
     const pool = await getPool();
@@ -2207,7 +2207,7 @@ router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async 
 });
 
 
-// â”€â”€ Update haulier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Update haulier ────────────────────────────────────────────────────────────
 // ── Correct dates and status flags (admin correction) ────────────────────────
 router.patch('/:shipmentId/status-dates', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
@@ -2278,7 +2278,7 @@ router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async 
 });
 
 
-// â”€â”€ Shipment search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Shipment search ───────────────────────────────────────────────────────────
 // Query params: shipmentRef, deliveryNumber, forwarder, customer,
 //               dateField (plannedCollection|actualCollection|plannedDelivery|actualDelivery),
 //               dateFrom, dateTo
@@ -2365,7 +2365,7 @@ router.get('/search', async (req, res) => {
 });
 
 
-// â”€â”€ Events for a shipment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Events for a shipment ─────────────────────────────────────────────────────
 router.get('/:shipmentId/events', async (req, res) => {
   try {
     const pool   = await getPool();

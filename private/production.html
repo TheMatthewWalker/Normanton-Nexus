@@ -149,16 +149,16 @@
     <!-- Top toolbar: table name + row count + export -->
     <div class="content-toolbar" id="toolbar" style="display:none;">
       <div>
-        <div class="toolbar-title" id="toolbar-title">â€”</div>
+        <div class="toolbar-title" id="toolbar-title">—</div>
         <div class="toolbar-hint"  id="toolbar-hint"></div>
       </div>
       <div class="toolbar-spacer"></div>
-      <div class="row-badge" id="row-badge">â€”</div>
+      <div class="row-badge" id="row-badge">—</div>
       <button class="btn-export" onclick="exportCSV()">Export CSV</button>
       <button class="btn-export-xlsx" id="btn-export-xlsx" onclick="exportXLSX()">Export XLSX + Related</button>
     </div>
 
-    <!-- Filter bar removed â€” per-column filters are now built into each table header -->
+    <!-- Filter bar removed — per-column filters are now built into each table header -->
 
     <!-- Data output -->
     <div class="data-panel" id="data-panel">
@@ -175,7 +175,7 @@
       <!-- Report toolbar -->
       <div class="report-toolbar">
         <div>
-          <div class="toolbar-title" id="report-title">â€”</div>
+          <div class="toolbar-title" id="report-title">—</div>
           <div class="toolbar-hint"  id="report-hint"></div>
         </div>
         <div class="toolbar-spacer"></div>
@@ -210,15 +210,15 @@
 <div id="ctx-menu">
   <div class="ctx-header" id="ctx-label">Row Actions</div>
   <div class="ctx-item" id="ctx-drill" onclick="openDrilldown()">
-    <span style="font-size:15px">â†³</span> View related records
+    <span style="font-size:15px">↳</span> View related records
   </div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" onclick="copyRow()">
-    <span style="font-size:15px">âŽ˜</span> Copy row as text
+    <span style="font-size:15px">⎘</span> Copy row as text
   </div>
   <div class="ctx-sep"></div>
   <div class="ctx-item dismiss" onclick="closeCtx()">
-    <span style="font-size:13px">âœ•</span> Dismiss
+    <span style="font-size:13px">✕</span> Dismiss
   </div>
 </div>
 
@@ -230,10 +230,10 @@
         <div class="dd-title"    id="dd-title">Related Records</div>
         <div class="dd-subtitle" id="dd-subtitle"></div>
       </div>
-      <button class="dd-close" onclick="closeDrilldown()">âœ•</button>
+      <button class="dd-close" onclick="closeDrilldown()">✕</button>
     </div>
     <div class="dd-body" id="dd-body">
-      <div class="loading-wrap"><div class="spinner"></div>Loadingâ€¦</div>
+      <div class="loading-wrap"><div class="spinner"></div>Loading…</div>
     </div>
   </div>
 </div>

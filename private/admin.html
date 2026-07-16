@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Normanton Nexus Â· User Administration</title>
+  <title>Normanton Nexus · User Administration</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/admin.css">
@@ -34,7 +34,7 @@
     <div class="header-right">
       <div class="user-badge">
         <div class="user-dot"></div>
-        <span id="session-user">â€¦</span>
+        <span id="session-user">…</span>
         <span class="role-pill" id="session-role"></span>
       </div>
       <a href="/logout" class="btn-logout">Sign Out</a>
@@ -56,7 +56,7 @@
             <circle cx="7" cy="9.5" r=".7" fill="currentColor"/>
           </svg>
           Pending Approvals
-          <span class="nav-badge" id="pending-count">â€¦</span>
+          <span class="nav-badge" id="pending-count">…</span>
         </div>
 
         <div class="nav-item" data-section="users">
@@ -65,7 +65,7 @@
             <path d="M1.5 12.5c0-3 2.5-4.5 5.5-4.5s5.5 1.5 5.5 4.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           </svg>
           All Users
-          <span class="nav-badge" id="users-count">â€¦</span>
+          <span class="nav-badge" id="users-count">…</span>
         </div>
 
         <div class="nav-item" data-section="audit">
@@ -78,7 +78,7 @@
           Audit Log
         </div>
 
-        <!-- Permissions â€” shown only for superadmin -->
+        <!-- Permissions — shown only for superadmin -->
         <div class="nav-item" data-section="permissions" id="nav-permissions" style="display:none">
           <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
             <circle cx="7" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.2"/>
@@ -119,7 +119,7 @@
     <!-- MAIN CONTENT -->
     <div class="main-content">
 
-      <!-- â”€â”€ PENDING APPROVALS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <!-- ── PENDING APPROVALS ───────────────────────────────────────────── -->
       <section class="section active" id="section-pending">
         <div class="section-header">
           <div>
@@ -128,11 +128,11 @@
           </div>
         </div>
         <div class="card-list" id="pending-list">
-          <div class="loading-wrap"><div class="spinner"></div>Loadingâ€¦</div>
+          <div class="loading-wrap"><div class="spinner"></div>Loading…</div>
         </div>
       </section>
 
-      <!-- â”€â”€ ALL USERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <!-- ── ALL USERS ──────────────────────────────────────────────────── -->
       <section class="section" id="section-users">
         <div class="section-header">
           <div>
@@ -140,7 +140,7 @@
             <div class="section-sub">Manage roles, departments and account status</div>
           </div>
           <div class="section-actions">
-            <input type="text" id="user-search" class="search-input" placeholder="Search username or emailâ€¦">
+            <input type="text" id="user-search" class="search-input" placeholder="Search username or email…">
           </div>
         </div>
         <div class="table-wrap">
@@ -160,13 +160,13 @@
               </tr>
             </thead>
             <tbody id="users-tbody">
-              <tr><td colspan="10" class="loading-cell"><div class="spinner"></div> Loadingâ€¦</td></tr>
+              <tr><td colspan="10" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- â”€â”€ AUDIT LOG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <!-- ── AUDIT LOG ──────────────────────────────────────────────────── -->
       <section class="section" id="section-audit">
         <div class="section-header">
           <div>
@@ -211,18 +211,18 @@
               </tr>
             </thead>
             <tbody id="audit-tbody">
-              <tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loadingâ€¦</td></tr>
+              <tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- â”€â”€ PERMISSIONS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <!-- ── PERMISSIONS ────────────────────────────────────────────────── -->
       <section class="section" id="section-permissions">
         <div class="section-header">
           <div>
             <div class="section-title">Permission Definitions</div>
-            <div class="section-sub">Permission codes that can be assigned to users â€” superadmin only</div>
+            <div class="section-sub">Permission codes that can be assigned to users — superadmin only</div>
           </div>
           <div class="section-actions">
             <button type="button" class="btn-primary" onclick="openCreatePermModal()">+ New Permission</button>
@@ -240,18 +240,18 @@
               </tr>
             </thead>
             <tbody id="perms-tbody">
-              <tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loadingâ€¦</td></tr>
+              <tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- â”€â”€ SQL CONSOLE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <!-- ── SQL CONSOLE ──────────────────────────────────────────────────── -->
       <section class="section" id="section-sql">
         <div class="section-header">
           <div>
             <div class="section-title">SQL Console</div>
-            <div class="section-sub">Ad-hoc queries via the /query endpoint Â· Destructive keywords blocked for non-admins Â· All commands are logged</div>
+            <div class="section-sub">Ad-hoc queries via the /query endpoint · Destructive keywords blocked for non-admins · All commands are logged</div>
           </div>
           <div class="section-actions">
             <span id="sql-row-count" class="sql-count" style="display:none"></span>
@@ -421,21 +421,21 @@
     </div>
   </div>
 
-  <!-- â”€â”€ EDIT USER MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  <!-- ── EDIT USER MODAL ────────────────────────────────────────────────── -->
   <div id="edit-overlay" class="modal-overlay">
     <div class="modal">
       <div class="modal-header">
-        <div class="modal-title">Edit User â€” <span id="edit-username">â€”</span></div>
-        <button type="button" class="modal-close" onclick="closeEditModal()">âœ•</button>
+        <div class="modal-title">Edit User — <span id="edit-username">—</span></div>
+        <button type="button" class="modal-close" onclick="closeEditModal()">✕</button>
       </div>
       <div class="modal-body">
 
-        <!-- Identity fields â€” superadmin only, shown via JS -->
+        <!-- Identity fields — superadmin only, shown via JS -->
         <div id="edit-identity-section" style="display:none">
           <div style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;
             letter-spacing:2px;text-transform:uppercase;color:var(--text-muted);
             margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border)">
-            Identity â€” Superadmin Only
+            Identity — Superadmin Only
           </div>
 
           <div class="modal-row">
@@ -468,9 +468,9 @@
         <div class="modal-row">
           <label class="modal-label">Role</label>
           <select id="edit-role" class="modal-select" aria-label="User role">
-            <option value="operator">Operator â€” standard access</option>
-            <option value="admin">Admin â€” user approval &amp; department assignment</option>
-            <option value="superadmin">Superadmin â€” full access + raw SQL</option>
+            <option value="operator">Operator — standard access</option>
+            <option value="admin">Admin — user approval &amp; department assignment</option>
+            <option value="superadmin">Superadmin — full access + raw SQL</option>
           </select>
         </div>
 
@@ -502,7 +502,7 @@
           <div id="edit-perms-tags" class="perm-tags"></div>
           <div class="perm-add-row">
             <select id="edit-perm-select" class="modal-select" aria-label="Add permission">
-              <option value="">â€” Grant a permission â€”</option>
+              <option value="">— Grant a permission —</option>
             </select>
             <button type="button" class="btn-secondary" onclick="addUserPermission()">Grant</button>
           </div>
@@ -510,7 +510,7 @@
 
         <div class="modal-row">
           <label class="modal-label">Admin Notes</label>
-          <textarea id="edit-notes" class="modal-textarea" placeholder="Optional notesâ€¦" rows="3"></textarea>
+          <textarea id="edit-notes" class="modal-textarea" placeholder="Optional notes…" rows="3"></textarea>
         </div>
 
       </div>
@@ -521,16 +521,16 @@
     </div>
   </div>
 
-  <!-- â”€â”€ APPROVE MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  <!-- ── APPROVE MODAL ──────────────────────────────────────────────────── -->
   <div id="approve-overlay" class="modal-overlay">
     <div class="modal modal--narrow">
       <div class="modal-header">
         <div class="modal-title">Approve Registration</div>
-        <button type="button" class="modal-close" onclick="closeApproveModal()">âœ•</button>
+        <button type="button" class="modal-close" onclick="closeApproveModal()">✕</button>
       </div>
       <div class="modal-body">
 
-        <div class="approve-info" id="approve-info">â€”</div>
+        <div class="approve-info" id="approve-info">—</div>
 
         <div class="modal-row">
           <label class="modal-label">Assign Role</label>
@@ -555,12 +555,12 @@
     </div>
   </div>
 
-  <!-- â”€â”€ CREATE / EDIT PERMISSION MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  <!-- ── CREATE / EDIT PERMISSION MODAL ────────────────────────────────── -->
   <div id="perm-overlay" class="modal-overlay">
     <div class="modal modal--narrow">
       <div class="modal-header">
         <div class="modal-title" id="perm-modal-title">New Permission</div>
-        <button type="button" class="modal-close" onclick="closePermModal()">âœ•</button>
+        <button type="button" class="modal-close" onclick="closePermModal()">✕</button>
       </div>
       <div class="modal-body">
 
