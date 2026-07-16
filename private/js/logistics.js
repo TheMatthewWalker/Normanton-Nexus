@@ -6,6 +6,16 @@ let deliveryRows = [];
 let shipmentRows = [];
 let selectedDeliveryIds = new Set();
 let selectedBookingShipmentIds = new Set();
+// Confirmed invoice/packing-list/customs file assignments for the KN
+// document-verification popup, keyed by shipmentID. Never explicitly
+// cleared — assignments for shipments outside the current booking batch
+// are simply never looked up again, and a shipment can only be booked once.
+let bookingDocumentAssignments = new Map();
+// The rows/haulier the booking modal is currently showing — lets the
+// verify-documents popup (opened on top of the booking modal) navigate
+// back to it without the caller having to thread them through every layer.
+let currentBookingRows = [];
+let currentBookingHaulier = '';
 let selectedCustomsShipmentIds = new Set();
 let selectedCollectionIds = new Set();
 let latestShipment = null;
@@ -819,11 +829,200 @@ function getBookingRowsWithInputs() {
     elementCode:       document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.elementCode || null,
     costCenter:        document.getElementById('booking-cost-center')?.value || null,
     customsCost:       (() => { const v = document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.customsCost; return v != null && v !== '' ? Number(v) : null; })(),
+    customsRequired:   Boolean(row.customsRequired),
   }));
 }
 
 
+// Categories a file can be tagged with in the KN document-verification
+// popup, mirroring KN's DocumentTypeCode list (routes/shipmentmain.js's
+// KN_DOCUMENT_TYPE_CODES): 271 Packing List, 380 Commercial Invoice,
+// 944 Customs Documents. 'Ignore' lets an unrelated PDF sit in the folder
+// without forcing a category onto it.
+const BOOKING_DOC_CATEGORIES = [
+  { value: '',             label: 'Ignore this file' },
+  { value: 'packing-list', label: 'Packing List' },
+  { value: 'invoice',      label: 'Commercial Invoice' },
+  { value: 'customs',      label: 'Customs Declaration' },
+];
+
+function bvdCategoryForFile(assignment, fileName) {
+  if (!assignment) return null;
+  if (assignment.packingList === fileName) return 'packing-list';
+  if (assignment.invoice === fileName) return 'invoice';
+  if (assignment.customs === fileName) return 'customs';
+  return null;
+}
+
+// A KN shipment is ready to book once packing list + invoice are both
+// assigned, and — only when this specific shipment is marked
+// customsRequired — a customs declaration too. Enforced, not hinted: this
+// same check gates both the "Verify Documents" status badge and the actual
+// booking call in submitBookingModal, so a shipment can never reach the KN
+// booking API without it.
+function bookingDocsComplete(row) {
+  const assignment = bookingDocumentAssignments.get(Number(row.shipmentID));
+  if (!assignment || !assignment.packingList || !assignment.invoice) return false;
+  if (row.customsRequired && !assignment.customs) return false;
+  return true;
+}
+
+// Disables the whole booking modal's submit button until every KN row in
+// the batch has verified documents — a batch that's part-verified must not
+// be partially sent, since submitBookingModal processes items in one pass.
+function updateBookingSubmitGate(rows, haulier) {
+  const btn = document.getElementById('booking-submit-btn');
+  if (!btn) return;
+  if (!isKnHaulier(haulier)) { btn.disabled = false; return; }
+  btn.disabled = !rows.every(bookingDocsComplete);
+}
+
+// Lists everything currently in a shipment's export folder (packing list,
+// any operator-uploaded invoice, any ClearPort customs PDF) and lets the
+// operator confirm/correct a category for each file. Nothing is written to
+// bookingDocumentAssignments until "Confirm Documents" is clicked — closing
+// or backing out of this popup without saving leaves the shipment
+// unverified, which is the safe default.
+async function openVerifyDocumentsModal(row, rows, haulier) {
+  const sid = row.shipmentID;
+  const ref = String(sid).padStart(8, '0');
+  openModal(`<div class="ps-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Verify Documents</div><div class="ps-modal-sub">${esc(ref)} — ${esc(row.destinationName || row.originName || '')}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint">Packing list, invoice and (where required) customs declaration must all be present and categorised before this shipment can be booked with Kuehne &amp; Nagel — they'll be uploaded to the shipment automatically once booked.</div>
+      <div id="bvd-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
+      <input type="file" id="bvd-file-input" accept="application/pdf" style="display:none">
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" id="bvd-back-btn">← Back</button>
+      <button type="button" class="btn-secondary" id="bvd-upload-btn">Upload Invoice</button>
+      <button type="button" class="btn-submit" id="bvd-save-btn" disabled>Confirm Documents</button>
+    </div>
+  </div>`);
+
+  document.getElementById('bvd-back-btn').addEventListener('click', () => openBookingModal(rows, haulier));
+  document.getElementById('bvd-upload-btn').addEventListener('click', () => document.getElementById('bvd-file-input').click());
+  document.getElementById('bvd-file-input').addEventListener('change', async () => {
+    const fileInput = document.getElementById('bvd-file-input');
+    const file = fileInput.files[0];
+    if (!file) return;
+    const uploadBtn = document.getElementById('bvd-upload-btn');
+    uploadBtn.disabled = true; uploadBtn.textContent = 'Uploading…';
+    try {
+      const res = await fetch(`/api/shipmentmain/${encodeURIComponent(sid)}/documents/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/pdf', 'X-File-Name': encodeURIComponent(file.name) },
+        body: file,
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Upload failed.');
+      await bvdLoadFolder(sid, row);
+    } catch (err) {
+      const body = document.getElementById('bvd-body');
+      if (body) body.insertAdjacentHTML('afterbegin', `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`);
+    } finally {
+      uploadBtn.disabled = false; uploadBtn.textContent = 'Upload Invoice';
+      fileInput.value = '';
+    }
+  });
+
+  await bvdLoadFolder(sid, row);
+}
+
+async function bvdLoadFolder(sid, row) {
+  const body = document.getElementById('bvd-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
+  try {
+    const res = await fetch(`/api/shipmentmain/${encodeURIComponent(sid)}/documents/folder`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load documents.');
+    bvdRenderFolder(sid, row, json.data);
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function bvdRenderFolder(sid, row, data) {
+  const body = document.getElementById('bvd-body');
+  const existing = bookingDocumentAssignments.get(Number(sid));
+
+  const rowsHtml = data.files.map((f, i) => {
+    const cat = (existing ? bvdCategoryForFile(existing, f.fileName) : null) ?? f.guessedCategory ?? '';
+    return `<tr class="admin-row">
+      <td>${esc(f.fileName)}</td>
+      <td>${(Number(f.sizeBytes || 0) / 1024).toFixed(1)} KB</td>
+      <td>
+        <select class="tf-input bvd-cat-select" data-filename="${esc(f.fileName)}">
+          ${BOOKING_DOC_CATEGORIES.map(c => `<option value="${esc(c.value)}" ${c.value === cat ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+        </select>
+      </td>
+      <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
+    </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    ${!data.files.length
+      ? '<div class="sap-empty">No documents in this shipment’s folder yet — upload the invoice below, or check that the packing list has generated.</div>'
+      : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table">
+          <thead><tr><th>File</th><th>Size</th><th>Category</th><th></th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table></div>`}
+    <div id="bvd-status" style="margin-top:12px;padding:10px;border-radius:6px;font-size:13px"></div>
+  `;
+
+  function updateStatus() {
+    const assignment = { packingList: null, invoice: null, customs: null };
+    document.querySelectorAll('.bvd-cat-select').forEach(sel => {
+      const fileName = sel.dataset.filename;
+      if (sel.value === 'packing-list') assignment.packingList = fileName;
+      if (sel.value === 'invoice')      assignment.invoice     = fileName;
+      if (sel.value === 'customs')      assignment.customs     = fileName;
+    });
+
+    const missing = [];
+    if (!assignment.packingList) missing.push('Packing List');
+    if (!assignment.invoice)     missing.push('Commercial Invoice');
+    if (data.customsRequired && !assignment.customs) missing.push('Customs Declaration');
+
+    const statusEl = document.getElementById('bvd-status');
+    const saveBtn  = document.getElementById('bvd-save-btn');
+    if (missing.length) {
+      statusEl.style.background = 'rgba(220,38,38,0.1)';
+      statusEl.style.color = 'var(--error,#DC2626)';
+      statusEl.textContent = `Missing: ${missing.join(', ')}. All required documents must be categorised before this shipment can be booked.`;
+      if (saveBtn) saveBtn.disabled = true;
+    } else {
+      statusEl.style.background = 'rgba(22,163,74,0.1)';
+      statusEl.style.color = 'var(--success,#16A34A)';
+      statusEl.textContent = data.customsRequired
+        ? 'Packing list, invoice and customs declaration all assigned — ready to book.'
+        : 'Packing list and invoice assigned — ready to book.';
+      if (saveBtn) saveBtn.disabled = false;
+    }
+    return assignment;
+  }
+
+  document.querySelectorAll('.bvd-cat-select').forEach(sel => sel.addEventListener('change', updateStatus));
+  updateStatus();
+
+  document.getElementById('bvd-save-btn').addEventListener('click', () => {
+    const assignment = updateStatus();
+    if (document.getElementById('bvd-save-btn').disabled) return;
+    bookingDocumentAssignments.set(Number(sid), assignment);
+    // currentBookingRows/currentBookingHaulier are set by openBookingModal
+    // right before this popup can be reached, so they always reflect the
+    // batch this shipment belongs to.
+    openBookingModal(currentBookingRows, currentBookingHaulier);
+  });
+}
+
+
 async function openBookingModal(rows, haulier) {
+  currentBookingRows = rows;
+  currentBookingHaulier = haulier;
   const isCustomerCollect = isCustomerCollectHaulier(haulier);
   const isKn = isKnHaulier(haulier);
   const needsForwarderChoice = rows.some(row => !row.forwarderID || !hasAssignedHaulier(row));
@@ -857,6 +1056,11 @@ async function openBookingModal(rows, haulier) {
         ? `<td><span id="booking-cost-${sid}" data-skip-cost="1" style="font-size:11px;color:var(--text-muted)">TPN — manual</span></td>`
         : `<td><input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
              step="0.01" min="0" style="width:90px" placeholder="£ required"></td>`;
+    // Documents are only meaningful for KN — that's the only booking route
+    // this app actually uploads documents against.
+    const docsCell = !isKn
+      ? '<td>—</td>'
+      : `<td><button type="button" class="btn-secondary booking-verify-docs-btn" data-sid="${sid}" style="padding:4px 10px;font-size:11px;white-space:nowrap;${bookingDocsComplete(row) ? 'color:var(--success,#16A34A);border-color:var(--success,#16A34A)' : ''}">${bookingDocsComplete(row) ? '✓ Verified' : 'Verify Documents'}</button></td>`;
     return `<tr>
       <td>${esc(shipmentRef)}</td>
       <td>${esc(row.destinationName || row.originName || '-')}</td>
@@ -871,6 +1075,7 @@ async function openBookingModal(rows, haulier) {
       <td><input class="tf-input booking-inline-input" type="text" id="booking-track-${sid}"
             value="${esc(row.trackingNumber || '')}"></td>
       ${costCell}
+      ${docsCell}
     </tr>`;
   }).join('');
   const trackingHelp = isCustomerCollect
@@ -878,8 +1083,15 @@ async function openBookingModal(rows, haulier) {
     : isKn
       ? 'Tracking will be taken from the Kuehne & Nagel API response where available.'
       : 'Tracking number is required for each shipment before booking can be confirmed.';
-  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th><th>Expected Cost</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted)">Cost Centre</label><select class="tf-input" id="booking-cost-center" style="max-width:280px"><option value="">Loading…</option></select></div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
+  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th><th>Expected Cost</th><th>Documents</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted)">Cost Centre</label><select class="tf-input" id="booking-cost-center" style="max-width:280px"><option value="">Loading…</option></select></div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
   document.getElementById('booking-submit-btn').addEventListener('click', submitBookingModal);
+  document.querySelectorAll('.booking-verify-docs-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = rows.find(r => String(r.shipmentID) === btn.dataset.sid);
+      if (row) openVerifyDocumentsModal(row, rows, haulier);
+    });
+  });
+  updateBookingSubmitGate(rows, haulier);
 
   // Load cost centres into dropdown
   fetch('/api/costcenters').then(r => r.json()).then(data => {
@@ -987,11 +1199,22 @@ async function submitBookingModal() {
     }
     const successfulUpdates = [];
     const failedRefs = [];
+    const docWarnings = [];
 
     for (const item of updates) {
       try {
         if (isKnHaulier(item.forwarderName)) {
           if (!item.plannedCollection) throw new Error('Planned collection date is required.');
+
+          // Enforced, not hinted: a KN shipment whose documents haven't been
+          // verified in the popup never reaches the booking API at all — no
+          // partial booking followed by a document-upload failure to clean
+          // up after.
+          const docs = bookingDocumentAssignments.get(Number(item.shipmentID));
+          if (!docs || !docs.packingList || !docs.invoice || (item.customsRequired && !docs.customs)) {
+            throw new Error('Documents must be verified (Packing List, Invoice' + (item.customsRequired ? ', Customs Declaration' : '') + ') before this shipment can be booked.');
+          }
+
           const response = await fetch(`/api/freight-booking/shipment/${encodeURIComponent(item.shipmentID)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1000,6 +1223,32 @@ async function submitBookingModal() {
           const json = await response.json();
           if (!response.ok) throw new Error(json.error || 'Failed to send to Kuehne & Nagel.');
           item.trackingNumber = String(json.trackingNumber || item.trackingNumber || '').trim();
+
+          // Booking has now actually happened and has a tracking number — a
+          // document-upload failure from here on is surfaced as a warning,
+          // not rolled back into a failed booking.
+          if (item.trackingNumber) {
+            const files = [
+              { fileName: docs.packingList, category: 'packing-list' },
+              { fileName: docs.invoice,     category: 'invoice' },
+              ...(docs.customs ? [{ fileName: docs.customs, category: 'customs' }] : []),
+            ];
+            try {
+              const uploadRes  = await fetch(`/api/shipmentmain/${encodeURIComponent(item.shipmentID)}/documents/upload-to-kn`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trackingNumber: item.trackingNumber, files }),
+              });
+              const uploadJson = await uploadRes.json();
+              const failedFiles = uploadJson.data?.failed || [];
+              if (!uploadJson.success || failedFiles.length) {
+                const detail = failedFiles.map(f => `${f.fileName}: ${f.error}`).join('; ') || uploadJson.error || 'unknown error';
+                docWarnings.push(`${item.shipmentRef}: booked (tracking ${item.trackingNumber}), but document upload to KN failed — ${detail}. Upload manually via the KN portal.`);
+              }
+            } catch (uploadErr) {
+              docWarnings.push(`${item.shipmentRef}: booked (tracking ${item.trackingNumber}), but document upload to KN failed — ${uploadErr.message}. Upload manually via the KN portal.`);
+            }
+          }
         } else if (isCustomerCollectHaulier(item.forwarderName)) {
           const response = await fetch(`/api/shipmentmain/${encodeURIComponent(item.shipmentID)}/send-collection-email`, { method: 'POST' });
           const json = await response.json();
@@ -1038,8 +1287,11 @@ async function submitBookingModal() {
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to mark shipments as booked.');
     await runShipmentBooking();
-    if (failedRefs.length) {
-      result.innerHTML = `<div class="sap-error tf-inline-error">Booked ${successfulUpdates.length} shipment(s). These failed: ${esc(failedRefs.join(' | '))}</div>`;
+    if (failedRefs.length || docWarnings.length) {
+      const parts = [`Booked ${successfulUpdates.length} shipment(s).`];
+      if (failedRefs.length)  parts.push(`Failed: ${failedRefs.join(' | ')}`);
+      if (docWarnings.length) parts.push(docWarnings.join(' | '));
+      result.innerHTML = `<div class="sap-error tf-inline-error">${esc(parts.join(' '))}</div>`;
       button.disabled = false;
       button.textContent = 'Book';
       return;

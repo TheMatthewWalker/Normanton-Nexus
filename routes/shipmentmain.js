@@ -1,12 +1,14 @@
 ﻿import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
+import FormData from 'form-data';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
 import { sqlConfig, stampDbChange } from '../config.js';
+import { getKnAccessToken } from './freightbooking.js';
 
 import { requirePermission } from '../middleware/auth.js';
 import e from 'express';
@@ -186,6 +188,50 @@ function getClearPortSettings() {
     identityOfActiveMeansOfTransportAtBorder:    process.env.CLEARPORT_IDENTITY_OF_ACTIVE_MEANS_AT_BORDER          || clearport.identityOfActiveMeansOfTransportAtBorder     || 'UNKNOWN',
     nationalityOfActiveMeansOfTransportAtBorder: process.env.CLEARPORT_NATIONALITY_OF_ACTIVE_MEANS_AT_BORDER       || clearport.nationalityOfActiveMeansOfTransportAtBorder  || 'GB',
   };
+}
+
+
+// ── Kuehne+Nagel Shipment Document Management API ────────────────────────────
+// Separate service from the booking API (routes/freightbooking.js) — same KN
+// OAuth client-credentials token (getKnAccessToken, imported above) works for
+// both, per KN's API portal. Defaults to the URL in KN's published swagger so
+// this works out of the box; override via KN_DOCUMENTS_API_URL if KN ever
+// versions the path.
+function getKnDocumentsSettings() {
+  return {
+    apiUrl: String(
+      process.env.KN_DOCUMENTS_API_URL ||
+      'https://gateway.api.kuehne-nagel.com/transport/execution/documentation/shipment/v2'
+    ).replace(/\/+$/, ''),
+  };
+}
+
+
+// KN's own classification codes for the document types this app cares about
+// (see the 'Often uploaded document types' list on DocumentTypeCode in KN's
+// ShipmentDocumentManagement swagger): 380 Commercial Invoice, 271 Packing
+// List, 944 Customs Documents. 'customs' maps to Customs Documents rather
+// than Export Declaration (833) since that's what ClearPort's CDS export PDF
+// actually is here.
+const KN_DOCUMENT_TYPE_CODES = {
+  'packing-list': '271',
+  invoice:        '380',
+  customs:        '944',
+};
+
+
+// Every file this app itself writes into a shipment's export folder already
+// follows a fixed naming convention (generateShipmentDocuments for the
+// packing list, the /customs/create route below for the ClearPort PDF), so
+// most files can be pre-categorised for the operator rather than left
+// blank. This is only a starting guess — the verify-documents popup always
+// lets the operator confirm or override it before a KN booking can proceed.
+function guessDocumentCategory(fileName, shipmentRef) {
+  const lower = fileName.toLowerCase();
+  if (lower === `${shipmentRef}.pdf`.toLowerCase()) return 'packing-list';
+  if (lower.includes('-customs-')) return 'customs';
+  if (lower.includes('-invoice-')) return 'invoice';
+  return null;
 }
 
 
@@ -1922,6 +1968,178 @@ router.get('/:shipmentId/documents/:fileName', async (req, res) => {
     const target = path.join(folder.shipmentPath, fileName); 
     await fsp.access(target, fs.constants.F_OK); 
     return res.sendFile(target);
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
+
+
+// ── List every document currently sitting in a shipment's export folder ──────
+// Regenerates the packing list first so it's always current, then lists the
+// whole folder — an operator-uploaded invoice and a ClearPort customs PDF
+// (both written into the same folder by the routes elsewhere in this file)
+// show up here too. Backs the "verify documents before booking" popup: KN
+// requires invoice + packing list on every shipment, plus a customs
+// declaration when customsRequired is set, before a booking is allowed to
+// proceed at all.
+router.get('/:shipmentId/documents/folder', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const context = await getShipmentContext(req.params.shipmentId);
+    await generateShipmentDocuments(context); // refreshes the packing list PDF on disk
+    const folder = getShipmentFolderInfo(context.shipment);
+    const ref = folder.shipmentRef;
+
+    let entries = [];
+    try {
+      entries = await fsp.readdir(folder.shipmentPath, { withFileTypes: true });
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    const files = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.pdf')) continue;
+      const stat = await fsp.stat(path.join(folder.shipmentPath, entry.name));
+      files.push({
+        fileName: entry.name,
+        sizeBytes: stat.size,
+        modifiedAtUtc: stat.mtime.toISOString(),
+        guessedCategory: guessDocumentCategory(entry.name, ref),
+        downloadUrl: `/api/shipmentmain/${req.params.shipmentId}/documents/${encodeURIComponent(entry.name)}`,
+      });
+    }
+    files.sort((a, b) => a.fileName.localeCompare(b.fileName));
+
+    res.json({
+      success: true,
+      data: {
+        shipmentRef: ref,
+        customsRequired: toBool(context.shipment.customsRequired),
+        customsComplete: toBool(context.shipment.customsComplete),
+        files,
+      },
+    });
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
+
+
+// ── Operator invoice upload ───────────────────────────────────────
+// The commercial invoice is the one document in the trio that's neither
+// generated by Nexus (packing list) nor pulled from ClearPort (customs) — an
+// operator uploads it by hand once it exists. Body is the raw PDF bytes
+// (Content-Type: application/pdf), not multipart — simplest thing that works
+// from a plain fetch(..., { body: file }) without adding a new dependency for
+// a single-file upload. Saved straight into the same folder the packing list
+// and customs PDF already live in.
+router.post('/:shipmentId/documents/upload',
+  requirePermission('LOG_PLANNING'),
+  express.raw({ type: 'application/pdf', limit: '20mb' }),
+  async (req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ success: false, error: 'No file content received. Content-Type must be application/pdf.' });
+      }
+      if (req.body.length > 20 * 1024 * 1024) {
+        return res.status(413).json({ success: false, error: 'File is too large (20MB limit).' });
+      }
+
+      const context = await getShipmentContext(req.params.shipmentId);
+      const folder = await ensureShipmentFolder(context.shipment);
+      const ref = folder.shipmentRef;
+
+      const originalName = String(req.get('X-File-Name') || req.query.fileName || 'invoice').replace(/\.pdf$/i, '');
+      const fileName = `${ref}-invoice-${sanitizeFileSegment(originalName)}-${Date.now()}.pdf`;
+      const filePath = path.join(folder.shipmentPath, fileName);
+      await fsp.writeFile(filePath, req.body);
+
+      res.status(201).json({
+        success: true,
+        data: {
+          fileName,
+          sizeBytes: req.body.length,
+          guessedCategory: 'invoice',
+          downloadUrl: `/api/shipmentmain/${req.params.shipmentId}/documents/${encodeURIComponent(fileName)}`,
+        },
+      });
+    } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+  }
+);
+
+
+// ── Upload booking documents to Kuehne+Nagel ──────────────────
+// Final step of the KN booking flow (see private/js/logistics.js's
+// submitBookingModal): once a booking has been placed and a tracking number
+// received, the confirmed invoice/packing-list/customs files — already
+// verified present by the operator in the pre-booking popup, never guessed
+// again here — are pushed to KN's ShipmentDocumentManagement API against
+// that tracking number. Uploads are attempted independently and reported
+// per-file: a failure here doesn't unwind the booking, which has already
+// happened and has its own tracking number, so the caller surfaces
+// per-file failures as a warning rather than rolling anything back.
+router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const trackingNumber = String(req.body.trackingNumber || '').trim();
+    const requestedFiles = Array.isArray(req.body.files) ? req.body.files : [];
+    if (!trackingNumber) {
+      return res.status(400).json({ success: false, error: 'trackingNumber is required.' });
+    }
+    if (!requestedFiles.length) {
+      return res.status(400).json({ success: false, error: 'At least one file is required.' });
+    }
+
+    const context = await getShipmentContext(req.params.shipmentId);
+    const folder = getShipmentFolderInfo(context.shipment);
+    const docs = getKnDocumentsSettings();
+    const pool = await getPool();
+
+    let accessToken;
+    try {
+      accessToken = (await getKnAccessToken()).access_token;
+    } catch (err) {
+      return res.status(502).json({ success: false, error: `Could not authenticate with Kuehne & Nagel: ${err.message}` });
+    }
+
+    const uploaded = [];
+    const failed = [];
+
+    for (const item of requestedFiles) {
+      const fileName = path.basename(String(item?.fileName || ''));
+      const category = String(item?.category || '');
+      const documentTypeCode = KN_DOCUMENT_TYPE_CODES[category];
+      if (!fileName || !documentTypeCode) {
+        failed.push({ fileName: fileName || '(unnamed)', error: `Unknown document category '${category}'.` });
+        continue;
+      }
+
+      try {
+        const filePath = path.join(folder.shipmentPath, fileName);
+        const fileBuffer = await fsp.readFile(filePath);
+
+        const form = new FormData();
+        form.append('documentContent', fileBuffer, { filename: fileName, contentType: 'application/pdf' });
+        form.append('documentTypeCode', documentTypeCode);
+
+        const url = `${docs.apiUrl}/shipments/${encodeURIComponent(trackingNumber)}/documents`;
+        const response = await axios.post(url, form, {
+          timeout: 30000,
+          headers: { ...form.getHeaders(), Authorization: `Bearer ${accessToken}` },
+        });
+
+        const documentId = response.data?.documentId || null;
+        uploaded.push({ fileName, category, documentTypeCode, documentId });
+        await writeShipmentEvent(
+          pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD',
+          `Uploaded ${fileName} (${category}, type ${documentTypeCode}) to KN tracking ${trackingNumber}${documentId ? ` — documentId ${documentId}` : ''}.`
+        );
+      } catch (err) {
+        const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
+        failed.push({ fileName, category, error: detail });
+        await writeShipmentEvent(
+          pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD_FAILED',
+          `Failed to upload ${fileName} (${category}) to KN tracking ${trackingNumber}: ${detail}`
+        ).catch(() => {});
+      }
+    }
+
+    res.json({ success: uploaded.length > 0, data: { trackingNumber, uploaded, failed } });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
 
