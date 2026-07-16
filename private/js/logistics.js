@@ -4576,8 +4576,8 @@ async function vmRemoveMaterial(vendor, vendorMaterialId, material) {
 async function runOrderSuggestions() {
   showResultPanel('Order Suggestions', "Materials projected to fall below their safety stock floor before a fresh order could arrive — not just-in-time");
   try {
-    const suggestions = await osFetchSuggestions();
-    osRenderSuggestionList(suggestions);
+    const groups = await osFetchSuggestions(); // grouped by vendor — see groupSuggestionsByVendor server-side
+    osRenderSuggestionList(groups);
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
@@ -4597,52 +4597,104 @@ async function osFetchTracked() {
   return json.data;
 }
 
-function osRenderSuggestionList(suggestions) {
-  document.getElementById('result-row-badge').textContent = `${suggestions.length} need${suggestions.length === 1 ? 's' : ''} ordering`;
+function osRenderSuggestionList(groups) {
+  const totalMaterials = groups.reduce((sum, g) => sum + g.materials.length, 0);
+  document.getElementById('result-row-badge').textContent =
+    `${totalMaterials} need${totalMaterials === 1 ? 's' : ''} ordering across ${groups.length} vendor${groups.length === 1 ? '' : 's'}`;
   document.getElementById('result-row-badge').classList.remove('hidden');
 
-  const rows = suggestions.map((s, i) => {
-    const urgencyBadge = s.urgency === 'Overdue'
-      ? `<span class="tile-badge" style="background:var(--error,#DC2626);color:#fff">Overdue</span>`
-      : `<span class="tile-badge" style="background:var(--warning,#D97706);color:#fff">Due Soon</span>`;
-    const agreementCell = s.isSpotPo
-      ? `<span style="color:var(--warning,#D97706)">Spot PO</span>`
-      : esc(s.scheduleAgreement || '—');
+  if (!groups.length) {
+    document.getElementById('result-body').innerHTML = `
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+        <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
+      </div>
+      <div class="sap-empty">Nothing needs ordering right now.</div>`;
+    document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
+    return;
+  }
+
+  // Vendors with a combined order-level MOQ (dbo.Vendor.OrderMoqQty) are
+  // forced through the Build Order modal rather than getting a per-row quick
+  // Accept — accepting one material alone would silently leave the order
+  // short of the minimum, which defeats the point of tracking it at all.
+  const sections = groups.map((g, gi) => {
+    const hasMoq = !!g.orderMoqQty;
+    const moqBadge = hasMoq
+      ? `<span class="tile-badge" style="background:${g.moqMet ? 'var(--success,#16A34A)' : 'var(--error,#DC2626)'};color:#fff">
+           ${g.moqMet ? 'MOQ met' : `Short ${g.moqShortfall.toLocaleString()} ${esc(g.orderMoqUom || '')} of MOQ`}
+         </span>`
+      : '';
+
+    const rows = g.materials.map((s, mi) => {
+      const urgencyBadge = s.urgency === 'Overdue'
+        ? `<span class="tile-badge" style="background:var(--error,#DC2626);color:#fff">Overdue</span>`
+        : `<span class="tile-badge" style="background:var(--warning,#D97706);color:#fff">Due Soon</span>`;
+      const agreementCell = s.isSpotPo
+        ? `<span style="color:var(--warning,#D97706)">Spot PO</span>`
+        : esc(s.scheduleAgreement || '—');
+      const acceptCell = hasMoq
+        ? `<span style="font-size:11px;color:var(--text-secondary,#666)">via Build Order</span>`
+        : `<button class="btn-submit os-accept-btn" data-gi="${gi}" data-mi="${mi}" style="padding:4px 12px;font-size:11px">Accept</button>`;
+      return `
+        <tr class="admin-row">
+          <td><strong>${esc(s.material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(s.materialText || '')}</div></td>
+          <td>${urgencyBadge}<div style="font-size:11px;margin-top:2px">Order by ${formatDisplayDate(s.orderByDate)}</div></td>
+          <td>${Number(s.currentStock).toLocaleString()} ${esc(s.uom || '')}</td>
+          <td>${Number(s.safetyStockQty).toLocaleString()} ${esc(s.uom || '')}</td>
+          <td>${formatDisplayDate(s.breachDate)}</td>
+          <td>${s.leadTimeDays}${s.transitTimeDays != null ? ` (+${s.transitTimeDays} transit)` : ''}d</td>
+          <td><strong>${Number(s.suggestedQty).toLocaleString()}</strong> ${esc(s.uom || '')}${s.materialMoqQty ? `<div style="font-size:11px;color:var(--text-secondary,#666)">MOQ ${Number(s.materialMoqQty).toLocaleString()}</div>` : ''}</td>
+          <td>${agreementCell}</td>
+          <td style="text-align:right">${acceptCell}</td>
+        </tr>`;
+    }).join('');
+
     return `
-      <tr class="admin-row">
-        <td><strong>${esc(s.material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(s.materialText || '')}</div></td>
-        <td>${esc(s.vendorName)}</td>
-        <td>${urgencyBadge}<div style="font-size:11px;margin-top:2px">Order by ${formatDisplayDate(s.orderByDate)}</div></td>
-        <td>${Number(s.currentStock).toLocaleString()} ${esc(s.uom || '')}</td>
-        <td>${Number(s.safetyStockQty).toLocaleString()} ${esc(s.uom || '')}</td>
-        <td>${formatDisplayDate(s.breachDate)}</td>
-        <td>${s.leadTimeDays}${s.transitTimeDays != null ? ` (+${s.transitTimeDays} transit)` : ''}d</td>
-        <td><strong>${Number(s.suggestedQty).toLocaleString()}</strong> ${esc(s.uom || '')}${s.materialMoqQty ? `<div style="font-size:11px;color:var(--text-secondary,#666)">MOQ ${Number(s.materialMoqQty).toLocaleString()}</div>` : ''}</td>
-        <td>${agreementCell}</td>
-        <td style="text-align:right"><button class="btn-submit os-accept-btn" data-i="${i}" style="padding:4px 12px;font-size:11px">Accept</button></td>
-      </tr>`;
+      <div class="ps-section">
+        <div class="ps-section-header" style="display:flex;align-items:center;gap:10px">
+          <span class="ps-section-dot ps-section-dot--today"></span>
+          <span class="ps-section-title">${esc(g.vendorName)}</span>
+          <span class="ps-section-count">${g.materials.length}</span>
+          ${moqBadge}
+          ${hasMoq ? `<button class="btn-submit os-build-order-btn" data-vendor-id="${g.vendorId}" style="margin-left:auto;padding:4px 12px;font-size:11px">Build Order</button>` : ''}
+        </div>
+        <div class="ps-section-body">
+          <div style="overflow-x:auto">
+            <table class="pn-batch-table admin-table">
+              <thead><tr>
+                <th>Material</th><th>Urgency</th><th>Current Stock</th><th>Safety Floor</th>
+                <th>Breach Date</th><th>Lead Time</th><th>Suggested Qty</th><th>Agreement</th><th></th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>`;
   }).join('');
 
   document.getElementById('result-body').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px">
-      <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor (Min Safety Stock on the material, falling back to SAP's own safety stock) — deliberately not just-in-time, since supplier dates often slip.</div>
+      <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor — not just-in-time. Vendors with a combined order MOQ are grouped so you can see whether one order clears it; use Build Order to combine materials and hit the minimum.</div>
       <button class="btn-secondary" id="os-view-tracked-btn" style="white-space:nowrap">View Tracked Orders →</button>
     </div>
-    ${suggestions.length ? `
-      <div style="overflow-x:auto">
-        <table class="pn-batch-table admin-table">
-          <thead><tr>
-            <th>Material</th><th>Vendor</th><th>Urgency</th><th>Current Stock</th>
-            <th>Safety Floor</th><th>Breach Date</th><th>Lead Time</th><th>Suggested Qty</th><th>Agreement</th><th></th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>` : '<div class="sap-empty">Nothing needs ordering right now.</div>'}
+    ${sections}
   `;
 
   document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
   document.querySelectorAll('.os-accept-btn').forEach(btn => {
-    btn.addEventListener('click', () => osOpenAcceptModal(suggestions[Number(btn.dataset.i)]));
+    btn.addEventListener('click', () => {
+      const g = groups[Number(btn.dataset.gi)];
+      osOpenAcceptModal(g.materials[Number(btn.dataset.mi)]);
+    });
+  });
+  document.querySelectorAll('.os-build-order-btn').forEach(btn => {
+    btn.addEventListener('click', () => osOpenBuildOrderModal(btn.dataset.vendorId));
+  });
+  document.querySelectorAll('.ps-section-header').forEach(hdr => {
+    hdr.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return; // don't collapse when the Build Order button is clicked
+      hdr.closest('.ps-section').classList.toggle('ps-section--collapsed');
+    });
   });
 }
 
@@ -4714,6 +4766,162 @@ function osOpenAcceptModal(s) {
       runOrderSuggestions();
     } catch (err) {
       document.getElementById('os-accept-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Accept Order';
+    }
+  });
+}
+
+
+// Combines several materials from one vendor into a single order — the way
+// a combined order-level MOQ (dbo.Vendor.OrderMoqQty) actually gets managed,
+// rather than just noted. Lists every material this vendor supplies (not
+// only the ones currently due), pre-checks the ones that are, and shows the
+// running total against the MOQ live as materials are checked/unchecked or
+// quantities adjusted, so a buyer can pull in a not-yet-urgent material to
+// close a gap without leaving the page to go check stock levels elsewhere.
+async function osOpenBuildOrderModal(vendorId) {
+  openModal(`<div class="ps-modal" style="max-width:760px;width:95vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Build Order</div><div class="ps-modal-sub" id="os-build-vendor-name">Loading…</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div id="os-build-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
+    </div>
+  </div>`);
+
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/vendor/${vendorId}/build`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load vendor materials');
+    osRenderBuildOrderForm(json.data);
+  } catch (err) {
+    document.getElementById('os-build-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+const OS_URGENCY_LABEL = { Overdue: 'Overdue', DueSoon: 'Due Soon', Upcoming: 'Upcoming', NotDue: 'Not due' };
+
+function osRenderBuildOrderForm(build) {
+  document.getElementById('os-build-vendor-name').textContent = build.vendorName;
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  const rows = build.materials.map((m, i) => {
+    const checked = m.dueNow && m.suggestedQty > 0;
+    return `
+      <tr class="admin-row">
+        <td><input type="checkbox" class="os-build-check" data-i="${i}" ${checked ? 'checked' : ''}></td>
+        <td><strong>${esc(m.material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.materialText || '')}</div></td>
+        <td>${esc(OS_URGENCY_LABEL[m.urgency] || m.urgency)}${m.orderByDate ? `<div style="font-size:11px">by ${formatDisplayDate(m.orderByDate)}</div>` : ''}</td>
+        <td>${Number(m.currentStock).toLocaleString()} ${esc(m.uom || '')}</td>
+        <td><input class="tf-input os-build-qty" type="number" step="0.001" data-i="${i}" value="${checked ? m.suggestedQty : ''}" style="width:90px;padding:3px 6px;font-size:12px"></td>
+      </tr>`;
+  }).join('');
+
+  document.getElementById('os-build-body').innerHTML = `
+    <div class="tf-row">
+      <div class="tf-field">
+        <label class="tf-label">Order Date</label>
+        <input class="tf-input" type="date" id="os-build-order-date" value="${todayStr}">
+      </div>
+    </div>
+    <div style="overflow-x:auto;max-height:340px;overflow-y:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th></th><th>Material</th><th>Status</th><th>Current Stock</th><th>Order Qty</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div id="os-build-moq-status" style="margin-top:12px;padding:10px;border-radius:6px;font-size:13px"></div>
+    <div id="os-build-result"></div>
+    <div class="ps-modal-actions" style="margin-top:14px">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="os-build-save-btn">Accept Order</button>
+    </div>
+  `;
+
+  function updateMoqStatus() {
+    let total = 0;
+    document.querySelectorAll('.os-build-check').forEach(cb => {
+      if (cb.checked) {
+        const qtyInput = document.querySelector(`.os-build-qty[data-i="${cb.dataset.i}"]`);
+        total += Number(qtyInput.value) || 0;
+      }
+    });
+    const statusEl = document.getElementById('os-build-moq-status');
+    if (!build.orderMoqQty) {
+      statusEl.style.background = 'var(--bg-secondary,#F3F4F6)';
+      statusEl.textContent = `Combined qty: ${total.toLocaleString()} — this vendor has no combined order MOQ.`;
+    } else {
+      const shortfall = Number(build.orderMoqQty) - total;
+      if (shortfall > 0) {
+        statusEl.style.background = 'rgba(220,38,38,0.1)';
+        statusEl.style.color = 'var(--error,#DC2626)';
+        statusEl.textContent = `Combined qty: ${total.toLocaleString()} / ${Number(build.orderMoqQty).toLocaleString()} ${build.orderMoqUom || ''} MOQ — short by ${shortfall.toLocaleString()}. Check more materials or increase quantities to clear the minimum.`;
+      } else {
+        statusEl.style.background = 'rgba(22,163,74,0.1)';
+        statusEl.style.color = 'var(--success,#16A34A)';
+        statusEl.textContent = `Combined qty: ${total.toLocaleString()} / ${Number(build.orderMoqQty).toLocaleString()} ${build.orderMoqUom || ''} MOQ — met.`;
+      }
+    }
+    return total;
+  }
+
+  document.querySelectorAll('.os-build-check, .os-build-qty').forEach(el => {
+    el.addEventListener('input', updateMoqStatus);
+    el.addEventListener('change', updateMoqStatus);
+  });
+  updateMoqStatus();
+
+  document.getElementById('os-build-save-btn').addEventListener('click', async () => {
+    const items = [];
+    document.querySelectorAll('.os-build-check').forEach(cb => {
+      if (!cb.checked) return;
+      const m = build.materials[Number(cb.dataset.i)];
+      const qtyInput = document.querySelector(`.os-build-qty[data-i="${cb.dataset.i}"]`);
+      const orderQty = Number(qtyInput.value) || 0;
+      if (orderQty <= 0) return;
+      items.push({
+        vendorMaterialId: m.vendorMaterialId,
+        material: m.material,
+        suggestedQty: m.suggestedQty,
+        orderQty,
+        leadTimeDays: m.leadTimeDays,
+        transitTimeDays: m.transitTimeDays,
+        incoterms: m.incoterms,
+        isSpotPo: m.isSpotPo,
+      });
+    });
+
+    if (!items.length) {
+      document.getElementById('os-build-result').innerHTML = '<div class="sap-error">Check at least one material with a qty greater than 0.</div>';
+      return;
+    }
+
+    const total = updateMoqStatus();
+    if (build.orderMoqQty && total < Number(build.orderMoqQty)) {
+      const shortBy = (Number(build.orderMoqQty) - total).toLocaleString();
+      const proceed = confirm(`This order is short of ${build.vendorName}'s ${Number(build.orderMoqQty).toLocaleString()} ${build.orderMoqUom || ''} combined MOQ by ${shortBy}. Accept anyway?`);
+      if (!proceed) return;
+    }
+
+    const btn = document.getElementById('os-build-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch('/api/performance/order-suggestions/accept-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vendorId: build.vendorId,
+          orderDate: document.getElementById('os-build-order-date').value || null,
+          items,
+        }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to accept order');
+      closePickModal();
+      runOrderSuggestions();
+    } catch (err) {
+      document.getElementById('os-build-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
       btn.disabled = false; btn.textContent = 'Accept Order';
     }
   });

@@ -151,96 +151,224 @@ function findStockBelowThresholdDate(weeklyForecast, asOfDate, threshold) {
 // The live "what needs ordering" computation. Nothing here is persisted until
 // a suggestion is accepted (db.acceptOrderSuggestion) — this always reflects
 // current stock/usage/vendor data, recomputed fresh on every request.
+function groupIncomingByMaterial(incoming) {
+  const map = new Map();
+  incoming.forEach(r => {
+    const list = map.get(r.Material) || [];
+    list.push(r);
+    map.set(r.Material, list);
+  });
+  return map;
+}
+
+// One vendor-material row's full suggestion picture — used both for the
+// "needs ordering now" list (computeOrderSuggestions, filtered to dueNow)
+// and the Build Order modal (computeVendorOrderBuild, unfiltered, so a
+// buyer can pull in a material that isn't urgent yet to help clear a
+// vendor's combined order MOQ). Returns null only when there's no SAP
+// snapshot to compute from at all.
+function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate) {
+  if (r.StockQty == null && r.ConsignmentQty == null) return null;
+
+  const openOrders = incomingByMaterial.get(r.Material) || [];
+  const openQty = openOrders.reduce((sum, o) => sum + (Number(o.OrderQty) || 0), 0);
+
+  // Current stock includes ConsignmentQty (see the comment on the
+  // currentStock aggregate further down this file) and anything already
+  // incoming, so an item on order doesn't keep getting re-flagged.
+  const currentStock = (Number(r.StockQty) || 0) + (Number(r.ConsignmentQty) || 0) + openQty;
+  const predictedMonthly = [
+    r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
+    r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
+  ];
+
+  // Manually-maintained floor takes priority over SAP's EISBE — see
+  // MinSafetyStockQty's column comment in migrate_vendor_master_data.sql.
+  const safetyStockQty = Number(r.MinSafetyStockQty ?? r.SapSafetyStock ?? 0);
+
+  const weeklyForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, today);
+  const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
+
+  const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
+  const orderByDate = breachDate ? addDaysUtc(breachDate, -leadTimeDays) : null;
+  const dueNow = !!(orderByDate && orderByDate <= horizonDate);
+  const urgency = !breachDate ? 'NotDue' : (orderByDate < asOfDate ? 'Overdue' : (dueNow ? 'DueSoon' : 'Upcoming'));
+
+  // Suggested qty: cover lead time + a review-cycle buffer, rebuild the
+  // safety-stock floor, minus what's already on hand or already incoming.
+  // Zero (not negative) when nothing's needed — Upcoming/NotDue materials
+  // still get a real number here so the Build Order modal has something
+  // sensible to prefill if a buyer opts to pull one in early.
+  let suggestedQty = 0;
+  if (breachDate) {
+    const coverageDays = leadTimeDays + ORDER_COVERAGE_BUFFER_DAYS;
+    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays);
+    const qty = demandOverCoverage + safetyStockQty - currentStock;
+    if (qty > 0) {
+      // Only force the material's own MOQ floor when it's actually due —
+      // don't inflate an "upcoming" material's number just because it has a
+      // small MOQ of its own.
+      const moq = Number(r.MaterialMoqQty) || 0;
+      suggestedQty = Math.round((dueNow && moq > qty ? moq : qty) * 1000) / 1000;
+    }
+  }
+
+  const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
+  const transitTimeDays = isExw ? (Number(r.TransitTimeDays) || 0) : null;
+
+  return {
+    vendorMaterialId: r.VendorMaterialId,
+    vendorId: r.VendorId,
+    vendorName: r.VendorName,
+    material: r.Material,
+    materialText: r.MaterialText,
+    uom: r.Uom,
+    mrpController: r.MrpController,
+    currentStock: Math.round(currentStock * 1000) / 1000,
+    openIncomingQty: Math.round(openQty * 1000) / 1000,
+    safetyStockQty,
+    breachDate: breachDate ? breachDate.toISOString().slice(0, 10) : null,
+    leadTimeDays,
+    transitTimeDays,
+    orderByDate: orderByDate ? orderByDate.toISOString().slice(0, 10) : null,
+    urgency,
+    dueNow,
+    suggestedQty,
+    materialMoqQty: r.MaterialMoqQty,
+    orderMoqQty: r.OrderMoqQty,
+    orderMoqUom: r.OrderMoqUom,
+    incoterms: r.Incoterms || null,
+    isSpotPo: !r.ScheduleAgreement,
+    scheduleAgreement: r.ScheduleAgreement || null,
+  };
+}
+
+// The live "what needs ordering" computation. Nothing here is persisted until
+// a suggestion is accepted (db.acceptOrderSuggestion) — this always reflects
+// current stock/usage/vendor data, recomputed fresh on every request.
 async function computeOrderSuggestions() {
   const [rows, incoming] = await Promise.all([
     db.listVendorMaterialsForSuggestions(),
     db.listOpenIncomingOrders(),
   ]);
-
-  const incomingByMaterial = new Map();
-  incoming.forEach(r => {
-    const list = incomingByMaterial.get(r.Material) || [];
-    list.push(r);
-    incomingByMaterial.set(r.Material, list);
-  });
+  const incomingByMaterial = groupIncomingByMaterial(incoming);
 
   const today = new Date();
   const asOfDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
   const horizonDate = addDaysUtc(asOfDate, ORDER_REVIEW_HORIZON_DAYS);
 
   const suggestions = [];
-
   for (const r of rows) {
-    // Can't compute anything without a matching SAP snapshot (stock + usage).
-    if (r.StockQty == null && r.ConsignmentQty == null) continue;
-
-    const openOrders = incomingByMaterial.get(r.Material) || [];
-    const openQty = openOrders.reduce((sum, o) => sum + (Number(o.OrderQty) || 0), 0);
-
-    // Current stock includes ConsignmentQty (see the comment on the
-    // currentStock aggregate further down this file) and anything already
-    // incoming, so an item on order doesn't keep getting re-flagged.
-    const currentStock = (Number(r.StockQty) || 0) + (Number(r.ConsignmentQty) || 0) + openQty;
-    const predictedMonthly = [
-      r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
-      r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
-    ];
-
-    // Manually-maintained floor takes priority over SAP's EISBE — see
-    // MinSafetyStockQty's column comment in migrate_vendor_master_data.sql.
-    const safetyStockQty = Number(r.MinSafetyStockQty ?? r.SapSafetyStock ?? 0);
-
-    const weeklyForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, today);
-    const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
-    if (!breachDate) continue; // never projected to breach the floor in the 13-month horizon
-
-    const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
-    const orderByDate = addDaysUtc(breachDate, -leadTimeDays);
-    if (orderByDate > horizonDate) continue; // not due for review yet
-
-    const urgency = orderByDate < asOfDate ? 'Overdue' : 'DueSoon';
-
-    // Suggested qty: cover lead time + a review-cycle buffer, rebuild the
-    // safety-stock floor, minus what's already on hand or already incoming.
-    const coverageDays = leadTimeDays + ORDER_COVERAGE_BUFFER_DAYS;
-    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays);
-    let suggestedQty = demandOverCoverage + safetyStockQty - currentStock;
-    if (suggestedQty <= 0) continue; // already covered despite the timing flag (e.g. a large open order)
-    const moq = Number(r.MaterialMoqQty) || 0;
-    if (moq > suggestedQty) suggestedQty = moq;
-    suggestedQty = Math.round(suggestedQty * 1000) / 1000;
-
-    const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
-    const transitTimeDays = isExw ? (Number(r.TransitTimeDays) || 0) : null;
-
-    suggestions.push({
-      vendorMaterialId: r.VendorMaterialId,
-      vendorId: r.VendorId,
-      vendorName: r.VendorName,
-      material: r.Material,
-      materialText: r.MaterialText,
-      uom: r.Uom,
-      mrpController: r.MrpController,
-      currentStock: Math.round(currentStock * 1000) / 1000,
-      openIncomingQty: Math.round(openQty * 1000) / 1000,
-      safetyStockQty,
-      breachDate: breachDate.toISOString().slice(0, 10),
-      leadTimeDays,
-      transitTimeDays,
-      orderByDate: orderByDate.toISOString().slice(0, 10),
-      urgency,
-      suggestedQty,
-      materialMoqQty: r.MaterialMoqQty,
-      orderMoqQty: r.OrderMoqQty,
-      orderMoqUom: r.OrderMoqUom,
-      incoterms: r.Incoterms || null,
-      isSpotPo: !r.ScheduleAgreement,
-      scheduleAgreement: r.ScheduleAgreement || null,
-    });
+    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate);
+    if (built && built.dueNow && built.suggestedQty > 0) suggestions.push(built);
   }
 
   suggestions.sort((a, b) => a.orderByDate.localeCompare(b.orderByDate));
   return suggestions;
+}
+
+// Groups the flat "needs ordering" list by vendor and tallies the running
+// total against that vendor's combined order-level MOQ (dbo.Vendor.
+// OrderMoqQty) — without this a buyer has to manually add up several
+// materials' suggested quantities themselves to know whether a single order
+// would even clear the vendor's shipping/order minimum.
+function groupSuggestionsByVendor(suggestions) {
+  const groups = new Map();
+  for (const s of suggestions) {
+    if (!groups.has(s.vendorId)) {
+      groups.set(s.vendorId, {
+        vendorId: s.vendorId,
+        vendorName: s.vendorName,
+        orderMoqQty: s.orderMoqQty,
+        orderMoqUom: s.orderMoqUom,
+        materials: [],
+      });
+    }
+    groups.get(s.vendorId).materials.push(s);
+  }
+
+  const result = Array.from(groups.values()).map(g => {
+    const combinedQty = g.materials.reduce((sum, m) => sum + (Number(m.suggestedQty) || 0), 0);
+    const moqShortfall = g.orderMoqQty ? Math.max(0, Number(g.orderMoqQty) - combinedQty) : 0;
+    const earliestOrderByDate = g.materials.reduce(
+      (min, m) => (!min || m.orderByDate < min) ? m.orderByDate : min, null
+    );
+    return {
+      ...g,
+      combinedQty: Math.round(combinedQty * 1000) / 1000,
+      moqMet: !g.orderMoqQty || moqShortfall <= 0,
+      moqShortfall: Math.round(moqShortfall * 1000) / 1000,
+      earliestOrderByDate,
+    };
+  });
+
+  result.sort((a, b) => (a.earliestOrderByDate || '9999').localeCompare(b.earliestOrderByDate || '9999'));
+  return result;
+}
+
+// Every material a vendor supplies (not just the ones currently due) so the
+// Build Order modal can offer pulling a not-yet-urgent material into the
+// order to help clear a combined MOQ, alongside the ones actually needed.
+async function computeVendorOrderBuild(vendorId) {
+  const [rows, incoming] = await Promise.all([
+    db.listVendorMaterialsForSuggestions(),
+    db.listOpenIncomingOrders(),
+  ]);
+  const incomingByMaterial = groupIncomingByMaterial(incoming);
+
+  const today = new Date();
+  const asOfDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const horizonDate = addDaysUtc(asOfDate, ORDER_REVIEW_HORIZON_DAYS);
+
+  const vendorRows = rows.filter(r => r.VendorId === vendorId);
+  const materials = [];
+  let vendorName = null, orderMoqQty = null, orderMoqUom = null;
+
+  for (const r of vendorRows) {
+    vendorName = r.VendorName;
+    orderMoqQty = r.OrderMoqQty;
+    orderMoqUom = r.OrderMoqUom;
+    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate);
+    if (built) materials.push(built);
+  }
+
+  materials.sort((a, b) => {
+    if (a.dueNow !== b.dueNow) return a.dueNow ? -1 : 1;
+    return (a.orderByDate || '9999').localeCompare(b.orderByDate || '9999');
+  });
+
+  return { vendorId, vendorName, orderMoqQty, orderMoqUom, materials };
+}
+
+// Shared date-math for accepting a suggestion, used by both the single-item
+// and batch accept routes so the EXW ready-to-collect logic only lives in
+// one place.
+function buildAcceptPayload({
+  vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
+  leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+}) {
+  const leadTime = Number(leadTimeDays) || 0;
+  const deliveryDate = addDaysUtc(orderDateObj, leadTime);
+
+  // EXW: the date actually quoted to the supplier is the ready-to-collect
+  // date, not the delivery date — see migrate_vendor_master_data.sql's DATE
+  // MATH block. Every other Incoterm leaves these columns NULL/unused.
+  const isExw = (incoterms || '').toUpperCase() === 'EXW';
+  const transitTime = isExw ? (Number(transitTimeDays) || 0) : null;
+  const readyToCollectDate = isExw ? addDaysUtc(deliveryDate, -(transitTime || 0)) : null;
+
+  return {
+    vendorMaterialId, vendorId, material,
+    suggestedQty: suggestedQty ?? null,
+    orderQty,
+    orderDate: orderDateObj,
+    leadTimeDaysUsed: leadTime,
+    deliveryDate,
+    transitTimeDaysUsed: transitTime,
+    readyToCollectDate,
+    isSpotPo: !!isSpotPo,
+    notes: notes || null,
+  };
 }
 
 const router = express.Router();
@@ -1562,7 +1690,17 @@ router.post('/turns-valclass/change-valuation-class', requirePermission('LOG_MRP
 // ── Order suggestions (MRP Phase 2b) ────────────────────────────────────────
 router.get('/order-suggestions', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const data = await computeOrderSuggestions();
+    const suggestions = await computeOrderSuggestions();
+    const data = groupSuggestionsByVendor(suggestions);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.get('/order-suggestions/vendor/:vendorId/build', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await computeVendorOrderBuild(Number(req.params.vendorId));
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -1584,30 +1722,61 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
     }
 
     const orderDateObj = orderDate ? new Date(orderDate) : new Date();
-    const leadTime = Number(leadTimeDays) || 0;
-    const deliveryDate = addDaysUtc(orderDateObj, leadTime);
-
-    // EXW: the date actually quoted to the supplier is the ready-to-collect
-    // date, not the delivery date — see migrate_vendor_master_data.sql's DATE
-    // MATH block. Every other Incoterm leaves these columns NULL/unused.
-    const isExw = (incoterms || '').toUpperCase() === 'EXW';
-    const transitTime = isExw ? (Number(transitTimeDays) || 0) : null;
-    const readyToCollectDate = isExw ? addDaysUtc(deliveryDate, -(transitTime || 0)) : null;
-
-    const suggestionId = await db.acceptOrderSuggestion({
-      vendorMaterialId, vendorId, material,
-      suggestedQty: suggestedQty ?? null,
-      orderQty,
-      orderDate: orderDateObj,
-      leadTimeDaysUsed: leadTime,
-      deliveryDate,
-      transitTimeDaysUsed: transitTime,
-      readyToCollectDate,
-      isSpotPo: !!isSpotPo,
-      notes: notes || null,
+    const payload = buildAcceptPayload({
+      vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
+      leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
     });
+    const suggestionId = await db.acceptOrderSuggestion(payload);
 
     res.json({ success: true, data: { suggestionId } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Combines several materials from one vendor into a single accepted order —
+// the Build Order modal's submit path, for clearing a vendor's combined
+// order-level MOQ (dbo.Vendor.OrderMoqQty) rather than accepting materials
+// one at a time and hoping they happen to add up. Every item gets its own
+// PurchaseOrderSuggestion row (lead time/dates/spot-PO can differ per
+// material even within one vendor) but shares the same OrderDate. Items
+// missing required fields are skipped rather than failing the whole batch,
+// since a partially-filled row in the modal shouldn't block the rest.
+router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { vendorId, orderDate, items } = req.body;
+    if (!vendorId || !Array.isArray(items) || !items.length) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'vendorId and a non-empty items array are required.' }
+      });
+    }
+
+    const orderDateObj = orderDate ? new Date(orderDate) : new Date();
+    const suggestionIds = [];
+
+    for (const item of items) {
+      const {
+        vendorMaterialId, material, suggestedQty, orderQty,
+        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+      } = item || {};
+      if (!vendorMaterialId || !material || !orderQty) continue;
+
+      const payload = buildAcceptPayload({
+        vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
+        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+      });
+      suggestionIds.push(await db.acceptOrderSuggestion(payload));
+    }
+
+    if (!suggestionIds.length) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'No valid items to accept — each item needs vendorMaterialId, material and orderQty > 0.' }
+      });
+    }
+
+    res.json({ success: true, data: { suggestionIds } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
