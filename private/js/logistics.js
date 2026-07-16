@@ -6095,6 +6095,23 @@ function normaliseCsvQty(value) {
   return /^-?\d+,\d+$/.test(v) ? v.replace(',', '.') : v;
 }
 
+// JS's Date constructor only reliably understands ISO (YYYY-MM-DD); the
+// network's locale writes dates as DD.MM.YY(YY) or DD/MM/YY(YY) (e.g.
+// "21.07.26"), which Date() silently turns into an Invalid Date — that then
+// fails server-side with "Validation failed for parameter 'orderDate'.
+// Invalid date." Converts the locale format to ISO before sending; already-
+// ISO values and anything unrecognised pass through unchanged so the server
+// still surfaces its own error for genuinely bad input.
+function normaliseCsvDate(value) {
+  const v = String(value || '').trim();
+  if (!v || /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const m = v.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2}|\d{4})$/);
+  if (!m) return v;
+  const [, dd, mm, yy] = m;
+  const year = yy.length === 2 ? (Number(yy) < 50 ? `20${yy}` : `19${yy}`) : yy;
+  return `${year}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+}
+
 function parseManualOrderCsv(text) {
   const rows = parseCsvText(text);
   if (!rows.length) return [];
@@ -6104,6 +6121,8 @@ function parseManualOrderCsv(text) {
     const obj = {};
     headerKeys.forEach((key, i) => { if (key) obj[key] = (cols[i] || '').trim(); });
     if (obj.orderQty) obj.orderQty = normaliseCsvQty(obj.orderQty);
+    if (obj.orderDate) obj.orderDate = normaliseCsvDate(obj.orderDate);
+    if (obj.deliveryDate) obj.deliveryDate = normaliseCsvDate(obj.deliveryDate);
     return obj;
   }).filter(obj => obj.vendor || obj.material);
 }
