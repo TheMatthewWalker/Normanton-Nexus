@@ -1207,7 +1207,8 @@ export async function listOrderShipments() {
     SELECT
       s.ShipmentId, s.ShipmentReference, s.DispatchDate, s.ExpectedEta,
       s.Haulier, s.ModeOfTransport, s.TrackingNumber, s.BillOfLading, s.ContainerNumber,
-      s.Notes, s.ReceivedAtUtc, s.ReceivedBy, s.CreatedAtUtc, s.UpdatedAtUtc,
+      s.Notes, s.ReceivedAtUtc, s.ReceivedBy, s.CancelledAtUtc, s.CancelledBy,
+      s.CreatedAtUtc, s.UpdatedAtUtc,
       (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount
     FROM dbo.PurchaseOrderShipment s
     ORDER BY s.CreatedAtUtc DESC
@@ -1216,6 +1217,9 @@ export async function listOrderShipments() {
 }
 
 // Single shipment plus its linked order lines — the Inbound Log detail view.
+// A cancelled shipment will always come back with an empty orders array —
+// cancelOrderShipment unlinks every order from it, so there's nothing left
+// to join against.
 export async function getOrderShipmentWithOrders(shipmentId) {
   const pool = await getPool();
   const { recordset: shipmentRows } = await pool.request()
@@ -1223,7 +1227,7 @@ export async function getOrderShipmentWithOrders(shipmentId) {
     .query(`
       SELECT ShipmentId, ShipmentReference, DispatchDate, ExpectedEta,
              Haulier, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber,
-             Notes, ReceivedAtUtc, ReceivedBy, CreatedAtUtc, UpdatedAtUtc
+             Notes, ReceivedAtUtc, ReceivedBy, CancelledAtUtc, CancelledBy, CreatedAtUtc, UpdatedAtUtc
       FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId
     `);
   const shipment = shipmentRows[0] || null;
@@ -1271,9 +1275,22 @@ export async function updateOrderShipment(shipmentId, {
 }
 
 // shipmentId may be null to unassign (e.g. an order was linked to the wrong
-// load by mistake).
+// load by mistake). Enforced, not hinted: re-checks the target shipment
+// isn't cancelled fresh from the DB rather than trusting the caller, same
+// convention as the MOQ/max-qty checks elsewhere in this file — a stale
+// picker showing a shipment that's since been cancelled must not be able to
+// link an order to it.
 export async function assignOrderShipment(suggestionId, shipmentId) {
   const pool = await getPool();
+
+  if (shipmentId) {
+    const { recordset } = await pool.request()
+      .input('shipmentId', sql.Int, shipmentId)
+      .query('SELECT CancelledAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+    if (!recordset[0]) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
+    if (recordset[0].CancelledAtUtc) { const err = new Error('This shipment has been cancelled and cannot accept orders.'); err.statusCode = 400; throw err; }
+  }
+
   await pool.request()
     .input('suggestionId', sql.Int, suggestionId)
     .input('shipmentId',   sql.Int, shipmentId || null)
@@ -1281,6 +1298,42 @@ export async function assignOrderShipment(suggestionId, shipmentId) {
       UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
       WHERE SuggestionId = @suggestionId
     `);
+}
+
+// Cancels a shipment (Inbound Log's "Cancel Shipment" action) and unlinks
+// every order currently on it — the orders themselves are left exactly as
+// they were (Status untouched), just no longer pointing at a dead shipment,
+// so they're free to be picked up in a new shipment later. Only possible
+// before the shipment is received: a received shipment's orders are already
+// Booked (see markShipmentReceived), so there'd be nothing sensible left to
+// unlink them back to.
+export async function cancelOrderShipment(shipmentId, cancelledBy) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query('SELECT ShipmentId, ReceivedAtUtc, CancelledAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+  const shipment = recordset[0];
+  if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
+  if (shipment.CancelledAtUtc) { const err = new Error('This shipment has already been cancelled.'); err.statusCode = 400; throw err; }
+  if (shipment.ReceivedAtUtc) { const err = new Error('Cannot cancel a shipment that has already been marked received.'); err.statusCode = 400; throw err; }
+
+  await pool.request()
+    .input('shipmentId',   sql.Int, shipmentId)
+    .input('cancelledBy',  sql.NVarChar(100), cancelledBy || null)
+    .query(`
+      UPDATE dbo.PurchaseOrderShipment SET CancelledAtUtc = GETUTCDATE(), CancelledBy = @cancelledBy, UpdatedAtUtc = GETUTCDATE()
+      WHERE ShipmentId = @shipmentId
+    `);
+
+  const { recordset: unlinked } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`
+      UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = NULL, UpdatedAtUtc = GETUTCDATE()
+      OUTPUT INSERTED.SuggestionId
+      WHERE ShipmentId = @shipmentId
+    `);
+
+  return { unlinkedCount: unlinked.length };
 }
 
 // PLACEHOLDER — real SAP goods-receipt posting (MIGO-equivalent RFC via

@@ -23,6 +23,15 @@
         BillOfLading / ContainerNumber — for sea/rail freight.
         ReceivedAtUtc / ReceivedBy — stamped when an operator marks the
           shipment received (see STATUS LIFECYCLE below); NULL until then.
+        CancelledAtUtc / CancelledBy — stamped by Cancel Shipment (Inbound
+          Log). Cancelling unlinks every order on the shipment (sets their
+          PurchaseOrderSuggestion.ShipmentId back to NULL, leaving the
+          order's own Status untouched) rather than deleting the shipment
+          row, so it stays visible for audit. Only possible before the
+          shipment is received — a received shipment's orders are already
+          Booked, so cancelling would leave them pointing at a dead
+          shipment; markShipmentReceived and cancelOrderShipment are
+          mutually exclusive terminal states.
       Deliberately separate from Logistics.dbo.ShipmentMain (outbound
       customer deliveries, KN booking API integration) — this is inbound
       only. Several PurchaseOrderSuggestion rows can point at the same
@@ -105,6 +114,17 @@ IF COL_LENGTH('dbo.PurchaseOrderShipment', 'ReceivedBy') IS NULL
   ALTER TABLE dbo.PurchaseOrderShipment ADD ReceivedBy NVARCHAR(100) NULL;
 
 PRINT 'dbo.PurchaseOrderShipment dispatch/ETA/B-L/container/received columns verified/added';
+
+
+/* ── 1c. PurchaseOrderShipment — add CancelledAtUtc/CancelledBy columns
+   (existing installs). Same COL_LENGTH()-guarded pattern used elsewhere;
+   safe to re-run. */
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'CancelledAtUtc') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD CancelledAtUtc DATETIME NULL;
+IF COL_LENGTH('dbo.PurchaseOrderShipment', 'CancelledBy') IS NULL
+  ALTER TABLE dbo.PurchaseOrderShipment ADD CancelledBy NVARCHAR(100) NULL;
+
+PRINT 'dbo.PurchaseOrderShipment CancelledAtUtc/CancelledBy columns verified/added';
 
 
 /* ── 2. PurchaseOrderSuggestion — add ShipmentId column (existing installs)

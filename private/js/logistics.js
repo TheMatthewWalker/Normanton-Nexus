@@ -5383,6 +5383,7 @@ function osRenderTrackedList(tracked) {
       <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
       <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
+      <button type="button" class="btn-secondary" id="os-auto-shipment-btn" disabled>Auto-Shipment</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
     </div>
     ${tracked.length ? `
@@ -5398,6 +5399,7 @@ function osRenderTrackedList(tracked) {
   document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
   document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
+  document.getElementById('os-auto-shipment-btn').addEventListener('click', () => autoCreateShipments());
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -5422,6 +5424,8 @@ function onTrackedCheckToggle(e) {
     : 'Select order lines to create a shipment, or manage individually below.';
   const btn = document.getElementById('os-create-shipment-btn');
   if (btn) btn.disabled = selectedTrackedIds.size === 0;
+  const autoBtn = document.getElementById('os-auto-shipment-btn');
+  if (autoBtn) autoBtn.disabled = selectedTrackedIds.size === 0;
 }
 
 // Full-row update, matching the backend's convention (see
@@ -5490,7 +5494,10 @@ async function openAssignShipmentModal(t) {
     const res  = await fetch('/api/performance/order-suggestions/shipments');
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load shipments');
-    const optionsHtml = json.data.map(s =>
+    // Cancelled shipments can't accept orders (enforced server-side too, in
+    // assignOrderShipment) — leaving them out of the picker avoids a
+    // pointless round trip to discover that.
+    const optionsHtml = json.data.filter(s => !s.CancelledAtUtc).map(s =>
       `<option value="${s.ShipmentId}" ${hasShipment && Number(t.ShipmentId) === s.ShipmentId ? 'selected' : ''}>${esc(s.ShipmentReference || `Shipment #${s.ShipmentId}`)} — ${esc(s.Haulier || 'no haulier set')} (${s.OrderCount} order${s.OrderCount === 1 ? '' : 's'})</option>`
     ).join('');
     existingSelect.innerHTML = `<option value="">— None —</option>${optionsHtml}`;
@@ -5664,6 +5671,77 @@ function showCreateShipmentSuccess(data) {
   </div>`);
   document.getElementById('cs-view-inbound-btn').addEventListener('click', () => { closePickModal(); runInboundLog(); });
   runOrderSuggestionsTracked();
+}
+
+// Same due date shown in the table's Due Date column — the raw value, not
+// the formatted label — used as the auto-shipment's Expected ETA below.
+function getOrderDueDateIso(t) {
+  const raw = (t.IsSpotPo && t.ReadyToCollectDate) ? t.ReadyToCollectDate : t.DeliveryDate;
+  return raw ? String(raw).slice(0, 10) : null;
+}
+
+// "Auto-Shipment" — for vendors who are always delivered on the day
+// they're ordered, so there's nothing to fill in: no modal, one shipment
+// per selected order line (not one combined shipment, since each order can
+// have its own due date), haulier fixed to 'Supplier Transport', Expected
+// ETA taken straight from the order's own due date, tracking/dispatch left
+// blank to be filled in later from the Inbound Log if it turns out to
+// matter for that delivery.
+async function autoCreateShipments() {
+  const ids = [...selectedTrackedIds];
+  if (!ids.length) return;
+  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+
+  const btn = document.getElementById('os-auto-shipment-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+
+  const results = [];
+  for (const t of rows) {
+    try {
+      const res = await fetch('/api/performance/order-suggestions/shipments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          haulier: 'Supplier Transport',
+          expectedEta: getOrderDueDateIso(t),
+          suggestionIds: [t.SuggestionId],
+        }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to create shipment');
+      results.push({ material: t.Material, success: true, reference: json.data.shipmentReference });
+    } catch (err) {
+      results.push({ material: t.Material, success: false, error: err.message });
+    }
+  }
+
+  selectedTrackedIds = new Set();
+  if (btn) { btn.disabled = false; btn.textContent = 'Auto-Shipment'; }
+  showAutoShipmentSummary(results);
+  runOrderSuggestionsTracked();
+}
+
+function showAutoShipmentSummary(results) {
+  const succeeded = results.filter(r => r.success).length;
+  openModal(`<div class="ps-modal lg-modal">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Auto-Shipment</div><div class="ps-modal-sub">${succeeded} of ${results.length} shipment${results.length === 1 ? '' : 's'} created</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <ul style="margin:0;padding-left:18px;font-size:12px">
+        ${results.map(r => r.success
+          ? `<li>${esc(r.material)} → <strong>${esc(r.reference)}</strong></li>`
+          : `<li style="list-style:none;margin-left:-18px" class="sap-error">${esc(r.material)}: ${esc(r.error)}</li>`
+        ).join('')}
+      </ul>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+      <button type="button" class="btn-submit" id="asm-view-inbound-btn">Open Inbound Log</button>
+    </div>
+  </div>`);
+  document.getElementById('asm-view-inbound-btn').addEventListener('click', () => { closePickModal(); runInboundLog(); });
 }
 
 // Records an order that already exists outside the suggestion engine — the
@@ -5847,7 +5925,9 @@ function renderInboundLog() {
       <td>${formatDisplayDate(s.ExpectedEta)}</td>
       <td>${esc(s.TrackingNumber || '-')}</td>
       <td>${s.OrderCount}</td>
-      <td>${s.ReceivedAtUtc ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
+      <td>${s.CancelledAtUtc
+        ? `<span style="color:var(--text-secondary,#666)">Cancelled ${formatDisplayDate(s.CancelledAtUtc)}</span>`
+        : (s.ReceivedAtUtc ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}` : '<span style="color:var(--text-secondary,#666)">Pending</span>')}</td>
     </tr>`).join('');
 
   document.getElementById('result-body').innerHTML = `
@@ -5891,9 +5971,11 @@ async function refreshInboundShipmentDetail(shipmentId) {
     const s = json.data;
 
     document.querySelector('.ps-modal-title').textContent = s.ShipmentReference || `Shipment #${s.ShipmentId}`;
-    document.querySelector('.ps-modal-sub').textContent = s.ReceivedAtUtc
-      ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}${s.ReceivedBy ? ' by ' + s.ReceivedBy : ''}`
-      : `${s.orders.length} order line${s.orders.length === 1 ? '' : 's'} — not yet received`;
+    document.querySelector('.ps-modal-sub').textContent = s.CancelledAtUtc
+      ? `Cancelled ${formatDisplayDate(s.CancelledAtUtc)}${s.CancelledBy ? ' by ' + s.CancelledBy : ''} — orders unlinked`
+      : (s.ReceivedAtUtc
+        ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}${s.ReceivedBy ? ' by ' + s.ReceivedBy : ''}`
+        : `${s.orders.length} order line${s.orders.length === 1 ? '' : 's'} — not yet received`);
 
     const ordersRows = s.orders.map(o => `
       <tr class="admin-row">
@@ -5961,15 +6043,18 @@ async function refreshInboundShipmentDetail(shipmentId) {
         </table>
       </div>`;
 
+    const isActive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
     actions.innerHTML = `
       <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+      ${isActive ? '<button type="button" class="btn-secondary" id="isd-cancel-btn">Cancel Shipment</button>' : ''}
       <button type="button" class="btn-secondary" id="isd-save-btn">Save Details</button>
-      ${s.ReceivedAtUtc ? '' : '<button type="button" class="btn-submit" id="isd-receive-btn">Mark Received</button>'}
+      ${isActive ? '<button type="button" class="btn-submit" id="isd-receive-btn">Mark Received</button>' : ''}
     `;
 
     document.getElementById('isd-save-btn').addEventListener('click', () => saveInboundShipmentDetail(shipmentId));
-    if (!s.ReceivedAtUtc) {
+    if (isActive) {
       document.getElementById('isd-receive-btn').addEventListener('click', () => markInboundShipmentReceived(shipmentId, s));
+      document.getElementById('isd-cancel-btn').addEventListener('click', () => cancelInboundShipment(shipmentId, s));
     }
   } catch (err) {
     body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
@@ -6028,6 +6113,35 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
   } catch (err) {
     if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = 'Mark Received'; }
+  }
+}
+
+// Unlinks every order on the shipment (their Status is left untouched —
+// they're just freed up to go on a different shipment later) and marks the
+// shipment cancelled. A destructive, hard-to-reverse action affecting every
+// order on the shipment, so this gets an explicit confirm() too.
+async function cancelInboundShipment(shipmentId, shipment) {
+  const orderCount = shipment.orders?.length || 0;
+  if (!confirm(`Cancel ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be unlinked and free to add to a different shipment.`)) return;
+  const btn = document.getElementById('isd-cancel-btn');
+  const result = document.getElementById('isd-result');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to cancel shipment');
+    // Not refreshing Tracked Orders here — it isn't necessarily the
+    // underlying view (Inbound Log is), and it fetches fresh on its own
+    // next visit anyway, same as after Mark Received above.
+    runInboundLog();
+    await refreshInboundShipmentDetail(shipmentId);
+  } catch (err) {
+    if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Cancel Shipment'; }
   }
 }
 

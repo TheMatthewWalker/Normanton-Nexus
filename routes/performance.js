@@ -2175,7 +2175,21 @@ router.patch('/order-suggestions/:suggestionId/shipment', requirePermission('LOG
     await db.assignOrderShipment(req.params.suggestionId, shipmentId ?? null);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, error: { message: err.message } });
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Inbound Log's "Cancel Shipment" action — unlinks every order on the
+// shipment (their own Status is untouched, they're just free to be put on
+// a new shipment) and marks the shipment itself cancelled. Blocked once the
+// shipment has been received — see cancelOrderShipment's comment.
+router.post('/order-suggestions/shipments/:shipmentId/cancel', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const cancelledBy = req.session?.user?.username || 'unknown';
+    const data = await db.cancelOrderShipment(req.params.shipmentId, cancelledBy);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
   }
 });
 
