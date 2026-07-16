@@ -6036,8 +6036,17 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
 // but for pasting in a whole pipeline's worth of orders at once instead of
 // one at a time. Parsed entirely client-side (no CSV library bundled for
 // this app; the format is simple enough to hand-roll correctly, including
-// quoted fields with embedded commas) and posted as JSON rows to
+// quoted fields with embedded delimiters) and posted as JSON rows to
 // /order-suggestions/manual/bulk, which resolves Vendor/Material by name.
+//
+// Delimiter is ';' rather than ',' — every PC on the network is set to a
+// locale (UK/EU) where Excel's default list separator is ';' (since ','
+// doubles as the decimal separator there), so a ',' delimiter would silently
+// mis-split a CSV exported/opened on any of those machines. Order Qty is
+// normalised for the same reason: those locales also use ',' as the decimal
+// point, so "5000,5" is accepted as 5000.5, not misread as two fields.
+const CSV_DELIMITER = ';';
+
 const MANUAL_ORDER_CSV_HEADERS = {
   'vendor': 'vendor', 'vendor name': 'vendor',
   'material': 'material', 'material code': 'material', 'material number': 'material',
@@ -6050,10 +6059,10 @@ const MANUAL_ORDER_CSV_HEADERS = {
   'notes': 'notes',
 };
 
-// Minimal RFC4180-style parser: handles quoted fields (embedded commas,
+// Minimal RFC4180-style parser: handles quoted fields (embedded delimiters,
 // embedded newlines, "" for an escaped quote) and both CRLF and LF row
 // endings, since a spreadsheet export could produce either.
-function parseCsvText(text) {
+function parseCsvText(text, delimiter = CSV_DELIMITER) {
   const rows = [];
   let row = [], field = '', inQuotes = false;
   const pushField = () => { row.push(field); field = ''; };
@@ -6065,7 +6074,7 @@ function parseCsvText(text) {
       else field += c;
     } else if (c === '"') {
       inQuotes = true;
-    } else if (c === ',') {
+    } else if (c === delimiter) {
       pushField();
     } else if (c === '\n') {
       pushRow();
@@ -6079,6 +6088,13 @@ function parseCsvText(text) {
   return rows.filter(r => r.some(v => String(v).trim() !== ''));
 }
 
+// A comma-decimal qty ("5000,5") is only ambiguous with the ',' delimiter,
+// which this app no longer uses — safe to always normalise comma to dot.
+function normaliseCsvQty(value) {
+  const v = String(value || '').trim();
+  return /^-?\d+,\d+$/.test(v) ? v.replace(',', '.') : v;
+}
+
 function parseManualOrderCsv(text) {
   const rows = parseCsvText(text);
   if (!rows.length) return [];
@@ -6087,13 +6103,14 @@ function parseManualOrderCsv(text) {
   return rows.slice(1).map(cols => {
     const obj = {};
     headerKeys.forEach((key, i) => { if (key) obj[key] = (cols[i] || '').trim(); });
+    if (obj.orderQty) obj.orderQty = normaliseCsvQty(obj.orderQty);
     return obj;
   }).filter(obj => obj.vendor || obj.material);
 }
 
 function downloadManualOrderCsvTemplate() {
-  const header  = 'Vendor,Material,Order Qty,Order Date,Delivery Date,Status,PO Number,Supplier Reference,Notes';
-  const example = 'Example Vendor Ltd,100123,5000,2026-07-16,,Ordered,PO-12345,SUP-REF-001,';
+  const header  = ['Vendor', 'Material', 'Order Qty', 'Order Date', 'Delivery Date', 'Status', 'PO Number', 'Supplier Reference', 'Notes'].join(CSV_DELIMITER);
+  const example = ['Example Vendor Ltd', '100123', '5000', '2026-07-16', '', 'Ordered', 'PO-12345', 'SUP-REF-001', ''].join(CSV_DELIMITER);
   const blob = new Blob([`${header}\r\n${example}\r\n`], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -6108,7 +6125,7 @@ async function openManualOrderCsvModal() {
       <button class="ps-modal-close" onclick="closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
-      <div class="toolbar-hint">Columns: Vendor, Material, Order Qty, Order Date, Delivery Date (optional), Status (optional — Accepted/Ordered/Booked/Received), PO Number (optional), Supplier Reference (optional), Notes (optional). Vendor and Material must already be configured together in Vendor Master Data.</div>
+      <div class="toolbar-hint">Columns: Vendor, Material, Order Qty, Order Date, Delivery Date (optional), Status (optional — Accepted/Ordered/Booked/Received), PO Number (optional), Supplier Reference (optional), Notes (optional). Vendor and Material must already be configured together in Vendor Master Data. Uses <strong>;</strong> as the column delimiter, matching Excel's UK/EU default — just save/export as CSV as normal.</div>
       <div style="margin:10px 0"><button type="button" class="btn-secondary" id="mc-template-btn">Download Template</button></div>
       <input type="file" id="mc-file-input" accept=".csv,text/csv" style="margin-bottom:10px">
       <div id="mc-preview"></div>
