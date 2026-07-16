@@ -1116,10 +1116,43 @@ function getShipmentFolderInfo(shipment) {
 }
 
 
+// Node's native fs.mkdir(path, { recursive: true }) has a documented class
+// of bug on Windows: the recursive walk is done natively (via libuv), and
+// for some absolute paths it can mis-resolve once it steps past the drive
+// root, ending up trying to create the bare long-path prefix ("\\?") as if
+// it were a real directory — surfacing as an opaque "ENOENT ... mkdir
+// '\\?'" that gives no hint anything is configured correctly or not (we
+// confirmed the real LOGISTICS_EXPORT_ROOT here is a perfectly well-formed
+// path — assertValidExportRoot above correctly lets it through). Building
+// each directory level ourselves with plain, non-recursive mkdir calls
+// avoids that native code path entirely.
+async function mkdirRecursiveSafe(targetPath) {
+  const toCreate = [];
+  let current = targetPath;
+  while (true) {
+    try {
+      await fsp.access(current, fs.constants.F_OK);
+      break; // this level (and everything above it) already exists
+    } catch {
+      toCreate.unshift(current);
+      const parent = path.dirname(current);
+      if (parent === current) break; // reached the drive/UNC root
+      current = parent;
+    }
+  }
+  for (const dir of toCreate) {
+    try {
+      await fsp.mkdir(dir);
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
 async function ensureShipmentFolder(shipment) {
   const folder = getShipmentFolderInfo(shipment);
-  await fsp.mkdir(folder.customerPath, { recursive: true });
-  await fsp.mkdir(folder.shipmentPath, { recursive: true });
+  await mkdirRecursiveSafe(folder.customerPath);
+  await mkdirRecursiveSafe(folder.shipmentPath);
   return folder;
 }
 
