@@ -1,4 +1,7 @@
 import express from 'express';
+import fs from 'fs';
+import fsp from 'fs/promises';
+import path from 'path';
 import { runFullRefresh, runTurnsValClassRefresh } from '../routes/performancesync.js';
 import * as sap from './performancesap.js';
 import * as db  from './performancesql.js';
@@ -469,6 +472,107 @@ function buildAcceptPayload({
     isSpotPo: !!isSpotPo,
     notes: notes || null,
   };
+}
+
+// ── Supplier invoice imports (Tracked Orders / Inbound Log) ────────────────
+// Mirrors routes/shipmentmain.js's export-folder pattern (assertValidExportRoot
+// / mkdirRecursiveSafe / getShipmentFolderInfo) for the equivalent import-side
+// folder. Files land at:
+//   LOGISTICS_IMPORT_ROOT\{Year}\{MM}. {MonthName}\{ShipmentReference} - {SupplierName}\
+// Year/month is the shipment's CreatedAtUtc, not today's date, so a shipment
+// created near a month boundary always files under the month it was actually
+// created in, even if the invoice itself is uploaded weeks later. Supplier
+// name comes from the first order linked to the shipment — a shipment is
+// assumed single-vendor in practice (confirmed with the business), even
+// though the schema technically allows a shipment to carry orders from more
+// than one vendor.
+const IMPORT_MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+function assertValidImportRoot(importRoot) {
+  const value = String(importRoot || '').trim();
+  const looksValid = /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^?\\]/.test(value);
+  if (!looksValid) {
+    const err = new Error(
+      `Logistics import folder path is misconfigured (LOGISTICS_IMPORT_ROOT resolved to "${value}"). ` +
+      `Check the .env value and that no stray Machine-scope environment variable of the same name is ` +
+      `shadowing it, then restart the service.`
+    );
+    err.statusCode = 500;
+    throw err;
+  }
+  return value;
+}
+
+function sanitizeImportFolderSegment(value) {
+  const clean = String(value || 'Unknown Supplier').replace(/[<>:"/\\|?*]/g, '_').replace(/[. ]+$/g, '').trim();
+  return clean || 'Unknown Supplier';
+}
+
+function sanitizeImportFileSegment(value) {
+  return String(value || '')
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .replace(/\s+/g, '-')
+    .replace(/[. ]+$/g, '')
+    .trim() || 'document';
+}
+
+// Node's native fs.mkdir(path, { recursive: true }) has a known bug on
+// Windows — see routes/shipmentmain.js's mkdirRecursiveSafe for the full
+// writeup (surfaces as an opaque "ENOENT ... mkdir '\\?'" unrelated to
+// whether the configured path is actually valid). Build each directory
+// level ourselves instead of relying on the native recursive walk.
+async function mkdirImportRecursiveSafe(targetPath) {
+  const toCreate = [];
+  let current = targetPath;
+  while (true) {
+    try {
+      await fsp.access(current, fs.constants.F_OK);
+      break; // this level (and everything above it) already exists
+    } catch {
+      toCreate.unshift(current);
+      const parent = path.dirname(current);
+      if (parent === current) break; // reached the drive/UNC root
+      current = parent;
+    }
+  }
+  for (const dir of toCreate) {
+    try {
+      await fsp.mkdir(dir);
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
+
+function getShipmentImportFolderInfo(shipment, supplierName) {
+  const importRoot = assertValidImportRoot(process.env.LOGISTICS_IMPORT_ROOT);
+  const created = shipment.CreatedAtUtc ? new Date(shipment.CreatedAtUtc) : new Date();
+  const year = String(created.getFullYear());
+  const monthFolder = `${String(created.getMonth() + 1).padStart(2, '0')}. ${IMPORT_MONTH_NAMES[created.getMonth()]}`;
+  const orderFolder = sanitizeImportFolderSegment(`${shipment.ShipmentReference || `Shipment ${shipment.ShipmentId}`} - ${supplierName || 'Unknown Supplier'}`);
+  const monthPath = path.join(importRoot, year, monthFolder);
+  return { monthPath, shipmentPath: path.join(monthPath, orderFolder) };
+}
+
+async function ensureShipmentImportFolder(shipment, supplierName) {
+  const folder = getShipmentImportFolderInfo(shipment, supplierName);
+  await mkdirImportRecursiveSafe(folder.monthPath);
+  await mkdirImportRecursiveSafe(folder.shipmentPath);
+  return folder;
+}
+
+// A shipment record (from db.getOrderShipmentWithOrders) plus the single
+// supplier name derived from its first linked order — shared by all three
+// document routes below so the folder-path derivation only lives in one
+// place.
+async function loadShipmentForImportDocs(shipmentId) {
+  const record = await db.getOrderShipmentWithOrders(shipmentId);
+  if (!record) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
+  const supplierName = record.orders?.[0]?.VendorName || '';
+  return { record, supplierName };
 }
 
 const router = express.Router();
@@ -2207,6 +2311,101 @@ router.post('/order-suggestions/shipments/:shipmentId/cancel', requirePermission
     res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
   }
 });
+
+
+// ── Supplier invoice uploads ────────────────────────────────────────────
+// Registered BEFORE the generic /documents/:fileName route below — same
+// route-ordering caution as routes/shipmentmain.js's equivalent pair: if
+// the fileName route came first, a request for /documents/folder would be
+// caught by it with fileName="folder" instead.
+router.get('/order-suggestions/shipments/:shipmentId/documents/folder', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const shipmentId = Number(req.params.shipmentId);
+    const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);
+    const folder = getShipmentImportFolderInfo(record, supplierName);
+
+    let entries = [];
+    try {
+      entries = await fsp.readdir(folder.shipmentPath, { withFileTypes: true });
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+
+    const files = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const stat = await fsp.stat(path.join(folder.shipmentPath, entry.name));
+      files.push({
+        fileName: entry.name,
+        sizeBytes: stat.size,
+        modifiedAtUtc: stat.mtime.toISOString(),
+        downloadUrl: `/api/performance/order-suggestions/shipments/${shipmentId}/documents/${encodeURIComponent(entry.name)}`,
+      });
+    }
+    files.sort((a, b) => a.fileName.localeCompare(b.fileName));
+
+    res.json({ success: true, data: { supplierName, files } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.get('/order-suggestions/shipments/:shipmentId/documents/:fileName', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const shipmentId = Number(req.params.shipmentId);
+    const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);
+    const folder = getShipmentImportFolderInfo(record, supplierName);
+    const fileName = path.basename(req.params.fileName || '');
+    const target = path.join(folder.shipmentPath, fileName);
+    await fsp.access(target, fs.constants.F_OK);
+    return res.sendFile(target);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Body is the raw file bytes (Content-Type: application/pdf / image/jpeg /
+// image/png), not multipart — same pattern as routes/shipmentmain.js's
+// operator invoice upload, simplest thing that works from a plain
+// fetch(..., { body: file }) without adding a dependency for a single-file
+// upload. Auto-creates the destination folder (year/month/shipment) if it
+// doesn't exist yet.
+router.post('/order-suggestions/shipments/:shipmentId/documents/upload',
+  requirePermission('LOG_MRP'),
+  express.raw({ type: ['application/pdf', 'image/jpeg', 'image/png'], limit: '20mb' }),
+  async (req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ success: false, error: { message: 'No file content received. Content-Type must be application/pdf, image/jpeg or image/png.' } });
+      }
+      if (req.body.length > 20 * 1024 * 1024) {
+        return res.status(413).json({ success: false, error: { message: 'File is too large (20MB limit).' } });
+      }
+
+      const shipmentId = Number(req.params.shipmentId);
+      const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);
+      const folder = await ensureShipmentImportFolder(record, supplierName);
+
+      const contentType = String(req.get('Content-Type') || '').toLowerCase();
+      const ext = contentType.includes('pdf') ? '.pdf' : contentType.includes('png') ? '.png' : '.jpg';
+      const originalName = String(req.get('X-File-Name') || req.query.fileName || 'invoice').replace(/\.(pdf|jpe?g|png)$/i, '');
+      const fileName = `${sanitizeImportFileSegment(originalName)}-${Date.now()}${ext}`;
+      const filePath = path.join(folder.shipmentPath, fileName);
+      await fsp.writeFile(filePath, req.body);
+
+      res.status(201).json({
+        success: true,
+        data: {
+          fileName,
+          sizeBytes: req.body.length,
+          downloadUrl: `/api/performance/order-suggestions/shipments/${shipmentId}/documents/${encodeURIComponent(fileName)}`,
+        },
+      });
+    } catch (err) {
+      res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+    }
+  }
+);
 
 
 export default router;

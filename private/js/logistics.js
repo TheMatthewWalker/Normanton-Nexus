@@ -5427,6 +5427,7 @@ function osRenderTrackedList(tracked) {
         <button class="btn-secondary os-shipment-btn" data-id="${t.SuggestionId}" style="padding:3px 8px;font-size:11px;white-space:nowrap" title="${t.ShipmentId ? esc([t.Haulier, t.ModeOfTransport, t.ShipmentTrackingNumber].filter(Boolean).join(' · ')) : ''}">
           ${t.ShipmentId ? esc(t.ShipmentReference || t.Haulier || 'Assigned') : '+ Assign'}
         </button>
+        ${t.ShipmentId ? `<button class="btn-secondary os-invoice-btn" data-shipment-id="${t.ShipmentId}" data-shipment-ref="${esc(t.ShipmentReference || '')}" style="padding:3px 8px;font-size:11px;white-space:nowrap;margin-left:4px">Invoice</button>` : ''}
       </td>
       <td style="text-align:right"><button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button></td>
     </tr>`;
@@ -5512,6 +5513,87 @@ function osRenderTrackedList(tracked) {
       if (t) openAssignShipmentModal(t);
     });
   });
+  document.querySelectorAll('.os-invoice-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openShipmentInvoiceModal(Number(btn.dataset.shipmentId), btn.dataset.shipmentRef);
+    });
+  });
+}
+
+// Lists and uploads supplier invoices for a shipment, saved server-side into
+// LOGISTICS_IMPORT_ROOT\{Year}\{MM}. {MonthName}\{ShipmentReference} -
+// {SupplierName}\ (the folder is auto-created on first upload — see
+// routes/performance.js's ensureShipmentImportFolder). Opened from the
+// Invoice button next to a shipment-assigned tracked-order row, so every
+// row on the same shipment lands on the same folder regardless of which
+// row's button was clicked.
+async function openShipmentInvoiceModal(shipmentId, shipmentReference) {
+  openModal(`<div class="ps-modal" style="max-width:560px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Supplier Invoices</div><div class="ps-modal-sub">${esc(shipmentReference || `Shipment #${shipmentId}`)}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint">Uploaded invoices are filed into the shipment's import folder automatically — no need to save them anywhere manually.</div>
+      <div id="osi-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
+      <input type="file" id="osi-file-input" accept="application/pdf,image/jpeg,image/png" style="display:none">
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+      <button type="button" class="btn-submit" id="osi-upload-btn">Upload Invoice</button>
+    </div>
+  </div>`);
+
+  document.getElementById('osi-upload-btn').addEventListener('click', () => document.getElementById('osi-file-input').click());
+  document.getElementById('osi-file-input').addEventListener('change', async () => {
+    const fileInput = document.getElementById('osi-file-input');
+    const file = fileInput.files[0];
+    if (!file) return;
+    const uploadBtn = document.getElementById('osi-upload-btn');
+    uploadBtn.disabled = true; uploadBtn.textContent = 'Uploading…';
+    try {
+      const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': file.type || 'application/pdf', 'X-File-Name': encodeURIComponent(file.name) },
+        body: file,
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Upload failed.');
+      await osiLoadFolder(shipmentId);
+    } catch (err) {
+      const body = document.getElementById('osi-body');
+      if (body) body.insertAdjacentHTML('afterbegin', `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`);
+    } finally {
+      uploadBtn.disabled = false; uploadBtn.textContent = 'Upload Invoice';
+      fileInput.value = '';
+    }
+  });
+
+  await osiLoadFolder(shipmentId);
+}
+
+async function osiLoadFolder(shipmentId) {
+  const body = document.getElementById('osi-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/folder`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load documents.');
+    const files = json.data.files || [];
+    body.innerHTML = !files.length
+      ? '<div class="sap-empty">No invoices uploaded yet.</div>'
+      : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table">
+          <thead><tr><th>File</th><th>Size</th><th>Uploaded</th><th></th></tr></thead>
+          <tbody>${files.map(f => `<tr class="admin-row">
+            <td>${esc(f.fileName)}</td>
+            <td>${(Number(f.sizeBytes || 0) / 1024).toFixed(1)} KB</td>
+            <td>${formatDisplayDate(f.modifiedAtUtc)}</td>
+            <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
+          </tr>`).join('')}</tbody>
+        </table></div>`;
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
 }
 
 function onTrackedCheckToggle(e) {
