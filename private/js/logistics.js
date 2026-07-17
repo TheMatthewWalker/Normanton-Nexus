@@ -4953,7 +4953,7 @@ function osRenderSuggestionList(groups) {
         ? `<span style="font-size:11px;color:var(--text-secondary,#666)">via Build Order</span>`
         : `<button class="btn-submit os-accept-btn" data-gi="${gi}" data-mi="${mi}" style="padding:4px 12px;font-size:11px">Accept</button>`;
       return `
-        <tr class="admin-row">
+        <tr class="admin-row os-suggestion-row" data-material="${esc(s.material)}" data-material-text="${esc(s.materialText || '')}" style="cursor:context-menu">
           <td><strong>${esc(s.material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(s.materialText || '')}</div></td>
           <td>${urgencyBadge}<div style="font-size:11px;margin-top:2px">Order by ${formatDisplayDate(s.orderByDate)}</div></td>
           <td>${Number(s.currentStock).toLocaleString()} ${esc(s.uom || '')}</td>
@@ -5019,6 +5019,55 @@ function osRenderSuggestionList(groups) {
       hdr.closest('.ps-section').classList.toggle('ps-section--collapsed');
     });
   });
+  document.querySelectorAll('.os-suggestion-row').forEach(row => {
+    row.addEventListener('contextmenu', (e) => {
+      showOsContextMenu(e, row.dataset.material, row.dataset.materialText);
+    });
+  });
+}
+
+// Small floating menu on right-click of an Order Suggestions row — mirrors
+// the pallet builder's .pb-ctx-menu pattern (warehouse.js
+// showPackageContextMenu/closePackageContextMenu). Built dynamically rather
+// than an inline oncontextmenu attribute, since materialText is free-text
+// from SAP and could contain characters that break attribute-string
+// escaping.
+function closeOsContextMenu() {
+  document.getElementById('os-ctx-menu')?.remove();
+  document.removeEventListener('click', closeOsContextMenu);
+}
+
+function showOsContextMenu(event, material, materialText) {
+  event.preventDefault();
+  closeOsContextMenu();
+
+  const menu = document.createElement('div');
+  menu.id = 'os-ctx-menu';
+  menu.className = 'pb-ctx-menu';
+  // Fixed positioning is viewport-relative, so use clientX/clientY (not
+  // pageX/pageY, which drift once the page has scrolled).
+  menu.style.left = `${Math.min(event.clientX, window.innerWidth  - 230)}px`;
+  menu.style.top  = `${Math.min(event.clientY, window.innerHeight - 60)}px`;
+  menu.innerHTML = `<div class="pb-ctx-item" data-action="forecast">View Consumption / Forecast</div>`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeOsContextMenu), 0);
+
+  menu.querySelector('[data-action="forecast"]').addEventListener('click', () => {
+    closeOsContextMenu();
+    goToMaterialForecast(material, materialText);
+  });
+}
+
+// Jumps to the Stock History & Forecast tile pre-filtered to a single
+// material — used from the Order Suggestions right-click menu so a buyer
+// can sanity-check the consumption trend behind a suggestion without
+// leaving to search for the material manually.
+function goToMaterialForecast(material, materialText) {
+  runStockHistoryForecast();
+  const searchInput = document.getElementById('shf-search');
+  if (searchInput) searchInput.value = material;
+  const title = `${material}${materialText ? ' — ' + materialText : ''}`;
+  shfLoadChart(material, title);
 }
 
 // Mirrors routes/performance.js's enforceMaterialQty — snaps to the nearest
@@ -5062,6 +5111,12 @@ function osOpenAcceptModal(s) {
           <input class="tf-input" type="date" id="os-order-date" value="${todayStr}">
         </div>
       </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Delivery Date <span style="font-weight:400;color:var(--text-secondary,#666)">(optional — leave blank to auto-calculate from lead time)</span></label>
+          <input class="tf-input" type="date" id="os-delivery-date" value="">
+        </div>
+      </div>
       ${s.materialMoqQty ? `<div class="toolbar-hint" style="margin:2px 0 10px">This vendor only supplies in ${Number(s.materialMoqQty).toLocaleString()} ${esc(s.uom || '')} lots — order in whole multiples.</div>` : ''}
       ${s.materialMaxQty ? `<div class="toolbar-hint" style="margin:2px 0 10px">Capped at ${Number(s.materialMaxQty).toLocaleString()} ${esc(s.uom || '')} maximum — entered/adjusted quantities above this are clamped down automatically.</div>` : ''}
       ${s.isSpotPo
@@ -5101,6 +5156,7 @@ function osOpenAcceptModal(s) {
       suggestedQty: s.suggestedQty,
       orderQty: enforcedQty,
       orderDate: document.getElementById('os-order-date').value || null,
+      deliveryDate: document.getElementById('os-delivery-date').value || null,
       leadTimeDays: s.leadTimeDays,
       transitTimeDays: s.transitTimeDays,
       incoterms: s.incoterms,

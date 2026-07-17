@@ -574,6 +574,27 @@ body::before {
 }
 .ps-section-header:hover { background: var(--accent-dim); }
 
+.pb-ctx-menu {
+  position: fixed;
+  z-index: 9200;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(30,45,69,0.15);
+  padding: 4px;
+  min-width: 170px;
+}
+.pb-ctx-item {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.pb-ctx-item:hover { background: var(--accent-dim, rgba(124,58,237,0.1)); color: var(--accent); }
+
 .ps-section-dot {
   width: 8px;
   height: 8px;

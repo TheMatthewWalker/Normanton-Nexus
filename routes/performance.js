@@ -438,10 +438,17 @@ function validateVendorCombinedQty(totalQty, orderMoqQty, orderMaxQty) {
 // one place.
 function buildAcceptPayload({
   vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
-  leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+  leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes, deliveryDateOverride
 }) {
   const leadTime = Number(leadTimeDays) || 0;
-  const deliveryDate = addWorkingDaysUtc(orderDateObj, leadTime);
+  // A user-entered delivery date takes priority over the lead-time-derived
+  // one — e.g. the vendor has confirmed a specific date that doesn't match
+  // the standard lead time. Falls back to the working-days calc when absent
+  // or invalid, so the default behaviour is unchanged.
+  const overrideDate = deliveryDateOverride ? new Date(deliveryDateOverride) : null;
+  const deliveryDate = (overrideDate && !isNaN(overrideDate.getTime()))
+    ? overrideDate
+    : addWorkingDaysUtc(orderDateObj, leadTime);
 
   // EXW: the date actually quoted to the supplier is the ready-to-collect
   // date, not the delivery date — see migrate_vendor_master_data.sql's DATE
@@ -1804,7 +1811,8 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
   try {
     const {
       vendorMaterialId, vendorId, material, suggestedQty, orderQty,
-      orderDate, leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+      orderDate, leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes,
+      deliveryDate: deliveryDateOverride
     } = req.body;
 
     if (!vendorMaterialId || !vendorId || !material || !orderQty) {
@@ -1845,7 +1853,7 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
     const orderDateObj = orderDate ? new Date(orderDate) : new Date();
     const payload = buildAcceptPayload({
       vendorMaterialId, vendorId, material, suggestedQty, orderQty: enforcedQty, orderDateObj,
-      leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+      leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes, deliveryDateOverride
     });
     const suggestionId = await db.acceptOrderSuggestion(payload);
 
