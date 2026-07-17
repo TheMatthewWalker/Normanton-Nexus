@@ -167,7 +167,7 @@ function getHealth() {
     const req = https.get(
       {
         host: '127.0.0.1', port: LIVENESS_PORT, path: HEALTH_PATH,
-        rejectUnauthorized: false, timeout: HEALTH_REQUEST_TIMEOUT_MS,
+        rejectUnauthorized: true, timeout: HEALTH_REQUEST_TIMEOUT_MS,
       },
       res => {
         let body = '';
