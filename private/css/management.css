@@ -163,11 +163,11 @@
 }
 
 .tile-twothirds {
-    grid-column: span 8;
+    grid-column: span 9;
 }
 
 .tile-onethird {
-    grid-column: span 4;
+    grid-column: span 3;
 }
 
 .tile-half {

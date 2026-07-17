@@ -586,9 +586,15 @@ function formatNumber(n) {
 
 
 function formatCurrency(n) {
-  return '£' + (n || 0).toLocaleString('en-GB', {
-    maximumFractionDigits: 0
-  });
+  if ( n < 1000 ) {
+    return '£' + (Math.round(n, 0) || 0).toLocaleString('en-GB');
+  }
+
+  if ( n < 1000000 ) {
+    return '£' + (Math.round(n / 1000, 0) || 0) + ' K'.toLocaleString('en-GB');
+  }
+
+  return '£' + (Math.round(n / 10000) / 100 || 0) + ' M'.toLocaleString('en-GB');
 }
 
 function formatPercent(n) {
@@ -694,7 +700,7 @@ function renderOrderBookTable(rows, ptfeInvoiced = 0) {
   }
 
   const remainingStock = stockToDate - pickedToDate;
-  const potential = ptfeInvoiced + remainingStock;
+  const potential = ptfeInvoiced + stockToDate;
 
   document.getElementById('kpi-ptfe-picked-only').innerText = formatCurrency(pickedToDate);
   document.getElementById('kpi-ptfe-picked').innerText = formatCurrency(pickedToDate + ptfeInvoiced);
