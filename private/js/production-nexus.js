@@ -184,6 +184,7 @@ function openFunction(fn) {
     reportShift:     ['Shift Performance',  'Output and scrap compared across Days, Afters and Nights'],
     reportOperator:  ['Operator Output',    'Production output ranked by primary operator'],
     reportMaterial:  ['Material Throughput','Output volume ranked by material code'],
+    stagingPost:     ['Staging Post',       'Request material from Stores — track status by due date'],
   };
   const [title, hint] = titles[fn] || [fn, ''];
   document.getElementById('result-title').textContent = title;
@@ -222,6 +223,7 @@ function openFunction(fn) {
     reportShift:     runReportShift,
     reportOperator:  runReportOperator,
     reportMaterial:  runReportMaterial,
+    stagingPost:     runStagingPost,
   };
   if (fns[fn]) fns[fn]();
 }
@@ -2391,13 +2393,14 @@ async function runApproveScrap() {
     body.innerHTML = `
       <div style="padding:16px 20px">
         <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
-          Review operator-entered scrap entries below. Checked entries will be approved and posted to SAP.
+          Review operator-entered scrap entries below. Approve checked entries to post them to SAP, or reject them to remove them from the queue permanently.
         </div>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
             <input type="checkbox" id="scrap-select-all" checked> Select All
           </label>
           <span style="flex:1"></span>
+          <button class="btn-secondary" id="scrap-reject-btn" style="color:var(--error);border-color:var(--error)">Reject Selected</button>
           <button class="btn-submit" id="scrap-approve-btn">Approve &amp; Post Selected to SAP</button>
         </div>
         <div style="overflow-x:auto">
@@ -2448,6 +2451,60 @@ async function runApproveScrap() {
       } catch (err) {
         msg.style.color = 'var(--error)'; msg.textContent = err.message;
         btn.disabled = false; btn.textContent = 'Approve & Post Selected to SAP';
+      }
+    });
+
+    const rejectBtn = document.getElementById('scrap-reject-btn');
+    let rejectArmed = false;
+    rejectBtn.addEventListener('click', async () => {
+      const msg     = document.getElementById('scrap-approve-msg');
+      const checked = [...document.querySelectorAll('.scrap-chk:checked')].map(c => Number(c.dataset.scrapid));
+      if (!checked.length) { msg.style.color = 'var(--error)'; msg.textContent = 'No entries selected.'; return; }
+
+      if (!rejectArmed) {
+        rejectArmed = true;
+        rejectBtn.textContent = `Click again to reject ${checked.length} entr${checked.length === 1 ? 'y' : 'ies'}`;
+        msg.style.color = 'var(--error)';
+        msg.textContent = 'Rejected entries are removed permanently and can never be posted to SAP.';
+        setTimeout(() => { rejectArmed = false; rejectBtn.textContent = 'Reject Selected'; }, 5000);
+        return;
+      }
+      rejectArmed = false;
+
+      rejectBtn.disabled = true; rejectBtn.textContent = 'Rejecting…';
+      msg.textContent = '';
+
+      try {
+        const res = await api('/scrap/reject', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scrapIDs: checked }),
+        });
+
+        let ok = 0, fail = 0;
+        (res.results || []).forEach(r => {
+          if (r.success) {
+            ok++;
+            document.querySelector(`tr[data-scrapid="${r.scrapID}"]`)?.remove();
+          } else {
+            fail++;
+            const el = document.getElementById(`scrap-result-${r.scrapID}`);
+            if (el) el.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(r.error)}">✗ ${esc(r.error)}</span>`;
+          }
+        });
+
+        const remaining = document.querySelectorAll('#scrap-approve-tbody tr').length;
+        const badge = document.getElementById('result-row-badge');
+        badge.textContent = `${remaining} pending`;
+
+        msg.style.color = fail ? '#D97706' : 'var(--accent)';
+        msg.textContent = fail
+          ? `${ok} rejected, ${fail} failed — see inline results.`
+          : `✓ ${ok} entr${ok === 1 ? 'y' : 'ies'} rejected.`;
+        if (!remaining) body.innerHTML = '<div class="pn-empty" style="color:var(--accent)">✓ No scrap entries pending approval.</div>';
+        rejectBtn.disabled = false; rejectBtn.textContent = 'Reject Selected';
+      } catch (err) {
+        msg.style.color = 'var(--error)'; msg.textContent = err.message;
+        rejectBtn.disabled = false; rejectBtn.textContent = 'Reject Selected';
       }
     });
   } catch (err) {
@@ -4591,4 +4648,308 @@ async function openRetryModal(processCode, recordId, batchRef) {
       btn.disabled = false; btn.textContent = 'Cancel Record';
     }
   });
+}
+
+// ── STAGING POST ──────────────────────────────────────────────────────────────
+// Material requisitions from Production to Stores. Backend at /api/staging
+// (routes/staging.js) — a separate route mount from /api/productionnexus, so
+// this section talks to it with plain fetch() rather than the api() helper
+// above. See sql/migrate_staging_post.sql for the full workflow writeup.
+
+const SP_LOCATIONS = ['Mixing', 'Extrusion', 'Convoluting', 'Tape Wrap', 'Braiding', 'Coverline', 'Drumming'];
+const SP_MIN_LEAD_HOURS = 4;
+
+async function spApi(path, opts) {
+  const r = await fetch('/api/staging' + path, opts);
+  let json = null;
+  try { json = await r.json(); } catch { /* non-JSON body */ }
+  if (json?.success === false || !r.ok) {
+    throw new Error(json?.error?.message || `Request failed (HTTP ${r.status})`);
+  }
+  return json;
+}
+
+function spDueLabel(req) {
+  const due = new Date(req.DueAtUtc);
+  const label = fmt(req.DueAtUtc);
+  if (req.Status !== 'Open') return label;
+  if (due < new Date()) return `<span style="color:var(--error);font-weight:700">${label} — Late</span>`;
+  return label;
+}
+
+function spStatusBadge(status) {
+  const map = { Open: 'in-progress', Completed: 'complete', Cancelled: 'cancelled' };
+  return `<span class="pn-status pn-status--${map[status] || 'open'}">${esc(status)}</span>`;
+}
+
+async function runStagingPost() {
+  const body = document.getElementById('result-body');
+  body.innerHTML = `
+    <div class="lg-actions" style="display:flex;justify-content:flex-end;margin-bottom:12px">
+      <button type="button" class="btn-submit" id="sp-new-request-btn">+ New Request</button>
+    </div>
+    <div id="sp-list"><div class="pn-loading"><div class="spinner"></div>Loading…</div></div>
+  `;
+  document.getElementById('sp-new-request-btn').addEventListener('click', spOpenRequestModal);
+  await spRefreshList();
+}
+
+async function spRefreshList() {
+  const listEl = document.getElementById('sp-list');
+  if (!listEl) return;
+  try {
+    const json = await spApi('/requests');
+    spRenderList(json.data || []);
+  } catch (err) {
+    listEl.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
+}
+
+function spRenderList(requests) {
+  const listEl = document.getElementById('sp-list');
+  if (!requests.length) {
+    listEl.innerHTML = '<div class="pn-empty">No staging requests yet — raise one above when you need material bringing to the line.</div>';
+    return;
+  }
+  const rows = requests.map(r => {
+    const cancellable = r.Status === 'Open' && Number(r.QuantityDelivered) === 0;
+    return `
+      <tr class="admin-row">
+        <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
+        <td>${Number(r.QuantityRequested).toLocaleString()}${r.QuantityDelivered > 0 ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.QuantityDelivered).toLocaleString()} delivered)</span>` : ''} ${esc(r.Uom || '')}</td>
+        <td>${esc(r.Location)}</td>
+        <td>${r.RequestedBatch ? esc(r.RequestedBatch) : '—'}</td>
+        <td>${spDueLabel(r)}</td>
+        <td>${spStatusBadge(r.Status)}</td>
+        <td style="text-align:right">${cancellable ? `<button class="btn-secondary sp-cancel-btn" data-id="${r.RequestId}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Cancel</button>` : ''}</td>
+      </tr>`;
+  }).join('');
+
+  listEl.innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Quantity</th><th>Location</th><th>Batch</th><th>Needed By</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  document.querySelectorAll('.sp-cancel-btn').forEach(btn => {
+    btn.addEventListener('click', () => spCancelRequest(Number(btn.dataset.id)));
+  });
+}
+
+async function spCancelRequest(requestId) {
+  if (!await wConfirm({ title: 'Cancel Request', message: 'Cancel this staging request? This cannot be undone.', confirmText: 'Cancel Request', variant: 'danger' })) return;
+  try {
+    await spApi(`/requests/${requestId}/cancel`, { method: 'POST' });
+    await spRefreshList();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+function spDefaultDueLocal() {
+  const d = new Date(Date.now() + SP_MIN_LEAD_HOURS * 60 * 60 * 1000);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+function spOpenRequestModal() {
+  openModal(`<div class="ps-modal" style="max-width:560px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">New Staging Request</div><div class="ps-modal-sub">Ask Stores to bring material to your line</div></div>
+      <button class="ps-modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Material</label>
+          <input class="tf-input" type="text" id="sp-material-search" placeholder="Search by material number or description…" autocomplete="off">
+          <input type="hidden" id="sp-material-value">
+          <input type="hidden" id="sp-material-text-value">
+          <input type="hidden" id="sp-material-uom-value">
+          <div id="sp-material-results"></div>
+        </div>
+      </div>
+      <div id="sp-batch-row"></div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Quantity</label>
+          <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-qty">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Location</label>
+          <select class="tf-input" id="sp-location">
+            ${SP_LOCATIONS.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('')}
+            <option value="__other__">Other…</option>
+          </select>
+        </div>
+      </div>
+      <div class="tf-row hidden" id="sp-other-location-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Other location</label>
+          <input class="tf-input" type="text" id="sp-other-location" placeholder="e.g. Goods-In, Extrusion Line 3…">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Needed By</label>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <button type="button" class="btn-secondary sp-due-preset" data-hours="4" style="padding:4px 10px;font-size:11px">4 hours</button>
+            <button type="button" class="btn-secondary sp-due-preset" data-hours="8" style="padding:4px 10px;font-size:11px">8 hours</button>
+            <button type="button" class="btn-secondary sp-due-preset" data-hours="24" style="padding:4px 10px;font-size:11px">Tomorrow</button>
+          </div>
+          <input class="tf-input" type="datetime-local" id="sp-due" value="${spDefaultDueLocal()}">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Minimum ${SP_MIN_LEAD_HOURS} hours from now, so Stores always has a fair chance to get to it — push it out further if it's not urgent.</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes <span class="tf-optional">(optional)</span></label>
+          <input class="tf-input" type="text" id="sp-notes" placeholder="Anything Stores should know">
+        </div>
+      </div>
+      <div id="sp-request-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="sp-submit-btn">Submit Request</button>
+    </div>
+  </div>`);
+
+  document.getElementById('sp-location').addEventListener('change', function () {
+    document.getElementById('sp-other-location-row').classList.toggle('hidden', this.value !== '__other__');
+  });
+
+  document.querySelectorAll('.sp-due-preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = new Date(Date.now() + Number(btn.dataset.hours) * 60 * 60 * 1000);
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      document.getElementById('sp-due').value = d.toISOString().slice(0, 16);
+    });
+  });
+
+  let searchTimer = null;
+  document.getElementById('sp-material-search').addEventListener('input', function () {
+    document.getElementById('sp-material-value').value = '';
+    document.getElementById('sp-batch-row').innerHTML = '';
+    clearTimeout(searchTimer);
+    const q = this.value.trim();
+    const results = document.getElementById('sp-material-results');
+    if (!q) { results.innerHTML = ''; return; }
+    searchTimer = setTimeout(() => spSearchMaterials(q), 250);
+  });
+
+  document.getElementById('sp-submit-btn').addEventListener('click', spSubmitRequest);
+}
+
+async function spSearchMaterials(q) {
+  const results = document.getElementById('sp-material-results');
+  if (!results) return;
+  results.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Searching…</div>';
+  try {
+    const json = await spApi(`/materials?search=${encodeURIComponent(q)}`);
+    const rows = json.data || [];
+    if (!rows.length) { results.innerHTML = '<div class="pn-empty">No materials matched.</div>'; return; }
+    results.innerHTML = `
+      <div style="overflow-x:auto;max-height:220px;overflow-y:auto;margin-top:6px">
+        <table class="pn-batch-table">
+          <thead><tr><th>Material</th><th>Description</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr class="pn-row sp-material-pick" style="cursor:pointer" data-material="${esc(r.material)}" data-text="${esc(r.materialText || '')}" data-uom="${esc(r.uom || '')}">
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.material)}</td>
+                <td>${esc(r.materialText || '—')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    document.querySelectorAll('.sp-material-pick').forEach(tr => {
+      tr.addEventListener('click', () => {
+        document.getElementById('sp-material-search').value = tr.dataset.material;
+        document.getElementById('sp-material-value').value = tr.dataset.material;
+        document.getElementById('sp-material-text-value').value = tr.dataset.text;
+        document.getElementById('sp-material-uom-value').value = tr.dataset.uom;
+        results.innerHTML = '';
+        spLoadBatchOptions(tr.dataset.material);
+      });
+    });
+  } catch (err) {
+    results.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
+}
+
+// Offers a specific-batch picker only when the material actually has
+// batch-tracked stock right now — there's no "is this material batch
+// managed" flag anywhere in this app, so live LQUA stock is the signal.
+async function spLoadBatchOptions(material) {
+  const row = document.getElementById('sp-batch-row');
+  if (!row) return;
+  try {
+    const json = await spApi(`/stock?material=${encodeURIComponent(material)}`);
+    const batches = (json.data || []).filter(r => r.batch);
+    if (!batches.length) { row.innerHTML = ''; return; }
+    row.innerHTML = `
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Specific Batch <span class="tf-optional">(optional)</span></label>
+          <select class="tf-input" id="sp-batch">
+            <option value="">Any batch</option>
+            ${batches.map(b => `<option value="${esc(b.batch)}">${esc(b.batch)} — ${Number(b.availableQty).toLocaleString()} in ${esc(b.bin || '?')}</option>`).join('')}
+          </select>
+        </div>
+      </div>`;
+  } catch {
+    row.innerHTML = ''; // stock lookup failing shouldn't block the rest of the form
+  }
+}
+
+async function spSubmitRequest() {
+  const material = document.getElementById('sp-material-value').value;
+  const resultEl = document.getElementById('sp-request-result');
+  if (!material) {
+    resultEl.innerHTML = '<div class="pn-empty">Pick a material from the search results.</div>';
+    return;
+  }
+  const locationSel = document.getElementById('sp-location').value;
+  const location = locationSel === '__other__'
+    ? `Other: ${document.getElementById('sp-other-location').value.trim()}`
+    : locationSel;
+  if (locationSel === '__other__' && !document.getElementById('sp-other-location').value.trim()) {
+    resultEl.innerHTML = '<div class="pn-empty">Enter the location.</div>';
+    return;
+  }
+
+  const dueLocal = document.getElementById('sp-due').value;
+  if (!dueLocal) {
+    resultEl.innerHTML = '<div class="pn-empty">Pick a Needed By date/time.</div>';
+    return;
+  }
+
+  const body = {
+    material,
+    materialText: document.getElementById('sp-material-text-value').value || null,
+    uom: document.getElementById('sp-material-uom-value').value || null,
+    quantityRequested: Number(document.getElementById('sp-qty').value),
+    location,
+    requestedBatch: document.getElementById('sp-batch')?.value || null,
+    dueAtUtc: new Date(dueLocal).toISOString(),
+    notes: document.getElementById('sp-notes').value.trim() || null,
+  };
+
+  if (!(body.quantityRequested > 0)) {
+    resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
+    return;
+  }
+
+  const btn = document.getElementById('sp-submit-btn');
+  btn.disabled = true; btn.textContent = 'Submitting…';
+  try {
+    await spApi('/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    closeModal();
+    await spRefreshList();
+  } catch (err) {
+    resultEl.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+    btn.disabled = false; btn.textContent = 'Submit Request';
+  }
 }

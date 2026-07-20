@@ -26,6 +26,9 @@ function setupTiles() {
       if (fn === 'addPicksheet')   showAddPicksheetForm();
       if (fn === 'csvUpload')      showCSVUpload();
       if (fn === 'sapSync')        runSAPSync();
+      if (fn === 'stagingFulfil')  runStagingFulfil();
+      if (fn === 'stagingCompleted') runStagingCompleted();
+      if (fn === 'stagingBinRestrictions') runStagingBinRestrictions();
     });
   });
 
@@ -2872,4 +2875,576 @@ function escJs(str) {
   return String(str)
     .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
     .replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// STAGING POST — Stores' side of the material-requisition workflow.
+// Production raises requests from production-nexus.html's own Staging Post
+// screen; this fulfils them. Backend at /api/staging (routes/staging.js) —
+// see sql/migrate_staging_post.sql for the full schema + workflow writeup.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function spApi(path, opts) {
+  const r = await fetch('/api/staging' + path, opts);
+  let json = null;
+  try { json = await r.json(); } catch { /* non-JSON body */ }
+  if (json?.success === false || !r.ok) {
+    throw new Error(json?.error?.message || `Request failed (HTTP ${r.status})`);
+  }
+  return json;
+}
+
+function spFormatDate(value) {
+  return value ? new Date(value).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+}
+
+function spDueCell(r) {
+  const label = spFormatDate(r.DueAtUtc);
+  if (new Date(r.DueAtUtc) < new Date()) return `<span style="color:var(--error,#DC2626);font-weight:700">${label} — Late</span>`;
+  return label;
+}
+
+// ── Staging Post (open demand) ────────────────────────────────────────────────
+
+async function runStagingFulfil() {
+  if (!await checkSession()) return;
+  showResultPanel('Staging Post', 'Open material requests from Production — sorted by due date');
+  try {
+    const json = await spApi('/requests/open');
+    spRenderFulfilList(json.data || []);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function spRenderFulfilList(requests) {
+  document.getElementById('result-row-badge').textContent = `${requests.length} open`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  if (!requests.length) {
+    document.getElementById('result-body').innerHTML = '<div class="sap-empty">No open staging requests — Production hasn’t asked for anything right now.</div>';
+    return;
+  }
+
+  const rows = requests.map(r => `
+    <tr class="admin-row sp-fulfil-row" style="cursor:pointer" data-id="${r.RequestId}">
+      <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
+      <td>${Number(r.QuantityRequested).toLocaleString()}${r.QuantityDelivered > 0 ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.QuantityDelivered).toLocaleString()} so far)</span>` : ''} ${esc(r.Uom || '')}</td>
+      <td>${esc(r.Location)}</td>
+      <td>${r.RequestedBatch ? `<strong>${esc(r.RequestedBatch)}</strong>` : '—'}</td>
+      <td>${spDueCell(r)}</td>
+      <td>${esc(r.RequestedBy)}</td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Quantity</th><th>Location</th><th>Batch</th><th>Needed By</th><th>Requested By</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  document.querySelectorAll('.sp-fulfil-row').forEach(tr => {
+    tr.addEventListener('click', () => spOpenFulfilModal(Number(tr.dataset.id)));
+  });
+}
+
+async function spOpenFulfilModal(requestId) {
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="ps-modal" style="max-width:780px;width:95vw">
+      <div class="ps-modal-header">
+        <div><div class="ps-modal-title">Loading…</div></div>
+        <button class="ps-modal-close" onclick="closePickModal()">×</button>
+      </div>
+      <div class="ps-modal-body" id="sp-fulfil-body"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
+    </div>`;
+  await spRefreshFulfilModal(requestId);
+}
+
+async function spRefreshFulfilModal(requestId) {
+  const body = document.getElementById('sp-fulfil-body');
+  if (!body) return;
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const [reqJson, stockJson] = await Promise.all([
+      spApi(`/requests/${requestId}`),
+      spApi(`/requests/${requestId}/stock`),
+    ]);
+    const request = reqJson.data;
+    const titleEl = document.querySelector('#ps-modal-overlay .ps-modal-title');
+    if (titleEl) titleEl.textContent = `${request.Material} — ${request.MaterialText || ''}`;
+
+    const remaining = Number(request.QuantityRequested) - Number(request.QuantityDelivered);
+    const stock = stockJson.data.stock || [];
+    const hasRestrictions = stockJson.data.hasRestrictions;
+    const requestedBatch = stockJson.data.requestedBatch;
+
+    const stockSorted = [...stock].sort((a, b) => (b.isAllowed - a.isAllowed) || (Number(b.availableQty) - Number(a.availableQty)));
+
+    const stockRowsHtml = stockSorted.length ? stockSorted.map(s => `
+      <tr class="pn-row sp-stock-row" style="cursor:pointer${s.isAllowed ? '' : ';opacity:0.65'}"
+          data-storagetype="${esc(s.storageType)}" data-bin="${esc(s.bin)}" data-batch="${esc(s.batch || '')}" data-sloc="${esc(s.storageLocation)}">
+        <td>${esc(s.storageType)}</td>
+        <td>${esc(s.bin)}</td>
+        <td>${esc(s.batch || '—')}</td>
+        <td>${Number(s.availableQty).toLocaleString()}</td>
+        <td>${hasRestrictions ? (s.isAllowed ? '<span style="color:#059669;font-weight:700">Allowed</span>' : '<span style="color:var(--text-muted)">Other bin</span>') : ''}</td>
+      </tr>`).join('') : `<tr><td colspan="5" class="sap-empty">No stock currently in SAP for this material.</td></tr>`;
+
+    body.innerHTML = `
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Requested</label><div>${Number(request.QuantityRequested).toLocaleString()} ${esc(request.Uom || '')}</div></div>
+        <div class="tf-field"><label class="tf-label">Delivered so far</label><div>${Number(request.QuantityDelivered).toLocaleString()} ${esc(request.Uom || '')}</div></div>
+        <div class="tf-field"><label class="tf-label">Remaining</label><div><strong>${remaining.toLocaleString()}</strong> ${esc(request.Uom || '')}</div></div>
+        <div class="tf-field"><label class="tf-label">Location</label><div>${esc(request.Location)}</div></div>
+      </div>
+      ${requestedBatch ? `<div class="toolbar-hint" style="margin:2px 0 10px">Production asked for a specific batch: <strong>${esc(requestedBatch)}</strong> — its location is highlighted below.</div>` : ''}
+      ${request.Notes ? `<div class="toolbar-hint" style="margin:2px 0 10px">Note from Production: ${esc(request.Notes)}</div>` : ''}
+
+      <div class="tf-section-label">Available Stock ${hasRestrictions ? '<span class="tf-optional">(bin restrictions configured for this material — allowed bins shown first)</span>' : ''}</div>
+      <div style="overflow-x:auto;max-height:220px;overflow-y:auto;margin-bottom:14px">
+        <table class="pn-batch-table">
+          <thead><tr><th>Storage Type</th><th>Bin</th><th>Batch</th><th>Available Qty</th><th></th></tr></thead>
+          <tbody>${stockRowsHtml}</tbody>
+        </table>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Click a stock row to fill in the source below, or enter it by hand.</div>
+
+      <div class="tf-section-label">Mark Delivered</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Quantity <span class="tf-req">*</span></label>
+          <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-deliver-qty" value="${remaining > 0 ? remaining : ''}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Batch</label>
+          <input class="tf-input" type="text" id="sp-deliver-batch" value="${esc(requestedBatch || '')}" ${requestedBatch ? 'readonly' : ''}>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Storage Location <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-deliver-sloc" placeholder="e.g. 0001">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Source Type <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-deliver-source-type">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Source Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-deliver-source-bin">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Dest. Type <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-deliver-dest-type">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-deliver-dest-bin">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Destination should be wherever &ldquo;${esc(request.Location)}&rdquo; actually resolves to on the floor.</div>
+      <div id="sp-deliver-result"></div>
+      <div class="ps-modal-actions" style="padding:0;margin-top:10px">
+        <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+        <button type="button" class="btn-submit" id="sp-deliver-btn">Create Transfer Order &amp; Mark Delivered</button>
+      </div>`;
+
+    document.querySelectorAll('.sp-stock-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        document.getElementById('sp-deliver-sloc').value = tr.dataset.sloc;
+        document.getElementById('sp-deliver-source-type').value = tr.dataset.storagetype;
+        document.getElementById('sp-deliver-source-bin').value = tr.dataset.bin;
+        if (!requestedBatch && tr.dataset.batch) document.getElementById('sp-deliver-batch').value = tr.dataset.batch;
+      });
+    });
+
+    document.getElementById('sp-deliver-btn').addEventListener('click', () => spSubmitDelivery(requestId));
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function spSubmitDelivery(requestId) {
+  const resultEl = document.getElementById('sp-deliver-result');
+  const body = {
+    quantity:                Number(document.getElementById('sp-deliver-qty').value),
+    batch:                    document.getElementById('sp-deliver-batch').value.trim() || null,
+    storageLocation:           document.getElementById('sp-deliver-sloc').value.trim(),
+    sourceStorageType:          document.getElementById('sp-deliver-source-type').value.trim(),
+    sourceBin:                   document.getElementById('sp-deliver-source-bin').value.trim(),
+    destinationStorageType:       document.getElementById('sp-deliver-dest-type').value.trim(),
+    destinationBin:                document.getElementById('sp-deliver-dest-bin').value.trim(),
+  };
+  if (!(body.quantity > 0)) { resultEl.innerHTML = '<div class="sap-error">Enter a quantity greater than zero.</div>'; return; }
+  if (!body.storageLocation || !body.sourceStorageType || !body.sourceBin || !body.destinationStorageType || !body.destinationBin) {
+    resultEl.innerHTML = '<div class="sap-error">Storage location, source bin/type and destination bin/type are all required.</div>';
+    return;
+  }
+
+  const btn = document.getElementById('sp-deliver-btn');
+  btn.disabled = true; btn.textContent = 'Creating transfer order…';
+  try {
+    const json = await spApi(`/requests/${requestId}/deliver`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const { transferOrderNumber, withinTolerance, cumulativeDelivered, quantityRequested } = json.data;
+
+    if (withinTolerance) {
+      spShowCompleteChoice(requestId, transferOrderNumber, cumulativeDelivered, quantityRequested);
+    } else {
+      closePickModal();
+      await runStagingFulfil();
+    }
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    btn.disabled = false; btn.textContent = 'Create Transfer Order & Mark Delivered';
+  }
+}
+
+function spShowCompleteChoice(requestId, transferOrderNumber, delivered, requested) {
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="ps-modal" style="max-width:440px">
+      <div class="ps-modal-header">
+        <div><div class="ps-modal-title">Transfer Order ${esc(transferOrderNumber)} Created</div><div class="ps-modal-sub">${delivered} of ${requested} delivered — within tolerance</div></div>
+      </div>
+      <div class="ps-modal-body">
+        <p style="margin:0">Is this request now complete, or is more still coming?</p>
+      </div>
+      <div class="ps-modal-actions">
+        <button type="button" class="btn-secondary" id="sp-leave-open-btn">Leave Open</button>
+        <button type="button" class="btn-submit" id="sp-confirm-complete-btn">Confirm Complete</button>
+      </div>
+    </div>`;
+
+  document.getElementById('sp-leave-open-btn').addEventListener('click', async () => {
+    closePickModal();
+    await runStagingFulfil();
+  });
+  document.getElementById('sp-confirm-complete-btn').addEventListener('click', async () => {
+    try { await spApi(`/requests/${requestId}/complete`, { method: 'POST' }); } catch (err) { alert(err.message); }
+    closePickModal();
+    await runStagingFulfil();
+  });
+}
+
+// ── Completed Requests (audit trail + KPIs) ───────────────────────────────────
+
+async function runStagingCompleted() {
+  if (!await checkSession()) return;
+  showResultPanel('Completed Requests', 'Staging Post audit trail and fulfilment KPIs');
+  await spRefreshCompleted();
+}
+
+async function spRefreshCompleted(from, to) {
+  const body = document.getElementById('result-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const qs = [];
+    if (from) qs.push(`from=${encodeURIComponent(from)}`);
+    if (to)   qs.push(`to=${encodeURIComponent(to)}`);
+    const query = qs.length ? `?${qs.join('&')}` : '';
+    const [kpiJson, listJson] = await Promise.all([
+      spApi(`/kpi${query}`),
+      spApi(`/requests/completed${query}`),
+    ]);
+    spRenderCompleted(kpiJson.data, listJson.data || [], from, to);
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function spRenderCompleted(kpi, requests, from, to) {
+  const { overall, byMaterial } = kpi;
+  const onTimePct = overall.CompletedCount ? (100 * overall.OnTimeCount / overall.CompletedCount) : 0;
+
+  const byMaterialRows = byMaterial.map(m => {
+    const pct = m.CompletedCount ? (100 * m.OnTimeCount / m.CompletedCount) : 0;
+    return `<tr class="admin-row">
+      <td><strong>${esc(m.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.MaterialText || '')}</div></td>
+      <td>${m.CompletedCount}</td>
+      <td>${pct.toFixed(0)}%</td>
+      <td>${m.AvgLeadTimeHours != null ? Number(m.AvgLeadTimeHours).toFixed(1) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const requestRows = requests.map(r => `
+    <tr class="admin-row sp-audit-row" style="cursor:pointer" data-id="${r.RequestId}">
+      <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
+      <td>${Number(r.QuantityRequested).toLocaleString()} / ${Number(r.QuantityDelivered).toLocaleString()} ${esc(r.Uom || '')}</td>
+      <td>${esc(r.Location)}</td>
+      <td>${r.Status === 'Completed' ? '<span style="color:#059669">Completed</span>' : '<span style="color:var(--text-muted)">Cancelled</span>'}</td>
+      <td>${spFormatDate(r.RequestedAtUtc)}</td>
+      <td>${spFormatDate(r.CompletedAtUtc)}</td>
+      <td>${r.Status === 'Completed' ? (new Date(r.CompletedAtUtc) <= new Date(r.DueAtUtc) ? '<span style="color:#059669">Yes</span>' : '<span style="color:var(--error,#DC2626)">No</span>') : '—'}</td>
+    </tr>`).join('');
+
+  const qs = [from ? `from=${from}` : '', to ? `to=${to}` : ''].filter(Boolean).join('&');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-row" style="margin-bottom:14px">
+      <div class="tf-field"><label class="tf-label">From</label><input class="tf-input" type="date" id="sp-kpi-from" value="${from || ''}"></div>
+      <div class="tf-field"><label class="tf-label">To</label><input class="tf-input" type="date" id="sp-kpi-to" value="${to || ''}"></div>
+      <div class="tf-field" style="justify-content:flex-end"><label class="tf-label">&nbsp;</label><button type="button" class="btn-secondary" id="sp-kpi-filter-btn">Filter</button></div>
+      <div class="tf-field" style="justify-content:flex-end"><label class="tf-label">&nbsp;</label><a class="btn-export" href="/api/staging/kpi/export${qs ? '?' + qs : ''}">Export to Excel</a></div>
+    </div>
+
+    <div class="rpt-kpi-row">
+      <div class="rpt-kpi"><div class="rpt-kpi-label">Completed</div><div class="rpt-kpi-val">${overall.CompletedCount || 0}</div></div>
+      <div class="rpt-kpi"><div class="rpt-kpi-label">On-Time %</div><div class="rpt-kpi-val">${onTimePct.toFixed(0)}%</div></div>
+      <div class="rpt-kpi"><div class="rpt-kpi-label">Avg Lead Time</div><div class="rpt-kpi-val">${overall.AvgLeadTimeHours != null ? Number(overall.AvgLeadTimeHours).toFixed(1) : '—'}</div><div class="rpt-kpi-sub">hours</div></div>
+    </div>
+
+    <div class="tf-section-label">By Material</div>
+    <div style="overflow-x:auto;margin-bottom:18px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Completed</th><th>On-Time %</th><th>Avg Lead (hrs)</th></tr></thead>
+        <tbody>${byMaterialRows || '<tr><td colspan="4" class="sap-empty">No completed requests in range.</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    <div class="tf-section-label">All Requests (Audit Trail)</div>
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Requested / Delivered</th><th>Location</th><th>Status</th><th>Requested At</th><th>Completed At</th><th>On Time</th></tr></thead>
+        <tbody>${requestRows || '<tr><td colspan="7" class="sap-empty">No requests in range.</td></tr>'}</tbody>
+      </table>
+    </div>`;
+
+  document.getElementById('sp-kpi-filter-btn').addEventListener('click', () => {
+    const f = document.getElementById('sp-kpi-from').value;
+    const t = document.getElementById('sp-kpi-to').value;
+    spRefreshCompleted(f || null, t || null);
+  });
+  document.querySelectorAll('.sp-audit-row').forEach(tr => {
+    tr.addEventListener('click', () => spOpenAuditDetail(Number(tr.dataset.id)));
+  });
+}
+
+async function spOpenAuditDetail(requestId) {
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Loading…</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
+  </div>`;
+  try {
+    const json = await spApi(`/requests/${requestId}`);
+    const r = json.data;
+    document.querySelector('#ps-modal-overlay .ps-modal-title').textContent = `${r.Material} — Request #${r.RequestId}`;
+    const deliveryRows = (r.deliveries || []).map(d => `
+      <tr class="admin-row">
+        <td>${Number(d.QuantityMoved).toLocaleString()}</td>
+        <td>${d.Batch ? esc(d.Batch) : '—'}</td>
+        <td>${esc(d.SourceStorageType || '')}/${esc(d.SourceBin || '')} &rarr; ${esc(d.DestinationStorageType || '')}/${esc(d.DestinationBin || '')}</td>
+        <td>${d.TransferOrderNumber ? esc(d.TransferOrderNumber) : '—'}</td>
+        <td>${esc(d.DeliveredBy)}</td>
+        <td>${spFormatDate(d.DeliveredAtUtc)}</td>
+      </tr>`).join('');
+    document.querySelector('#ps-modal-overlay .ps-modal-body').innerHTML = `
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Requested</label><div>${Number(r.QuantityRequested).toLocaleString()} ${esc(r.Uom || '')}</div></div>
+        <div class="tf-field"><label class="tf-label">Delivered</label><div>${Number(r.QuantityDelivered).toLocaleString()} ${esc(r.Uom || '')}</div></div>
+        <div class="tf-field"><label class="tf-label">Location</label><div>${esc(r.Location)}</div></div>
+        <div class="tf-field"><label class="tf-label">Status</label><div>${esc(r.Status)}</div></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Requested By</label><div>${esc(r.RequestedBy)} — ${spFormatDate(r.RequestedAtUtc)}</div></div>
+        <div class="tf-field"><label class="tf-label">Needed By</label><div>${spFormatDate(r.DueAtUtc)}</div></div>
+      </div>
+      ${r.Notes ? `<div class="toolbar-hint">Note: ${esc(r.Notes)}</div>` : ''}
+      <div class="tf-section-label" style="margin-top:12px">Deliveries</div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead><tr><th>Qty</th><th>Batch</th><th>Source &rarr; Dest</th><th>Transfer Order</th><th>By</th><th>When</th></tr></thead>
+          <tbody>${deliveryRows || '<tr><td colspan="6" class="sap-empty">No deliveries recorded.</td></tr>'}</tbody>
+        </table>
+      </div>`;
+  } catch (err) {
+    document.querySelector('#ps-modal-overlay .ps-modal-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Bin Restrictions (Warehouse Supervisor config) ────────────────────────────
+
+async function runStagingBinRestrictions() {
+  if (!await checkSession()) return;
+  showResultPanel('Bin Restrictions', 'Configure which bins/bin types Staging Post deliveries must be picked from, per material');
+  try {
+    const json = await spApi('/bin-restrictions');
+    spRenderBinRestrictions(json.data || []);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function spRenderBinRestrictions(restrictions) {
+  const rows = restrictions.map(r => `
+    <tr class="admin-row">
+      <td><strong>${esc(r.Material)}</strong></td>
+      <td>${esc(r.StorageType)}</td>
+      <td>${r.Bin ? esc(r.Bin) : '<span style="color:var(--text-muted)">Any bin in this type</span>'}</td>
+      <td>${esc(r.Notes || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary sp-br-edit" data-id="${r.RestrictionId}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary sp-br-delete" data-id="${r.RestrictionId}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="sp-br-add-btn">+ Add Restriction</button>
+    </div>
+    ${restrictions.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Storage Type</th><th>Bin</th><th>Notes</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No bin restrictions configured — every material can be picked from anywhere in stock.</div>'}
+  `;
+
+  document.getElementById('sp-br-add-btn').addEventListener('click', () => spOpenBinRestrictionModal(null));
+  document.querySelectorAll('.sp-br-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = restrictions.find(x => String(x.RestrictionId) === btn.dataset.id);
+      if (r) spOpenBinRestrictionModal(r);
+    });
+  });
+  document.querySelectorAll('.sp-br-delete').forEach(btn => {
+    btn.addEventListener('click', () => spDeleteBinRestriction(btn.dataset.id));
+  });
+}
+
+function spOpenBinRestrictionModal(restriction) {
+  const isEdit = !!restriction;
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit' : 'Add'} Bin Restriction</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Material <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-br-material" value="${esc(restriction?.Material || '')}" placeholder="Search by material number or description…" ${isEdit ? 'readonly' : ''}>
+          <input type="hidden" id="sp-br-material-value" value="${esc(restriction?.Material || '')}">
+          <div id="sp-br-material-results"></div>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Storage Type <span class="tf-req">*</span></label>
+          <input class="tf-input" type="text" id="sp-br-storage-type" value="${esc(restriction?.StorageType || '')}" placeholder="e.g. 001">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Bin <span class="tf-optional">(optional)</span></label>
+          <input class="tf-input" type="text" id="sp-br-bin" value="${esc(restriction?.Bin || '')}" placeholder="Leave blank for any bin in this type">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes <span class="tf-optional">(optional)</span></label>
+          <input class="tf-input" type="text" id="sp-br-notes" value="${esc(restriction?.Notes || '')}" placeholder="e.g. Manual FIFO placement">
+        </div>
+      </div>
+      <div id="sp-br-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="sp-br-save-btn">${isEdit ? 'Save Changes' : 'Add Restriction'}</button>
+    </div>
+  </div>`;
+
+  if (!isEdit) {
+    let searchTimer = null;
+    document.getElementById('sp-br-material').addEventListener('input', function () {
+      document.getElementById('sp-br-material-value').value = '';
+      clearTimeout(searchTimer);
+      const q = this.value.trim();
+      const results = document.getElementById('sp-br-material-results');
+      if (!q) { results.innerHTML = ''; return; }
+      searchTimer = setTimeout(() => spSearchBinRestrictionMaterials(q), 250);
+    });
+  }
+
+  document.getElementById('sp-br-save-btn').addEventListener('click', async () => {
+    const material = isEdit ? restriction.Material : document.getElementById('sp-br-material-value').value;
+    const body = {
+      material,
+      storageType: document.getElementById('sp-br-storage-type').value.trim(),
+      bin: document.getElementById('sp-br-bin').value.trim() || null,
+      notes: document.getElementById('sp-br-notes').value.trim() || null,
+    };
+    const resultEl = document.getElementById('sp-br-result');
+    if (!body.material) { resultEl.innerHTML = '<div class="sap-error">Pick a material from the search results.</div>'; return; }
+    if (!body.storageType) { resultEl.innerHTML = '<div class="sap-error">Storage type is required.</div>'; return; }
+
+    const btn = document.getElementById('sp-br-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      await spApi(isEdit ? `/bin-restrictions/${restriction.RestrictionId}` : '/bin-restrictions', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      closePickModal();
+      runStagingBinRestrictions();
+    } catch (err) {
+      resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Restriction';
+    }
+  });
+}
+
+async function spSearchBinRestrictionMaterials(q) {
+  const results = document.getElementById('sp-br-material-results');
+  if (!results) return;
+  results.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
+  try {
+    const json = await spApi(`/materials?search=${encodeURIComponent(q)}`);
+    const rows = json.data || [];
+    if (!rows.length) { results.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
+    results.innerHTML = `
+      <div style="overflow-x:auto;max-height:220px;overflow-y:auto;margin-top:6px">
+        <table class="pn-batch-table">
+          <thead><tr><th>Material</th><th>Description</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr class="pn-row sp-br-material-pick" style="cursor:pointer" data-material="${esc(r.material)}">
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.material)}</td>
+                <td>${esc(r.materialText || '—')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    document.querySelectorAll('.sp-br-material-pick').forEach(tr => {
+      tr.addEventListener('click', () => {
+        document.getElementById('sp-br-material').value = tr.dataset.material;
+        document.getElementById('sp-br-material-value').value = tr.dataset.material;
+        results.innerHTML = '';
+      });
+    });
+  } catch (err) {
+    results.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function spDeleteBinRestriction(restrictionId) {
+  if (!confirm('Delete this bin restriction?')) return;
+  try {
+    await spApi(`/bin-restrictions/${restrictionId}`, { method: 'DELETE' });
+    runStagingBinRestrictions();
+  } catch (err) {
+    alert(err.message);
+  }
 }

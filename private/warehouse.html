@@ -122,10 +122,51 @@
         </div>
       </div>
 
+      <!-- Staging Post -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Staging Post</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="stagingFulfil">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Staging Post</div>
+            <div class="tile-desc">Open material requests from Production &mdash; sorted by due date</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="stagingCompleted">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Completed Requests</div>
+            <div class="tile-desc">Audit trail and fulfilment KPIs &mdash; on-time %, average lead time</div>
+          </div>
+
+        </div>
+      </div>
+
       <!-- Supervisor (LOG_SUPER permission required — shown by JS) -->
       <div class="pn-section hidden" id="supervisor-section">
         <div class="pn-section-hdr pn-section-hdr--supervisor">Supervisor</div>
         <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="stagingBinRestrictions">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Bin Restrictions</div>
+            <div class="tile-desc">Configure which bins/bin types Staging Post deliveries must be picked from, per material</div>
+          </div>
 
           <div class="sap-tile sap-tile--live" data-fn="addPicksheet">
             <div class="tile-icon">
