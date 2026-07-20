@@ -2949,6 +2949,15 @@ function spRenderFulfilList(requests) {
   });
 }
 
+// Staging Post deliveries always transfer into the same SAP destination —
+// operators never need to see or enter it.
+const SP_DESTINATION_TYPE = 'SA';
+const SP_DESTINATION_BIN = 'PTFE';
+// Holds the source location/batch data captured from whichever stock row the
+// operator selected in the Mark Delivered modal (set in spRefreshFulfilModal,
+// read in spSubmitDelivery).
+let spSelectedStockRow = null;
+
 async function spOpenFulfilModal(requestId) {
   const overlay = document.getElementById('ps-modal-overlay');
   overlay.classList.remove('hidden');
@@ -3010,7 +3019,7 @@ async function spRefreshFulfilModal(requestId) {
           <tbody>${stockRowsHtml}</tbody>
         </table>
       </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Click a stock row to fill in the source below, or enter it by hand.</div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Click a stock row below to select where to pick from.</div>
 
       <div class="tf-section-label">Mark Delivered</div>
       <div class="tf-row">
@@ -3018,46 +3027,24 @@ async function spRefreshFulfilModal(requestId) {
           <label class="tf-label">Quantity <span class="tf-req">*</span></label>
           <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-deliver-qty" value="${remaining > 0 ? remaining : ''}">
         </div>
-        <div class="tf-field">
-          <label class="tf-label">Batch</label>
-          <input class="tf-input" type="text" id="sp-deliver-batch" value="${esc(requestedBatch || '')}" ${requestedBatch ? 'readonly' : ''}>
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Storage Location <span class="tf-req">*</span></label>
-          <input class="tf-input" type="text" id="sp-deliver-sloc" placeholder="e.g. 0001">
-        </div>
       </div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Source Type <span class="tf-req">*</span></label>
-          <input class="tf-input" type="text" id="sp-deliver-source-type">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Source Bin <span class="tf-req">*</span></label>
-          <input class="tf-input" type="text" id="sp-deliver-source-bin">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Dest. Type <span class="tf-req">*</span></label>
-          <input class="tf-input" type="text" id="sp-deliver-dest-type">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
-          <input class="tf-input" type="text" id="sp-deliver-dest-bin">
-        </div>
-      </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Destination should be wherever &ldquo;${esc(request.Location)}&rdquo; actually resolves to on the floor.</div>
       <div id="sp-deliver-result"></div>
       <div class="ps-modal-actions" style="padding:0;margin-top:10px">
         <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
         <button type="button" class="btn-submit" id="sp-deliver-btn">Create Transfer Order &amp; Mark Delivered</button>
       </div>`;
 
+    spSelectedStockRow = null;
     document.querySelectorAll('.sp-stock-row').forEach(tr => {
       tr.addEventListener('click', () => {
-        document.getElementById('sp-deliver-sloc').value = tr.dataset.sloc;
-        document.getElementById('sp-deliver-source-type').value = tr.dataset.storagetype;
-        document.getElementById('sp-deliver-source-bin').value = tr.dataset.bin;
-        if (!requestedBatch && tr.dataset.batch) document.getElementById('sp-deliver-batch').value = tr.dataset.batch;
+        document.querySelectorAll('.sp-stock-row.selected').forEach(prev => prev.classList.remove('selected'));
+        tr.classList.add('selected');
+        spSelectedStockRow = {
+          storageLocation: tr.dataset.sloc,
+          sourceStorageType: tr.dataset.storagetype,
+          sourceBin: tr.dataset.bin,
+          batch: (requestedBatch || tr.dataset.batch || '') || null,
+        };
       });
     });
 
@@ -3069,20 +3056,20 @@ async function spRefreshFulfilModal(requestId) {
 
 async function spSubmitDelivery(requestId) {
   const resultEl = document.getElementById('sp-deliver-result');
-  const body = {
-    quantity:                Number(document.getElementById('sp-deliver-qty').value),
-    batch:                    document.getElementById('sp-deliver-batch').value.trim() || null,
-    storageLocation:           document.getElementById('sp-deliver-sloc').value.trim(),
-    sourceStorageType:          document.getElementById('sp-deliver-source-type').value.trim(),
-    sourceBin:                   document.getElementById('sp-deliver-source-bin').value.trim(),
-    destinationStorageType:       document.getElementById('sp-deliver-dest-type').value.trim(),
-    destinationBin:                document.getElementById('sp-deliver-dest-bin').value.trim(),
-  };
-  if (!(body.quantity > 0)) { resultEl.innerHTML = '<div class="sap-error">Enter a quantity greater than zero.</div>'; return; }
-  if (!body.storageLocation || !body.sourceStorageType || !body.sourceBin || !body.destinationStorageType || !body.destinationBin) {
-    resultEl.innerHTML = '<div class="sap-error">Storage location, source bin/type and destination bin/type are all required.</div>';
+  if (!spSelectedStockRow) {
+    resultEl.innerHTML = '<div class="sap-error">Click a row in the Available Stock table above to pick where to take it from.</div>';
     return;
   }
+  const body = {
+    quantity: Number(document.getElementById('sp-deliver-qty').value),
+    batch: spSelectedStockRow.batch,
+    storageLocation: spSelectedStockRow.storageLocation,
+    sourceStorageType: spSelectedStockRow.sourceStorageType,
+    sourceBin: spSelectedStockRow.sourceBin,
+    destinationStorageType: SP_DESTINATION_TYPE,
+    destinationBin: SP_DESTINATION_BIN,
+  };
+  if (!(body.quantity > 0)) { resultEl.innerHTML = '<div class="sap-error">Enter a quantity greater than zero.</div>'; return; }
 
   const btn = document.getElementById('sp-deliver-btn');
   btn.disabled = true; btn.textContent = 'Creating transfer order…';

@@ -4796,13 +4796,11 @@ function spOpenRequestModal() {
           <label class="tf-label">Needed By</label>
           <div style="display:flex;gap:6px;margin-bottom:6px">
             <button type="button" class="btn-secondary sp-due-preset" data-hours="4" style="padding:4px 10px;font-size:11px">4 hours</button>
-            <button type="button" class="btn-secondary sp-due-preset" data-hours="8" style="padding:4px 10px;font-size:11px">8 hours</button>
-            <button type="button" class="btn-secondary sp-due-preset" data-hours="24" style="padding:4px 10px;font-size:11px">Tomorrow</button>
           </div>
           <input class="tf-input" type="datetime-local" id="sp-due" value="${spDefaultDueLocal()}">
         </div>
       </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Minimum ${SP_MIN_LEAD_HOURS} hours from now, so Stores always has a fair chance to get to it — push it out further if it's not urgent.</div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Use the 4 hours button, or pick your own time — it must be more than ${SP_MIN_LEAD_HOURS} hours from now, so Stores always has a fair chance to get to it.</div>
       <div class="tf-row">
         <div class="tf-field tf-field--wide">
           <label class="tf-label">Notes <span class="tf-optional">(optional)</span></label>

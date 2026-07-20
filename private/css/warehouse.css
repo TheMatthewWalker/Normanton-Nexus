@@ -694,7 +694,8 @@ body::before {
 }
 .ps-modal-close:hover { color: var(--error); }
 
-.ps-modal-body { flex: 1; overflow: auto; }
+.ps-modal-body { flex: 1; overflow: auto; padding: 20px 24px; }
+.sp-stock-row.selected { background: rgba(37,99,235,0.15) !important; box-shadow: inset 0 0 0 1px var(--accent,#2563eb); }
 
 .ps-modal-actions {
   display: flex; align-items: center; gap: 10px; justify-content: flex-end;

@@ -88,6 +88,9 @@ async function createSapTransferOrder(body) {
 // Minimum lead time a production request can specify — protects Stores from
 // being asked for an impossible immediate turnaround. No upper bound.
 const NEEDED_BY_MIN_LEAD_HOURS = 4;
+// Grace period so picking the "4 hours" preset and submitting a little while
+// later never spuriously fails the minimum-lead-time check below.
+const NEEDED_BY_GRACE_MINUTES = 5;
 
 // ── Material search (no LOG_MRP gate — see stagingsql.js's searchMaterials) ──
 
@@ -161,7 +164,7 @@ router.post('/requests', async (req, res) => {
       return res.status(400).json({ success: false, error: { message: 'dueAtUtc (Needed By) is required.' } });
     }
     const due = new Date(dueAtUtc);
-    const minDue = new Date(Date.now() + NEEDED_BY_MIN_LEAD_HOURS * 60 * 60 * 1000);
+    const minDue = new Date(Date.now() + NEEDED_BY_MIN_LEAD_HOURS * 60 * 60 * 1000 - NEEDED_BY_GRACE_MINUTES * 60 * 1000);
     if (due < minDue) {
       return res.status(400).json({
         success: false,
