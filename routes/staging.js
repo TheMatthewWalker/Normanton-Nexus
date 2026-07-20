@@ -69,7 +69,12 @@ async function fetchLquaStock({ material, batch, storageType, bin }) {
   });
   const body = response.data;
   if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
-  return body.data;
+  // The underlying generic table-read RFC (ZRFC_READ_TABLES) returns the SAP
+  // field-name header as if it were a data row (e.g. availableQty: "VERME")
+  // — the same quirk warehouse.js's raw Display Stock call already skips via
+  // slice(1). Filter it out defensively by quantity rather than by position,
+  // since a genuine header row never has a real numeric quantity.
+  return (body.data || []).filter(row => Number.isFinite(Number(row.availableQty)));
 }
 
 // SapServer's existing POST /api/warehouse/transfer-order (L_TO_CREATE_SINGLE) —
