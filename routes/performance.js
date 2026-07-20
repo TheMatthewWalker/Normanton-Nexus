@@ -199,10 +199,12 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
   const openOrders = incomingByMaterial.get(r.Material) || [];
   const openQty = openOrders.reduce((sum, o) => sum + (Number(o.OrderQty) || 0), 0);
 
-  // Current stock includes ConsignmentQty (see the comment on the
-  // currentStock aggregate further down this file) and anything already
-  // incoming, so an item on order doesn't keep getting re-flagged.
-  const currentStock = (Number(r.StockQty) || 0) + (Number(r.ConsignmentQty) || 0) + openQty;
+  // Stock physically on hand right now — deliberately NOT including open
+  // orders here. Those only help avoid a breach once they actually land;
+  // an order due in December doesn't stop an October breach just because
+  // it exists. See incomingDeliveries below, which times each order's
+  // contribution to its real delivery week instead.
+  const onHandStock = (Number(r.StockQty) || 0) + (Number(r.ConsignmentQty) || 0);
   const predictedMonthly = [
     r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
     r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
@@ -212,7 +214,23 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
   // MinSafetyStockQty's column comment in migrate_vendor_master_data.sql.
   const safetyStockQty = Number(r.MinSafetyStockQty ?? r.SapSafetyStock ?? 0);
 
-  const weeklyForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, today);
+  // Mirrors the /turns-valclass/history route's incomingDeliveries handling
+  // (see buildWeeklyStockForecast's incomingThisWeek) — each open order
+  // bumps the forecast only in the week it's actually due, not from today.
+  // Previously this function instead added the full openQty straight onto
+  // currentStock before the forecast ever ran, which meant an order due
+  // to land AFTER a breach was silently treated as already available and
+  // could mask the breach (and therefore the suggestion) entirely — the
+  // bug reported against 30005R/Raaj Ratna: existing orders dated after
+  // the 12 Oct breach date were propping up the projection so no shortage
+  // was ever detected. Orders with no recorded DeliveryDate fall back to
+  // "today", the same assumption this function made everywhere before.
+  const incomingDeliveries = openOrders.map(o => ({
+    date: o.DeliveryDate ? new Date(o.DeliveryDate) : asOfDate,
+    qty: Number(o.OrderQty) || 0,
+  }));
+
+  const weeklyForecast = buildWeeklyStockForecast(onHandStock, predictedMonthly, today, incomingDeliveries);
   const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
 
   const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
@@ -222,9 +240,15 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
 
   // Suggested qty: cover lead time + a review-cycle buffer, rebuild the
   // safety-stock floor, minus what's already on hand or already incoming.
+  // Unlike the breach-date forecast above, sizing a NEW order deliberately
+  // nets off the FULL open-order quantity regardless of timing — stock
+  // that's already on order still shouldn't be duplicated by a fresh
+  // order, it just doesn't get credited as available before its actual
+  // delivery date for the purpose of deciding WHETHER a breach happens.
   // Zero (not negative) when nothing's needed — Upcoming/NotDue materials
   // still get a real number here so the Build Order modal has something
   // sensible to prefill if a buyer opts to pull one in early.
+  const currentStock = onHandStock + openQty;
   let suggestedQty = 0;
   if (breachDate) {
     const coverageDays = leadTimeDays + ORDER_COVERAGE_BUFFER_DAYS;
