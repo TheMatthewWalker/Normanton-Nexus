@@ -2219,6 +2219,20 @@ router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), asy
   }
 });
 
+// Hard delete — see db.deleteOrderSuggestion's comment for how this differs
+// from setting Status='Cancelled'. No restriction on which status/shipment
+// state a row is in: the user asked for this specifically to fix mistakes
+// (duplicate manual entries, wrong material picked), which can happen at
+// any stage.
+router.delete('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.deleteOrderSuggestion(req.params.suggestionId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // ── Inbound shipment tracking + supplier reference (haulier / mode of
 // transport / tracking numbers for orders that travel via a haulier;
 // SupplierReference above for vendors who deliver themselves) — see

@@ -1155,6 +1155,23 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
     `);
 }
 
+// Hard-deletes a tracked order outright — distinct from setting
+// Status='Cancelled', which just hides the row from listOrderSuggestionsTracked
+// (see that function's WHERE clause) while keeping it for audit. This is for
+// genuine mistakes: a duplicate manual entry, a wrong material picked, etc.,
+// where there's nothing worth keeping a record of. No FK constraints
+// reference PurchaseOrderSuggestion, so this is a plain delete with no
+// cleanup elsewhere — if the order was linked to a shipment, that shipment's
+// OrderCount/Suppliers (both live-computed via JOIN in listOrderShipments)
+// simply reflect one fewer line afterwards, same as if it were never linked.
+export async function deleteOrderSuggestion(suggestionId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('suggestionId', sql.Int, suggestionId)
+    .query('DELETE FROM dbo.PurchaseOrderSuggestion OUTPUT DELETED.SuggestionId WHERE SuggestionId = @suggestionId');
+  if (!recordset[0]) { const err = new Error('Tracked order not found.'); err.statusCode = 404; throw err; }
+}
+
 // ── Inbound shipment tracking (haulier / mode of transport / tracking
 // number, dispatch date / ETA, B/L & container), and self-delivering-
 // supplier reconciliation via SupplierReference above — see
@@ -1323,11 +1340,12 @@ export async function assignOrderShipment(suggestionId, shipmentId) {
 
 // Cancels a shipment (Inbound Log's "Cancel Shipment" action) and unlinks
 // every order currently on it — the orders themselves are left exactly as
-// they were (Status untouched), just no longer pointing at a dead shipment,
-// so they're free to be picked up in a new shipment later. Only possible
-// before the shipment is received: a received shipment's orders are already
-// Booked (see markShipmentReceived), so there'd be nothing sensible left to
-// unlink them back to.
+// they were (Status untouched, including Booked on an already-received
+// shipment), just no longer pointing at a dead shipment, so they're free to
+// be picked up in a new shipment later. Allowed even after the shipment has
+// been marked received — e.g. it was booked against the wrong load, or
+// needs pulling apart after the fact — the only real guard is against
+// cancelling something already cancelled.
 export async function cancelOrderShipment(shipmentId, cancelledBy) {
   const pool = await getPool();
   const { recordset } = await pool.request()
@@ -1336,7 +1354,6 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
   const shipment = recordset[0];
   if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   if (shipment.CancelledAtUtc) { const err = new Error('This shipment has already been cancelled.'); err.statusCode = 400; throw err; }
-  if (shipment.ReceivedAtUtc) { const err = new Error('Cannot cancel a shipment that has already been marked received.'); err.statusCode = 400; throw err; }
 
   await pool.request()
     .input('shipmentId',   sql.Int, shipmentId)

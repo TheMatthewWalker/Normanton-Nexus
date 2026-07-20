@@ -5386,11 +5386,37 @@ function osRenderBuildOrderForm(build) {
   });
 }
 
-async function runOrderSuggestionsTracked() {
+// Reads which .ps-section groups are currently expanded (not collapsed) on
+// screen, keyed by the stable data-group-key set in osRenderTrackedList —
+// called right before a save-triggered re-render wipes result-body, so a
+// user's open groups don't collapse back to the default "everything
+// closed" state and force them to re-find their place. Must be captured
+// before showResultPanel/osRenderTrackedList run, not after.
+function osCaptureExpandedGroups() {
+  const expanded = new Set();
+  document.querySelectorAll('.ps-section[data-group-key]').forEach(sec => {
+    if (!sec.classList.contains('ps-section--collapsed')) expanded.add(sec.dataset.groupKey);
+  });
+  return expanded;
+}
+
+function osApplyExpandedGroups(expanded) {
+  if (!expanded || !expanded.size) return;
+  document.querySelectorAll('.ps-section[data-group-key]').forEach(sec => {
+    if (expanded.has(sec.dataset.groupKey)) sec.classList.remove('ps-section--collapsed');
+  });
+}
+
+// preserveExpanded: pass true when re-running after an in-place save (not a
+// fresh visit to the tile) so previously-open groups reopen automatically —
+// see osCaptureExpandedGroups/osApplyExpandedGroups above.
+async function runOrderSuggestionsTracked(preserveExpanded) {
+  const expanded = preserveExpanded ? osCaptureExpandedGroups() : null;
   showResultPanel('Tracked Orders', 'Accepted order suggestions — update status as they’re raised in SAP and received');
   try {
     const tracked = await osFetchTracked();
     osRenderTrackedList(tracked);
+    osApplyExpandedGroups(expanded);
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
@@ -5429,7 +5455,10 @@ function osRenderTrackedList(tracked) {
         </button>
         ${t.ShipmentId ? `<button class="btn-secondary os-invoice-btn" data-shipment-id="${t.ShipmentId}" data-shipment-ref="${esc(t.ShipmentReference || '')}" style="padding:3px 8px;font-size:11px;white-space:nowrap;margin-left:4px">Invoice</button>` : ''}
       </td>
-      <td style="text-align:right"><button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button></td>
+      <td style="text-align:right">
+        <button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button>
+        <button class="btn-secondary os-delete-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px;margin-left:4px;color:var(--error,#DC2626)">Delete</button>
+      </td>
     </tr>`;
   };
 
@@ -5449,7 +5478,12 @@ function osRenderTrackedList(tracked) {
     { key: 'cancelled', label: 'Cancelled',              dot: 'other',   match: t => t.Status === 'Cancelled' },
   ];
 
-  const renderSupplierGroup = (name, rows) => `<div class="ps-section ps-section--collapsed ps-section--nested">
+  // data-group-key on both levels lets osCaptureExpandedGroups/
+  // osApplyExpandedGroups re-open whatever the user had expanded before a
+  // save-triggered re-render — see those functions' comment for why this
+  // exists. Keyed on bucket + vendor name rather than array index, since
+  // index isn't stable once rows move between buckets after a status change.
+  const renderSupplierGroup = (bucketKey, name, rows) => `<div class="ps-section ps-section--collapsed ps-section--nested" data-group-key="${esc(bucketKey)}::${esc(name)}">
     <div class="ps-section-header">
       <span class="ps-section-dot ps-section-dot--other"></span>
       <span class="ps-section-title">${esc(name)}</span>
@@ -5467,8 +5501,8 @@ function osRenderTrackedList(tracked) {
     const byVendor = {};
     bucketRows.forEach(t => { const key = t.VendorName || 'Unknown Vendor'; (byVendor[key] = byVendor[key] || []).push(t); });
     const vendorGroups = Object.keys(byVendor).sort((a, b) => a.localeCompare(b))
-      .map(name => renderSupplierGroup(name, byVendor[name])).join('');
-    return `<div class="ps-section ps-section--collapsed">
+      .map(name => renderSupplierGroup(bd.key, name, byVendor[name])).join('');
+    return `<div class="ps-section ps-section--collapsed" data-group-key="${esc(bd.key)}">
       <div class="ps-section-header">
         <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
         <span class="ps-section-title">${bd.label}</span>
@@ -5505,6 +5539,12 @@ function osRenderTrackedList(tracked) {
     btn.addEventListener('click', () => {
       const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
       if (t) osSaveTrackedStatus(t);
+    });
+  });
+  document.querySelectorAll('.os-delete-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
+      if (t) osDeleteTracked(t);
     });
   });
   document.querySelectorAll('.os-shipment-btn').forEach(btn => {
@@ -5663,7 +5703,28 @@ async function osSaveTrackedStatus(t) {
     btn.disabled = false; btn.textContent = 'Save';
     return;
   }
-  runOrderSuggestionsTracked();
+  runOrderSuggestionsTracked(true);
+}
+
+// Hard-deletes a tracked order outright — distinct from setting Status to
+// Cancelled (which just hides it from this list for audit purposes, see
+// db.deleteOrderSuggestion's comment). For genuine mistakes: a duplicate
+// manual entry, wrong material picked, etc. No status/shipment restriction
+// client-side — the server allows it at any stage — but this is
+// destructive and unrecoverable, so it gets an explicit confirm().
+async function osDeleteTracked(t) {
+  if (!confirm(`Delete this tracked order for ${t.Material} — ${t.VendorName}? This permanently removes it, it won't just be marked Cancelled. This cannot be undone.`)) return;
+  const btn = document.querySelector(`.os-delete-btn[data-id="${t.SuggestionId}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to delete order');
+    runOrderSuggestionsTracked(true);
+  } catch (err) {
+    alert(err.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+  }
 }
 
 // Bulk save — for editing several rows (any mix of qty/status/PO/supplier
@@ -5689,7 +5750,7 @@ async function saveSelectedTrackedOrders() {
   if (failed.length) {
     alert(`Saved ${results.length - failed.length} of ${results.length} line(s).\n\nFailed:\n` + failed.map(f => `${f.material}: ${f.error}`).join('\n'));
   }
-  runOrderSuggestionsTracked();
+  runOrderSuggestionsTracked(true);
 }
 
 const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
@@ -6278,17 +6339,25 @@ async function refreshInboundShipmentDetail(shipmentId) {
         </table>
       </div>`;
 
-    const isActive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
+    // Cancelling is allowed any time up until the shipment is itself
+    // cancelled — including after it's been marked received (see
+    // cancelOrderShipment's comment in performancesql.js for why). Marking
+    // received is the narrower action: only makes sense once, on a shipment
+    // that isn't already cancelled or received.
+    const canCancel = !s.CancelledAtUtc;
+    const canReceive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
     actions.innerHTML = `
       <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
-      ${isActive ? '<button type="button" class="btn-secondary" id="isd-cancel-btn">Cancel Shipment</button>' : ''}
+      ${canCancel ? '<button type="button" class="btn-secondary" id="isd-cancel-btn">Cancel Shipment</button>' : ''}
       <button type="button" class="btn-secondary" id="isd-save-btn">Save Details</button>
-      ${isActive ? '<button type="button" class="btn-submit" id="isd-receive-btn">Mark Received</button>' : ''}
+      ${canReceive ? '<button type="button" class="btn-submit" id="isd-receive-btn">Mark Received</button>' : ''}
     `;
 
     document.getElementById('isd-save-btn').addEventListener('click', () => saveInboundShipmentDetail(shipmentId));
-    if (isActive) {
+    if (canReceive) {
       document.getElementById('isd-receive-btn').addEventListener('click', () => markInboundShipmentReceived(shipmentId, s));
+    }
+    if (canCancel) {
       document.getElementById('isd-cancel-btn').addEventListener('click', () => cancelInboundShipment(shipmentId, s));
     }
   } catch (err) {
@@ -6353,11 +6422,17 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
 
 // Unlinks every order on the shipment (their Status is left untouched —
 // they're just freed up to go on a different shipment later) and marks the
-// shipment cancelled. A destructive, hard-to-reverse action affecting every
-// order on the shipment, so this gets an explicit confirm() too.
+// shipment cancelled. Allowed even after Mark Received (see
+// cancelOrderShipment's comment) — in that case the orders stay Booked, so
+// the confirm makes that explicit rather than implying a full undo. A
+// destructive, hard-to-reverse action affecting every order on the
+// shipment, so this gets an explicit confirm() too.
 async function cancelInboundShipment(shipmentId, shipment) {
   const orderCount = shipment.orders?.length || 0;
-  if (!confirm(`Cancel ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be unlinked and free to add to a different shipment.`)) return;
+  const receivedNote = shipment.ReceivedAtUtc
+    ? ` This shipment was already marked received — its orders will stay Booked, just unlinked from this shipment.`
+    : '';
+  if (!confirm(`Cancel ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be unlinked and free to add to a different shipment.${receivedNote}`)) return;
   const btn = document.getElementById('isd-cancel-btn');
   const result = document.getElementById('isd-result');
   if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
