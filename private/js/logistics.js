@@ -5669,6 +5669,15 @@ async function runOrderSuggestionsTracked(preserveExpanded) {
 
 const OS_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Booked', 'Received', 'Cancelled'];
 
+// Same "which date counts as due" logic as the Due Date column's display
+// (renderTrackedRow's dueLabel below) — a spot PO's actionable date is when
+// it needs collecting, not the (informational only) full delivery date.
+// No date at all sorts to the end.
+function osEffectiveDueDate(t) {
+  const d = t.IsSpotPo && t.ReadyToCollectDate ? t.ReadyToCollectDate : t.DeliveryDate;
+  return d ? new Date(d).getTime() : Infinity;
+}
+
 function osRenderTrackedList(tracked) {
   trackedRows = tracked;
   selectedTrackedIds = new Set();
@@ -5745,6 +5754,10 @@ function osRenderTrackedList(tracked) {
     if (!bucketRows.length) return '';
     const byVendor = {};
     bucketRows.forEach(t => { const key = t.VendorName || 'Unknown Vendor'; (byVendor[key] = byVendor[key] || []).push(t); });
+    // Sort each vendor's orders by the same due date shown in the Due Date
+    // column (ready-to-collect date for spot POs, delivery date otherwise) —
+    // earliest due first, no-date rows pushed to the end.
+    Object.values(byVendor).forEach(rows => rows.sort((a, b) => osEffectiveDueDate(a) - osEffectiveDueDate(b)));
     const vendorGroups = Object.keys(byVendor).sort((a, b) => a.localeCompare(b))
       .map(name => renderSupplierGroup(bd.key, name, byVendor[name])).join('');
     return `<div class="ps-section ps-section--collapsed" data-group-key="${esc(bd.key)}">
@@ -6451,12 +6464,41 @@ async function runInboundLog() {
   }
 }
 
+// Delivery-date bucket for one shipment — ExpectedEta vs today, same
+// backlog/today/week dot colours as everywhere else in the app (see
+// getDateBucket). No ETA set yet isn't "late" (there's no date to be late
+// against), so it falls into Upcoming until one is entered.
+function ilBucketFor(s) {
+  if (!s.ExpectedEta) return 'upcoming';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const eta = new Date(s.ExpectedEta); eta.setHours(0, 0, 0, 0);
+  if (eta.getTime() < today.getTime()) return 'late';
+  if (eta.getTime() === today.getTime()) return 'today';
+  return 'upcoming';
+}
+
+const IL_BUCKET_DEFS = [
+  { key: 'late',     label: 'Late',     dot: 'backlog', defaultOpen: true },
+  { key: 'today',    label: 'Today',    dot: 'today',   defaultOpen: true },
+  { key: 'upcoming', label: 'Upcoming', dot: 'week',    defaultOpen: true },
+];
+
+// No-ETA rows sort last within whichever bucket they land in (Upcoming).
+function ilSortByEta(rows) {
+  return [...rows].sort((a, b) => {
+    const ta = a.ExpectedEta ? new Date(a.ExpectedEta).getTime() : Infinity;
+    const tb = b.ExpectedEta ? new Date(b.ExpectedEta).getTime() : Infinity;
+    return ta - tb;
+  });
+}
+
 function renderInboundLog() {
   if (!inboundShipmentRows.length) {
     document.getElementById('result-body').innerHTML = '<div class="sap-empty">No inbound shipments yet — create one from Tracked Orders by selecting order lines.</div>';
     return;
   }
-  const rows = inboundShipmentRows.map(s => `
+
+  const renderRow = s => `
     <tr class="admin-row lg-row" data-id="${s.ShipmentId}">
       <td><strong>${esc(s.ShipmentReference || `#${s.ShipmentId}`)}</strong></td>
       <td>${esc(s.Suppliers || '-')}</td>
@@ -6469,16 +6511,30 @@ function renderInboundLog() {
       <td>${s.CancelledAtUtc
         ? `<span style="color:var(--text-secondary,#666)">Cancelled ${formatDisplayDate(s.CancelledAtUtc)}</span>`
         : (s.ReceivedAtUtc ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}` : '<span style="color:var(--text-secondary,#666)">Pending</span>')}</td>
-    </tr>`).join('');
+    </tr>`;
 
-  document.getElementById('result-body').innerHTML = `
-    <div style="overflow-x:auto">
-      <table class="pn-batch-table admin-table">
-        <thead><tr><th>Reference</th><th>Supplier</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+  const tableHead = '<thead><tr><th>Reference</th><th>Supplier</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>';
+
+  const sections = IL_BUCKET_DEFS.map(bd => {
+    const bucketRows = ilSortByEta(inboundShipmentRows.filter(s => ilBucketFor(s) === bd.key));
+    if (!bucketRows.length) return '';
+    const collapsed = bd.defaultOpen ? '' : ' ps-section--collapsed';
+    return `<div class="ps-section${collapsed}" data-group-key="${bd.key}">
+      <div class="ps-section-header">
+        <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
+        <span class="ps-section-title">${bd.label}</span>
+        <span class="ps-section-count">${bucketRows.length}</span>
+        <span class="ps-chevron">v</span>
+      </div>
+      <div class="ps-section-body">
+        <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${bucketRows.map(renderRow).join('')}</tbody></table></div>
+      </div>
     </div>`;
+  }).join('');
 
+  document.getElementById('result-body').innerHTML = `<div class="ps-sections">${sections}</div>`;
+
+  document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
   document.querySelectorAll('.lg-row').forEach(row => {
     row.addEventListener('click', () => openInboundShipmentDetail(Number(row.dataset.id)));
   });
