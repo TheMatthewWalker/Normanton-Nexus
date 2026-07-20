@@ -3155,6 +3155,53 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
   res.json({ success: true, results });
 });
 
+// ── Scrap — reject selected pending entries ──────────────────────────────────
+// Voids the entries (IsVoided=1) so they disappear from the approval queue and
+// can never be approved or posted to SAP. Only pending, un-posted entries are
+// eligible — approved/posted scrap must go through Scrap Reversal instead.
+
+router.post('/scrap/reject', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const { scrapIDs } = req.body;
+  if (!Array.isArray(scrapIDs) || !scrapIDs.length)
+    return res.status(400).json({ success: false, error: 'scrapIDs array required.' });
+
+  const pool = await getProductionPool();
+  const uid  = userId(req);
+
+  const results = await Promise.all(scrapIDs.map(async (scrapID) => {
+    try {
+      const scrapR = await pool.request()
+        .input('id', sql.Int, Number(scrapID))
+        .query(`SELECT se.ProcessCode, se.ProcessRecordID, se.Quantity, se.UnitOfMeasure,
+                       sr.ReasonCode
+                FROM   prod.ScrapEntries se
+                JOIN   prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
+                WHERE  se.ScrapID = @id AND se.IsApproved = 0 AND se.IsVoided = 0 AND se.SAPPosted = 0`);
+
+      if (!scrapR.recordset.length)
+        return { scrapID, success: false, error: 'Not found, already approved, or voided.' };
+
+      const s = scrapR.recordset[0];
+
+      await pool.request()
+        .input('id', sql.Int, Number(scrapID))
+        .query(`UPDATE prod.ScrapEntries SET IsVoided = 1
+                WHERE ScrapID = @id AND IsApproved = 0 AND IsVoided = 0 AND SAPPosted = 0`);
+
+      audit('SCRAP_REJECT', req.session?.user?.username,
+        `ScrapID '${scrapID}' REJECTED - ${s.Quantity} ${s.UnitOfMeasure} reason ${s.ReasonCode}`, req);
+      await writeEvent(pool, s.ProcessCode, s.ProcessRecordID, 'NOTE',
+        `Scrap rejected by supervisor — ScrapID ${scrapID} (${s.Quantity} ${s.UnitOfMeasure}, reason ${s.ReasonCode})`, 0, uid);
+
+      return { scrapID, success: true };
+    } catch (err) {
+      return { scrapID, success: false, error: err.message };
+    }
+  }));
+
+  res.json({ success: true, results });
+});
+
 // ── GET /scrap/:scrapId/documents — all SAP material documents for a scrap entry
 router.get('/scrap/:scrapId/documents', async (req, res) => {
   const scrapID = Number(req.params.scrapId);

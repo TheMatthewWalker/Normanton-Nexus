@@ -8,9 +8,9 @@ const getPool = async () => await sql.connect(sqlConfig);
 
 // ── Validate required KN env vars on startup ──────────────────────────────────
 const KN_API_URL      = process.env.KN_API_URL;
-const KN_CUSTOMER_ID  = process.env.KN_CUSTOMER_ID_TEST;
-const KN_CUSTOMER_KEY = process.env.KN_CUSTOMER_KEY_TEST;
-const KN_SECRET       = process.env.KN_SECRET_64_TEST;
+const KN_CUSTOMER_ID  = process.env.KN_CUSTOMER_ID;
+const KN_CUSTOMER_KEY = process.env.KN_CUSTOMER_KEY;
+const KN_SECRET       = process.env.KN_SECRET_64;
 
 if (!KN_API_URL || !KN_CUSTOMER_ID || !KN_CUSTOMER_KEY || !KN_SECRET) {
     console.error('[freightbooking] Missing required env vars: KN_API_URL, KN_CUSTOMER_ID, KN_CUSTOMER_KEY, KN_SECRET');
@@ -42,6 +42,13 @@ function buildBookingPayload(shipment, pallets, options = {}) {
     return {
         customerId:  KN_CUSTOMER_ID,
         customerKey: KN_CUSTOMER_KEY,
+
+        references: [
+            {
+                value: String(shipment.shipmentID),
+                code: 'ABO'
+            },
+        ],
 
         bookingFlags: {
             appointmentRequired: false,
