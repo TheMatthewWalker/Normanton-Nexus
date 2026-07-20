@@ -120,6 +120,7 @@ function setupTiles() {
       if (fn === 'vendorMasterData')    runVendorMasterData();
       if (fn === 'orderSuggestions')    runOrderSuggestions();
       if (fn === 'inboundLog')         runInboundLog();
+      if (fn === 'demandAdjustments')  runDemandAdjustments();
     });
   });
 
@@ -4146,11 +4147,13 @@ async function cvcSubmit() {
 
 // ── Tile 5: history / forecast, by material or combined ─────────────────────
 let shfMrpController = '';
+let shfCurrentMaterial = null; // null when the combined/"Show All" view is loaded — quick-add link hides itself in that case
 
 async function runStockHistoryForecast() {
   showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast, plus a weekly expected-stock-level projection — search for a material, or view the combined trend for all materials');
   destroyTurnsCharts();
   shfMrpController = '';
+  shfCurrentMaterial = null;
   const body = document.getElementById('result-body');
 
   body.innerHTML = `
@@ -4174,7 +4177,10 @@ async function runStockHistoryForecast() {
     </div>
     <div id="shf-picker" style="margin:10px 0"></div>
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
-      <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">Select a material or press &ldquo;Show All&rdquo;</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px">
+        <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Select a material or press &ldquo;Show All&rdquo;</div>
+        <a href="javascript:void(0)" id="shf-add-adjustment-link" class="hidden" style="font-size:12px;color:var(--accent);white-space:nowrap">+ Add Demand Adjustment</a>
+      </div>
       <canvas id="shf-chart" style="max-height:320px"></canvas>
     </div>
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
@@ -4188,6 +4194,9 @@ async function runStockHistoryForecast() {
     if (e.key === 'Enter') { e.preventDefault(); shfSearchMaterials(); }
   });
   document.getElementById('shf-all-btn').addEventListener('click', () => shfLoadChart(null, 'All Materials (combined)'));
+  document.getElementById('shf-add-adjustment-link').addEventListener('click', () => {
+    if (shfCurrentMaterial) daOpenModal(null, shfCurrentMaterial);
+  });
   document.getElementById('shf-mrp-controller').addEventListener('change', e => {
     shfMrpController = e.target.value;
     shfLoadChart(null, shfMrpController ? `All Materials — MRP Controller ${shfMrpController} (combined)` : 'All Materials (combined)');
@@ -4273,6 +4282,9 @@ async function shfLoadChart(material, title) {
   destroyTurnsCharts();
   const titleEl = document.getElementById('shf-chart-title');
   titleEl.textContent = 'Loading…';
+  shfCurrentMaterial = material || null;
+  const addAdjLink = document.getElementById('shf-add-adjustment-link');
+  if (addAdjLink) addAdjLink.classList.toggle('hidden', !shfCurrentMaterial);
 
   try {
     const ctrlParam = shfMrpController ? `mrpController=${encodeURIComponent(shfMrpController)}` : '';
@@ -4857,6 +4869,239 @@ async function vmRemoveMaterial(vendor, vendorMaterialId, material) {
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Remove failed');
     vmShowVendorMaterials(vendor);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// Demand Adjustments (MRP Phase 3) — manual, per-material usage overrides for
+// known events a seasonal-index forecast can't see on its own (machine down,
+// planned extra production, or a standing correction to a forecast running
+// too high/low). See sql/migrate_demand_adjustments.sql and
+// routes/performance.js's makeDailyUsageFn for how these feed both the Stock
+// History & Forecast graph and the order-suggestion engine.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function runDemandAdjustments() {
+  showResultPanel('Demand Adjustments', 'Manual usage overrides for known events — machine downtime, extra production, or a standing forecast correction');
+  try {
+    const adjustments = await daFetchAdjustments();
+    daRenderList(adjustments);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function daFetchAdjustments() {
+  const res = await fetch('/api/performance/demand-adjustments');
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error?.message || 'Failed to load demand adjustments');
+  return json.data;
+}
+
+function daRenderList(adjustments) {
+  document.getElementById('result-row-badge').textContent = `${adjustments.length} adjustment${adjustments.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const rows = adjustments.map(a => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(a.Material)}</td>
+      <td>${esc(a.MaterialText || '—')}</td>
+      <td>${daRangeLabel(a)}</td>
+      <td>${esc(String(a.UsagePercent))}%</td>
+      <td>${esc(a.Reason || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary da-edit" data-id="${esc(String(a.AdjustmentId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary da-delete" data-id="${esc(String(a.AdjustmentId))}" data-material="${esc(a.Material)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="da-add-btn">+ Add Adjustment</button>
+    </div>
+    ${adjustments.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Description</th><th>Range</th><th>Usage %</th><th>Reason</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No demand adjustments yet — add one to override predicted usage for a material.</div>'}
+  `;
+
+  document.getElementById('da-add-btn').addEventListener('click', () => daOpenModal(null));
+  document.querySelectorAll('.da-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const a = adjustments.find(x => String(x.AdjustmentId) === btn.dataset.id);
+      if (a) daOpenModal(a);
+    });
+  });
+  document.querySelectorAll('.da-delete').forEach(btn => {
+    btn.addEventListener('click', () => daDeleteAdjustment(btn.dataset.id, btn.dataset.material));
+  });
+}
+
+// Range reads as "Permanent" only when BOTH bounds are open — a single open
+// bound still shows the bound it does have (e.g. "22/07/2026 → indefinitely").
+function daRangeLabel(a) {
+  if (!a.StartDate && !a.EndDate) return 'Permanent';
+  const start = a.StartDate ? formatDisplayDate(a.StartDate) : 'the start';
+  const end = a.EndDate ? formatDisplayDate(a.EndDate) : 'indefinitely';
+  return `${start} &rarr; ${end}`;
+}
+
+function daDateInputValue(value) {
+  if (!value) return '';
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+// prefillMaterial locks the Material field for the quick-add link from Stock
+// History & Forecast (a known-valid material already on screen — no need to
+// search for it again), without being an edit of an existing adjustment.
+function daOpenModal(adjustment, prefillMaterial) {
+  const isEdit = !!adjustment;
+  const material = adjustment?.Material || prefillMaterial || '';
+  const materialLocked = isEdit || !!prefillMaterial;
+  openModal(`<div class="ps-modal" style="max-width:520px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Demand Adjustment' : 'Add Demand Adjustment'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Material</label>
+          <input class="tf-input" type="text" id="da-material" value="${esc(material)}" placeholder="Search by material number or description…" ${materialLocked ? 'readonly' : ''}>
+          <input type="hidden" id="da-material-value" value="${esc(material)}">
+          <div id="da-material-search-results"></div>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Start Date</label>
+          <input class="tf-input" type="date" id="da-start-date" value="${daDateInputValue(adjustment?.StartDate)}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">End Date</label>
+          <input class="tf-input" type="date" id="da-end-date" value="${daDateInputValue(adjustment?.EndDate)}">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Leave Start Date blank to apply from today onward. Leave End Date blank to apply indefinitely until you edit or delete this adjustment. Leave both blank for a permanent correction.</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Usage %</label>
+          <input class="tf-input" type="number" step="0.1" min="0" id="da-usage-percent" value="${adjustment?.UsagePercent ?? 100}">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Percentage of the normal predicted usage to apply over the range above — 0 = fully stopped (e.g. a machine down), 50 = half rate, 150 = one and a half times (planned extra production).</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Reason</label>
+          <input class="tf-input" type="text" id="da-reason" value="${esc(adjustment?.Reason || '')}" placeholder="e.g. Line 3 down for planned maintenance">
+        </div>
+      </div>
+      <div id="da-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="da-save-btn">${isEdit ? 'Save Changes' : 'Add Adjustment'}</button>
+    </div>
+  </div>`);
+
+  if (!materialLocked) {
+    let searchTimer = null;
+    document.getElementById('da-material').addEventListener('input', function () {
+      document.getElementById('da-material-value').value = '';
+      clearTimeout(searchTimer);
+      const q = this.value.trim();
+      const results = document.getElementById('da-material-search-results');
+      if (!q) { results.innerHTML = ''; return; }
+      searchTimer = setTimeout(() => daSearchMaterials(q), 250);
+    });
+  }
+
+  document.getElementById('da-save-btn').addEventListener('click', async () => {
+    const material = isEdit ? adjustment.Material : document.getElementById('da-material-value').value;
+    const body = {
+      material,
+      startDate: document.getElementById('da-start-date').value || null,
+      endDate: document.getElementById('da-end-date').value || null,
+      usagePercent: vmNumOrNull(document.getElementById('da-usage-percent').value),
+      reason: document.getElementById('da-reason').value.trim() || null,
+    };
+    if (!body.material) {
+      document.getElementById('da-result').innerHTML = '<div class="sap-error">Pick a material from the search results.</div>';
+      return;
+    }
+    if (body.usagePercent == null || body.usagePercent < 0) {
+      document.getElementById('da-result').innerHTML = '<div class="sap-error">Usage % is required and cannot be negative.</div>';
+      return;
+    }
+    const btn = document.getElementById('da-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/performance/demand-adjustments/${adjustment.AdjustmentId}` : '/api/performance/demand-adjustments', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runDemandAdjustments();
+    } catch (err) {
+      document.getElementById('da-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Adjustment';
+    }
+  });
+}
+
+// Reuses the same turns-valclass search endpoint as vmSearchMaterials —
+// no new backend search route needed.
+async function daSearchMaterials(q) {
+  const results = document.getElementById('da-material-search-results');
+  if (!results) return;
+  results.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
+  try {
+    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}`);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Search failed');
+    const rows = json.data.slice(0, 30);
+    if (!rows.length) { results.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
+    results.innerHTML = `
+      <div style="overflow-x:auto;max-height:240px;overflow-y:auto;margin-top:6px">
+        <table class="pn-batch-table">
+          <thead><tr><th>Material</th><th>Description</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr class="pn-row da-material-pick" style="cursor:pointer" data-material="${esc(r.material)}">
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.material)}</td>
+                <td>${esc(r.materialText || '—')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    document.querySelectorAll('.da-material-pick').forEach(tr => {
+      tr.addEventListener('click', () => {
+        document.getElementById('da-material').value = tr.dataset.material;
+        document.getElementById('da-material-value').value = tr.dataset.material;
+        results.innerHTML = '';
+      });
+    });
+  } catch (err) {
+    results.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function daDeleteAdjustment(adjustmentId, material) {
+  if (!confirm(`Delete the demand adjustment for ${material}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/performance/demand-adjustments/${adjustmentId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runDemandAdjustments();
   } catch (err) {
     alert(err.message);
   }

@@ -17,14 +17,11 @@ async function getPool() {
 // ── Weekly expected-stock-level forecast ────────────────────────────────────
 // Projects stock forward week by week from a current total, driven by the 13
 // monthly PredictedUsage buckets already computed by the seasonal-index model
-// (performanceforecast.js). PredictedUsage is monthly; ordering decisions need
-// weekly resolution (delivered mid-month still needs a stock line for the
-// weeks either side of it), so each month's total is spread across the
-// calendar weeks that overlap it, in proportion to how many days of that week
-// fall inside the month — a week split across a month boundary gets its usage
-// split the same way. This is Phase 1: no confirmed-delivery data exists yet
-// (that's a later phase), so the line only ever goes down; it does not yet
-// show deliveries putting stock back up.
+// (performanceforecast.js), optionally overridden day-by-day by manual
+// dbo.DemandAdjustment rows (see makeDailyUsageFn below). This is Phase 1: no
+// confirmed-delivery data exists yet (that's a later phase), so the line only
+// ever goes down on its own; it does not yet show deliveries putting stock
+// back up (that's incomingDeliveries, added separately below).
 //
 // predictedMonthly[i] is month i's total, where i=0 is the CURRENT calendar
 // month and i=12 is 12 months out — see the big comment on PredictedUsage
@@ -39,18 +36,52 @@ async function getPool() {
 // Returns weeks running from "today" through the end of month index 12,
 // each with the stock level AS OF that week's end date (i.e. after that
 // week's share of usage has been deducted).
-function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = []) {
+
+// Builds a day -> usage function shared by buildWeeklyStockForecast and
+// demandOverDays. Both used to spread each month's total across whatever
+// date range they cared about using a month-overlap-fraction shortcut
+// (qty * overlapDays / daysInMonth) — mathematically identical to a flat
+// per-day rate within a month, just computed without actually visiting each
+// day. That shortcut broke once a demand adjustment needed to change the
+// rate partway through a month (or partway through a week), since the rate
+// is no longer uniform across the month — so both functions now walk day by
+// day instead. Adjustments are validated not to overlap each other for the
+// same material at write time (see findOverlappingDemandAdjustment in
+// performancesql.js), so at most one ever applies to a given day; a NULL
+// startDate/endDate on an adjustment means unbounded in that direction.
+function makeDailyUsageFn(predictedMonthly, from, adjustments = []) {
+  const months = predictedMonthly.map((qty, i) => {
+    const monthStart = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + i, 1));
+    const monthEnd    = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + i + 1, 1));
+    const daysInMonth  = Math.round((monthEnd - monthStart) / 86400000);
+    return { monthStart, monthEnd, dailyRate: daysInMonth > 0 ? (Number(qty) || 0) / daysInMonth : 0 };
+  });
+  return function dailyUsage(day) {
+    const month = months.find(m => day >= m.monthStart && day < m.monthEnd);
+    let rate = month ? month.dailyRate : 0;
+    for (const adj of adjustments) {
+      const afterStart = !adj.startDate || day >= adj.startDate;
+      const beforeEnd = !adj.endDate || day <= adj.endDate;
+      if (afterStart && beforeEnd) {
+        rate *= (Number(adj.usagePercent) || 0) / 100;
+        break;
+      }
+    }
+    return rate;
+  };
+}
+
+function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = [], adjustments = []) {
   const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
 
-  // Calendar-month windows for i = 0..12, each [monthStart, monthEnd).
-  const months = predictedMonthly.map((qty, i) => {
-    const monthStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
-    const monthEnd    = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1));
-    const daysInMonth  = Math.round((monthEnd - monthStart) / 86400000);
-    return { qty: Number(qty) || 0, monthStart, monthEnd, daysInMonth };
-  });
-
-  const horizonEnd = months[months.length - 1].monthEnd;
+  // Calendar-month windows for i = 0..12, each [monthStart, monthEnd) — only
+  // needed here now for the overall horizon end; per-day rates come from
+  // makeDailyUsageFn.
+  const monthEnds = predictedMonthly.map((qty, i) =>
+    new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1))
+  );
+  const horizonEnd = monthEnds[monthEnds.length - 1];
+  const dailyUsage = makeDailyUsageFn(predictedMonthly, start, adjustments);
 
   const weeks = [];
   let runningStock = currentStock;
@@ -70,13 +101,8 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
     runningStock += incomingThisWeek;
 
     let weeklyUsage = 0;
-    for (const m of months) {
-      const overlapStart = weekStart > m.monthStart ? weekStart : m.monthStart;
-      const overlapEnd    = weekEnd   < m.monthEnd    ? weekEnd   : m.monthEnd;
-      const overlapDays   = (overlapEnd - overlapStart) / 86400000;
-      if (overlapDays > 0 && m.daysInMonth > 0) {
-        weeklyUsage += m.qty * (overlapDays / m.daysInMonth);
-      }
+    for (let day = weekStart; day < weekEnd; day = addDaysUtc(day, 1)) {
+      weeklyUsage += dailyUsage(day);
     }
 
     runningStock -= weeklyUsage;
@@ -93,6 +119,37 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
   return {
     asOfDate: start.toISOString().slice(0, 10),
     currentStock: Math.round(currentStock * 100) / 100,
+    weeks,
+  };
+}
+
+// Sums several materials' own buildWeeklyStockForecast results into one
+// combined series, week by week — used by the /turns-valclass/history
+// route's "all materials"/MRP-controller-filtered views. Necessary once
+// demand adjustments exist: two materials in the same combined view can
+// carry different (or no) adjustment, and a single blended predictedMonthly
+// array built by summing raw usage up front can't represent that, so each
+// material now gets its own buildWeeklyStockForecast call and the results
+// are added together here instead. All forecasts share the same `today` and
+// the same 13-month horizon length, so their week grids line up exactly —
+// safe to sum by index. Equivalent to the old aggregate-then-forecast
+// approach whenever nothing has an adjustment, since day-by-day usage is
+// linear/additive either way.
+function mergeWeeklyForecasts(forecasts) {
+  if (!forecasts.length) return { asOfDate: null, currentStock: 0, weeks: [] };
+  const weekCount = forecasts[0].weeks.length;
+  const weeks = [];
+  for (let i = 0; i < weekCount; i++) {
+    weeks.push({
+      weekEnding: forecasts[0].weeks[i].weekEnding,
+      weeklyUsage: Math.round(forecasts.reduce((sum, f) => sum + f.weeks[i].weeklyUsage, 0) * 100) / 100,
+      incomingQty: Math.round(forecasts.reduce((sum, f) => sum + f.weeks[i].incomingQty, 0) * 100) / 100,
+      expectedStock: Math.round(forecasts.reduce((sum, f) => sum + f.weeks[i].expectedStock, 0) * 100) / 100,
+    });
+  }
+  return {
+    asOfDate: forecasts[0].asOfDate,
+    currentStock: Math.round(forecasts.reduce((sum, f) => sum + f.currentStock, 0) * 100) / 100,
     weeks,
   };
 }
@@ -132,24 +189,18 @@ function addWorkingDaysUtc(date, days) {
   return result;
 }
 
-// Demand between `from` and `from + days`, spread across predictedMonthly the
-// same way buildWeeklyStockForecast spreads it across weeks — used for the
-// suggested-qty calculation, which needs a demand total over an arbitrary
-// day-count rather than the week-by-week series.
-function demandOverDays(predictedMonthly, from, days) {
+// Demand between `from` and `from + days`, using the same day-by-day
+// dailyUsage as buildWeeklyStockForecast (see makeDailyUsageFn) so a demand
+// adjustment applies identically here as it does to the graph — used for
+// the suggested-qty calculation, which needs a demand total over an
+// arbitrary day-count rather than the week-by-week series.
+function demandOverDays(predictedMonthly, from, days, adjustments = []) {
   const rangeEnd = addDaysUtc(from, days);
+  const dailyUsage = makeDailyUsageFn(predictedMonthly, from, adjustments);
   let total = 0;
-  predictedMonthly.forEach((qty, i) => {
-    const monthStart = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + i, 1));
-    const monthEnd    = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + i + 1, 1));
-    const daysInMonth  = Math.round((monthEnd - monthStart) / 86400000);
-    const overlapStart = from > monthStart ? from : monthStart;
-    const overlapEnd    = rangeEnd < monthEnd ? rangeEnd : monthEnd;
-    const overlapDays   = (overlapEnd - overlapStart) / 86400000;
-    if (overlapDays > 0 && daysInMonth > 0) {
-      total += (Number(qty) || 0) * (overlapDays / daysInMonth);
-    }
-  });
+  for (let day = from; day < rangeEnd; day = addDaysUtc(day, 1)) {
+    total += dailyUsage(day);
+  }
   return total;
 }
 
@@ -187,17 +238,36 @@ function groupIncomingByMaterial(incoming) {
   return map;
 }
 
+// Shapes raw dbo.DemandAdjustment rows into the {startDate, endDate,
+// usagePercent} form makeDailyUsageFn expects, normalizing StartDate/
+// EndDate to UTC-midnight Date objects (or null, preserved as-is — a NULL
+// bound means unbounded, see migrate_demand_adjustments.sql's header).
+function groupAdjustmentsByMaterial(adjustments) {
+  const map = new Map();
+  adjustments.forEach(r => {
+    const list = map.get(r.Material) || [];
+    list.push({
+      startDate: r.StartDate ? new Date(r.StartDate) : null,
+      endDate: r.EndDate ? new Date(r.EndDate) : null,
+      usagePercent: r.UsagePercent,
+    });
+    map.set(r.Material, list);
+  });
+  return map;
+}
+
 // One vendor-material row's full suggestion picture — used both for the
 // "needs ordering now" list (computeOrderSuggestions, filtered to dueNow)
 // and the Build Order modal (computeVendorOrderBuild, unfiltered, so a
 // buyer can pull in a material that isn't urgent yet to help clear a
 // vendor's combined order MOQ). Returns null only when there's no SAP
 // snapshot to compute from at all.
-function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate) {
+function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial = new Map()) {
   if (r.StockQty == null && r.ConsignmentQty == null) return null;
 
   const openOrders = incomingByMaterial.get(r.Material) || [];
   const openQty = openOrders.reduce((sum, o) => sum + (Number(o.OrderQty) || 0), 0);
+  const materialAdjustments = adjustmentsByMaterial.get(r.Material) || [];
 
   // Stock physically on hand right now — deliberately NOT including open
   // orders here. Those only help avoid a breach once they actually land;
@@ -230,7 +300,7 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     qty: Number(o.OrderQty) || 0,
   }));
 
-  const weeklyForecast = buildWeeklyStockForecast(onHandStock, predictedMonthly, today, incomingDeliveries);
+  const weeklyForecast = buildWeeklyStockForecast(onHandStock, predictedMonthly, today, incomingDeliveries, materialAdjustments);
   const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
 
   const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
@@ -252,7 +322,7 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
   let suggestedQty = 0;
   if (breachDate) {
     const coverageDays = leadTimeDays + ORDER_COVERAGE_BUFFER_DAYS;
-    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays);
+    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays, materialAdjustments);
     const qty = demandOverCoverage + safetyStockQty - currentStock;
     if (qty > 0) {
       // MaterialMoqQty is a LOT SIZE, not just a floor — this vendor only
@@ -307,11 +377,13 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
 // a suggestion is accepted (db.acceptOrderSuggestion) — this always reflects
 // current stock/usage/vendor data, recomputed fresh on every request.
 async function computeOrderSuggestions() {
-  const [rows, incoming] = await Promise.all([
+  const [rows, incoming, adjustments] = await Promise.all([
     db.listVendorMaterialsForSuggestions(),
     db.listOpenIncomingOrders(),
+    db.listDemandAdjustments(),
   ]);
   const incomingByMaterial = groupIncomingByMaterial(incoming);
+  const adjustmentsByMaterial = groupAdjustmentsByMaterial(adjustments);
 
   const today = new Date();
   const asOfDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
@@ -319,7 +391,7 @@ async function computeOrderSuggestions() {
 
   const suggestions = [];
   for (const r of rows) {
-    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate);
+    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial);
     if (built && built.dueNow && built.suggestedQty > 0) suggestions.push(built);
   }
 
@@ -377,11 +449,13 @@ function groupSuggestionsByVendor(suggestions) {
 // Build Order modal can offer pulling a not-yet-urgent material into the
 // order to help clear a combined MOQ, alongside the ones actually needed.
 async function computeVendorOrderBuild(vendorId) {
-  const [rows, incoming] = await Promise.all([
+  const [rows, incoming, adjustments] = await Promise.all([
     db.listVendorMaterialsForSuggestions(),
     db.listOpenIncomingOrders(),
+    db.listDemandAdjustments(),
   ]);
   const incomingByMaterial = groupIncomingByMaterial(incoming);
+  const adjustmentsByMaterial = groupAdjustmentsByMaterial(adjustments);
 
   const today = new Date();
   const asOfDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
@@ -396,7 +470,7 @@ async function computeVendorOrderBuild(vendorId) {
     orderMoqQty = r.OrderMoqQty;
     orderMaxQty = r.OrderMaxQty;
     orderMoqUom = r.OrderMoqUom;
-    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate);
+    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial);
     if (built) materials.push(built);
   }
 
@@ -1622,37 +1696,47 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     }));
 
     // ── Weekly expected-stock-level forecast ──────────────────────────────────
-    // Aggregate current stock + aggregate predicted usage across whatever set of
-    // materials this request resolved to (one material, an MRP controller's book,
-    // or everything), projected forward week by week. See buildWeeklyStockForecast
-    // for the month-to-week spreading method.
+    // Built per material and summed (see mergeWeeklyForecasts) rather than
+    // aggregating stock/predicted usage across materials up front and running
+    // the forecast once — necessary now that a demand adjustment can apply to
+    // one material in a combined/MRP-controller view and not another. See
+    // mergeWeeklyForecasts' comment for why this is equivalent to the old
+    // approach whenever nothing has an adjustment.
     //
-    // currentStock intentionally includes consignmentQty here — this is the ONLY
-    // place StockQty and ConsignmentQty are added together anywhere in the app.
-    // For MRP/shipment planning, what's physically available to consume is what
-    // matters, regardless of who currently owns it on paper. Every other reader of
-    // StockQty (the plain turns-valclass list, aggregates, value-by-price, the
-    // Stock Turns tile) stays on StockQty alone — those are valuation views, and
-    // consignment stock has no value yet from our accounting perspective, so it
-    // must never appear in anything valuation-facing.
-    const currentStock = data.reduce(
-      (sum, r) => sum + (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0),
-      0
-    );
-    const predictedMonthly = new Array(13).fill(0);
-    data.forEach(r => r.predictedUsage.forEach((v, i) => { predictedMonthly[i] += Number(v) || 0; }));
+    // Each material's own onHandStock intentionally includes consignmentQty
+    // here — this is the ONLY place StockQty and ConsignmentQty are added
+    // together anywhere in the app. For MRP/shipment planning, what's
+    // physically available to consume is what matters, regardless of who
+    // currently owns it on paper. Every other reader of StockQty (the plain
+    // turns-valclass list, aggregates, value-by-price, the Stock Turns tile)
+    // stays on StockQty alone — those are valuation views, and consignment
+    // stock has no value yet from our accounting perspective, so it must
+    // never appear in anything valuation-facing.
+    const materialsInScope = data.map(r => r.material);
+    const scopeFilter = materialsInScope.length ? materialsInScope : null;
 
     // Bump the forecast with expected deliveries from accepted-but-not-yet-
-    // received order suggestions (MRP Phase 2b), scoped to whatever material
-    // set this request already resolved to — same filter as everything else
-    // on this route. See buildWeeklyStockForecast's incomingDeliveries param.
-    const materialsInScope = data.map(r => r.material);
-    const openIncomingOrders = await db.listOpenIncomingOrders(materialsInScope.length ? materialsInScope : null);
-    const incomingDeliveries = openIncomingOrders
-      .filter(o => o.DeliveryDate)
-      .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0 }));
+    // received order suggestions (MRP Phase 2b), and apply any manual demand
+    // adjustments (machine down, planned extra production, or a standing
+    // correction — see sql/migrate_demand_adjustments.sql) — both scoped to
+    // whatever material set this request already resolved to, same filter
+    // as everything else on this route.
+    const [openIncomingOrders, demandAdjustments] = await Promise.all([
+      db.listOpenIncomingOrders(scopeFilter),
+      db.listDemandAdjustments(scopeFilter),
+    ]);
+    const incomingByMaterial = groupIncomingByMaterial(openIncomingOrders);
+    const adjustmentsByMaterial = groupAdjustmentsByMaterial(demandAdjustments);
 
-    const stockForecast = buildWeeklyStockForecast(currentStock, predictedMonthly, new Date(), incomingDeliveries);
+    const perMaterialForecasts = data.map(r => {
+      const onHandStock = (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0);
+      const incomingDeliveries = (incomingByMaterial.get(r.material) || [])
+        .filter(o => o.DeliveryDate)
+        .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0 }));
+      const materialAdjustments = adjustmentsByMaterial.get(r.material) || [];
+      return buildWeeklyStockForecast(onHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments);
+    });
+    const stockForecast = mergeWeeklyForecasts(perMaterialForecasts);
 
     // ── Recorded accuracy overlay (dbo.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen
@@ -1826,6 +1910,66 @@ router.put('/vendors/:vendorId/materials/:vendorMaterialId', requirePermission('
 router.delete('/vendors/:vendorId/materials/:vendorMaterialId', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     await db.deleteVendorMaterial(req.params.vendorMaterialId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Demand adjustments — manually-maintained overrides to a material's
+// predicted usage (machine down, planned extra production, or a standing
+// correction to a forecast that's running too high/low). See
+// sql/migrate_demand_adjustments.sql and performancesql.js's
+// findOverlappingDemandAdjustment for the overlap-rejection rule that keeps
+// createDemandAdjustment/updateDemandAdjustment's 400s meaningful.
+// ══════════════════════════════════════════════════════════════════════════
+
+router.get('/demand-adjustments', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.listDemandAdjustmentsForAdmin();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/demand-adjustments', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { material, usagePercent } = req.body;
+    if (!material || !String(material).trim()) {
+      return res.status(400).json({ success: false, error: { message: 'material is required.' } });
+    }
+    if (usagePercent == null || Number(usagePercent) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'usagePercent is required and cannot be negative.' } });
+    }
+    const createdBy = req.session?.user?.username || 'unknown';
+    const adjustmentId = await db.createDemandAdjustment({ ...req.body, createdBy });
+    res.json({ success: true, data: { adjustmentId } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.put('/demand-adjustments/:adjustmentId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { material, usagePercent } = req.body;
+    if (!material || !String(material).trim()) {
+      return res.status(400).json({ success: false, error: { message: 'material is required.' } });
+    }
+    if (usagePercent == null || Number(usagePercent) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'usagePercent is required and cannot be negative.' } });
+    }
+    await db.updateDemandAdjustment(req.params.adjustmentId, req.body);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.delete('/demand-adjustments/:adjustmentId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.deleteDemandAdjustment(req.params.adjustmentId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });

@@ -1066,6 +1066,141 @@ export async function listOpenIncomingOrders(materials = null) {
   return recordset;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Demand adjustments — dbo.DemandAdjustment
+// ══════════════════════════════════════════════════════════════════════════
+// Manual overrides to a material's predicted usage (see
+// sql/migrate_demand_adjustments.sql's header for the full design). Read
+// two ways, same split as listOpenIncomingOrders above:
+//  - computeOrderSuggestions()/computeVendorOrderBuild() call this with no
+//    filter, since they process every vendor-mapped material in one pass.
+//  - the /turns-valclass/history route calls this scoped to the materials
+//    already resolved for that request.
+export async function listDemandAdjustments(materials = null) {
+  const pool = await getPool();
+  const request = pool.request();
+  let whereSql = '';
+  if (materials && materials.length) {
+    const inClause = materials.map((m, i) => {
+      request.input(`am${i}`, sql.NVarChar(18), m);
+      return `@am${i}`;
+    }).join(',');
+    whereSql = `WHERE Material IN (${inClause})`;
+  }
+  const { recordset } = await request.query(`
+    SELECT AdjustmentId, Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy, CreatedAtUtc, UpdatedAtUtc
+    FROM dbo.DemandAdjustment
+    ${whereSql}
+    ORDER BY Material, StartDate
+  `);
+  return recordset;
+}
+
+// The admin table's list view — same rows as listDemandAdjustments(), but
+// with the material's description joined in so the page doesn't need a
+// second lookup per row. Kept as a separate function (rather than always
+// joining in listDemandAdjustments) since the forecast-facing callers above
+// only need the raw date/percent fields, many times per request.
+export async function listDemandAdjustmentsForAdmin() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT
+      d.AdjustmentId, d.Material, d.StartDate, d.EndDate, d.UsagePercent, d.Reason,
+      d.CreatedBy, d.CreatedAtUtc, d.UpdatedAtUtc, t.MaterialText
+    FROM dbo.DemandAdjustment d
+    LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = d.Material
+    ORDER BY d.Material, d.StartDate
+  `);
+  return recordset;
+}
+
+// Two ranges overlap unless one entirely ends (with a real EndDate) before
+// the other entirely starts (with a real StartDate) — a NULL bound on
+// either side of that comparison means it can never be true in that
+// direction (an unbounded side never "ends before" or "starts after"
+// anything), so the two NOT(...) legs below correctly treat NULL as
+// -infinity/+infinity without needing SQL Server-specific date literals for
+// it. excludeId lets updateDemandAdjustment check against every OTHER row
+// for the same material without tripping over itself.
+async function findOverlappingDemandAdjustment(material, startDate, endDate, excludeId = null) {
+  const pool = await getPool();
+  const request = pool.request()
+    .input('material',  sql.NVarChar(18), material)
+    .input('startDate', sql.Date, startDate ?? null)
+    .input('endDate',   sql.Date, endDate ?? null);
+  let excludeSql = '';
+  if (excludeId != null) {
+    request.input('excludeId', sql.Int, excludeId);
+    excludeSql = 'AND AdjustmentId <> @excludeId';
+  }
+  const { recordset } = await request.query(`
+    SELECT TOP 1 AdjustmentId, StartDate, EndDate FROM dbo.DemandAdjustment
+    WHERE Material = @material
+      ${excludeSql}
+      AND NOT (EndDate IS NOT NULL AND @startDate IS NOT NULL AND EndDate < @startDate)
+      AND NOT (StartDate IS NOT NULL AND @endDate IS NOT NULL AND StartDate > @endDate)
+  `);
+  return recordset[0] || null;
+}
+
+function formatAdjustmentRange(row) {
+  const start = row.StartDate ? new Date(row.StartDate).toISOString().slice(0, 10) : 'the beginning';
+  const end = row.EndDate ? new Date(row.EndDate).toISOString().slice(0, 10) : 'indefinitely';
+  return `${start} to ${end}`;
+}
+
+export async function createDemandAdjustment({ material, startDate, endDate, usagePercent, reason, createdBy }) {
+  const overlap = await findOverlappingDemandAdjustment(material, startDate, endDate);
+  if (overlap) {
+    const err = new Error(`This material already has an adjustment covering ${formatAdjustmentRange(overlap)} — edit or delete that one instead of creating an overlapping second adjustment.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('material',     sql.NVarChar(18),  material)
+    .input('startDate',    sql.Date,           startDate ?? null)
+    .input('endDate',      sql.Date,           endDate ?? null)
+    .input('usagePercent', sql.Decimal(9, 2),  usagePercent)
+    .input('reason',       sql.NVarChar(500), reason || null)
+    .input('createdBy',    sql.NVarChar(100), createdBy || null)
+    .query(`
+      INSERT INTO dbo.DemandAdjustment (Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy)
+      OUTPUT INSERTED.AdjustmentId
+      VALUES (@material, @startDate, @endDate, @usagePercent, @reason, @createdBy)
+    `);
+  return recordset[0].AdjustmentId;
+}
+
+export async function updateDemandAdjustment(adjustmentId, { material, startDate, endDate, usagePercent, reason }) {
+  const overlap = await findOverlappingDemandAdjustment(material, startDate, endDate, adjustmentId);
+  if (overlap) {
+    const err = new Error(`This material already has another adjustment covering ${formatAdjustmentRange(overlap)} — edit or delete that one instead of creating an overlapping second adjustment.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const pool = await getPool();
+  await pool.request()
+    .input('adjustmentId', sql.Int,           adjustmentId)
+    .input('material',     sql.NVarChar(18),  material)
+    .input('startDate',    sql.Date,           startDate ?? null)
+    .input('endDate',      sql.Date,           endDate ?? null)
+    .input('usagePercent', sql.Decimal(9, 2),  usagePercent)
+    .input('reason',       sql.NVarChar(500), reason || null)
+    .query(`
+      UPDATE dbo.DemandAdjustment SET
+        Material = @material, StartDate = @startDate, EndDate = @endDate,
+        UsagePercent = @usagePercent, Reason = @reason, UpdatedAtUtc = GETUTCDATE()
+      WHERE AdjustmentId = @adjustmentId
+    `);
+}
+
+export async function deleteDemandAdjustment(adjustmentId) {
+  const pool = await getPool();
+  await pool.request().input('adjustmentId', sql.Int, adjustmentId)
+    .query('DELETE FROM dbo.DemandAdjustment WHERE AdjustmentId = @adjustmentId');
+}
+
 export async function acceptOrderSuggestion({
   vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDate,
   leadTimeDaysUsed, deliveryDate, transitTimeDaysUsed, readyToCollectDate, isSpotPo, notes
