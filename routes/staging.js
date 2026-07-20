@@ -17,6 +17,7 @@ import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
 import ExcelJS from 'exceljs';
 import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
 import * as db from './stagingsql.js';
 
@@ -334,12 +335,19 @@ router.post('/requests/:id/deliver', async (req, res) => {
 
     await audit('STAGING_DELIVERED', actor(req), `Request #${req.params.id} — ${quantity} moved, TO ${transferOrder.transferOrderNumber}`, req);
 
+    const redrum = await maybeReverseBatchManagedReturn({
+      batch: batch || request.RequestedBatch || null,
+      destinationStorageType, destinationBin, storageLocation,
+      audit, actorUsername: actor(req), req,
+    });
+
     res.json({
       success: true,
       data: {
         transferOrderNumber: transferOrder.transferOrderNumber,
         messages: transferOrder.messages || [],
         ...result,
+        ...(redrum ? { redrum } : {}),
       },
     });
   } catch (err) {

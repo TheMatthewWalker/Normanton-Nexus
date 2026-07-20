@@ -929,6 +929,31 @@ router.get('/process/:processCode/data', async (req, res) => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// Safeguard for re-drum traceability — a Drumming (DR) parent referenced as
+// traceability must already be marked reversed (see lib/redrumReversal.js,
+// which sets IsReversed automatically once the original drum's backflush has
+// actually been reversed in SAP) before a new drum can be logged against it.
+// Blocks the whole submission rather than letting a partial record through.
+async function assertParentBatchesReversed(pool, parentBatches) {
+  const drParents = (parentBatches || [])
+    .filter(pb => pb.processCode && String(pb.processCode).toUpperCase() === 'DR' && pb.recordID);
+
+  for (const pb of drParents) {
+    const r = await pool.request()
+      .input('id', sql.Int, Number(pb.recordID))
+      .query(`SELECT IsReversed FROM prod.Drumming WHERE DrummingID = @id`);
+
+    if (!r.recordset.length || !r.recordset[0].IsReversed) {
+      const err = new Error(
+        `This drum cannot be processed, as the original drum (DR${String(pb.recordID).padStart(8, '0')}) ` +
+        `has not been correctly reversed yet. Please seek advice from a supervisor.`
+      );
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+}
+
 async function writeEvent(pool, processCode, recordId, eventType, message, severity, userId) {
   await pool.request()
     .input('pc',  sql.NVarChar(5),   processCode)
@@ -2207,10 +2232,14 @@ router.post('/drumming/entry', async (req, res) => {
   if (!material || !coilLengths.length)
     return res.status(400).json({ success: false, error: 'material and at least one coilLength are required.' });
 
+  const pool = await getProductionPool();
+
+  try { await assertParentBatchesReversed(pool, parentBatches); }
+  catch (err) { return res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+
   try { await assertProfitCentre('DR', material); }
   catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
 
-  const pool = await getProductionPool();
   const uid  = userId(req);
   const sid  = shiftID || currentShiftID();
   const totalLength = coilLengths.reduce((s, l) => s + Number(l), 0);
@@ -2382,10 +2411,13 @@ async function submitDrumming(req, res, entryType) {
   if (!material || !packagingID || !weightKG)
     return res.status(400).json({ success: false, error: 'material, packagingID, weightKG and at least one coilLength are required.' });
 
+  const pool = await getProductionPool();
+
+  try { await assertParentBatchesReversed(pool, parentBatches); }
+  catch (err) { return res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+
   try { await assertProfitCentre('DR', material); }
   catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
-
-  const pool = await getProductionPool();
   const uid  = userId(req);
   const sid  = shiftID || currentShiftID();
   const totalLength = coilLengths.reduce((s, l) => s + Number(l), 0);
@@ -2560,6 +2592,20 @@ router.get('/drumming/:drummingId/coils', async (req, res) => {
       .input('id', sql.Int, Number(req.params.drummingId))
       .query(`SELECT CoilID, CoilSeq, LengthM FROM prod.DrummingCoils WHERE DrummingID=@id ORDER BY CoilSeq`);
     res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// Quick check for the traceability safeguard's instant client-side feedback
+// (see assertParentBatchesReversed for the authoritative server-side check
+// applied at submission time).
+router.get('/drumming/:drummingId/reversal-status', async (req, res) => {
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request()
+      .input('id', sql.Int, Number(req.params.drummingId))
+      .query(`SELECT IsReversed FROM prod.Drumming WHERE DrummingID=@id`);
+    if (!r.recordset.length) return res.status(404).json({ success: false, error: 'Drumming record not found.' });
+    res.json({ success: true, data: { isReversed: !!r.recordset[0].IsReversed } });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 

@@ -4078,21 +4078,42 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
         <div class="bm-section-title">Traceability — Previous Process Batches</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add each upstream batch that fed into this drum. Leave empty if not applicable.</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add each upstream batch that fed into this drum — including a previous Drumming batch if this is a re-drum. Leave empty if not applicable.</div>
         <div style="display:flex;gap:6px;margin-bottom:10px">
           <select class="tf-input" id="dw-parent-pc" style="width:150px">
-            ${Object.entries(PROCESS_LABELS).filter(([k])=>k!=='DR').map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+            ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
           </select>
           <input class="tf-input" id="dw-parent-rid" type="number" placeholder="Record ID" style="width:130px">
           <button class="btn-secondary" id="dw-add-batch">+ Add</button>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px" id="dw-batch-tags">${batchTags}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px" id="dw-batch-tags">${batchTags}</div>
+        <div id="dw-batch-warning" style="font-size:12px;color:var(--error)"></div>
       </div>`;
 
-    document.getElementById('dw-add-batch').addEventListener('click', () => {
+    document.getElementById('dw-add-batch').addEventListener('click', async () => {
       const pc  = document.getElementById('dw-parent-pc')?.value;
       const rid = Number(document.getElementById('dw-parent-rid')?.value);
+      const warningEl = document.getElementById('dw-batch-warning');
       if (!pc || !rid) return;
+
+      // Instant feedback for a re-drum reference — the authoritative check
+      // runs server-side at submission regardless, but this saves the
+      // operator from filling out the whole wizard only to be rejected.
+      if (pc === 'DR' && warningEl) {
+        warningEl.textContent = 'Checking whether that drum has been reversed…';
+        try {
+          const json = await api(`/drumming/${rid}/reversal-status`);
+          if (!json.data?.isReversed) {
+            warningEl.textContent = `This drum cannot be processed, as the original drum (DR${String(rid).padStart(8,'0')}) has not been correctly reversed yet. Please seek advice from a supervisor.`;
+            return;
+          }
+          warningEl.textContent = '';
+        } catch (err) {
+          warningEl.textContent = `Could not verify DR${String(rid).padStart(8,'0')} — ${err.message}`;
+          return;
+        }
+      }
+
       if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
         state.parentBatches.push({ processCode: pc, recordID: rid });
       renderDrummingPhaseBody(state, reasons, packagingOptions);

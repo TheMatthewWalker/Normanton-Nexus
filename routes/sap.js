@@ -5,6 +5,7 @@ import express from 'express';
 import fs      from 'fs';
 import sql     from 'mssql';
 import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 
 // Use a pinned certificate when connecting over HTTPS; fall back to no custom agent for HTTP (dev).
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
@@ -409,7 +410,16 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 
         const rows = body.data;
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Transfer order succeeded for material ${params.Material || ''}`), req);
-        res.json({ success: true, data: rows });
+
+        const redrum = await maybeReverseBatchManagedReturn({
+            batch: params.Batch || null,
+            destinationStorageType: params.DestinationType,
+            destinationBin: params.DestinationBin,
+            storageLocation: params.StorageLocation,
+            audit, actorUsername: getActorUsername(req), req,
+        });
+
+        res.json({ success: true, data: rows, ...(redrum ? { redrum } : {}) });
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
