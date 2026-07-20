@@ -45,8 +45,13 @@ BEGIN
     Material        NVARCHAR(18)  NOT NULL,  -- MATNR, matches TurnsValClassSnapshot.Material
 
     -- NULL = unbounded in that direction — see the header note above.
-    StartDate       DATE          NULL,
-    EndDate         DATE          NULL,
+    -- DATETIME, not DATE, to match every other date column in this project
+    -- (Vendor, PurchaseOrderShipment, etc.) — this SQL Server instance
+    -- predates the DATE type (added in SQL Server 2008). Time component is
+    -- always midnight; comparisons in findOverlappingDemandAdjustment and
+    -- the day-level forecast walk only ever compare whole days.
+    StartDate       DATETIME      NULL,
+    EndDate         DATETIME      NULL,
 
     -- Percentage of the normal predicted daily usage to apply over the
     -- range above. 0 = fully stopped (e.g. a machine down for the whole

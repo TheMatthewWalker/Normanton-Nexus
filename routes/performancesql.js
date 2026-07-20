@@ -1126,8 +1126,8 @@ async function findOverlappingDemandAdjustment(material, startDate, endDate, exc
   const pool = await getPool();
   const request = pool.request()
     .input('material',  sql.NVarChar(18), material)
-    .input('startDate', sql.Date, startDate ?? null)
-    .input('endDate',   sql.Date, endDate ?? null);
+    .input('startDate', sql.DateTime, startDate ?? null)
+    .input('endDate',   sql.DateTime, endDate ?? null);
   let excludeSql = '';
   if (excludeId != null) {
     request.input('excludeId', sql.Int, excludeId);
@@ -1159,8 +1159,8 @@ export async function createDemandAdjustment({ material, startDate, endDate, usa
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('material',     sql.NVarChar(18),  material)
-    .input('startDate',    sql.Date,           startDate ?? null)
-    .input('endDate',      sql.Date,           endDate ?? null)
+    .input('startDate',    sql.DateTime,       startDate ?? null)
+    .input('endDate',      sql.DateTime,       endDate ?? null)
     .input('usagePercent', sql.Decimal(9, 2),  usagePercent)
     .input('reason',       sql.NVarChar(500), reason || null)
     .input('createdBy',    sql.NVarChar(100), createdBy || null)
@@ -1183,8 +1183,8 @@ export async function updateDemandAdjustment(adjustmentId, { material, startDate
   await pool.request()
     .input('adjustmentId', sql.Int,           adjustmentId)
     .input('material',     sql.NVarChar(18),  material)
-    .input('startDate',    sql.Date,           startDate ?? null)
-    .input('endDate',      sql.Date,           endDate ?? null)
+    .input('startDate',    sql.DateTime,       startDate ?? null)
+    .input('endDate',      sql.DateTime,       endDate ?? null)
     .input('usagePercent', sql.Decimal(9, 2),  usagePercent)
     .input('reason',       sql.NVarChar(500), reason || null)
     .query(`
