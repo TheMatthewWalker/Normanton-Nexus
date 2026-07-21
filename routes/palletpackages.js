@@ -43,6 +43,7 @@ router.get('/pallet/:palletId', async (req, res) => {
                            pp.sapDelivery, pp.sapDeliveryItem,
                            pp.sapCustomer, pp.sapCustomerMaterial, pp.scanTime,
                            pp.sapSourceStorageType, pp.sapSourceBin, pp.sapStageTransferOrder,
+                           pp.sapPackagingInstruction,
                            pd.packDescription, pd.packMaterial, pd.packWeight, pd.packHeight
                     FROM   Logistics.dbo.PalletPackages pp
                     LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pp.packagingID
@@ -87,6 +88,10 @@ router.get('/sapmaterial/:sapMaterial', async (req, res) => {
 // from (its LGTYP/LGPLA before the picksheet-stage-batch transfer order moved
 // it into the picksheet's 916 bin) — required so DELETE below can reverse the
 // transfer order and put the stock back where it was.
+// sapPackagingInstruction is the batch's raw SAP packaging instruction (e.g.
+// "IB_363660_MB", ZPRODBATCH~PALL_MATNR) — captured here so the delivery-
+// complete ZDELFLAG/ZDELPACK maintenance step can later look up its ZBOM_INFO
+// packaging materials without re-querying SAP for the batch's stock row.
 router.post('/', async (req, res) => {
     try {
         const {
@@ -94,6 +99,7 @@ router.post('/', async (req, res) => {
             sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
             sapCustomer, sapCustomerMaterial, scanTime,
             sapSourceStorageType, sapSourceBin, sapStageTransferOrder,
+            sapPackagingInstruction,
         } = req.body;
 
         const pool   = await getPool();
@@ -112,16 +118,19 @@ router.post('/', async (req, res) => {
             .input('sapSourceStorageType',sql.NVarChar(3),  sapSourceStorageType ?? null)
             .input('sapSourceBin',        sql.NVarChar(10), sapSourceBin ?? null)
             .input('sapStageTransferOrder',sql.NVarChar(10),sapStageTransferOrder ?? null)
+            .input('sapPackagingInstruction', sql.NVarChar(40), sapPackagingInstruction ?? null)
             .query(`INSERT INTO Logistics.dbo.PalletPackages
                         (palletID, packagingID, palletLayer, sapMaterial,
                          sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
                          sapCustomer, sapCustomerMaterial, scanTime,
-                         sapSourceStorageType, sapSourceBin, sapStageTransferOrder)
+                         sapSourceStorageType, sapSourceBin, sapStageTransferOrder,
+                         sapPackagingInstruction)
                     VALUES
                         (@palletID, @packagingID, @palletLayer, @sapMaterial,
                          @sapQuantity, @sapBatch, @sapDelivery, @sapDeliveryItem,
                          @sapCustomer, @sapCustomerMaterial, @scanTime,
-                         @sapSourceStorageType, @sapSourceBin, @sapStageTransferOrder);
+                         @sapSourceStorageType, @sapSourceBin, @sapStageTransferOrder,
+                         @sapPackagingInstruction);
                     SELECT SCOPE_IDENTITY() AS palletItemID;`);
 
         res.status(201).json({ success: true, palletItemID: result.recordset[0].palletItemID });

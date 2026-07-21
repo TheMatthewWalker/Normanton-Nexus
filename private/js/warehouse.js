@@ -16,6 +16,8 @@ let pendingCSVRecords  = [];
   setupSupervisorSection();
   pollStagingOpenCount();
   setInterval(pollStagingOpenCount, 60000);
+  pollZdelflagWarnCount();
+  setInterval(pollZdelflagWarnCount, 60000);
 })();
 
 // Staging Post tile badge — open request count, turns red the moment any
@@ -36,6 +38,25 @@ async function pollStagingOpenCount() {
   } catch { /* leave the static LIVE badge in place on failure */ }
 }
 
+// ZDELFLAG Warnings tile badge — count of deliveries whose latest
+// ZDELFLAG/ZDELPACK maintenance run was Failed or Warning. Same red
+// "needs attention" styling as the Staging Post overdue badge.
+async function pollZdelflagWarnCount() {
+  const badge = document.getElementById('zdelflag-warn-badge');
+  if (!badge) return;
+  try {
+    const r = await fetch('/api/deliverymain/zdelflag/warnings');
+    const json = await r.json();
+    const count = (json.data || []).length;
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.classList.toggle('tile-badge--overdue', count > 0);
+    badge.classList.toggle('tile-badge--live', count === 0);
+    badge.title = count > 0
+      ? `${count} delivery/deliveries need ZDELFLAG/ZDELPACK investigation`
+      : 'No ZDELFLAG/ZDELPACK warnings';
+  } catch { /* leave the static LIVE badge in place on failure */ }
+}
+
 function setupTiles() {
   document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {
     tile.addEventListener('click', () => {
@@ -49,6 +70,7 @@ function setupTiles() {
       if (fn === 'stagingFulfil')  runStagingFulfil();
       if (fn === 'stagingCompleted') runStagingCompleted();
       if (fn === 'stagingBinRestrictions') runStagingBinRestrictions();
+      if (fn === 'zdelflagWarnings') runZdelflagWarnings();
     });
   });
 
@@ -938,6 +960,7 @@ async function openPalletBuilder() {
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
          requiredMaterials: [], stockError: null,
          pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
+         pendingPackagingInstruction: null,
          layerContainers: {} };
 
   const overlay = getPbOverlay();
@@ -998,6 +1021,7 @@ async function openPalletBuilderOnExisting(palletId) {
          allPackaging: [], allowedPackaging: [], packages: [], nextLayer: 1,
          requiredMaterials: [], stockError: null,
          pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
+         pendingPackagingInstruction: null,
          layerContainers: {} };
 
   const overlay = getPbOverlay();
@@ -1181,6 +1205,7 @@ function addPackageFromFoundBatch(material, batch, deliveryItem, qty, packagingM
   pb.pendingSapMaterial     = material;
   pb.pendingSapDeliveryItem = deliveryItem || null;
   pb.pendingSapQuantity     = qty || null;
+  pb.pendingPackagingInstruction = packagingMaterial || null;
   applySuggestedPackaging(material, packagingMaterial);
   addPackage();
 }
@@ -1207,6 +1232,7 @@ function wireBatchScanInput() {
     pb.pendingSapMaterial     = match?.material || null;
     pb.pendingSapDeliveryItem = match?.deliveryItem || null;
     pb.pendingSapQuantity     = match?.qty || null;
+    pb.pendingPackagingInstruction = match?.packagingMaterial || null;
     if (match) applySuggestedPackaging(match.material, match.packagingMaterial);
   });
 
@@ -2107,6 +2133,7 @@ async function addPackage() {
         sapSourceStorageType: sourceStorageType,
         sapSourceBin:         sourceBin,
         sapStageTransferOrder: transferOrderNumber,
+        sapPackagingInstruction: pb.pendingSapMaterial ? (pb.pendingPackagingInstruction || null) : null,
         scanTime:    new Date().toISOString(),
       }),
     });
@@ -2181,6 +2208,7 @@ async function addPackage() {
     pb.pendingSapMaterial     = null;
     pb.pendingSapDeliveryItem = null;
     pb.pendingSapQuantity     = null;
+    pb.pendingPackagingInstruction = null;
     if (usingCustom) {
       ['pb-dim-l','pb-dim-w','pb-dim-h'].forEach(id => {
         const el = document.getElementById(id);
@@ -3469,5 +3497,73 @@ async function spDeleteBinRestriction(restrictionId) {
     runStagingBinRestrictions();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ── ZDELFLAG/ZDELPACK Warnings ───────────────────────────────────────────────
+// Lists deliveries whose latest transaction-ZPIL9 maintenance run (see
+// deliverymain.js's runZdelflagMaintenance, fired on delivery complete)
+// came back Failed or Warning, with a Reprocess action so someone can fix
+// the underlying SAP issue and retry before the delivery ships. A delivery
+// drops off this list the moment a reprocess attempt records Success.
+async function runZdelflagWarnings() {
+  if (!await checkSession()) return;
+  showResultPanel('ZDELFLAG Warnings', 'Deliveries where ZDELFLAG/ZDELPACK maintenance (ZPIL9) failed or warned');
+  try {
+    const r = await fetch('/api/deliverymain/zdelflag/warnings');
+    const json = await r.json();
+    if (json.success === false) throw new Error(json.error || 'Failed to load ZDELFLAG warnings');
+    zdRenderWarnings(json.data || []);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+  pollZdelflagWarnCount();
+}
+
+function zdRenderWarnings(warnings) {
+  const rows = warnings.map(w => {
+    const msgText = (w.messages || []).map(m => esc(m.message || '')).join('<br>') || '<span style="color:var(--text-muted)">—</span>';
+    return `
+    <tr class="admin-row">
+      <td><strong>${esc(String(w.deliveryID))}</strong></td>
+      <td><span class="tile-badge ${w.status === 'Failed' ? 'tile-badge--overdue' : ''}" style="position:static;display:inline-block">${esc(w.status)}</span></td>
+      <td style="max-width:420px">${msgText}</td>
+      <td>${spFormatDate(w.ranAtUtc)}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary zd-reprocess" data-id="${esc(String(w.deliveryID))}" style="padding:3px 10px;font-size:11px">Reprocess</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    ${warnings.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Delivery</th><th>Status</th><th>Messages</th><th>Last Run</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No deliveries currently have a failed or warning ZDELFLAG/ZDELPACK run.</div>'}
+  `;
+
+  document.querySelectorAll('.zd-reprocess').forEach(btn => {
+    btn.addEventListener('click', () => zdReprocess(btn.dataset.id, btn));
+  });
+}
+
+async function zdReprocess(deliveryId, btn) {
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Reprocessing…';
+  try {
+    const r = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/zdelflag/reprocess`, { method: 'POST' });
+    const json = await r.json();
+    if (!r.ok || json.success === false) {
+      throw new Error(json.error || 'Reprocess failed');
+    }
+    runZdelflagWarnings();
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 }

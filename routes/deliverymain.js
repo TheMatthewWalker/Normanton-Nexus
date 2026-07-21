@@ -520,6 +520,201 @@ router.get('/:deliveryId/pallets', async (req, res) => {
     }
 });
 
+// ── ZDELFLAG/ZDELPACK maintenance (transaction ZPIL9) ───────────────────────
+//
+// Confirms all materials/packaging assigned to a delivery in SAP's own
+// ZDELFLAG/ZDELPACK tables via the custom BAPI Z_MAINT_ZDELFLAG_ZDELPACK
+// (ported from the uploaded zpil9_code.bas macro's maint_delflag_pack — see
+// SapServer's ZdelflagHelpers.cs for the full field-by-field mapping
+// rationale). Runs after the ZDEL weight update when a delivery is marked
+// complete, and again unchanged from the reprocess endpoint below.
+//
+// Only PalletPackages rows with a real sapMaterial are actual SAP batches —
+// the outer box/container shells the MB/C2 packing flow creates (packagingID
+// set, sapMaterial null) aren't batches and don't get their own row. Every
+// real batch must have sapBatch recorded (there's no path in this app to add
+// one without a batch) — a missing one here is treated as a hard stop, same
+// as the user's own "add the hard-stop in case there is a bug" instruction.
+//
+// One row per package (VHART "SMBX") plus one combined header row per pallet
+// (VHART "PALL", PACKID = palletID*1000, package rows +1/+2/... from there).
+// PALLET is "G" unless the pallet has no palletType set, in which case "S".
+// Weights (NTGEW/BRGEW) are only populated on the header row, from that
+// pallet's own gross/net weight — package rows default to 0. T_DELPACK gets
+// one row per (package, ZBOM_INFO~IDNRK) pair for that package's packaging
+// instruction, MENGE always 1, TAREWEI from dbo.PackagingData.
+//
+// Never throws — always resolves to { status, messages } and writes exactly
+// one row to dbo.DeliveryZdelflagRun, so a SAP-side failure here can be
+// surfaced as a warning (with a reprocess option) rather than blocking
+// whatever called it.
+async function runZdelflagMaintenance(pool, deliveryId, userId) {
+    const sapGet = async (path) => {
+        const response = await axios.get(`${sapConfig.url}${path}`, {
+            timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` },
+        });
+        return response.data;
+    };
+    const sapPost = async (path, body) => {
+        const response = await axios.post(`${sapConfig.url}${path}`, body, {
+            timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` },
+        });
+        return response.data;
+    };
+
+    const recordRun = async (status, messages) => {
+        await pool.request()
+            .input('deliveryId',   sql.NVarChar(10),  String(deliveryId))
+            .input('status',       sql.NVarChar(10),  status)
+            .input('messages',     sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
+            .input('ranByUserID',  sql.Int,           userId ?? null)
+            .query(`INSERT INTO Logistics.dbo.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
+                    VALUES (@deliveryId, @status, @messages, @ranByUserID)`);
+        return { status, messages: messages || [] };
+    };
+
+    try {
+        // 1. Delivery + pallet + package data already sitting in our own DB.
+        const dmRes = await pool.request()
+            .input('deliveryId', sql.BigInt, deliveryId)
+            .query('SELECT customerID FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId');
+        const customerId = dmRes.recordset[0]?.customerID != null ? String(dmRes.recordset[0].customerID) : '';
+
+        const palletsRes = await pool.request()
+            .input('deliveryId', sql.BigInt, deliveryId)
+            .query(`SELECT pm.palletID, pm.palletType, pm.grossWeight, pm.packagingWeight
+                    FROM Logistics.dbo.PalletMain pm
+                    INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                    WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    ORDER BY pm.palletID ASC`);
+        const pallets = palletsRes.recordset;
+        if (!pallets.length) {
+            return await recordRun('Failed', [{ type: 'E', message: 'No pallets found for this delivery.' }]);
+        }
+
+        const packagesRes = await pool.request()
+            .input('sapDelivery', sql.NVarChar, String(deliveryId))
+            .query(`SELECT palletID, sapMaterial, sapQuantity, sapBatch, sapDeliveryItem, sapPackagingInstruction
+                    FROM Logistics.dbo.PalletPackages
+                    WHERE sapDelivery = @sapDelivery
+                    ORDER BY palletID ASC, palletItemID ASC`);
+
+        const missingBatch = packagesRes.recordset.find(p => p.sapMaterial && !p.sapBatch);
+        if (missingBatch) {
+            const msg = `Package for material ${missingBatch.sapMaterial} on pallet ${missingBatch.palletID} has no batch recorded — cannot maintain ZDELFLAG/ZDELPACK.`;
+            return await recordRun('Failed', [{ type: 'E', message: msg }]);
+        }
+
+        const packagesByPallet = {};
+        packagesRes.recordset
+            .filter(p => p.sapMaterial)
+            .forEach(p => { (packagesByPallet[p.palletID] ||= []).push(p); });
+
+        // 2. SAP lookups Node needs to fill in the rows.
+        const abladRes = await sapGet(`/api/warehouse/zdelflag/likp-ablad/${encodeURIComponent(deliveryId)}`);
+        const empst = abladRes?.success !== false ? (abladRes?.data || '') : '';
+
+        const lipsRes = await sapGet(`/api/warehouse/zdelflag/lips-items/${encodeURIComponent(deliveryId)}`);
+        const lipsByPosnr = {};
+        (lipsRes?.success !== false ? (lipsRes?.data || []) : []).forEach(r => {
+            lipsByPosnr[String(r.itemNumber || '').trim()] = r;
+        });
+
+        const eiktoRes = customerId
+            ? await sapGet(`/api/warehouse/zdelflag/eikto/${encodeURIComponent(customerId)}`)
+            : null;
+        const eikto = eiktoRes?.success !== false ? (eiktoRes?.data || '') : '';
+
+        const instructions = [...new Set(
+            packagesRes.recordset.map(p => String(p.sapPackagingInstruction || '').trim()).filter(Boolean)
+        )];
+        const zbomRes = instructions.length
+            ? await sapPost('/api/warehouse/zdelflag/zbom-info', { packagingInstructions: instructions })
+            : { data: [] };
+        const idnrksByInstruction = {};
+        (zbomRes?.success !== false ? (zbomRes?.data || []) : []).forEach(r => {
+            (idnrksByInstruction[r.packagingInstruction] ||= []).push(r.componentMaterial);
+        });
+
+        // 3. Packaging component weights (T_DELPACK~TAREWEI), keyed by
+        // packMaterial (the SAP material number, same as ZBOM_INFO~IDNRK).
+        const allIdnrks = [...new Set(Object.values(idnrksByInstruction).flat())];
+        const weightByIdnrk = {};
+        if (allIdnrks.length) {
+            const pdRes = await pool.request()
+                .query(`SELECT packMaterial, packWeight FROM Logistics.dbo.PackagingData WHERE packMaterial IS NOT NULL`);
+            pdRes.recordset.forEach(r => { weightByIdnrk[String(r.packMaterial).trim()] = Number(r.packWeight || 0); });
+        }
+
+        // 4. Build T_DELFLAG / T_DELPACK rows.
+        const budat = new Date().toISOString().slice(0, 10).replace(/-/g, ''); // yyyyMMdd
+        const delflagRows = [];
+        const delpackRows = [];
+
+        pallets.forEach(pallet => {
+            const packages     = packagesByPallet[pallet.palletID] || [];
+            const hasType      = pallet.palletType != null && String(pallet.palletType).trim() !== '';
+            const palletFlag   = hasType ? 'G' : 'S';
+            const headerPackid = pallet.palletID * 1000;
+            const netWeight    = Number(pallet.grossWeight || 0) - Number(pallet.packagingWeight || 0);
+
+            delflagRows.push({
+                vbeln: String(deliveryId), posnr: '', charg: '',
+                kunnr: customerId, empst, werks: '3012',
+                ntgew: netWeight, brgew: Number(pallet.grossWeight || 0),
+                kdmat: '', lfimg: 0, eikto, arktx: '', matnr: '',
+                budat, packid: String(headerPackid), boxes: String(packages.length),
+                pallet: palletFlag, vhart: 'PALL',
+                smbxMatnr: (packages.find(p => p.sapPackagingInstruction)?.sapPackagingInstruction) || '',
+                pallMatnr: 'PALLET', mtart: '', smbxhu: '', done: 'X',
+                printPalletLabel: true, printBoxLabel: false,
+            });
+
+            packages.forEach((pkg, idx) => {
+                const packid  = String(headerPackid + idx + 1);
+                const posnr   = String(pkg.sapDeliveryItem || '').trim();
+                const lipsRow = lipsByPosnr[posnr];
+                const instr   = String(pkg.sapPackagingInstruction || '').trim();
+
+                delflagRows.push({
+                    vbeln: String(deliveryId), posnr, charg: pkg.sapBatch,
+                    kunnr: customerId, empst, werks: '3012',
+                    ntgew: 0, brgew: 0,
+                    kdmat: lipsRow?.customerMaterial || '', lfimg: Number(pkg.sapQuantity || 0),
+                    eikto, arktx: lipsRow?.description || '', matnr: pkg.sapMaterial,
+                    budat, packid, boxes: '1', pallet: palletFlag, vhart: 'SMBX',
+                    smbxMatnr: instr, pallMatnr: 'PALLET',
+                    mtart: '', smbxhu: packid, done: 'X',
+                    printPalletLabel: false, printBoxLabel: false,
+                });
+
+                (idnrksByInstruction[instr] || []).forEach(idnrk => {
+                    delpackRows.push({
+                        packid, pallMatnr: idnrk, menge: 1, meins: 'EA',
+                        tarewei: weightByIdnrk[idnrk] || 0, gewei: 'KG',
+                    });
+                });
+            });
+        });
+
+        // 5. Call the BAPI.
+        const maintainRes = await sapPost('/api/warehouse/zdelflag/maintain', { delflagRows, delpackRows });
+
+        if (maintainRes?.success === false) {
+            const msg = maintainRes?.error?.message || 'SAP rejected the ZDELFLAG/ZDELPACK maintenance call.';
+            return await recordRun('Failed', [{ type: 'E', message: msg }]);
+        }
+
+        const messages   = maintainRes?.data?.messages || [];
+        const hasBlocker = messages.some(m => m.type === 'E' || m.type === 'A');
+        if (hasBlocker)     return await recordRun('Failed', messages);
+        if (messages.length) return await recordRun('Warning', messages);
+        return await recordRun('Success', []);
+    } catch (err) {
+        return await recordRun('Failed', [{ type: 'E', message: err.message }]);
+    }
+}
+
 // ── Mark delivery as complete — rolls up pallet weights/volume/count ──
 //
 // After the rollup, pushes the same actual gross/net weight and pallet count
@@ -531,6 +726,10 @@ router.get('/:deliveryId/pallets', async (req, res) => {
 // this runs, so a SAP-side failure here is surfaced as a warning rather than
 // failing the whole completion — the operator doesn't lose their finished
 // pallets over a SAP hiccup, but does get told to fix LIKP by hand.
+//
+// After ZDEL, also runs the ZDELFLAG/ZDELPACK maintenance step (see
+// runZdelflagMaintenance above) — same best-effort treatment, surfaced as
+// its own zdelflagWarning rather than blocking completion.
 router.patch('/:deliveryId/complete', async (req, res) => {
     try {
         const pool = await getPool();
@@ -591,7 +790,95 @@ router.patch('/:deliveryId/complete', async (req, res) => {
             sapWarning = `Could not update SAP (ZDEL) with the actual weights/pallet count: ${sapErr.message}. Update LIKP manually.`;
         }
 
-        res.json({ success: true, data: { ...totals, sapWarning } });
+        let zdelflagWarning = null;
+        const zdelflagResult = await runZdelflagMaintenance(pool, req.params.deliveryId, null);
+        if (zdelflagResult.status !== 'Success') {
+            zdelflagWarning = zdelflagResult.messages.map(m => m.message).filter(Boolean).join('; ')
+                || `ZDELFLAG/ZDELPACK maintenance did not complete successfully (${zdelflagResult.status}).`;
+        }
+
+        res.json({ success: true, data: { ...totals, sapWarning, zdelflagWarning } });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── ZDELFLAG/ZDELPACK warning log — deliveries whose latest maintenance run
+// was Failed or Warning, for the warehouse warning-log UI ──
+router.get('/zdelflag/warnings', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query(`SELECT r.deliveryID, r.status, r.messages, r.ranAtUtc
+                    FROM Logistics.dbo.DeliveryZdelflagRun r
+                    INNER JOIN (
+                        SELECT deliveryID, MAX(ranAtUtc) AS latestRun
+                        FROM Logistics.dbo.DeliveryZdelflagRun
+                        GROUP BY deliveryID
+                    ) latest ON latest.deliveryID = r.deliveryID AND latest.latestRun = r.ranAtUtc
+                    WHERE r.status IN ('Failed', 'Warning')
+                    ORDER BY r.ranAtUtc DESC`);
+        res.json({
+            success: true,
+            data: result.recordset.map(r => ({
+                deliveryID: r.deliveryID,
+                status: r.status,
+                messages: JSON.parse(r.messages || '[]'),
+                ranAtUtc: r.ranAtUtc,
+            })),
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Latest ZDELFLAG/ZDELPACK run status for one delivery ──
+router.get('/:deliveryId/zdelflag/status', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status, messages, ranAtUtc
+                    FROM Logistics.dbo.DeliveryZdelflagRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        const row = result.recordset[0];
+        res.json({
+            success: true,
+            data: row
+                ? { status: row.status, messages: JSON.parse(row.messages || '[]'), ranAtUtc: row.ranAtUtc }
+                : { status: null, messages: [], ranAtUtc: null },
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Reprocess ZDELFLAG/ZDELPACK maintenance for one delivery ──
+// Only allowed while the latest run is missing, Failed, or Warning — once a
+// VBELN has a Success run recorded, it can't be reprocessed without a future
+// reversal feature (not implemented yet), per the user's explicit "if it is
+// successful, it cannot be used again for the same VBELN, unless it is
+// reversed" instruction.
+router.post('/:deliveryId/zdelflag/reprocess', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const latestRes = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status
+                    FROM Logistics.dbo.DeliveryZdelflagRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        const latestStatus = latestRes.recordset[0]?.status;
+        if (latestStatus === 'Success') {
+            return res.status(409).json({
+                success: false,
+                error: 'This delivery already has a successful ZDELFLAG/ZDELPACK run and cannot be reprocessed.',
+            });
+        }
+
+        const result = await runZdelflagMaintenance(pool, req.params.deliveryId, null);
+        res.json({ success: true, data: result });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
