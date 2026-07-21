@@ -880,6 +880,16 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
         const budat = new Date().toISOString().slice(0, 10).replace(/-/g, ''); // yyyyMMdd
         const delflagRows = [];
         const delpackRows = [];
+        // T_DELPACK rows only ever get created when a package's captured
+        // sapPackagingInstruction resolves to at least one ZBOM_INFO~IDNRK
+        // component. Either of those failing (no instruction captured at
+        // pack time, or ZBOM_INFO has nothing for the instruction that WAS
+        // captured) silently sends an empty T_DELPACK to SAP — the BAPI
+        // itself won't complain about that, so without this check the run
+        // gets recorded as a silent 'Success' with an empty ZDELPACK and no
+        // way to tell why. Collected here and folded into the run's warning
+        // messages below so it shows up in the ZDELFLAG Warnings tile.
+        const delpackWarnings = [];
 
         pallets.forEach(pallet => {
             const packages     = packagesByPallet[pallet.palletID] || [];
@@ -918,12 +928,20 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
                     printPalletLabel: false, printBoxLabel: false,
                 });
 
-                (idnrksByInstruction[instr] || []).forEach(idnrk => {
-                    delpackRows.push({
-                        packid, pallMatnr: idnrk, menge: 1, meins: 'EA',
-                        tarewei: weightByIdnrk[idnrk] || 0, gewei: 'KG',
+                if (!instr) {
+                    delpackWarnings.push(`Material ${pkg.sapMaterial || '?'} on pallet ${pallet.palletID} has no packaging instruction recorded — no ZDELPACK row was created for it.`);
+                } else {
+                    const idnrks = idnrksByInstruction[instr] || [];
+                    if (!idnrks.length) {
+                        delpackWarnings.push(`No ZBOM_INFO packaging components found for instruction "${instr}" (material ${pkg.sapMaterial || '?'} on pallet ${pallet.palletID}) — no ZDELPACK row was created for it.`);
+                    }
+                    idnrks.forEach(idnrk => {
+                        delpackRows.push({
+                            packid, pallMatnr: idnrk, menge: 1, meins: 'EA',
+                            tarewei: weightByIdnrk[idnrk] || 0, gewei: 'KG',
+                        });
                     });
-                });
+                }
             });
         });
 
@@ -937,8 +955,14 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
 
         const messages   = maintainRes?.data?.messages || [];
         const hasBlocker = messages.some(m => m.type === 'E' || m.type === 'A');
-        if (hasBlocker)     return await recordRun('Failed', messages);
-        if (messages.length) return await recordRun('Warning', messages);
+        if (hasBlocker) return await recordRun('Failed', messages);
+        // SAP's own messages take priority when there's a genuine blocker;
+        // otherwise fold in our own delpackWarnings (SAP itself won't
+        // complain about an empty T_DELPACK, so this is the only way a
+        // silently-empty ZDELPACK gets surfaced instead of recording as a
+        // plain 'Success').
+        const allWarnings = [...messages, ...delpackWarnings.map(message => ({ type: 'W', message }))];
+        if (allWarnings.length) return await recordRun('Warning', allWarnings);
         return await recordRun('Success', []);
     } catch (err) {
         return await recordRun('Failed', [{ type: 'E', message: err.message }]);

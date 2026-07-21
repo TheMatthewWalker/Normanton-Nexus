@@ -59,7 +59,7 @@ async function pollZdelflagWarnCount() {
   } catch { /* leave the static LIVE badge in place on failure */ }
 }
 
-// Packaging Holding tile badge — count of deliveries the SAP sync found
+// Picksheets on Hold tile badge — count of deliveries the SAP sync found
 // completed outside Nexus, waiting for someone to confirm packaging.
 async function pollPackagingHoldingCount() {
   const badge = document.getElementById('packaging-holding-badge');
@@ -73,7 +73,7 @@ async function pollPackagingHoldingCount() {
     badge.classList.toggle('tile-badge--live', count === 0);
     badge.title = count > 0
       ? `${count} delivery/deliveries waiting for packaging data`
-      : 'No deliveries waiting for packaging data';
+      : 'No deliveries modified in SAP outside Nexus have been found.';
   } catch { /* leave the static LIVE badge in place on failure */ }
 }
 
@@ -688,7 +688,7 @@ function renderPicksheets(rows) {
   });
 }
 
-// ── Packaging Holding ─────────────────────────────────────────────────────────
+// ── Picksheets on Hold ─────────────────────────────────────────────────────────
 // Deliveries the SAP sync found already completed in SAP outside Nexus (see
 // runZdelflagMaintenance's neighbour, runSapSync's reconciliation step in
 // deliverymain.js). Clicking a row opens the same Picked Pallets/Pallet
@@ -698,12 +698,12 @@ function renderPicksheets(rows) {
 // held job outright instead of confirming it (soft-cancel server-side).
 async function runPackagingHolding() {
   if (!await checkSession()) return;
-  showResultPanel('Packaging Holding', 'Deliveries completed in SAP outside Nexus — waiting for packaging data');
+  showResultPanel('Picksheets on Hold', 'Deliveries completed in SAP outside Nexus — waiting for packaging data');
 
   try {
     const res  = await fetch('/api/deliverymain/packaging-holding');
     const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to load packaging holding list');
+    if (!json.success) throw new Error(json.error || 'Failed to load picksheets on hold list');
 
     const rows = json.data;
     const badge = document.getElementById('result-row-badge');
@@ -784,7 +784,7 @@ async function deleteHeldPicksheet(deliveryId) {
 async function deleteAllHeldPicksheets() {
   if (!await wConfirm({
     title: 'Delete All Held Picksheets',
-    message: 'Delete every picksheet in the packaging holding area instead of confirming packaging?\nThis reverses any SAP staging and cancels each delivery in Nexus. This cannot be undone.',
+    message: 'Delete every picksheet in the picksheets on hold area instead of confirming packaging?\nThis reverses any SAP staging and cancels each delivery in Nexus. This cannot be undone.',
     confirmText: 'Delete All',
     variant: 'danger',
   })) return;
@@ -2437,7 +2437,7 @@ async function completeDelivery() {
   if (!await wConfirm({
     title: fromHolding ? 'Confirm Packaging' : 'Complete Delivery',
     message: fromHolding
-      ? `Confirm packaging data for Delivery #${deliveryId}?\nThis will move it out of Packaging Holding and make it available for shipment creation. SAP already has this delivery marked complete, so no ZDEL/ZDELFLAG updates are sent.`
+      ? `Confirm packaging data for Delivery #${deliveryId}?\nThis will move it out of Picksheets on Hold and make it available for shipment creation. SAP already has this delivery marked complete, so no ZDEL/ZDELFLAG updates are sent.`
       : `Mark Delivery #${deliveryId} as complete?\nThis will remove it from the open picksheets list.`,
     confirmText: fromHolding ? 'Confirm' : 'Complete',
     variant: 'success',
@@ -3665,7 +3665,20 @@ async function runZdelflagWarnings() {
 
 function zdRenderWarnings(warnings) {
   const rows = warnings.map(w => {
-    const msgText = (w.messages || []).map(m => esc(m.message || '')).join('<br>') || '<span style="color:var(--text-muted)">—</span>';
+    // Always show the SAP message TYPE alongside the text, and fall back to
+    // an explicit "(no message text)" note per line rather than dropping it
+    // silently — a run can land here with a real message object whose TYPE
+    // is set but MESSAGE text came back blank from SAP, which previously
+    // rendered as a bare "—" with no way to tell what actually happened.
+    const msgText = (w.messages || []).length
+      ? w.messages.map(m => {
+          const type = esc(String(m.type || '').trim());
+          const text = esc(String(m.message || '').trim());
+          return type
+            ? `<span style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;font-size:10px">[${type}]</span> ${text || '<span style="color:var(--text-muted)">(no message text)</span>'}`
+            : (text || '<span style="color:var(--text-muted)">(no message text)</span>');
+        }).join('<br>')
+      : '<span style="color:var(--text-muted)">—</span>';
     return `
     <tr class="admin-row">
       <td><strong>${esc(String(w.deliveryID))}</strong></td>
