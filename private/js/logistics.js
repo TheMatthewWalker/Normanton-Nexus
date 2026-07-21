@@ -419,7 +419,7 @@ function renderCustomsDocuments() {
     : '<div id="customs-selection-msg" class="lg-selection-msg hidden"></div>';
 
   const customsWriteBtn = hasPlanning()
-    ? `<button type="button" class="btn-submit" id="customs-create-btn" disabled>Create Customs Entry</button>`
+    ? `<button type="button" class="btn-secondary" id="customs-not-required-btn" disabled style="color:var(--error,#DC2626)">Mark Not Required</button><button type="button" class="btn-submit" id="customs-create-btn" disabled>Create Customs Entry</button>`
     : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`;
   document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Customs Documents</div><div class="toolbar-hint" id="customs-selection-hint">Select one or more shipments, then create the customs entries in ClearPort.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="customs-clear-btn" disabled>Clear Selection</button>${customsWriteBtn}</div>${noticeHtml}<div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--week"></span><span class="ps-section-title">Awaiting Customs</span><span class="ps-section-count">${shipmentRows.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Movement</th><th>Forwarder</th><th>Destination</th><th>Customs ID</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`;
   bindCustomsDocumentsEvents();
@@ -464,6 +464,7 @@ function bindCustomsDocumentsEvents() {
     updateCustomsDocumentsUI();
   });
   document.getElementById('customs-create-btn').addEventListener('click', submitCustomsDocuments);
+  document.getElementById('customs-not-required-btn')?.addEventListener('click', markSelectedNotRequired);
 }
 
 
@@ -617,6 +618,8 @@ function updateCustomsDocumentsUI() {
   if (clearBtn) clearBtn.disabled = rows.length === 0;
   const createBtn = document.getElementById('customs-create-btn');
   if (createBtn) createBtn.disabled = rows.length === 0;
+  const notRequiredBtn = document.getElementById('customs-not-required-btn');
+  if (notRequiredBtn) notRequiredBtn.disabled = rows.length === 0;
 }
 
 
@@ -670,6 +673,63 @@ async function submitCustomsDocuments() {
       type: completed.length ? (completed.every(i => i.pdfSaved) ? 'success' : 'warning') : 'error',
       text: lines.join(' '),
     };
+
+    await runCustomsDocuments();
+  } catch (err) {
+    customsBatchNotice = { type: 'error', text: err.message };
+    button.disabled = false;
+    button.textContent = originalText;
+    if (message) {
+      message.textContent = err.message;
+      message.classList.remove('hidden');
+    }
+  }
+}
+
+
+// Mass "un-mark" — for shipments that were flagged as needing a customs
+// declaration but turn out not to (wrong flag, incoterms/destination
+// change, etc). Clears customsRequired for every selected row in one call
+// so they don't have to be toggled off one at a time via the shipment
+// detail modal; drops them straight off this queue since it's filtered on
+// customsRequired = 1.
+async function markSelectedNotRequired() {
+  const rows = getSelectedCustomsRows();
+  if (!rows.length) return;
+  if (!await wConfirmLg({
+    title: 'Mark as Not Required',
+    message: `Mark ${rows.length} shipment(s) as not requiring customs? They'll drop off this list.`,
+    confirmText: 'Mark Not Required',
+    variant: '',
+  })) return;
+
+  const button = document.getElementById('customs-not-required-btn');
+  const message = document.getElementById('customs-selection-msg');
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Updating...';
+  if (message) {
+    message.textContent = '';
+    message.classList.add('hidden');
+    message.classList.remove('lg-selection-msg--success');
+  }
+
+  try {
+    const res = await fetch('/api/shipmentmain/customs-required/bulk', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shipmentIDs: rows.map(row => row.shipmentID), required: false }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to update shipments.');
+
+    const updated = json.data?.updated || 0;
+    const skipped = json.data?.skipped || [];
+    const lines = [`${updated} shipment(s) marked as not requiring customs.`];
+    if (skipped.length) {
+      lines.push(`${skipped.length} shipment(s) skipped — customs already complete: ${skipped.map(id => String(id).padStart(8, '0')).join(', ')}.`);
+    }
+    customsBatchNotice = { type: skipped.length ? 'warning' : 'success', text: lines.join(' ') };
 
     await runCustomsDocuments();
   } catch (err) {

@@ -2396,6 +2396,50 @@ router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'),
 });
 
 
+// ── Bulk toggle customsRequired — mass "mark as no customs required" from
+// the Customs Documents queue, so several shipments that don't actually
+// need a declaration (e.g. wrongly flagged, or a destination/incoterms
+// change) can be cleared in one go instead of one at a time. Same
+// customsComplete guard as the single-shipment route above: any shipment
+// whose customs is already complete is left untouched and reported back
+// in `skipped` rather than failing the whole batch.
+router.patch('/customs-required/bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
+  const shipmentIds = normalizeIdList(req.body.shipmentIDs);
+  if (!shipmentIds.length) {
+    return res.status(400).json({ success: false, error: 'Select at least one shipment.' });
+  }
+  const required = toBool(req.body.required) ? 1 : 0;
+
+  try {
+    const pool = await getPool();
+
+    const blockedRequest = pool.request();
+    const blockedClause = createInClause(blockedRequest, shipmentIds, 'bsid');
+    const blockedRes = await blockedRequest.query(`
+      SELECT shipmentID FROM Logistics.dbo.ShipmentMain
+      WHERE shipmentID IN (${blockedClause}) AND ISNULL(customsComplete, 0) = 1`);
+    const skipped = blockedRes.recordset.map(r => r.shipmentID);
+
+    const updateRequest = pool.request();
+    const updateClause = createInClause(updateRequest, shipmentIds, 'usid');
+    updateRequest.input('required', sql.Bit, required);
+    const result = await updateRequest.query(`
+      UPDATE Logistics.dbo.ShipmentMain
+      SET customsRequired = @required
+      WHERE shipmentID IN (${updateClause})
+        AND ISNULL(customsComplete, 0) = 0;
+
+      SELECT @@ROWCOUNT AS affectedRows;
+    `);
+
+    stampDbChange(req.session?.user?.username, 'ShipmentMain');
+    res.json({ success: true, data: { updated: Number(result.recordset[0]?.affectedRows || 0), skipped } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 // ── Remove a delivery from a shipment ────────────────────────────────────────
 router.delete('/:shipmentId/deliveries/:deliveryId', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
