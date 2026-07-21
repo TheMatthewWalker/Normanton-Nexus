@@ -716,7 +716,7 @@ async function cancelSelectedShipments() {
 
 async function runOpenDeliveries() {
   if (!await checkSession()) return;
-  showResultPanel('Open Deliveries', 'Completed deliveries ready for shipment creation');
+  showResultPanel('Create Shipment', 'Completed deliveries ready for shipment creation');
   try {
     const res = await fetch('/api/deliverymain/completed-unshipped');
     const json = await res.json();
@@ -764,12 +764,84 @@ function bindOpenDeliveriesEvents() {
     if (e.target.closest('input')) return;
     showPickedPallets(row.dataset.id, row.children[2]?.textContent || '');
   }));
+  document.querySelectorAll('.lg-row').forEach(row => row.addEventListener('contextmenu', e => {
+    showLgContextMenu(e, row.dataset.id);
+  }));
   document.getElementById('lg-clear-btn').addEventListener('click', () => {
     selectedDeliveryIds = new Set();
     document.querySelectorAll('.lg-check').forEach(input => { input.checked = false; });
     updateSelectionUI();
   });
   document.getElementById('lg-create-btn').addEventListener('click', openShipmentModal);
+}
+
+// Right-click menu on a Create Shipment picksheet row — mirrors the Order
+// Suggestions .pb-ctx-menu pattern (showOsContextMenu above). Offers two
+// ways to pull a completed-but-unshipped delivery back out of the flow:
+// "uncomplete" it (send it back to Open Picksheets for re-picking) or
+// cancel it outright (order was cancelled, material booked back to stock).
+function closeLgContextMenu() {
+  document.getElementById('lg-ctx-menu')?.remove();
+  document.removeEventListener('click', closeLgContextMenu);
+}
+
+function showLgContextMenu(event, deliveryId) {
+  event.preventDefault();
+  closeLgContextMenu();
+
+  const menu = document.createElement('div');
+  menu.id = 'lg-ctx-menu';
+  menu.className = 'pb-ctx-menu';
+  menu.style.left = `${Math.min(event.clientX, window.innerWidth  - 230)}px`;
+  menu.style.top  = `${Math.min(event.clientY, window.innerHeight - 80)}px`;
+  menu.innerHTML = `
+    <div class="pb-ctx-item" data-action="uncomplete">Return to Open Picksheets</div>
+    <div class="pb-ctx-item" data-action="cancel" style="color:var(--error,#DC2626)">Mark as Cancelled</div>`;
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeLgContextMenu), 0);
+
+  menu.querySelector('[data-action="uncomplete"]').addEventListener('click', () => {
+    closeLgContextMenu();
+    uncompleteDelivery(deliveryId);
+  });
+  menu.querySelector('[data-action="cancel"]').addEventListener('click', () => {
+    closeLgContextMenu();
+    cancelPicksheetDelivery(deliveryId);
+  });
+}
+
+async function uncompleteDelivery(deliveryId) {
+  if (!await wConfirmLg({
+    title: 'Return to Open Picksheets',
+    message: `Return Delivery #${deliveryId} to Open Picksheets? It will need to be completed again before it can be added to a shipment. Any pallets already built are kept.`,
+    confirmText: 'Return',
+    variant: '',
+  })) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/uncomplete`, { method: 'PATCH' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to return delivery to Open Picksheets');
+    runOpenDeliveries();
+  } catch (err) {
+    wConfirmLg({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
+}
+
+async function cancelPicksheetDelivery(deliveryId) {
+  if (!await wConfirmLg({
+    title: 'Mark as Cancelled',
+    message: `Cancel Delivery #${deliveryId}? This reverses any SAP staging (books the picked material back into stock) and removes it from Create Shipment. This cannot be undone.`,
+    confirmText: 'Cancel Delivery',
+    variant: 'danger',
+  })) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/cancel-picksheet`, { method: 'PATCH' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to cancel delivery');
+    runOpenDeliveries();
+  } catch (err) {
+    wConfirmLg({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
 }
 
 

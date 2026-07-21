@@ -332,6 +332,102 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
     }
 });
 
+// ── Return a completed-but-unshipped picksheet to Open Picksheets ────────
+// Right-click action from the Create Shipment list — "uncompletes" a
+// delivery so it can be re-picked/re-built before completing again. Any
+// pallets already built stay intact (pallet builder doesn't care about
+// completionStatus); only the completion rollup itself is reverted, since
+// palletCount/grossWeight/netWeight/deliveryVolume are recalculated fresh
+// from PalletMain by the /complete route anyway. Restricted to deliveries
+// that are actually sitting in Create Shipment (completed, not cancelled,
+// not already linked to a shipment, not in the packaging-holding area —
+// that one has its own tile/routes since undoing it would fight the next
+// SAP sync's reconciliation pass).
+router.patch('/:deliveryId/uncomplete', async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        const checkRes = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`SELECT dm.completionStatus, ISNULL(dm.deliveryCancelled, 0) AS deliveryCancelled,
+                           ISNULL(dm.pendingPackagingData, 0) AS pendingPackagingData,
+                           sl.deliveryID AS linkedShipmentDelivery
+                    FROM Logistics.dbo.DeliveryMain dm
+                    LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+                    WHERE dm.deliveryID = @deliveryId`);
+        if (!checkRes.recordset.length) {
+            return res.status(404).json({ success: false, error: 'Delivery not found' });
+        }
+        const row = checkRes.recordset[0];
+        if (!row.completionStatus || row.deliveryCancelled || row.pendingPackagingData) {
+            return res.status(409).json({ success: false, error: 'This delivery is not an active completed picksheet.' });
+        }
+        if (row.linkedShipmentDelivery != null) {
+            return res.status(409).json({ success: false, error: 'This delivery is already linked to a shipment — remove it from the shipment first.' });
+        }
+
+        await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`UPDATE Logistics.dbo.DeliveryMain
+                    SET completionStatus = 0,
+                        completionDate   = NULL,
+                        palletCount      = NULL,
+                        grossWeight      = NULL,
+                        netWeight        = NULL,
+                        deliveryVolume   = NULL
+                    WHERE deliveryID = @deliveryId`);
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Cancel a completed-but-unshipped picksheet ────────────────────────────
+// Right-click action from the Create Shipment list, for a delivery whose
+// order was cancelled after it was already picked/completed. Reuses the
+// same reversal + soft-cancel helper as the packaging-holding delete
+// (cancelHeldPicksheet, defined above) — reversing each package's SAP
+// staging transfer order is exactly what "books the material back into
+// stock", so this happens automatically rather than as a separate manual
+// step.
+router.patch('/:deliveryId/cancel-picksheet', async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        const checkRes = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`SELECT dm.completionStatus, ISNULL(dm.deliveryCancelled, 0) AS deliveryCancelled,
+                           sl.deliveryID AS linkedShipmentDelivery
+                    FROM Logistics.dbo.DeliveryMain dm
+                    LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+                    WHERE dm.deliveryID = @deliveryId`);
+        if (!checkRes.recordset.length) {
+            return res.status(404).json({ success: false, error: 'Delivery not found' });
+        }
+        const row = checkRes.recordset[0];
+        if (!row.completionStatus || row.deliveryCancelled) {
+            return res.status(409).json({ success: false, error: 'This delivery is not an active completed picksheet.' });
+        }
+        if (row.linkedShipmentDelivery != null) {
+            return res.status(409).json({ success: false, error: 'This delivery is already linked to a shipment — remove it from the shipment first.' });
+        }
+
+        const result = await cancelHeldPicksheet(pool, req.params.deliveryId);
+        if (!result.success) {
+            return res.status(422).json({
+                success: false,
+                error: `Could not reverse SAP staging for ${result.failures.length} package(s) — delivery not cancelled.`,
+                failures: result.failures,
+            });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 
 // ── Picksheet materials + available stock (SAP-backed) ─────────────────────
 // Orchestrates: LIPS (materials required for this delivery) → picksheet-stock
