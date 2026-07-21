@@ -51,9 +51,9 @@
     <!-- TILE GRID — grouped by section -->
     <div class="tile-section" id="tile-section">
 
-      <!-- Stock Information -->
+      <!-- Stock Management -->
       <div class="pn-section">
-        <div class="pn-section-hdr">Stock Information</div>
+        <div class="pn-section-hdr">Stock Management</div>
         <div class="tile-grid">
 
           <div class="sap-tile sap-tile--live" data-fn="displayStock">
@@ -87,6 +87,28 @@
             <span class="tile-badge tile-badge--soon">SOON</span>
             <div class="tile-title">Stock Overview</div>
             <div class="tile-desc">Aggregated material stock levels across all storage locations</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="transferOrders">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Transfer Orders</div>
+            <div class="tile-desc">Create warehouse transfer orders via L_TO_CREATE_SINGLE</div>
+          </div>
+
+          <div class="sap-tile sap-tile--placeholder" data-fn="goodsReceipts">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--soon">SOON</span>
+            <div class="tile-title">Goods Receipts</div>
+            <div class="tile-desc">Incoming goods and inbound delivery confirmations</div>
           </div>
 
         </div>
@@ -133,7 +155,7 @@
                 <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
               </svg>
             </div>
-            <span class="tile-badge tile-badge--live">LIVE</span>
+            <span id="staging-open-badge" class="tile-badge tile-badge--live">LIVE</span>
             <div class="tile-title">Staging Post</div>
             <div class="tile-desc">Open material requests from Production &mdash; sorted by due date</div>
           </div>
@@ -199,36 +221,6 @@
             <span class="tile-badge tile-badge--live">LIVE</span>
             <div class="tile-title">SAP Sync</div>
             <div class="tile-desc">Pull open deliveries from SAP and insert any not yet in the database</div>
-          </div>
-
-        </div>
-      </div>
-
-      <!-- Stock Movements -->
-      <div class="pn-section">
-        <div class="pn-section-hdr">Stock Movements</div>
-        <div class="tile-grid">
-
-          <div class="sap-tile sap-tile--live" data-fn="transferOrders">
-            <div class="tile-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
-              </svg>
-            </div>
-            <span class="tile-badge tile-badge--live">LIVE</span>
-            <div class="tile-title">Transfer Orders</div>
-            <div class="tile-desc">Create warehouse transfer orders via L_TO_CREATE_SINGLE</div>
-          </div>
-
-          <div class="sap-tile sap-tile--placeholder" data-fn="goodsReceipts">
-            <div class="tile-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
-            </div>
-            <span class="tile-badge tile-badge--soon">SOON</span>
-            <div class="tile-title">Goods Receipts</div>
-            <div class="tile-desc">Incoming goods and inbound delivery confirmations</div>
           </div>
 
         </div>

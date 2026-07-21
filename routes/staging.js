@@ -19,6 +19,7 @@ import ExcelJS from 'exceljs';
 import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
+import { notify } from '../lib/notify.js';
 import * as db from './stagingsql.js';
 
 const router = express.Router();
@@ -120,6 +121,17 @@ router.get('/requests/open', async (req, res) => {
   }
 });
 
+// Tile-badge summary for the warehouse Staging Post tile — open count +
+// overdue count, cheap enough to poll every 60s without pulling full rows.
+router.get('/requests/open-summary', async (req, res) => {
+  try {
+    const data = await db.getStagingOpenSummary();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 router.get('/requests', async (req, res) => {
   try {
     const data = await db.listStagingRequests();
@@ -181,6 +193,24 @@ router.post('/requests', async (req, res) => {
       material, materialText, uom, quantityRequested, location, requestedBatch, dueAtUtc: due, notes, requestedBy,
     });
     await audit('STAGING_REQUEST_CREATED', requestedBy, `Request #${requestId} — ${quantityRequested} of ${material} to ${location}`, req);
+
+    // Let the warehouse department know a new request is waiting — best-effort,
+    // must never block the response the requester is waiting on.
+    try {
+      const pool = await sql.connect(sqlConfig);
+      await notify(pool, {
+        title: 'New Staging Post Request',
+        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${due.toISOString().slice(0, 16).replace('T', ' ')}.`,
+        severity: 1,
+        category: 'logistics',
+        actionLabel: 'Open Staging Post',
+        actionURL: '/private/warehouse.html',
+        target: { type: 'department', value: 'warehouse' },
+      });
+    } catch (notifyErr) {
+      console.error('[staging notify]', notifyErr.message);
+    }
+
     res.json({ success: true, data: { requestId } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });

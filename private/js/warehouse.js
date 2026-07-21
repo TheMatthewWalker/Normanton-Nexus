@@ -14,7 +14,27 @@ let pendingCSVRecords  = [];
   sessionPermissions = d.permissions || [];
   setupTiles();
   setupSupervisorSection();
+  pollStagingOpenCount();
+  setInterval(pollStagingOpenCount, 60000);
 })();
+
+// Staging Post tile badge — open request count, turns red the moment any
+// open request is overdue (DueAtUtc already passed). Same 60s cadence as
+// the notification bell and the Failed Backflush tile on production-nexus.
+async function pollStagingOpenCount() {
+  const badge = document.getElementById('staging-open-badge');
+  if (!badge) return;
+  try {
+    const json = await spApi('/requests/open-summary');
+    const { openCount = 0, overdueCount = 0 } = json.data || {};
+    badge.textContent = openCount > 99 ? '99+' : String(openCount);
+    badge.classList.toggle('tile-badge--overdue', overdueCount > 0);
+    badge.classList.toggle('tile-badge--live', overdueCount === 0);
+    badge.title = overdueCount > 0
+      ? `${openCount} open request${openCount === 1 ? '' : 's'} — ${overdueCount} overdue`
+      : `${openCount} open request${openCount === 1 ? '' : 's'}`;
+  } catch { /* leave the static LIVE badge in place on failure */ }
+}
 
 function setupTiles() {
   document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {

@@ -285,6 +285,12 @@ body::before {
   border: 1px solid var(--border);
 }
 
+.tile-badge--overdue {
+  background: rgba(220,38,38,0.12);
+  color: #DC2626;
+  border: 1px solid rgba(220,38,38,0.3);
+}
+
 .tile-title {
   font-size: 15px; font-weight: 700;
   color: var(--text);

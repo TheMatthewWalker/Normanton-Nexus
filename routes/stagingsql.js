@@ -58,6 +58,23 @@ export async function listOpenStagingRequests() {
   return recordset;
 }
 
+// Lightweight tile-badge summary — count of open requests and how many of
+// those are overdue (DueAtUtc already passed), without pulling the full
+// open-request payload just to count it. Same DueAtUtc-comparison idiom as
+// computeStagingKpis' OnTimeCount, just against "now" instead of CompletedAtUtc.
+export async function getStagingOpenSummary() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT
+      COUNT(*) AS OpenCount,
+      SUM(CASE WHEN DueAtUtc < GETUTCDATE() THEN 1 ELSE 0 END) AS OverdueCount
+    FROM dbo.StagingRequest
+    WHERE Status = 'Open'
+  `);
+  const row = recordset[0] || {};
+  return { openCount: row.OpenCount || 0, overdueCount: row.OverdueCount || 0 };
+}
+
 // Production's tracking view — everything, open requests first (by due
 // date), then closed ones most-recent-first so a just-completed/cancelled
 // request doesn't immediately vanish off the bottom.
