@@ -3284,9 +3284,14 @@ async function spSubmitDelivery(requestId) {
     const json = await spApi(`/requests/${requestId}/deliver`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    const { transferOrderNumber, withinTolerance, cumulativeDelivered, quantityRequested } = json.data;
+    const { transferOrderNumber, metOrExceeded, withinTolerance, cumulativeDelivered, quantityRequested } = json.data;
 
-    if (withinTolerance) {
+    if (metOrExceeded) {
+      // Delivered at least what was requested — auto-complete, no prompt.
+      try { await spApi(`/requests/${requestId}/complete`, { method: 'POST' }); } catch (err) { alert(err.message); }
+      closePickModal();
+      await runStagingFulfil();
+    } else if (withinTolerance) {
       spShowCompleteChoice(requestId, transferOrderNumber, cumulativeDelivered, quantityRequested);
     } else {
       closePickModal();

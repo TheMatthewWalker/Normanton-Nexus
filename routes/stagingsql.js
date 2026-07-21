@@ -12,10 +12,16 @@ async function getPool() {
   return await sql.connect(sqlConfig);
 }
 
-// Delivered quantity within this fraction of requested counts as "close
-// enough" to offer Stores the confirm-complete/leave-open choice. Outside
-// it, the request just stays Open — see recordStagingDelivery below and the
-// migration's header note for the full reasoning.
+// Fulfilment outcome after a delivery, used by the frontend to decide
+// whether to auto-complete, ask, or just leave the request open — see
+// recordStagingDelivery below.
+//   - Delivered >= requested: always auto-completed, no prompt. Over-
+//     delivery is a deliberate operator choice (they picked the qty), not
+//     an edge case that needs confirming.
+//   - Delivered < requested by up to WITHIN_TOLERANCE_PCT: close enough
+//     that Stores gets the confirm-complete/leave-open choice.
+//   - Delivered < requested by more than that: request just stays Open,
+//     no prompt — there's clearly more still to come.
 export const WITHIN_TOLERANCE_PCT = 0.10;
 
 const REQUEST_COLUMNS = `
@@ -191,11 +197,12 @@ export async function listStagingRequestDeliveries(requestId) {
 }
 
 // Records one delivery (one transfer order's worth), rolls it into the
-// request's cumulative QuantityDelivered, and reports whether the new
-// cumulative total is within WITHIN_TOLERANCE_PCT of what was requested —
-// the route uses that flag to decide whether to offer Stores the
-// confirm-complete/leave-open choice. Never changes Status itself; that's a
-// separate, explicit completeStagingRequest call.
+// request's cumulative QuantityDelivered, and reports the fulfilment
+// outcome (metOrExceeded / withinTolerance — see WITHIN_TOLERANCE_PCT above)
+// so the route/frontend can decide whether to auto-complete, offer Stores
+// the confirm-complete/leave-open choice, or just leave the request open.
+// Never changes Status itself; that's a separate, explicit
+// completeStagingRequest call.
 export async function recordStagingDelivery(requestId, {
   quantityMoved, batch, sourceStorageType, sourceBin,
   destinationStorageType, destinationBin, transferOrderNumber, deliveredBy,
@@ -231,9 +238,11 @@ export async function recordStagingDelivery(requestId, {
   const row = updateResult.recordset[0];
   const requested = Number(row.QuantityRequested);
   const delivered = Number(row.QuantityDelivered);
-  const withinTolerance = requested > 0 && Math.abs(delivered - requested) / requested <= WITHIN_TOLERANCE_PCT;
+  const metOrExceeded = delivered >= requested;
+  const shortfallPct = requested > 0 ? (requested - delivered) / requested : 0;
+  const withinTolerance = !metOrExceeded && shortfallPct > 0 && shortfallPct <= WITHIN_TOLERANCE_PCT;
 
-  return { cumulativeDelivered: delivered, quantityRequested: requested, withinTolerance };
+  return { cumulativeDelivered: delivered, quantityRequested: requested, metOrExceeded, withinTolerance };
 }
 
 // ── KPIs (Completed requests only — Cancelled requests were never fulfilled,
