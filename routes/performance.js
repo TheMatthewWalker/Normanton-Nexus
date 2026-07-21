@@ -1189,8 +1189,9 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // through the same notes upload as the Data tab (see
     // dbo.OrderBookLineNotes.BringForward) — it's purely a planning flag,
     // nothing in this app acts on it automatically.
+    let nextMonthWs = null;
     if (mode === 'monthEnd') {
-      const nextMonthWs = wb.addWorksheet('Next Month');
+      nextMonthWs = wb.addWorksheet('Next Month');
       nextMonthWs.columns = [
         { header: 'Customer',      key: 'customer',          width: 14 },
         { header: 'Customer Name', key: 'customerName',      width: 30 },
@@ -1479,19 +1480,51 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     );
     setMergedCell('A48:F48', 'What product, value and time is coming through on the last day of the month. Flag a row "x" in Last Day on the Data tab and fill in Last Day Time — filter the Data tab by Last Day to see the individual products and times.', cardDescFont, null);
 
+    // Card 7b — Bring Forward, straight under the Last Day total above.
+    // Sourced from the Next Month tab (not Data — Bring Forward only ever
+    // lives there), so it's only meaningful for a Month End export; a Full
+    // Breakdown export has no Next Month tab to sum, and shows a static 0
+    // rather than a broken cross-sheet formula.
+    setMergedCell('A50:C50', 'VALUE FLAGGED TO BRING FORWARD (NEXT MONTH)', cardLabelFont, cardLabelFill);
+    setMergedCell('D50:F50', 'ITEMS FLAGGED', cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(51).height = 30;
+    if (nextMonthWs) {
+      const nextMonthOrderValueCol   = excelColumnLetter(nextMonthWs.getColumn('orderValue').number);
+      const nextMonthBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
+      const nextMonthValueRange        = `'Next Month'!$${nextMonthOrderValueCol}:$${nextMonthOrderValueCol}`;
+      const nextMonthBringForwardRange = `'Next Month'!$${nextMonthBringForwardCol}:$${nextMonthBringForwardCol}`;
+
+      const bringForwardValueCell = setMergedCell(
+        'A51:C51',
+        { formula: `SUMIF(${nextMonthBringForwardRange},"x",${nextMonthValueRange})`, result: 0 },
+        cardValueFont, null
+      );
+      bringForwardValueCell.numFmt = '#,##0.00';
+      setMergedCell(
+        'D51:F51',
+        { formula: `COUNTIF(${nextMonthBringForwardRange},"x")`, result: 0 },
+        cardValueFont, null
+      );
+    } else {
+      const zeroValueCell = setMergedCell('A51:C51', 0, cardValueFont, null);
+      zeroValueCell.numFmt = '#,##0.00';
+      setMergedCell('D51:F51', 0, cardValueFont, null);
+    }
+    setMergedCell('A52:F52', 'Order Value of Next Month tab rows flagged Bring Forward — candidates to pull into this month if it\'s falling short of target. See the Next Month tab for detail.', cardDescFont, null);
+
     // Card 8 — Value-by-hour for Last Day items. Sourced from Planned
     // Production Value (column R) — that's the "expected production" figure,
     // not Stock Value, since Last Day items are typically not made yet.
     // ExcelJS can't create native embedded chart objects (no chart API), so
     // this pairs a live SUMPRODUCT column with Excel's built-in Data Bar
     // conditional formatting for an automatic in-cell visual. For a full axis
-    // chart, select A51:C75 in Excel and Insert > Chart — a one-off manual
+    // chart, select A55:C79 in Excel and Insert > Chart — a one-off manual
     // step since this file regenerates fresh on every export. Rows with Last
     // Day = "x" but no parseable Last Day Time default into the Hour 0 bucket
     // rather than being dropped.
-    setMergedCell('A50:F50', 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
+    setMergedCell('A54:F54', 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
 
-    const hourHeaderRow = 51;
+    const hourHeaderRow = 55;
     dashboardWs.getCell(`A${hourHeaderRow}`).value = 'Hour';
     dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Expected Value (Planned Production)';
     dashboardWs.getCell(`C${hourHeaderRow}`).value = 'Cumulative Invoiced Total';
@@ -1503,8 +1536,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     });
     dashboardWs.mergeCells(`C${hourHeaderRow}:F${hourHeaderRow}`);
 
-    const firstHourRow = hourHeaderRow + 1; // 52
-    const lastHourRow = firstHourRow + 23;  // 75
+    const firstHourRow = hourHeaderRow + 1; // 56
+    const lastHourRow = firstHourRow + 23;  // 79
 
     for (let hour = 0; hour <= 23; hour++) {
       const r = firstHourRow + hour;
@@ -1549,10 +1582,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       }]
     });
 
-    const hourTableCaptionRow = lastHourRow + 1; // 76
+    const hourTableCaptionRow = lastHourRow + 1; // 80
     setMergedCell(
       `A${hourTableCaptionRow}:F${hourTableCaptionRow}`,
-      'Data bars approximate a value-by-hour chart — this export can\'t embed a native Excel chart object. For a full axis chart, select A51:C75 and Insert > Chart. Blank/unrecognised Last Day Time defaults to the Hour 0 row.',
+      'Data bars approximate a value-by-hour chart — this export can\'t embed a native Excel chart object. For a full axis chart, select A55:C79 and Insert > Chart. Blank/unrecognised Last Day Time defaults to the Hour 0 row.',
       cardDescFont, null
     );
 
