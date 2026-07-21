@@ -866,6 +866,35 @@ body::before {
 .booking-modal-table { margin-top: 16px; }
 .booking-help { margin-top: 12px; }
 
+/* Cost Centre + per-shipment Expected Cost/Documents, side by side below the
+   booking table — keeps the table itself narrow (avoids horizontal scroll)
+   while still surfacing per-shipment cost/document status on one line. */
+.booking-cost-docs-row {
+  margin-top: 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.booking-cost-centre-field { display: flex; flex-direction: column; gap: 6px; }
+.booking-cost-doc-list { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 220px; }
+.booking-cost-doc-items { display: flex; flex-direction: column; gap: 6px; }
+.booking-cost-doc-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.booking-cost-doc-ref {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 76px;
+}
+.booking-cost-doc-cost { display: flex; align-items: center; }
+.booking-cost-doc-docs { display: flex; align-items: center; }
+
 /* ── Pallet cards (shared format with warehouse) ─────────────────────────── */
 .ps-pcard-list { display:flex;flex-direction:column;gap:10px;padding:16px; }
 .ps-pcard { background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden; }

@@ -1900,6 +1900,72 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
 });
 
 
+// ── Unbook a shipment ─────────────────────────────────────────────────────
+// Reverses a booking so it goes back into Awaiting Booking. Fixes a real
+// double-cost bug: /mark-booked above inserts a ShipmentCost row every time
+// it runs, but nothing previously cleared that row when a shipment was
+// un-booked (e.g. via the Booking Status checkbox in Edit Dates & Status,
+// the only way to do this before now) -- re-booking then inserted a second
+// row, duplicating the freight cost in the expected-costs table. Unbooking
+// now deletes any not-yet-MIGO'd cost rows for the shipment as part of the
+// same action (migoStatus = 1 rows are left alone -- those have already
+// been processed in SAP and shouldn't be touched), along with the planned
+// collection date and tracking number, since both get re-entered at
+// booking time anyway. Only allowed while the shipment is still genuinely
+// awaiting collection -- not already collected/delivered, not cancelled.
+router.post('/unbook', requirePermission('LOG_PLANNING'), async (req, res) => {
+  const shipmentIds = normalizeIdList(req.body.shipmentIDs);
+  if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
+
+  const pool = await getPool();
+  const completed = [];
+  const failed    = [];
+
+  for (const shipmentId of shipmentIds) {
+    let tx = null;
+    try {
+      tx = new sql.Transaction(pool);
+      await tx.begin();
+
+      const result = await tx.request()
+        .input('shipmentId', sql.BigInt, shipmentId)
+        .query(`
+          UPDATE Logistics.dbo.ShipmentMain
+          SET bookingStatus = 0, plannedCollection = NULL, trackingNumber = NULL
+          WHERE shipmentID = @shipmentId
+            AND ISNULL(shipmentCancelled, 0) = 0
+            AND ISNULL(bookingStatus, 0) = 1
+            AND ISNULL(collectionStatus, 0) = 0;
+
+          SELECT @@ROWCOUNT AS affectedRows;
+        `);
+      if (!result.recordset[0]?.affectedRows) throw new Error('Not currently booked and awaiting collection.');
+
+      await tx.request()
+        .input('shipmentId', sql.BigInt, shipmentId)
+        .query(`
+          DELETE FROM Logistics.dbo.ShipmentCost
+          WHERE shipmentID = @shipmentId AND ISNULL(migoStatus, 0) = 0
+        `);
+
+      await tx.commit();
+      tx = null;
+
+      const username = req.session?.user?.username || 'unknown';
+      await writeShipmentEvent(pool, shipmentId, 'CORRECTION',
+        `Unbooked by ${username}: expected costs cleared, planned collection and tracking number reset.`);
+      completed.push(shipmentId);
+    } catch (err) {
+      try { if (tx) await tx.rollback(); } catch (_) {}
+      failed.push({ shipmentID: shipmentId, error: err.message });
+    }
+  }
+
+  if (!completed.length) return res.status(409).json({ success: false, error: 'No shipments were unbooked.', data: { completed, failed } });
+  res.json({ success: true, data: { completed, failed } });
+});
+
+
 router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async (req, res) => {
   const deliveryIDs = normalizeDeliveryIds(req.body.deliveryIDs);
   if (!deliveryIDs.length) 

@@ -248,12 +248,42 @@ function isKnHaulier(value) {
 }
 
 
+// EXW ("Ex Works") means the customer arranges their own collection — used
+// in the booking modal to auto-select Customer Collect instead of making
+// the operator pick a haulier for a shipment that was never going to use one.
+function isExWorksIncoterms(value) {
+  const normalized = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+  return normalized === 'EXW' || normalized === 'EXWORKS';
+}
+
+
 async function loadApprovedForwarders() {
   if (approvedForwarders) return approvedForwarders;
   const res = await fetch('/api/forwarders/approved');
   const json = await res.json();
-  approvedForwarders = Array.isArray(json) ? json : [];
+  const raw = Array.isArray(json) ? json : [];
+  approvedForwarders = dedupeForwardersByName(raw);
   return approvedForwarders;
+}
+
+
+// Forwarders can have multiple rows sharing the same display name — one per
+// service/rate category (e.g. a pallet rate and a parcel rate under the same
+// haulier name). The haulier-selection dropdowns (booking modal, shipment
+// detail) only need one option per name; keep the lowest forwarderID for a
+// stable, deterministic choice. loadAllForwarders() is deliberately NOT
+// deduped here — the Create Shipment modal relies on its duplicates to
+// filter forwarder name options by the chosen Forwarder Mode.
+function dedupeForwardersByName(list) {
+  const byName = new Map();
+  list.slice()
+    .sort((a, b) => Number(a.forwarderID) - Number(b.forwarderID))
+    .forEach(f => {
+      const key = String(f.forwarderName || '').trim().toLowerCase();
+      if (!key || byName.has(key)) return;
+      byName.set(key, f);
+    });
+  return Array.from(byName.values()).sort((a, b) => String(a.forwarderName || '').localeCompare(String(b.forwarderName || '')));
 }
 
 
@@ -1174,34 +1204,38 @@ async function openBookingModal(rows, haulier) {
       ? 'Confirm the collection dates, send the shipments to the KN API, then mark them as booked.'
       : 'Confirm the tracking number for each shipment, and update collection dates if needed.';
   const actionLabel = isCustomerCollect ? 'Send Email and Book' : isKn ? 'Send via API and Book' : 'Book';
-  const rowsHtml = rows.map(row => {
+  // Customer Collect forwarder entry, for auto-selecting it below on EXW rows.
+  const customerCollectForwarder = forwarders.find(item => isCustomerCollectHaulier(item.forwarderName));
+  const built = rows.map(row => {
     const shipmentRef = String(row.shipmentID || '').padStart(8, '0');
     const plannedDate = getShipmentPlannedDate(row, 'in-transit');
+    const sid           = esc(String(row.shipmentID));
+    // EXW ("Ex Works") means the customer arranges their own collection —
+    // pre-select Customer Collect instead of making the operator pick a
+    // haulier for something that was never going to use one.
+    const rowIsExw = isExWorksIncoterms(row.incoTerms);
     const forwarderField = row.forwarderID && hasAssignedHaulier(row)
       ? `${esc(row.forwarderName || '')}`
-      : `<select class="tf-input booking-inline-input" id="booking-forwarder-${esc(String(row.shipmentID))}"><option value="">Select haulier</option>${forwarders.map(item => `<option value="${esc(String(item.forwarderID))}">${esc(item.forwarderName || '')}</option>`).join('')}</select>`;
+      : `<select class="tf-input booking-inline-input" id="booking-forwarder-${sid}"><option value="">Select haulier</option>${forwarders.map(item => `<option value="${esc(String(item.forwarderID))}" ${rowIsExw && customerCollectForwarder && String(item.forwarderID) === String(customerCollectForwarder.forwarderID) ? 'selected' : ''}>${esc(item.forwarderName || '')}</option>`).join('')}</select>`;
     const collectionVal = plannedDate ? new Date(plannedDate).toISOString().slice(0, 10) : '';
     const deliveryVal   = row.plannedDelivery ? new Date(row.plannedDelivery).toISOString().slice(0, 10) : '';
-    const sid           = esc(String(row.shipmentID));
     const isRowKH       = isKnHaulier ? false : normalizeHaulierName(row.forwarderName || '').includes('howley');
-    // Cost cell — KN gets auto-filled after render; others get manual input
+    // Cost — KN gets auto-filled after render; others get manual input
     const costCell = isKnHaulier
-      ? `<td>
-           <div id="booking-cost-loading-${sid}" style="font-size:11px;color:var(--text-muted)">Calculating…</div>
-           <input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
-             step="0.01" min="0" style="display:none;width:90px" placeholder="£">
-           <div id="booking-cost-detail-${sid}" style="font-size:10px;color:var(--text-muted);margin-top:2px"></div>
-         </td>`
+      ? `<div id="booking-cost-loading-${sid}" style="font-size:11px;color:var(--text-muted)">Calculating…</div>
+         <input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
+           step="0.01" min="0" style="display:none;width:90px" placeholder="£">
+         <div id="booking-cost-detail-${sid}" style="font-size:10px;color:var(--text-muted);margin-top:2px"></div>`
       : isRowKH
-        ? `<td><span id="booking-cost-${sid}" data-skip-cost="1" style="font-size:11px;color:var(--text-muted)">TPN — manual</span></td>`
-        : `<td><input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
-             step="0.01" min="0" style="width:90px" placeholder="£ required"></td>`;
+        ? `<span id="booking-cost-${sid}" data-skip-cost="1" style="font-size:11px;color:var(--text-muted)">TPN — manual</span>`
+        : `<input class="tf-input booking-inline-input" type="number" id="booking-cost-${sid}"
+             step="0.01" min="0" style="width:90px" placeholder="£ required">`;
     // Documents are only meaningful for KN — that's the only booking route
     // this app actually uploads documents against.
     const docsCell = !isKn
-      ? '<td>—</td>'
-      : `<td><button type="button" class="btn-secondary booking-verify-docs-btn" data-sid="${sid}" style="padding:4px 10px;font-size:11px;white-space:nowrap;${bookingDocsComplete(row) ? 'color:var(--success,#16A34A);border-color:var(--success,#16A34A)' : ''}">${bookingDocsComplete(row) ? '✓ Verified' : 'Verify Documents'}</button></td>`;
-    return `<tr>
+      ? ''
+      : `<button type="button" class="btn-secondary booking-verify-docs-btn" data-sid="${sid}" style="padding:4px 10px;font-size:11px;white-space:nowrap;${bookingDocsComplete(row) ? 'color:var(--success,#16A34A);border-color:var(--success,#16A34A)' : ''}">${bookingDocsComplete(row) ? '✓ Verified' : 'Verify Documents'}</button>`;
+    const trHtml = `<tr>
       <td>${esc(shipmentRef)}</td>
       <td>${esc(row.destinationName || row.originName || '-')}</td>
       <td>${forwarderField}</td>
@@ -1214,16 +1248,26 @@ async function openBookingModal(rows, haulier) {
             value="${esc(deliveryVal)}" placeholder="Auto from route"></td>
       <td><input class="tf-input booking-inline-input" type="text" id="booking-track-${sid}"
             value="${esc(row.trackingNumber || '')}"></td>
-      ${costCell}
-      ${docsCell}
     </tr>`;
-  }).join('');
+    // Compact per-shipment cost/documents line — lives next to Cost Centre
+    // below the table instead of as two more table columns, since those two
+    // (Expected Cost's detail text, and the Documents button) were the
+    // widest cells and pushed the table into horizontal scroll.
+    const costDocsHtml = `<div class="booking-cost-doc-item">
+        <span class="booking-cost-doc-ref">${esc(shipmentRef)}</span>
+        <span class="booking-cost-doc-cost">${costCell}</span>
+        ${docsCell ? `<span class="booking-cost-doc-docs">${docsCell}</span>` : ''}
+      </div>`;
+    return { trHtml, costDocsHtml };
+  });
+  const rowsHtml     = built.map(b => b.trHtml).join('');
+  const costDocsHtml = built.map(b => b.costDocsHtml).join('');
   const trackingHelp = isCustomerCollect
     ? 'Tracking number is optional for customer collect shipments.'
     : isKn
       ? 'Tracking will be taken from the Kuehne & Nagel API response where available.'
       : 'Tracking number is required for each shipment before booking can be confirmed.';
-  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th><th>Expected Cost</th><th>Documents</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted)">Cost Centre</label><select class="tf-input" id="booking-cost-center" style="max-width:280px"><option value="">Loading…</option></select></div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
+  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(haulier || 'Unassigned Haulier')} - ${rows.length} shipment(s)</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="toolbar-hint">${esc(subtitle)}</div><table class="ps-table booking-modal-table"><thead><tr><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Planned Collection</th><th>Planned Delivery</th><th>Tracking Number</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="toolbar-hint booking-help">${esc(trackingHelp)}</div><div class="booking-cost-docs-row"><div class="booking-cost-centre-field"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted)">Cost Centre</label><select class="tf-input" id="booking-cost-center" style="max-width:280px"><option value="">Loading…</option></select></div><div class="booking-cost-doc-list"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted)">Expected Cost &amp; Documents</label><div class="booking-cost-doc-items">${costDocsHtml}</div></div></div><div id="booking-submit-result"></div></div><div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="booking-submit-btn">${esc(actionLabel)}</button></div></div>`);
   document.getElementById('booking-submit-btn').addEventListener('click', submitBookingModal);
   document.querySelectorAll('.booking-verify-docs-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2012,6 +2056,7 @@ function renderAwaitingCollection() {
       ${hasPlanning() ? `
         <button class="btn-secondary" id="col-date-btn"    disabled>Update Date</button>
         <button class="btn-secondary" id="col-loading-btn" disabled>Loading List</button>
+        <button class="btn-secondary" id="col-unbook-btn"  disabled style="color:var(--error,#DC2626)">Unbook</button>
         <button class="btn-submit"    id="col-collect-btn" disabled>Mark Collected</button>
       ` : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`}
     </div>
@@ -2027,6 +2072,7 @@ function bindAwaitingCollectionEvents() {
   document.getElementById('col-clear-btn').addEventListener('click',   clearCollectionSelection);
   document.getElementById('col-date-btn').addEventListener('click',    openUpdateCollectionDateModal);
   document.getElementById('col-loading-btn').addEventListener('click', downloadLoadingList);
+  document.getElementById('col-unbook-btn')?.addEventListener('click', unbookSelected);
   document.getElementById('col-collect-btn').addEventListener('click', markCollectedBulk);
 }
 
@@ -2057,7 +2103,7 @@ function updateCollectionUI() {
   if (hint) hint.textContent = count ? `${count} shipment(s) selected.` : 'Select shipments, then use the actions below.';
   if (msg && !count) msg.classList.add('hidden');
   document.getElementById('col-clear-btn')?.toggleAttribute('disabled', count === 0);
-  ['col-date-btn', 'col-loading-btn', 'col-collect-btn'].forEach(id => {
+  ['col-date-btn', 'col-loading-btn', 'col-unbook-btn', 'col-collect-btn'].forEach(id => {
     const btn = document.getElementById(id);
     if (btn) btn.disabled = count === 0 || !hasPlanning();
   });
@@ -2225,6 +2271,42 @@ async function submitMarkCollected(rows, mixed) {
   } catch (err) {
     result.textContent = err.message;
     btn.disabled = false; btn.textContent = mixed ? 'Confirm (Mixed Hauliers)' : 'Confirm';
+  }
+}
+
+
+// Sends a shipment back to Awaiting Booking instead of the previous manual
+// route (ticking Booking Status off in Edit Dates & Status), which left its
+// ShipmentCost row behind — re-booking then inserted a second one,
+// duplicating the freight cost. This also clears the planned collection
+// date and tracking number, since both get re-entered when it's re-booked
+// (possibly with a different haulier).
+async function unbookSelected() {
+  const rows = getSelectedCollectionRows();
+  if (!rows.length) return;
+  if (!await wConfirmLg({
+    title: 'Unbook Shipment(s)',
+    message: `Unbook ${rows.length} shipment(s)? This clears their expected freight cost, planned collection date and tracking number, and moves them back to Awaiting Booking.`,
+    confirmText: 'Unbook',
+    variant: 'danger',
+  })) return;
+  try {
+    const res = await fetch('/api/shipmentmain/unbook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shipmentIDs: rows.map(r => r.shipmentID) }),
+    });
+    const json = await res.json();
+    if (!json.success && !json.data?.completed?.length) throw new Error(json.error || 'Failed to unbook shipments.');
+    const { completed = [], failed = [] } = json.data || {};
+    showCollectionMsg(
+      [completed.length ? `${completed.length} shipment(s) unbooked.` : '',
+       failed.length    ? `${failed.length} failed: ${failed.map(f => f.error).join('; ')}` : ''].filter(Boolean).join(' '),
+      failed.length === 0
+    );
+    await runShipmentQueue('awaiting-collection');
+  } catch (err) {
+    showCollectionMsg(err.message);
   }
 }
 
