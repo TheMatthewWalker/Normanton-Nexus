@@ -740,6 +740,9 @@ function zdRenderPackagingHolding(rows) {
 
   document.getElementById('result-body').innerHTML = `
     <div class="ps-sections">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+        <button class="btn-secondary" id="ph-delete-all" style="padding:4px 12px;font-size:11px;color:var(--error,#DC2626)">Delete All (${rows.length})</button>
+      </div>
       <table class="ps-table">
         <thead><tr><th>Delivery ID</th><th>Destination</th><th>Service</th><th>Moved to Holding</th><th></th></tr></thead>
         <tbody>${tbody}</tbody>
@@ -758,6 +761,7 @@ function zdRenderPackagingHolding(rows) {
       deleteHeldPicksheet(btn.dataset.id);
     });
   });
+  document.getElementById('ph-delete-all').addEventListener('click', deleteAllHeldPicksheets);
 }
 
 async function deleteHeldPicksheet(deliveryId) {
@@ -771,6 +775,32 @@ async function deleteHeldPicksheet(deliveryId) {
     const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/packaging-holding`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Delete failed');
+    runPackagingHolding();
+  } catch (err) {
+    wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
+}
+
+async function deleteAllHeldPicksheets() {
+  if (!await wConfirm({
+    title: 'Delete All Held Picksheets',
+    message: 'Delete every picksheet in the packaging holding area instead of confirming packaging?\nThis reverses any SAP staging and cancels each delivery in Nexus. This cannot be undone.',
+    confirmText: 'Delete All',
+    variant: 'danger',
+  })) return;
+  try {
+    const res  = await fetch('/api/deliverymain/packaging-holding/all', { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
+    if (json.failures && json.failures.length) {
+      const list = json.failures.map(f => `#${f.deliveryId}: ${f.error}`).join('\n');
+      await wConfirm({
+        title: 'Some Deletions Failed',
+        message: `Deleted ${json.deleted.length} of ${json.deleted.length + json.failures.length}. Still held:\n${list}`,
+        confirmText: 'OK',
+        variant: '',
+      });
+    }
     runPackagingHolding();
   } catch (err) {
     wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });

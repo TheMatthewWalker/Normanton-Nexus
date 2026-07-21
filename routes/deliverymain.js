@@ -161,6 +161,36 @@ router.get('/packaging-holding', async (req, res) => {
     }
 });
 
+// ── Shared: reverse SAP staging + soft-cancel one held picksheet ─────────
+// Factored out so the single-delivery delete and the delete-all route below
+// share identical reversal/cancel logic instead of drifting apart.
+async function cancelHeldPicksheet(pool, deliveryId) {
+    const pkgsRes = await pool.request()
+        .input('sapDelivery', sql.NVarChar, String(deliveryId))
+        .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
+                       sapSourceStorageType, sapSourceBin
+                FROM   Logistics.dbo.PalletPackages
+                WHERE  sapDelivery = @sapDelivery`);
+
+    const failures = [];
+    for (const pkg of pkgsRes.recordset) {
+        const reversal = await reverseStagedPackage(pkg);
+        if (reversal.attempted && !reversal.success) {
+            failures.push({ palletItemID: pkg.palletItemID, sapMaterial: pkg.sapMaterial, sapBatch: pkg.sapBatch, error: reversal.error });
+        }
+    }
+    if (failures.length) {
+        return { success: false, failures };
+    }
+
+    await pool.request()
+        .input('deliveryId', sql.BigInt, deliveryId)
+        .query(`UPDATE Logistics.dbo.DeliveryMain
+                SET deliveryCancelled = 1, pendingPackagingData = 0
+                WHERE deliveryID = @deliveryId`);
+    return { success: true };
+}
+
 // ── Delete a held picksheet instead of confirming its packaging ──────────
 // Only allowed while the delivery is genuinely sitting in the packaging
 // holding area (pendingPackagingData = 1) — not a general-purpose delivery
@@ -186,35 +216,55 @@ router.delete('/:deliveryId/packaging-holding', async (req, res) => {
             return res.status(409).json({ success: false, error: 'This delivery is not in the packaging holding area.' });
         }
 
-        const pkgsRes = await pool.request()
-            .input('sapDelivery', sql.NVarChar, String(req.params.deliveryId))
-            .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
-                           sapSourceStorageType, sapSourceBin
-                    FROM   Logistics.dbo.PalletPackages
-                    WHERE  sapDelivery = @sapDelivery`);
-
-        const failures = [];
-        for (const pkg of pkgsRes.recordset) {
-            const reversal = await reverseStagedPackage(pkg);
-            if (reversal.attempted && !reversal.success) {
-                failures.push({ palletItemID: pkg.palletItemID, sapMaterial: pkg.sapMaterial, sapBatch: pkg.sapBatch, error: reversal.error });
-            }
-        }
-        if (failures.length) {
+        const result = await cancelHeldPicksheet(pool, req.params.deliveryId);
+        if (!result.success) {
             return res.status(422).json({
                 success: false,
-                error: `Could not reverse SAP staging for ${failures.length} package(s) — delivery not deleted.`,
-                failures,
+                error: `Could not reverse SAP staging for ${result.failures.length} package(s) — delivery not deleted.`,
+                failures: result.failures,
             });
         }
 
-        await pool.request()
-            .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`UPDATE Logistics.dbo.DeliveryMain
-                    SET deliveryCancelled = 1, pendingPackagingData = 0
-                    WHERE deliveryID = @deliveryId`);
-
         res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Delete every held picksheet in one go ─────────────────────────────────
+// Same reversal/soft-cancel as the single-delivery route above, applied to
+// every delivery currently sitting in the holding area. Best-effort per
+// delivery — one failing SAP reversal doesn't block the rest; failures are
+// reported back so the caller can see which ones still need attention.
+router.delete('/packaging-holding/all', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const idsRes = await pool.request()
+            .query(`SELECT deliveryID FROM Logistics.dbo.DeliveryMain
+                    WHERE completionStatus = 1 AND pendingPackagingData = 1
+                      AND ISNULL(deliveryCancelled, 0) = 0`);
+
+        const deleted = [];
+        const failures = [];
+        for (const row of idsRes.recordset) {
+            const deliveryId = row.deliveryID;
+            try {
+                const result = await cancelHeldPicksheet(pool, deliveryId);
+                if (result.success) {
+                    deleted.push(deliveryId);
+                } else {
+                    failures.push({
+                        deliveryId,
+                        error: `Could not reverse SAP staging for ${result.failures.length} package(s)`,
+                        failures: result.failures,
+                    });
+                }
+            } catch (err) {
+                failures.push({ deliveryId, error: err.message });
+            }
+        }
+
+        res.json({ success: true, deleted, failures });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
