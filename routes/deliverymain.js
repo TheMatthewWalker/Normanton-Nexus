@@ -4,6 +4,7 @@ import axios from 'axios';
 import { sqlConfig, sapConfig } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import { makeSapToken, sapAgent } from './sap.js';
+import { reverseStagedPackage } from './sapStaging.js';
 
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
@@ -138,6 +139,87 @@ router.get('/open-picksheets', async (req, res) => {
     }
 });
 
+// ── Packaging Holding — deliveries the SAP sync found completed outside
+// Nexus (see runSapSync's reconciliation step below), waiting for someone
+// to confirm their real packaging data via the normal pallet builder ──
+router.get('/packaging-holding', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dispatchDate,
+                           dm.deliveryService, dm.picksheetComment, dm.deliveryPriority,
+                           dm.incoterms, dm.movedToHoldingAtUtc
+                    FROM Logistics.dbo.DeliveryMain dm
+                    LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
+                    WHERE dm.completionStatus = 1
+                      AND dm.pendingPackagingData = 1
+                      AND ISNULL(dm.deliveryCancelled, 0) = 0
+                    ORDER BY dm.movedToHoldingAtUtc DESC`);
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Delete a held picksheet instead of confirming its packaging ──────────
+// Only allowed while the delivery is genuinely sitting in the packaging
+// holding area (pendingPackagingData = 1) — not a general-purpose delivery
+// delete. Soft-deletes via deliveryCancelled (same convention as shipment
+// cancellation elsewhere in this app) rather than a hard DELETE, so the
+// audit trail and any linked pallets stay intact instead of orphaning FK
+// references. Reverses any SAP staging first, same defensive reasoning as
+// palletmain.js's pallet delete — a partial pallet could exist if the
+// delivery was picked in Nexus for a while before it got completed outside
+// the app and swept into holding.
+router.delete('/:deliveryId/packaging-holding', async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        const checkRes = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
+                    FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId`);
+        if (!checkRes.recordset.length) {
+            return res.status(404).json({ success: false, error: 'Delivery not found' });
+        }
+        if (!checkRes.recordset[0].pendingPackagingData) {
+            return res.status(409).json({ success: false, error: 'This delivery is not in the packaging holding area.' });
+        }
+
+        const pkgsRes = await pool.request()
+            .input('sapDelivery', sql.NVarChar, String(req.params.deliveryId))
+            .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
+                           sapSourceStorageType, sapSourceBin
+                    FROM   Logistics.dbo.PalletPackages
+                    WHERE  sapDelivery = @sapDelivery`);
+
+        const failures = [];
+        for (const pkg of pkgsRes.recordset) {
+            const reversal = await reverseStagedPackage(pkg);
+            if (reversal.attempted && !reversal.success) {
+                failures.push({ palletItemID: pkg.palletItemID, sapMaterial: pkg.sapMaterial, sapBatch: pkg.sapBatch, error: reversal.error });
+            }
+        }
+        if (failures.length) {
+            return res.status(422).json({
+                success: false,
+                error: `Could not reverse SAP staging for ${failures.length} package(s) — delivery not deleted.`,
+                failures,
+            });
+        }
+
+        await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`UPDATE Logistics.dbo.DeliveryMain
+                    SET deliveryCancelled = 1, pendingPackagingData = 0
+                    WHERE deliveryID = @deliveryId`);
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Completed deliveries available for shipment creation ──
 router.get('/completed-unshipped', async (req, res) => {
     try {
@@ -163,6 +245,7 @@ router.get('/completed-unshipped', async (req, res) => {
                     LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
                     WHERE dm.completionStatus = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
+                      AND ISNULL(dm.pendingPackagingData, 0) = 0
                       AND sl.deliveryID IS NULL
                     ORDER BY dm.deliveryPriority DESC, dm.completionDate DESC, dm.dispatchDate ASC, dm.deliveryID ASC`);
         res.json({ success: true, data: result.recordset });
@@ -190,6 +273,7 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
                     WHERE dm.customerID = @customerId
                       AND dm.completionStatus = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
+                      AND ISNULL(dm.pendingPackagingData, 0) = 0
                       AND sl.deliveryID IS NULL
                     ORDER BY dm.deliveryID ASC`);
         res.json({ success: true, data: result.recordset });
@@ -730,14 +814,31 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
 // After ZDEL, also runs the ZDELFLAG/ZDELPACK maintenance step (see
 // runZdelflagMaintenance above) — same best-effort treatment, surfaced as
 // its own zdelflagWarning rather than blocking completion.
+//
+// If this delivery was sitting in the packaging holding area
+// (pendingPackagingData = 1 — the SAP sync found it already completed in
+// SAP outside Nexus, see runSapSync's reconciliation step), SAP already
+// considers it closed. Pushing ZDEL/ZDELFLAG again for a delivery SAP has
+// already finished isn't just redundant, it's likely to be rejected — so
+// both SAP calls are skipped entirely for this path. Completing here just
+// records the real packaging data locally (from whatever pallets were just
+// built) and clears pendingPackagingData, releasing it into Create Shipment.
 router.patch('/:deliveryId/complete', async (req, res) => {
     try {
         const pool = await getPool();
+
+        const pendingRes = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
+                    FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId`);
+        const wasHeldForPackaging = !!pendingRes.recordset[0]?.pendingPackagingData;
+
         await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .query(`UPDATE Logistics.dbo.DeliveryMain
                     SET completionStatus = 1,
                         completionDate   = GETDATE(),
+                        pendingPackagingData = 0,
                         palletCount = (
                             SELECT COUNT(*)
                             FROM Logistics.dbo.PalletMain pm
@@ -772,32 +873,38 @@ router.patch('/:deliveryId/complete', async (req, res) => {
         const totals = rolledUp.recordset[0] || {};
 
         let sapWarning = null;
-        try {
-            const response = await axios.post(
-                `${sapConfig.url}/api/warehouse/set-delivery-weight`,
-                {
-                    deliveryNumber: String(req.params.deliveryId),
-                    grossWeight: Number(totals.grossWeight || 0),
-                    netWeight:   Number(totals.netWeight || 0),
-                    palletCount: Number(totals.palletCount || 0),
-                },
-                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
-            );
-            if (!response.data?.success) {
-                sapWarning = response.data?.error?.message || 'SAP rejected the ZDEL weight update.';
-            }
-        } catch (sapErr) {
-            sapWarning = `Could not update SAP (ZDEL) with the actual weights/pallet count: ${sapErr.message}. Update LIKP manually.`;
-        }
-
         let zdelflagWarning = null;
-        const zdelflagResult = await runZdelflagMaintenance(pool, req.params.deliveryId, null);
-        if (zdelflagResult.status !== 'Success') {
-            zdelflagWarning = zdelflagResult.messages.map(m => m.message).filter(Boolean).join('; ')
-                || `ZDELFLAG/ZDELPACK maintenance did not complete successfully (${zdelflagResult.status}).`;
+        let note = null;
+
+        if (wasHeldForPackaging) {
+            note = 'This delivery was already completed in SAP outside Nexus — packaging data has been recorded locally and it\'s now available for shipment creation. ZDEL and ZDELFLAG/ZDELPACK were not re-sent to SAP.';
+        } else {
+            try {
+                const response = await axios.post(
+                    `${sapConfig.url}/api/warehouse/set-delivery-weight`,
+                    {
+                        deliveryNumber: String(req.params.deliveryId),
+                        grossWeight: Number(totals.grossWeight || 0),
+                        netWeight:   Number(totals.netWeight || 0),
+                        palletCount: Number(totals.palletCount || 0),
+                    },
+                    { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+                );
+                if (!response.data?.success) {
+                    sapWarning = response.data?.error?.message || 'SAP rejected the ZDEL weight update.';
+                }
+            } catch (sapErr) {
+                sapWarning = `Could not update SAP (ZDEL) with the actual weights/pallet count: ${sapErr.message}. Update LIKP manually.`;
+            }
+
+            const zdelflagResult = await runZdelflagMaintenance(pool, req.params.deliveryId, null);
+            if (zdelflagResult.status !== 'Success') {
+                zdelflagWarning = zdelflagResult.messages.map(m => m.message).filter(Boolean).join('; ')
+                    || `ZDELFLAG/ZDELPACK maintenance did not complete successfully (${zdelflagResult.status}).`;
+            }
         }
 
-        res.json({ success: true, data: { ...totals, sapWarning, zdelflagWarning } });
+        res.json({ success: true, data: { ...totals, sapWarning, zdelflagWarning, note, wasHeldForPackaging } });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -1123,7 +1230,45 @@ async function runSapSync() {
             }
         }
 
-        return { success: true, status: 200, total: deliveries.length, inserted, skipped, errors, missing, autoCreated, kna1Error };
+        // ── Reconcile: pick up deliveries completed outside Nexus ──────────
+        // Anything Nexus still thinks is open (completionStatus = 0, not
+        // cancelled) but that this SAP pull did NOT return is assumed to
+        // have been picked/shipped directly in SAP, bypassing the pallet
+        // builder entirely — Nexus never captured real pallet/packaging
+        // data for it. Move it out of Open Picksheets into the packaging
+        // holding area (completionStatus = 1 so it drops off Open
+        // Picksheets, pendingPackagingData = 1 so it's also excluded from
+        // Create Shipment) until someone confirms its packaging via the
+        // normal pallet builder — see the /:deliveryId/complete route's
+        // pendingPackagingData handling and the "Packaging Holding" tile.
+        //
+        // Note this trusts SAP's open-picksheets pull to be a complete,
+        // accurate list of everything genuinely still open — a transient
+        // SAP-side hiccup that returns an incomplete list would incorrectly
+        // sweep real open picksheets into holding. There's no independent
+        // signal available here to tell the two cases apart, so this is a
+        // direct implementation of the requested rule, not a hedged one.
+        const sapOpenDeliveryIds = new Set(
+            deliveries
+                .map(d => parseInt(d.deliveryNumber, 10))
+                .filter(Number.isFinite)
+        );
+        const openInNexusRes = await pool.request()
+            .query(`SELECT deliveryID FROM Logistics.dbo.DeliveryMain
+                    WHERE completionStatus = 0 AND ISNULL(deliveryCancelled, 0) = 0`);
+        const movedToHolding = [];
+        for (const row of openInNexusRes.recordset) {
+            const id = Number(row.deliveryID);
+            if (sapOpenDeliveryIds.has(id)) continue;
+            await pool.request()
+                .input('deliveryId', sql.BigInt, id)
+                .query(`UPDATE Logistics.dbo.DeliveryMain
+                        SET completionStatus = 1, pendingPackagingData = 1, movedToHoldingAtUtc = GETUTCDATE()
+                        WHERE deliveryID = @deliveryId`);
+            movedToHolding.push(id);
+        }
+
+        return { success: true, status: 200, total: deliveries.length, inserted, skipped, errors, missing, autoCreated, kna1Error, movedToHolding };
 
     } catch (err) {
         if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {

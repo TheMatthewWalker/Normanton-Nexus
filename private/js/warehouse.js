@@ -18,6 +18,8 @@ let pendingCSVRecords  = [];
   setInterval(pollStagingOpenCount, 60000);
   pollZdelflagWarnCount();
   setInterval(pollZdelflagWarnCount, 60000);
+  pollPackagingHoldingCount();
+  setInterval(pollPackagingHoldingCount, 60000);
 })();
 
 // Staging Post tile badge — open request count, turns red the moment any
@@ -57,6 +59,24 @@ async function pollZdelflagWarnCount() {
   } catch { /* leave the static LIVE badge in place on failure */ }
 }
 
+// Packaging Holding tile badge — count of deliveries the SAP sync found
+// completed outside Nexus, waiting for someone to confirm packaging.
+async function pollPackagingHoldingCount() {
+  const badge = document.getElementById('packaging-holding-badge');
+  if (!badge) return;
+  try {
+    const r = await fetch('/api/deliverymain/packaging-holding');
+    const json = await r.json();
+    const count = (json.data || []).length;
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.classList.toggle('tile-badge--overdue', count > 0);
+    badge.classList.toggle('tile-badge--live', count === 0);
+    badge.title = count > 0
+      ? `${count} delivery/deliveries waiting for packaging data`
+      : 'No deliveries waiting for packaging data';
+  } catch { /* leave the static LIVE badge in place on failure */ }
+}
+
 function setupTiles() {
   document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {
     tile.addEventListener('click', () => {
@@ -64,6 +84,7 @@ function setupTiles() {
       if (fn === 'displayStock')   runDisplayStock();
       if (fn === 'transferOrders') showTransferForm();
       if (fn === 'openPicksheets') runOpenPicksheets();
+      if (fn === 'packagingHolding') runPackagingHolding();
       if (fn === 'addPicksheet')   showAddPicksheetForm();
       if (fn === 'csvUpload')      showCSVUpload();
       if (fn === 'sapSync')        runSAPSync();
@@ -667,12 +688,101 @@ function renderPicksheets(rows) {
   });
 }
 
-// ── Pallet list modal ─────────────────────────────────────────────────────────
-let _palletListCtx = null; // { deliveryId, destName, custId } for refresh after builder closes
-
-async function showPickedPallets(deliveryId, destName, custId) {
+// ── Packaging Holding ─────────────────────────────────────────────────────────
+// Deliveries the SAP sync found already completed in SAP outside Nexus (see
+// runZdelflagMaintenance's neighbour, runSapSync's reconciliation step in
+// deliverymain.js). Clicking a row opens the same Picked Pallets/Pallet
+// Builder modal as Open Picksheets, so packaging can be confirmed through
+// the normal flow — completeDelivery() detects fromHolding and skips the
+// SAP pushes since SAP already has this delivery closed. Delete removes a
+// held job outright instead of confirming it (soft-cancel server-side).
+async function runPackagingHolding() {
   if (!await checkSession()) return;
-  _palletListCtx = { deliveryId, destName, custId: custId || '' };
+  showResultPanel('Packaging Holding', 'Deliveries completed in SAP outside Nexus — waiting for packaging data');
+
+  try {
+    const res  = await fetch('/api/deliverymain/packaging-holding');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load packaging holding list');
+
+    const rows = json.data;
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${rows.length} held`;
+    badge.classList.toggle('hidden', rows.length === 0);
+
+    zdRenderPackagingHolding(rows);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML =
+      `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+  pollPackagingHoldingCount();
+}
+
+function zdRenderPackagingHolding(rows) {
+  if (!rows.length) {
+    document.getElementById('result-body').innerHTML =
+      '<div class="sap-empty">Nothing waiting for packaging data.</div>';
+    return;
+  }
+
+  const tbody = rows.map(r => {
+    const moved = spFormatDate(r.movedToHoldingAtUtc);
+    return `<tr class="ps-row" data-id="${esc(String(r.deliveryID))}" data-dest="${esc(r.destinationName ?? '')}" data-custid="${esc(String(r.customerID ?? ''))}">
+      <td>${esc(String(r.deliveryID))}</td>
+      <td>${esc(r.destinationName ?? '—')}</td>
+      <td>${esc(r.deliveryService ?? '')}</td>
+      <td>${esc(moved)}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary ph-delete" data-id="${esc(String(r.deliveryID))}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="ps-sections">
+      <table class="ps-table">
+        <thead><tr><th>Delivery ID</th><th>Destination</th><th>Service</th><th>Moved to Holding</th><th></th></tr></thead>
+        <tbody>${tbody}</tbody>
+      </table>
+    </div>`;
+
+  document.querySelectorAll('#result-body .ps-row').forEach(tr => {
+    tr.addEventListener('click', e => {
+      if (e.target.closest('.ph-delete')) return;
+      showPickedPallets(tr.dataset.id, tr.dataset.dest, tr.dataset.custid, true);
+    });
+  });
+  document.querySelectorAll('.ph-delete').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      deleteHeldPicksheet(btn.dataset.id);
+    });
+  });
+}
+
+async function deleteHeldPicksheet(deliveryId) {
+  if (!await wConfirm({
+    title: 'Delete Held Picksheet',
+    message: `Delete Delivery #${deliveryId} instead of confirming its packaging?\nThis reverses any SAP staging it may have and cancels the delivery in Nexus.`,
+    confirmText: 'Delete',
+    variant: 'danger',
+  })) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/packaging-holding`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Delete failed');
+    runPackagingHolding();
+  } catch (err) {
+    wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
+}
+
+// ── Pallet list modal ─────────────────────────────────────────────────────────
+let _palletListCtx = null; // { deliveryId, destName, custId, fromHolding } for refresh after builder closes
+
+async function showPickedPallets(deliveryId, destName, custId, fromHolding) {
+  if (!await checkSession()) return;
+  _palletListCtx = { deliveryId, destName, custId: custId || '', fromHolding: !!fromHolding };
 
   const overlay = document.getElementById('ps-modal-overlay');
   overlay.classList.remove('hidden');
@@ -681,7 +791,7 @@ async function showPickedPallets(deliveryId, destName, custId) {
       <div class="ps-modal-header">
         <div>
           <div class="ps-modal-title">Picked Pallets</div>
-          <div class="ps-modal-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}</div>
+          <div class="ps-modal-sub">Delivery #${esc(String(deliveryId))} · ${esc(destName)}${fromHolding ? ' · <span style="color:var(--warning,#B45309)">Confirming packaging — already completed in SAP</span>' : ''}</div>
         </div>
         <button class="ps-modal-close" onclick="closePickModal()">✕</button>
       </div>
@@ -689,7 +799,7 @@ async function showPickedPallets(deliveryId, destName, custId) {
         <div class="sap-loading"><div class="spinner"></div>Fetching pallets…</div>
       </div>
       <div class="ps-modal-actions">
-        <button class="btn-secondary" onclick="completeDelivery()">Complete Delivery ✓</button>
+        <button class="btn-secondary" onclick="completeDelivery()">${fromHolding ? 'Confirm Packaging ✓' : 'Complete Delivery ✓'}</button>
         <button class="btn-submit" onclick="openPalletBuilder()">+ Add Pallet</button>
       </div>
     </div>`;
@@ -2292,12 +2402,14 @@ async function deletePalletFromBuilder() {
 }
 
 async function completeDelivery() {
-  const { deliveryId } = _palletListCtx || {};
+  const { deliveryId, fromHolding } = _palletListCtx || {};
   if (!deliveryId) return;
   if (!await wConfirm({
-    title: 'Complete Delivery',
-    message: `Mark Delivery #${deliveryId} as complete?\nThis will remove it from the open picksheets list.`,
-    confirmText: 'Complete',
+    title: fromHolding ? 'Confirm Packaging' : 'Complete Delivery',
+    message: fromHolding
+      ? `Confirm packaging data for Delivery #${deliveryId}?\nThis will move it out of Packaging Holding and make it available for shipment creation. SAP already has this delivery marked complete, so no ZDEL/ZDELFLAG updates are sent.`
+      : `Mark Delivery #${deliveryId} as complete?\nThis will remove it from the open picksheets list.`,
+    confirmText: fromHolding ? 'Confirm' : 'Complete',
     variant: 'success',
   })) return;
   try {
@@ -2307,7 +2419,8 @@ async function completeDelivery() {
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
     closePickModal();
-    await runOpenPicksheets();
+    if (fromHolding) { await runPackagingHolding(); } else { await runOpenPicksheets(); }
+    pollPackagingHoldingCount();
     if (json.data?.sapWarning) {
       wConfirm({ title: 'Delivery Complete — SAP Not Updated', message: json.data.sapWarning, confirmText: 'OK', variant: '' });
     }

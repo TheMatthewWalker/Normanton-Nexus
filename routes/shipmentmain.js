@@ -1925,9 +1925,10 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
       FROM Logistics.dbo.DeliveryMain dm 
         LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = dm.customerID 
         LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID 
-      WHERE dm.deliveryID IN (${inClause}) AND dm.completionStatus = 1 
-        AND ISNULL(dm.deliveryCancelled, 0) = 0 
-        AND sl.deliveryID IS NULL 
+      WHERE dm.deliveryID IN (${inClause}) AND dm.completionStatus = 1
+        AND ISNULL(dm.deliveryCancelled, 0) = 0
+        AND ISNULL(dm.pendingPackagingData, 0) = 0
+        AND sl.deliveryID IS NULL
       ORDER BY dm.deliveryID ASC`);
 
     const deliveries = deliveriesResult.recordset;
@@ -2453,6 +2454,7 @@ router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async 
       WHERE dm.deliveryID IN (${inClause})
         AND dm.completionStatus = 1
         AND ISNULL(dm.deliveryCancelled, 0) = 0
+        AND ISNULL(dm.pendingPackagingData, 0) = 0
         AND sl.deliveryID IS NULL`);
 
     if (available.recordset.length !== deliveryIDs.length)
