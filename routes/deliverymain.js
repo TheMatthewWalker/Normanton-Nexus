@@ -353,6 +353,27 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
             byMaterial[mat].requiredQty += parseSapNum(r.quantity);
         });
 
+        // SAP's LIPS open quantity isn't reduced by picking/packing — it only
+        // drops at goods issue, which happens well after the pallet(s) are
+        // built. So on its own, requiredQty here is "not yet at all
+        // dispatched", not "not yet picked" — every material would show its
+        // full original requirement again on every new pallet, ignoring
+        // whatever was already boxed onto this delivery's OTHER pallets.
+        // Subtract what's already in dbo.PalletPackages for this delivery
+        // (every pallet, not just whichever one is currently open) so the
+        // panel reflects what's actually still left to pick.
+        const pickedRes = await pool.request()
+            .input('sapDelivery', sql.NVarChar, String(deliveryId))
+            .query(`SELECT sapMaterial, SUM(sapQuantity) AS pickedQty
+                    FROM   Logistics.dbo.PalletPackages
+                    WHERE  sapDelivery = @sapDelivery AND sapMaterial IS NOT NULL
+                    GROUP  BY sapMaterial`);
+        pickedRes.recordset.forEach(row => {
+            const mat = String(row.sapMaterial || '').trim();
+            if (!mat || !byMaterial[mat]) return;
+            byMaterial[mat].requiredQty = Math.max(0, byMaterial[mat].requiredQty - Number(row.pickedQty || 0));
+        });
+
         // Packaging instruction (ZPRODBATCH~PALL_MATNR) encodes the customer
         // it was built for as its middle underscore-delimited segment, e.g.
         // "IB_363660_C2" -> customer 363660. A batch built for a DIFFERENT
