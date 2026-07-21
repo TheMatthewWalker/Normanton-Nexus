@@ -227,7 +227,10 @@
       <div class="mgmt-breakdown-header">
         <h3 id="breakdownModalTitle">Order Book &mdash; Full Breakdown</h3>
         <div class="mgmt-breakdown-header-actions">
+          <span id="uploadNotesStatus" class="mgmt-upload-status"></span>
           <button id="exportBreakdownBtn" class="mgmt-breakdown-btn">Export to Excel</button>
+          <button id="uploadNotesBtn" class="mgmt-breakdown-btn" title="Upload an edited Month End Breakdown file — saves Risk, Won't Get, Last Day and Bring Forward comments so the next download shows them">Upload Updated File</button>
+          <input type="file" id="uploadNotesInput" accept=".xlsx" style="display:none;">
           <button id="closeBreakdownBtn" class="mgmt-breakdown-close" aria-label="Close">&times;</button>
         </div>
       </div>

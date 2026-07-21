@@ -360,6 +360,13 @@
   gap: 10px;
 }
 
+.mgmt-upload-status {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .mgmt-breakdown-close {
   background: none;
   border: none;

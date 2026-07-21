@@ -16,8 +16,9 @@
 import express      from 'express';
 import bcrypt       from 'bcrypt';
 import sql          from 'mssql';
+import jwt          from 'jsonwebtoken';
 import rateLimit    from 'express-rate-limit';
-import { sqlConfig } from '../config.js';
+import { sqlConfig, sapServerSecret } from '../config.js';
 import { notify }    from '../lib/notify.js';
 
 const router = express.Router();
@@ -281,6 +282,82 @@ router.post('/register', registerLimiter, async (req, res) => {
   } catch (err) {
     console.error('[register]', err.message);
     res.status(500).json({ success: false, error: 'Registration failed. Please try again.' });
+  }
+});
+
+// ── POST /api/auth/orderbook-token ──────────────────────────────────────────
+// Short-lived credential exchange for the Month End Breakdown Excel macro
+// (see routes/performance.js's upload-notes route and
+// middleware/auth.js's requireSessionOrApiToken) — VBA running inside
+// Excel has no access to the portal's session cookie, so the macro logs in
+// here once with the user's normal username/password to get a bearer
+// token, then sends that token with the actual comments upload instead.
+//
+// Deliberately separate from POST /login: that route manages full browser
+// session state (regenerate, departments, permissions, redirect); this is
+// a single JSON request/response with no session at all, scoped narrowly
+// via the JWT's issuer/audience claims so a token minted here can never be
+// replayed against the SapServer bridge (or vice versa) even though both
+// happen to be signed with the same underlying secret.
+const orderBookTokenLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  handler: (req, res) => {
+    res.status(429).json({ success: false, error: 'Too many attempts. Try again later.' });
+  },
+});
+
+router.post('/api/auth/orderbook-token', orderBookTokenLimiter, async (req, res) => {
+  const { username, password } = req.body || {};
+
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: 'Username and password are required.' });
+  }
+
+  try {
+    const pool = await sql.connect(sqlConfig);
+    const userResult = await pool.request()
+      .input('username', sql.NVarChar(80), String(username).trim())
+      .query(`
+        SELECT UserID, Username, PasswordHash, IsActive, IsLocked
+        FROM kongsberg.dbo.PortalUsers
+        WHERE Username = @username
+      `);
+
+    const user = userResult.recordset[0];
+
+    if (!user) {
+      // Fake compare to prevent timing attacks — same idiom as /login.
+      await bcrypt.compare(password, '$2b$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+      await audit('ORDERBOOK_TOKEN_FAIL', username, 'Unknown username', req);
+      return res.status(401).json({ success: false, error: 'Invalid username or password.' });
+    }
+
+    if (!user.IsActive || user.IsLocked) {
+      await audit('ORDERBOOK_TOKEN_FAIL', username, !user.IsActive ? 'Account pending approval' : 'Account locked', req);
+      return res.status(401).json({ success: false, error: 'Account is not available for login.' });
+    }
+
+    const passwordValid = await bcrypt.compare(password, user.PasswordHash);
+    if (!passwordValid) {
+      await audit('ORDERBOOK_TOKEN_FAIL', username, 'Bad password', req);
+      return res.status(401).json({ success: false, error: 'Invalid username or password.' });
+    }
+
+    const token = jwt.sign(
+      { userId: user.UserID, username: user.Username },
+      sapServerSecret,
+      { issuer: 'kongsberg-portal', audience: 'orderbook-notes-upload', expiresIn: '20m' }
+    );
+
+    await audit('ORDERBOOK_TOKEN_OK', username, null, req);
+    res.json({ success: true, token, expiresInMinutes: 20 });
+
+  } catch (err) {
+    console.error('[orderbook-token]', err.message);
+    res.status(500).json({ success: false, error: 'Server error.' });
   }
 });
 

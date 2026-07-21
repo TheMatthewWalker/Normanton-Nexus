@@ -1193,6 +1193,54 @@ function exportBreakdown() {
   window.location.href = BASE + '/orderbook-breakdown/export' + params;
 }
 
+// Sends the raw edited .xlsx straight through as the request body (same
+// "plain fetch with the file as body" pattern used for supplier invoice
+// uploads elsewhere in this app) — rides on the normal portal session
+// cookie, same as every other request here, so this satisfies "upload
+// using your login credentials" without any separate sign-in step. The
+// server reads whatever's in the Data/Next Month tabs' Risk, Won't Get,
+// Reason, Last Day, Last Day Time and Bring Forward columns and saves it,
+// so the next person to hit Export sees it prefilled.
+function showUploadStatus(message, isError) {
+  const el = document.getElementById('uploadNotesStatus');
+  el.textContent = message;
+  el.style.color = isError ? '#b91c1c' : '#166534';
+  clearTimeout(showUploadStatus._t);
+  showUploadStatus._t = setTimeout(() => { el.textContent = ''; }, 6000);
+}
+
+async function uploadBreakdownNotes(e) {
+  const file = e.target.files[0];
+  e.target.value = ''; // allow re-selecting the same file next time
+  if (!file) return;
+
+  const btn = document.getElementById('uploadNotesBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Uploading…';
+
+  try {
+    const buf = await file.arrayBuffer();
+    const res = await fetch(BASE + '/orderbook-breakdown/upload-notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+      body: buf,
+    });
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok || !json.success) {
+      throw new Error(json.error?.message || json.error || `Upload failed (${res.status}).`);
+    }
+
+    showUploadStatus(`Saved — ${json.data.rowsUpdated} line(s) updated.`, false);
+  } catch (err) {
+    showUploadStatus(`Upload failed: ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+
 
 // ✅ MAIN RENDER
 function renderDashboard() {
@@ -1239,6 +1287,8 @@ document.getElementById('fullBreakdownBtn').onclick = () => openBreakdownModal('
 document.getElementById('monthEndBreakdownBtn').onclick = () => openBreakdownModal('monthEnd');
 document.getElementById('closeBreakdownBtn').onclick = closeBreakdownModal;
 document.getElementById('exportBreakdownBtn').onclick = exportBreakdown;
+document.getElementById('uploadNotesBtn').onclick = () => document.getElementById('uploadNotesInput').click();
+document.getElementById('uploadNotesInput').onchange = uploadBreakdownNotes;
 
 document.getElementById('breakdownOverlay').addEventListener('click', e => {
   if (e.target.id === 'breakdownOverlay') closeBreakdownModal();

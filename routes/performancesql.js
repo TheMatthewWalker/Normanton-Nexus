@@ -862,6 +862,75 @@ export async function getPtfeInvoicedMonthToDate() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Order book line notes — persisted Risk/Reason/Won't Get/Last Day/Bring
+// Forward flags from the Month End Breakdown export, round-tripped via the
+// upload-notes route (routes/performance.js) so the next person to download
+// the sheet sees what's already been flagged instead of starting blank and
+// duplicating work. See sql/migrate_orderbook_line_notes.sql for the table
+// design and dbo.OrderBookLineNotes' column comments.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Keyed by `${referenceDocument}||${material}` — same grain as a Data-sheet
+// row — so the export route can prefill with a single Map.get() per row
+// rather than a nested loop/join.
+export async function listOrderBookLineNotes() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT ReferenceDocument, Material, Risk, Reason, WontGet, LastDay, LastDayTime, BringForward
+    FROM dbo.OrderBookLineNotes
+  `);
+
+  const map = new Map();
+  recordset.forEach(r => {
+    map.set(`${r.ReferenceDocument}||${r.Material}`, {
+      risk:         r.Risk || '',
+      reason:       r.Reason || '',
+      wontGet:      r.WontGet || '',
+      lastDay:      r.LastDay || '',
+      lastDayTime:  r.LastDayTime || '',
+      bringForward: r.BringForward || '',
+    });
+  });
+  return map;
+}
+
+// Upsert via the existing generic upsertBatch() helper — see its header
+// comment for why this project can't just use MERGE (SQL Server 2005 has
+// none). Last upload wins for a given (referenceDocument, material): there's
+// no per-field merge, since re-uploading is a planner submitting their full,
+// current view of every row they can see, not a partial patch.
+export async function upsertOrderBookLineNotes(rows, username) {
+  if (!rows.length) return;
+
+  const keyColumns = [
+    ['ReferenceDocument', 'referenceDocument', sql.NVarChar(10)],
+    ['Material',          'material',          sql.NVarChar(18)],
+  ];
+
+  const shaped = rows.map(r => ({
+    referenceDocument: r.referenceDocument,
+    material:          r.material,
+    risk:              r.risk || null,
+    reason:            r.reason || null,
+    wontGet:           r.wontGet || null,
+    lastDay:           r.lastDay || null,
+    lastDayTime:       r.lastDayTime || null,
+    bringForward:      r.bringForward || null,
+    updatedByUsername: username || null,
+  }));
+
+  await upsertBatch('dbo.OrderBookLineNotes', keyColumns, [
+    ['Risk',              'risk',              sql.VarChar(1)],
+    ['Reason',            'reason',            sql.NVarChar(500)],
+    ['WontGet',           'wontGet',           sql.VarChar(1)],
+    ['LastDay',           'lastDay',           sql.VarChar(1)],
+    ['LastDayTime',       'lastDayTime',       sql.VarChar(20)],
+    ['BringForward',      'bringForward',      sql.VarChar(1)],
+    ['UpdatedByUsername', 'updatedByUsername', sql.NVarChar(80)],
+  ], shaped);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Vendor master data (MRP Phase 2) — dbo.Vendor / dbo.VendorMaterial
 // ══════════════════════════════════════════════════════════════════════════
 // Manually-maintained business data (lead time, Incoterms, MOQ), NOT sourced

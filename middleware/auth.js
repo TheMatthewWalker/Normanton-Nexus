@@ -7,12 +7,16 @@
  *   requireLogin        — any authenticated user
  *   requireRole(role)   — user must have at least this role level
  *   requireDepartment(dept) — user must have access to this department
+ *   requireSessionOrApiToken — session cookie OR bearer token (Excel macro)
  *
  * Role hierarchy (lowest → highest):
  *   operator < admin < superadmin
  *
  * Superadmins bypass all department checks.
  */
+
+import jwt from 'jsonwebtoken';
+import { sapServerSecret } from '../config.js';
 
 // ── Role hierarchy ────────────────────────────────────────────────────────────
 // operator   — basic site access
@@ -131,4 +135,38 @@ export function requirePermission(permissionCode) {
 // Utility — exported so routes can compare levels without importing the map.
 export function roleLevel(role) {
   return ROLE_LEVEL[role] ?? 0;
+}
+
+// ── requireSessionOrApiToken ────────────────────────────────────────────────
+// For routes that need to work both from the logged-in web page (normal
+// session cookie, like everything else in this app) AND from the Month End
+// Breakdown Excel macro (routes/performance.js's upload-notes route), which
+// has no cookie jar to carry a session — it authenticates once via
+// POST /api/auth/orderbook-token (routes/auth.js) and sends the resulting
+// short-lived JWT as `Authorization: Bearer <token>` instead.
+//
+// Whichever path succeeds, the handler reads req.uploadUser = { userID,
+// username } the same way either way, so it never needs to know which
+// route the caller came in by.
+export function requireSessionOrApiToken(req, res, next) {
+  if (req.session?.user?.userID) {
+    req.uploadUser = { userID: req.session.user.userID, username: req.session.user.username };
+    return next();
+  }
+
+  const [scheme, token] = String(req.headers.authorization || '').split(' ');
+  if (scheme === 'Bearer' && token) {
+    try {
+      const payload = jwt.verify(token, sapServerSecret, {
+        issuer: 'kongsberg-portal',
+        audience: 'orderbook-notes-upload',
+      });
+      req.uploadUser = { userID: payload.userId, username: payload.username };
+      return next();
+    } catch (err) {
+      return res.status(401).json({ success: false, error: 'Invalid or expired upload token — please log in again from the button on the Dashboard tab.' });
+    }
+  }
+
+  res.status(401).json({ success: false, error: 'Not authenticated.' });
 }

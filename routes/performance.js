@@ -8,7 +8,7 @@ import * as db  from './performancesql.js';
 import sql from 'mssql';
 import ExcelJS from 'exceljs';
 import { sqlConfig, auditQuery } from '../config.js';
-import { requirePermission } from '../middleware/auth.js';
+import { requirePermission, requireSessionOrApiToken } from '../middleware/auth.js';
 
 async function getPool() {
   return await sql.connect(sqlConfig);
@@ -899,6 +899,21 @@ function isOnOrBeforeCurrentMonth(date) {
   return y < cy || (y === cy && m <= cm);
 }
 
+// Feeds the Next Month tab — orders due in the calendar month immediately
+// after the current one, i.e. the pool a planner might pull forward to help
+// meet this month's target if Month End Breakdown shows a shortfall.
+function isInNextCalendarMonth(date) {
+  if (!date) return false;
+
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return false;
+
+  const today = new Date();
+  const next = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1));
+
+  return d.getUTCFullYear() === next.getUTCFullYear() && d.getUTCMonth() === next.getUTCMonth();
+}
+
 // 1-based column index -> Excel letter ('A', 'B', ..., 'Z', 'AA', ...).
 // Used to build cell references for the Stock/Picked Value formulas below —
 // computed from ws.getColumn(key).number rather than hardcoded, so the
@@ -935,14 +950,27 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
   try {
     const mode = req.query.mode === 'monthEnd' ? 'monthEnd' : 'full';
 
-    let [rows, invoicedToDate] = await Promise.all([
+    let [allRows, invoicedToDate, lineNotesMap] = await Promise.all([
       db.getOrderBookBreakdown(),
-      db.getPtfeInvoicedMonthToDate()
+      db.getPtfeInvoicedMonthToDate(),
+      db.listOrderBookLineNotes()
     ]);
 
+    let rows = allRows;
     if (mode === 'monthEnd') {
       rows = rows.filter(r => isOnOrBeforeCurrentMonth(r.RequestDate));
+      // Month End Breakdown is PTFE-only — the Full Breakdown export (mode
+      // !== 'monthEnd') is left showing every value stream, unchanged.
+      rows = rows.filter(r => r.ValueStream === 'PTFE');
     }
+
+    // Next Month tab — PTFE orders due the calendar month after this one,
+    // so a planner can spot candidates to bring forward. Only built for the
+    // Month End export; drawn from allRows (unfiltered by date) rather than
+    // rows, since rows has already been narrowed to "this month or earlier".
+    const nextMonthRows = mode === 'monthEnd'
+      ? allRows.filter(r => r.ValueStream === 'PTFE' && isInNextCalendarMonth(r.RequestDate))
+      : [];
 
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Kongsberg Portal';
@@ -975,6 +1003,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       { header: 'Picked Qty',    key: 'pickedQty',         width: 14 },
       { header: 'Picked Value',  key: 'pickedValue',       width: 14 },
       { header: 'Risk',          key: 'risk',              width: 8 },
+      { header: 'Won\'t Get',    key: 'wontGet',           width: 10 },
       { header: 'Reason',        key: 'reason',            width: 34 },
       { header: 'Last Day',                key: 'lastDay',               width: 10 },
       { header: 'Last Day Time',           key: 'lastDayTime',           width: 14 },
@@ -1016,6 +1045,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const pickedValueCol = excelColumnLetter(dataWs.getColumn('pickedValue').number);
     const valueStreamCol = excelColumnLetter(dataWs.getColumn('valueStream').number);
     const riskCol        = excelColumnLetter(dataWs.getColumn('risk').number);
+    const wontGetCol     = excelColumnLetter(dataWs.getColumn('wontGet').number);
     const lastDayCol              = excelColumnLetter(dataWs.getColumn('lastDay').number);
     const lastDayTimeCol          = excelColumnLetter(dataWs.getColumn('lastDayTime').number);
     const plannedProductionQtyCol = excelColumnLetter(dataWs.getColumn('plannedProductionQty').number);
@@ -1033,6 +1063,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     rows.forEach((r, i) => {
       const excelRow = i + 2; // header occupies row 1
 
+      // Prefill from whatever a previous planner already flagged and
+      // uploaded for this exact order/material — see
+      // dbo.OrderBookLineNotes / listOrderBookLineNotes — so downloading
+      // fresh never starts from a blank sheet and duplicates work already
+      // done.
+      const notes = lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {};
+
       const row = dataWs.addRow({
         valueStream: r.ValueStream,
         customer: r.Customer,
@@ -1044,15 +1081,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         orderValue: Number(r.OrderValue || 0),
         stockQty: Number(r.StockQty || 0),
         pickedQty: Number(r.PickedQty || 0),
-        risk: '',
-        reason: '',
-        lastDay: '',
-        lastDayTime: '',
-        // Defaults to Stock Qty — planners can overtype per line, but this way
-        // the Value-by-Hour "Planned" bucket and the Invoiced + Planned card
-        // aren't zero out of the box just because nobody's touched the column
-        // yet.
-        plannedProductionQty: Number(r.StockQty || 0)
+        risk: notes.risk || '',
+        wontGet: notes.wontGet || '',
+        reason: notes.reason || '',
+        lastDay: notes.lastDay || '',
+        lastDayTime: notes.lastDayTime || '',
+        // Defaults to Order Qty — planners can overtype per line, but this
+        // way the Value-by-Hour "Planned" bucket and the Invoiced + Planned
+        // card start from what was actually ordered rather than what's
+        // physically in stock right now.
+        plannedProductionQty: Number(r.OrderQty || 0)
         // stockValue / pickedValue / plannedProductionValue / atRiskSeq set as
         // formulas below.
       });
@@ -1090,6 +1128,19 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         formulae: ['"x"']
       };
       row.getCell('risk').alignment   = { horizontal: 'center' };
+
+      // Won't Get is a separate, stronger flag than Risk — "x" here means
+      // confirmed, not maybe. Kept as its own column (rather than a second
+      // value in the Risk dropdown) so the two can never be confused when
+      // filtering, and so a row can't accidentally be both at once without
+      // it being obvious on the sheet.
+      row.getCell('wontGet').dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        formulae: ['"x"']
+      };
+      row.getCell('wontGet').alignment = { horizontal: 'center' };
+
       row.getCell('reason').alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
 
       // Last Day — same "x" flag pattern as Risk: marks a line as due on the
@@ -1114,6 +1165,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       // Override the alternating fill on every manual-entry column so they
       // stand out from the SAP-sourced / formula columns.
       row.getCell('risk').fill                  = inputFill;
+      row.getCell('wontGet').fill                = inputFill;
       row.getCell('reason').fill                 = inputFill;
       row.getCell('lastDay').fill                = inputFill;
       row.getCell('lastDayTime').fill            = inputFill;
@@ -1130,11 +1182,73 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     dataWs.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: dataWs.columns.length } };
     dataWs.views = [{ state: 'frozen', ySplit: 1 }];
 
+    // ── Next Month sheet (Month End export only) ────────────────────────────
+    // PTFE orders due the calendar month after this one — a candidate pool
+    // to pull forward if the Data tab shows this month falling short. Bring
+    // Forward is the same "x" flag pattern as Risk/Last Day, and round-trips
+    // through the same notes upload as the Data tab (see
+    // dbo.OrderBookLineNotes.BringForward) — it's purely a planning flag,
+    // nothing in this app acts on it automatically.
+    if (mode === 'monthEnd') {
+      const nextMonthWs = wb.addWorksheet('Next Month');
+      nextMonthWs.columns = [
+        { header: 'Customer',      key: 'customer',          width: 14 },
+        { header: 'Customer Name', key: 'customerName',      width: 30 },
+        { header: 'Order',         key: 'referenceDocument', width: 14 },
+        { header: 'Date',          key: 'requestDate',       width: 14 },
+        { header: 'Material',      key: 'material',          width: 16 },
+        { header: 'Order Qty',     key: 'orderQty',          width: 14 },
+        { header: 'Order Value',   key: 'orderValue',        width: 14 },
+        { header: 'Bring Forward', key: 'bringForward',      width: 14 },
+      ];
+
+      const nmHeaderRow = nextMonthWs.getRow(1);
+      nmHeaderRow.height = 22;
+      nmHeaderRow.eachCell(cell => {
+        cell.fill      = headerFill;
+        cell.font      = headerFont;
+        cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        cell.border    = cellBorder;
+      });
+
+      nextMonthRows.forEach((r, i) => {
+        const notes = lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {};
+
+        const row = nextMonthWs.addRow({
+          customer: r.Customer,
+          customerName: r.CustomerName || r.Customer,
+          referenceDocument: r.ReferenceDocument,
+          requestDate: r.RequestDate ? new Date(r.RequestDate).toISOString().slice(0, 10) : '',
+          material: r.Material,
+          orderQty: Number(r.OrderQty || 0),
+          orderValue: Number(r.OrderValue || 0),
+          bringForward: notes.bringForward || '',
+        });
+
+        row.getCell('bringForward').dataValidation = { type: 'list', allowBlank: true, formulae: ['"x"'] };
+        row.getCell('bringForward').alignment = { horizontal: 'center' };
+
+        const fill = i % 2 === 0 ? oddFill : evenFill;
+        row.eachCell(cell => {
+          cell.fill   = fill;
+          cell.font   = { name: 'Arial', size: 10, color: { argb: 'FF000000' } };
+          cell.border = cellBorder;
+        });
+        row.getCell('bringForward').fill = inputFill;
+      });
+
+      nextMonthWs.getColumn('orderQty').numFmt   = '#,##0';
+      nextMonthWs.getColumn('orderValue').numFmt = '#,##0.00';
+      nextMonthWs.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: nextMonthWs.columns.length } };
+      nextMonthWs.views = [{ state: 'frozen', ySplit: 1 }];
+    }
+
     // ── Dashboard sheet ──────────────────────────────────────────────────
     const dataStockRange  = `'Data'!$${stockValueCol}:$${stockValueCol}`;
     const dataPickedRange = `'Data'!$${pickedValueCol}:$${pickedValueCol}`;
     const dataStreamRange = `'Data'!$${valueStreamCol}:$${valueStreamCol}`;
     const dataRiskRange   = `'Data'!$${riskCol}:$${riskCol}`;
+    const dataWontGetRange = `'Data'!$${wontGetCol}:$${wontGetCol}`;
     const dataLastDayRange              = `'Data'!$${lastDayCol}:$${lastDayCol}`;
     const dataPlannedQtyRange           = `'Data'!$${plannedProductionQtyCol}:$${plannedProductionQtyCol}`;
     const dataPlannedValueRange         = `'Data'!$${plannedProductionValueCol}:$${plannedProductionValueCol}`;
@@ -1233,13 +1347,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const stockCardCell = setMergedCell(
       'A13:F13',
       {
-        formula: `$A$5+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"<>x")`,
+        formula: `$A$5+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"<>x",${dataWontGetRange},"<>x")`,
         result: invoicedToDate + stockTotalPtfe
       },
       cardValueFont, null
     );
     stockCardCell.numFmt = '#,##0.00';
-    setMergedCell('A14:F14', 'Full month-end prediction: invoiced + stock not flagged at risk on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.', cardDescFont, null);
+    setMergedCell('A14:F14', 'Full month-end prediction: invoiced + stock not flagged at risk or Won\'t Get on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.', cardDescFont, null);
 
     // Card 4 — Invoiced + Planned. Excludes rows flagged Last Day = "x" —
     // those are tracked separately in the Final Day Total card and the
@@ -1250,13 +1364,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const plannedCardCell = setMergedCell(
       'A17:F17',
       {
-        formula: `$A$5+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x")`,
+        formula: `$A$5+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x")`,
         result: invoicedToDate + ptfeRows.filter(r => String(r.lastDay || '').toLowerCase() !== 'x').reduce((sum, r) => sum + Number(r.StockValue || 0), 0)
       },
       cardValueFont, null
     );
     plannedCardCell.numFmt = '#,##0.00';
-    setMergedCell('A18:F18', 'Invoiced plus Planned Production Value for everything NOT flagged Last Day (those are in Final Day Total below instead).', cardDescFont, null);
+    setMergedCell('A18:F18', 'Invoiced plus Planned Production Value for everything NOT flagged Last Day or Won\'t Get (Last Day items are in Final Day Total below instead; Won\'t Get items are confirmed misses).', cardDescFont, null);
 
     // Card 4b — Final Day Total. Invoiced + Planned above, plus whatever's
     // flagged Last Day on top — the true month-end grand total once the
@@ -1266,13 +1380,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const finalDayTotalCell = setMergedCell(
       'A21:F21',
       {
-        formula: `$A$17+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`,
+        formula: `$A$17+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x",${dataWontGetRange},"<>x")`,
         result: 0
       },
       cardValueFont, null
     );
     finalDayTotalCell.numFmt = '#,##0.00';
-    setMergedCell('A22:F22', 'Invoiced + Planned (above) plus the Planned Production Value of everything flagged Last Day — see the hour-by-hour breakdown below for when it lands.', cardDescFont, null);
+    setMergedCell('A22:F22', 'Invoiced + Planned (above) plus the Planned Production Value of everything flagged Last Day but NOT Won\'t Get — see the hour-by-hour breakdown below for when it lands.', cardDescFont, null);
 
     // Card 5 — Risk
     setMergedCell('A24:C24', 'VALUE AT RISK (PTFE)', riskLabelFont, riskLabelFill);
@@ -1291,6 +1405,25 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     );
     setMergedCell('A26:F26', 'Flagged rows are excluded from Invoiced + Potential Stock above — we may or may not receive this stock. See the Risk / Reason columns on the Data tab for detail.', cardDescFont, null);
 
+    // Card 5b — Won't Get. Deliberately separate from Risk above: this is a
+    // confirmed miss, not a maybe, so it's tracked on its own so the two
+    // never get conflated when someone's reading the dashboard quickly.
+    setMergedCell('A28:C28', 'CONFIRMED NOT GETTING (PTFE)', riskLabelFont, riskLabelFill);
+    setMergedCell('D28:F28', 'ITEMS FLAGGED (PTFE)', riskLabelFont, riskLabelFill);
+    dashboardWs.getRow(29).height = 30;
+    const wontGetValueCell = setMergedCell(
+      'A29:C29',
+      { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataWontGetRange},"x")`, result: 0 },
+      riskValueFont, null
+    );
+    wontGetValueCell.numFmt = '#,##0.00';
+    setMergedCell(
+      'D29:F29',
+      { formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataWontGetRange},"x")`, result: 0 },
+      riskValueFont, null
+    );
+    setMergedCell('A30:F30', 'Flagged rows are excluded from Invoiced + Potential Stock, Invoiced + Planned and Final Day Total above — this stock is confirmed not coming this month. Filter the Won\'t Get column on the Data tab for detail.', cardDescFont, null);
+
     // Card 6 — At-risk lines detail. Excel has no true "hover tooltip" that
     // can show live, formula-driven content (native cell comments only hold
     // static text), so this pairs a hyperlink to the filtered Data tab (works
@@ -1299,16 +1432,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Seq" helper column on the Data tab, not TEXTJOIN/dynamic arrays, so it
     // evaluates correctly on any Excel version (2007 and up), not just
     // 365/2021+.
-    setMergedCell('A28:F28', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
+    setMergedCell('A32:F32', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
     setMergedCell(
-      'A29:F29',
+      'A33:F33',
       { text: 'Open the Data tab and use the Risk column filter arrow to show every flagged row', hyperlink: "#'Data'!A1" },
       { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
       null,
       { horizontal: 'left', vertical: 'middle' }
     );
 
-    const atRiskListStartRow = 30;
+    const atRiskListStartRow = 34;
     const atRiskListCount = 10;
     for (let idx = 0; idx < atRiskListCount; idx++) {
       const r = atRiskListStartRow + idx;
@@ -1330,21 +1463,21 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     );
 
     // Card 7 — Due on last day of the month
-    setMergedCell('A42:C42', 'VALUE DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
-    setMergedCell('D42:F42', 'ITEMS DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
-    dashboardWs.getRow(43).height = 30;
+    setMergedCell('A46:C46', 'VALUE DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
+    setMergedCell('D46:F46', 'ITEMS DUE (PTFE) — LAST DAY', cardLabelFont, cardLabelFill);
+    dashboardWs.getRow(47).height = 30;
     const lastDayValueCell = setMergedCell(
-      'A43:C43',
+      'A47:C47',
       { formula: `SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
       cardValueFont, null
     );
     lastDayValueCell.numFmt = '#,##0.00';
     setMergedCell(
-      'D43:F43',
+      'D47:F47',
       { formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
       cardValueFont, null
     );
-    setMergedCell('A44:F44', 'What product, value and time is coming through on the last day of the month. Flag a row "x" in Last Day on the Data tab and fill in Last Day Time — filter the Data tab by Last Day to see the individual products and times.', cardDescFont, null);
+    setMergedCell('A48:F48', 'What product, value and time is coming through on the last day of the month. Flag a row "x" in Last Day on the Data tab and fill in Last Day Time — filter the Data tab by Last Day to see the individual products and times.', cardDescFont, null);
 
     // Card 8 — Value-by-hour for Last Day items. Sourced from Planned
     // Production Value (column R) — that's the "expected production" figure,
@@ -1352,13 +1485,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // ExcelJS can't create native embedded chart objects (no chart API), so
     // this pairs a live SUMPRODUCT column with Excel's built-in Data Bar
     // conditional formatting for an automatic in-cell visual. For a full axis
-    // chart, select A47:C71 in Excel and Insert > Chart — a one-off manual
+    // chart, select A51:C75 in Excel and Insert > Chart — a one-off manual
     // step since this file regenerates fresh on every export. Rows with Last
     // Day = "x" but no parseable Last Day Time default into the Hour 0 bucket
     // rather than being dropped.
-    setMergedCell('A46:F46', 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
+    setMergedCell('A50:F50', 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
 
-    const hourHeaderRow = 47;
+    const hourHeaderRow = 51;
     dashboardWs.getCell(`A${hourHeaderRow}`).value = 'Hour';
     dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Expected Value (Planned Production)';
     dashboardWs.getCell(`C${hourHeaderRow}`).value = 'Cumulative Invoiced Total';
@@ -1370,8 +1503,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     });
     dashboardWs.mergeCells(`C${hourHeaderRow}:F${hourHeaderRow}`);
 
-    const firstHourRow = hourHeaderRow + 1; // 48
-    const lastHourRow = firstHourRow + 23;  // 71
+    const firstHourRow = hourHeaderRow + 1; // 52
+    const lastHourRow = firstHourRow + 23;  // 75
 
     for (let hour = 0; hour <= 23; hour++) {
       const r = firstHourRow + hour;
@@ -1416,10 +1549,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       }]
     });
 
-    const hourTableCaptionRow = lastHourRow + 1; // 72
+    const hourTableCaptionRow = lastHourRow + 1; // 76
     setMergedCell(
       `A${hourTableCaptionRow}:F${hourTableCaptionRow}`,
-      'Data bars approximate a value-by-hour chart — this export can\'t embed a native Excel chart object. For a full axis chart, select A47:C71 and Insert > Chart. Blank/unrecognised Last Day Time defaults to the Hour 0 row.',
+      'Data bars approximate a value-by-hour chart — this export can\'t embed a native Excel chart object. For a full axis chart, select A51:C75 and Insert > Chart. Blank/unrecognised Last Day Time defaults to the Hour 0 row.',
       cardDescFont, null
     );
 
@@ -1441,6 +1574,135 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     }
   }
 });
+
+// ── Upload Month End Breakdown comments back ────────────────────────────────
+// Body is the raw edited .xlsx — same "plain fetch(..., { body: file })",
+// not-multipart pattern as the supplier invoice upload further down this
+// file (see /order-suggestions/shipments/:shipmentId/documents/upload).
+// Reads the Data and Next Month sheets back out with ExcelJS and upserts
+// whatever a planner typed into Risk/Won't Get/Reason/Last Day/Last Day
+// Time/Bring Forward into dbo.OrderBookLineNotes, so the next person to
+// download the sheet sees it prefilled instead of starting blank.
+//
+// Column positions are read from the header row rather than assumed fixed
+// — ExcelJS doesn't preserve the `key` metadata used when the file was
+// first written (that's an ExcelJS-only construct, not part of the xlsx
+// format itself), so a freshly-loaded workbook has no column keys at all.
+// Matching by header text also means the upload still works if a planner
+// reorders or hides columns before sending it back.
+//
+// requireSessionOrApiToken accepts either the normal portal session
+// (web page's "Upload updated file" button) or a bearer token from
+// POST /api/auth/orderbook-token (the Excel macro) — either way the
+// route reads req.uploadUser for who to credit the update to.
+function buildHeaderMap(headerRow) {
+  const map = {};
+  headerRow.eachCell((cell, colNumber) => {
+    const text = String(cell.value || '').trim();
+    if (text) map[text] = colNumber;
+  });
+  return map;
+}
+
+function readCellText(row, colNumber) {
+  if (!colNumber) return '';
+  const v = row.getCell(colNumber).value;
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    if ('result' in v) return String(v.result ?? '').trim();
+    if ('text' in v) return String(v.text ?? '').trim();
+    return '';
+  }
+  return String(v).trim();
+}
+
+router.post('/orderbook-breakdown/upload-notes',
+  requireSessionOrApiToken,
+  express.raw({
+    type: [
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/octet-stream'
+    ],
+    limit: '20mb'
+  }),
+  async (req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ success: false, error: { message: 'No file content received.' } });
+      }
+
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(req.body);
+
+      const dataWs = wb.getWorksheet('Data');
+      if (!dataWs) {
+        return res.status(400).json({ success: false, error: { message: 'This file has no "Data" sheet — is it a Month End Breakdown export?' } });
+      }
+
+      const dataHeaderMap = buildHeaderMap(dataWs.getRow(1));
+      const notesByKey = new Map();
+
+      dataWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        if (rowNumber === 1) return; // header
+
+        const referenceDocument = readCellText(row, dataHeaderMap['Order']);
+        const material          = readCellText(row, dataHeaderMap['Material']);
+        if (!referenceDocument || !material) return;
+
+        notesByKey.set(`${referenceDocument}||${material}`, {
+          referenceDocument,
+          material,
+          risk:         readCellText(row, dataHeaderMap['Risk']),
+          reason:       readCellText(row, dataHeaderMap['Reason']),
+          wontGet:      readCellText(row, dataHeaderMap["Won't Get"]),
+          lastDay:      readCellText(row, dataHeaderMap['Last Day']),
+          lastDayTime:  readCellText(row, dataHeaderMap['Last Day Time']),
+          bringForward: '',
+        });
+      });
+
+      // Next Month tab is optional — a Full Breakdown export (or a Month
+      // End export where nobody touched that tab) won't necessarily carry
+      // one, and that's fine; Bring Forward just stays unset for every row.
+      const nextMonthWs = wb.getWorksheet('Next Month');
+      if (nextMonthWs) {
+        const nmHeaderMap = buildHeaderMap(nextMonthWs.getRow(1));
+
+        nextMonthWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+          if (rowNumber === 1) return;
+
+          const referenceDocument = readCellText(row, nmHeaderMap['Order']);
+          const material          = readCellText(row, nmHeaderMap['Material']);
+          if (!referenceDocument || !material) return;
+
+          const key = `${referenceDocument}||${material}`;
+          const existing = notesByKey.get(key) || {
+            referenceDocument, material, risk: '', reason: '', wontGet: '', lastDay: '', lastDayTime: ''
+          };
+          existing.bringForward = readCellText(row, nmHeaderMap['Bring Forward']);
+          notesByKey.set(key, existing);
+        });
+      }
+
+      const noteRows = Array.from(notesByKey.values());
+      await db.upsertOrderBookLineNotes(noteRows, req.uploadUser?.username);
+
+      await auditQuery(
+        'ORDERBOOK_NOTES_UPLOAD',
+        req.uploadUser?.username,
+        `Uploaded Month End Breakdown comments for ${noteRows.length} line(s)`,
+        req
+      );
+
+      res.json({ success: true, data: { rowsUpdated: noteRows.length } });
+
+    } catch (err) {
+      console.error('[orderbook-breakdown/upload-notes]', err.message);
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  }
+);
 
 
 // ══════════════════════════════════════════════════════════════════════════
