@@ -3012,15 +3012,20 @@ async function spRefreshFulfilModal(requestId) {
 
     const stockSorted = [...stock].sort((a, b) => (b.isAllowed - a.isAllowed) || (Number(b.availableQty) - Number(a.availableQty)));
 
-    const stockRowsHtml = stockSorted.length ? stockSorted.map(s => `
+    const stockRowsHtml = stockSorted.length ? stockSorted.map(s => {
+      const isConsignment = s.specialStockInd === 'K';
+      return `
       <tr class="pn-row sp-stock-row" style="cursor:pointer${s.isAllowed ? '' : ';opacity:0.65'}"
-          data-storagetype="${esc(s.storageType)}" data-bin="${esc(s.bin)}" data-batch="${esc(s.batch || '')}" data-sloc="${esc(s.storageLocation)}">
+          data-storagetype="${esc(s.storageType)}" data-bin="${esc(s.bin)}" data-batch="${esc(s.batch || '')}" data-sloc="${esc(s.storageLocation)}"
+          data-specialstockind="${esc(s.specialStockInd || '')}" data-specialstocknum="${esc(s.specialStockNum || '')}">
         <td>${esc(s.storageType)}</td>
         <td>${esc(s.bin)}</td>
         <td>${esc(s.batch || '—')}</td>
         <td>${Number(s.availableQty).toLocaleString()}</td>
+        <td>${isConsignment ? '<span style="color:#B45309;font-weight:700">Consignment</span>' : ''}</td>
         <td>${hasRestrictions ? (s.isAllowed ? '<span style="color:#059669;font-weight:700">Allowed</span>' : '<span style="color:var(--text-muted)">Other bin</span>') : ''}</td>
-      </tr>`).join('') : `<tr><td colspan="5" class="sap-empty">No stock currently in SAP for this material.</td></tr>`;
+      </tr>`;
+    }).join('') : `<tr><td colspan="6" class="sap-empty">No stock currently in SAP for this material.</td></tr>`;
 
     body.innerHTML = `
       <div class="tf-row">
@@ -3035,7 +3040,7 @@ async function spRefreshFulfilModal(requestId) {
       <div class="tf-section-label">Available Stock ${hasRestrictions ? '<span class="tf-optional">(bin restrictions configured for this material — allowed bins shown first)</span>' : ''}</div>
       <div style="overflow-x:auto;max-height:220px;overflow-y:auto;margin-bottom:14px">
         <table class="pn-batch-table">
-          <thead><tr><th>Storage Type</th><th>Bin</th><th>Batch</th><th>Available Qty</th><th></th></tr></thead>
+          <thead><tr><th>Storage Type</th><th>Bin</th><th>Batch</th><th>Available Qty</th><th>Stock</th><th></th></tr></thead>
           <tbody>${stockRowsHtml}</tbody>
         </table>
       </div>
@@ -3064,6 +3069,8 @@ async function spRefreshFulfilModal(requestId) {
           sourceStorageType: tr.dataset.storagetype,
           sourceBin: tr.dataset.bin,
           batch: (requestedBatch || tr.dataset.batch || '') || null,
+          specialStockIndicator: tr.dataset.specialstockind || null,
+          specialStockNumber: tr.dataset.specialstocknum || null,
         };
       });
     });
@@ -3088,8 +3095,14 @@ async function spSubmitDelivery(requestId) {
     sourceBin: spSelectedStockRow.sourceBin,
     destinationStorageType: SP_DESTINATION_TYPE,
     destinationBin: SP_DESTINATION_BIN,
+    specialStockIndicator: spSelectedStockRow.specialStockIndicator,
+    specialStockNumber: spSelectedStockRow.specialStockNumber,
   };
   if (!(body.quantity > 0)) { resultEl.innerHTML = '<div class="sap-error">Enter a quantity greater than zero.</div>'; return; }
+  if (body.specialStockIndicator === 'K' && !body.specialStockNumber) {
+    resultEl.innerHTML = '<div class="sap-error">This is consignment stock but has no vendor (special stock) number from SAP — cannot issue it automatically.</div>';
+    return;
+  }
 
   const btn = document.getElementById('sp-deliver-btn');
   btn.disabled = true; btn.textContent = 'Creating transfer order…';

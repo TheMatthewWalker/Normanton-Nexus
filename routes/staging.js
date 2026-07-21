@@ -90,6 +90,24 @@ async function createSapTransferOrder(body) {
   return responseBody.data;
 }
 
+// SapServer's existing POST /api/warehouse/consignment-mb1b (MB1B + LT01
+// non-consign/consign pair) — same endpoint private/js/warehouse.js's Stock
+// Transfer tool already switches to whenever SpecialStockIndicator is 'K'
+// (consignment) and the destination is SA/PTFE. Required so consignment
+// stock is actually posted out of consignment (MB1B) rather than just moved
+// bin-to-bin, which would leave it showing as consignment stock in SAP while
+// physically sitting in Production.
+async function createSapConsignmentMb1b(body) {
+  const response = await axios.post(`${sapConfig.url}/api/warehouse/consignment-mb1b`, body, {
+    timeout: 60000,
+    httpsAgent: sapAgent,
+    headers: { Authorization: `Bearer ${makeSapToken()}` },
+  });
+  const responseBody = response.data;
+  if (!responseBody.success) throw new Error(responseBody.error ?? 'SapServer returned success=false');
+  return responseBody.data;
+}
+
 // Minimum lead time a production request can specify — protects Stores from
 // being asked for an impossible immediate turnaround. No upper bound.
 const NEEDED_BY_MIN_LEAD_HOURS = 4;
@@ -326,24 +344,60 @@ router.post('/requests/:id/deliver', async (req, res) => {
       });
     }
 
+    // Consignment stock (LQUA-SOBKZ = 'K') moving into a production bin needs
+    // the MB1B + LT01 pair, not a plain transfer order — same rule
+    // private/js/warehouse.js's manual Stock Transfer tool already applies
+    // (see runStockTransfer's isConsignment check there).
+    const isConsignment = specialStockIndicator === 'K' && destinationStorageType === 'SA';
+    if (isConsignment && !specialStockNumber) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'This stock is held as consignment stock (SOBKZ K) — a special stock number (vendor) is required to issue it.' },
+      });
+    }
+
     let transferOrder;
     try {
-      transferOrder = await createSapTransferOrder({
-        StorageLocation: storageLocation,
-        Material: request.Material,
-        Quantity: Number(quantity),
-        SourceType: sourceStorageType,
-        SourceBin: sourceBin,
-        DestinationType: destinationStorageType,
-        DestinationBin: destinationBin,
-        Batch: batch || request.RequestedBatch || undefined,
-        StockCategory: stockCategory || undefined,
-        SpecialStockIndicator: specialStockIndicator || undefined,
-        SpecialStockNumber: specialStockNumber || undefined,
-      });
+      if (isConsignment) {
+        const mb1b = await createSapConsignmentMb1b({
+          Material: request.Material,
+          Quantity: Number(quantity),
+          Header: `Staging Post fulfilment — Request #${req.params.id}`,
+          SpecialStockNumber: specialStockNumber,
+          StorageLocation: storageLocation,
+          SourceType: sourceStorageType,
+          SourceBin: sourceBin,
+          DestinationType: destinationStorageType,
+          DestinationBin: destinationBin,
+        });
+        transferOrder = {
+          success: true,
+          transferOrderNumber: null,
+          messages: [mb1b.mb1bMessage, mb1b.toNonConsignMessage, mb1b.toConsignMessage]
+            .filter(Boolean)
+            .map(message => ({ type: 'S', message })),
+        };
+      } else {
+        transferOrder = await createSapTransferOrder({
+          StorageLocation: storageLocation,
+          Material: request.Material,
+          Quantity: Number(quantity),
+          SourceType: sourceStorageType,
+          SourceBin: sourceBin,
+          DestinationType: destinationStorageType,
+          DestinationBin: destinationBin,
+          Batch: batch || request.RequestedBatch || undefined,
+          StockCategory: stockCategory || undefined,
+          SpecialStockIndicator: specialStockIndicator || undefined,
+          SpecialStockNumber: specialStockNumber || undefined,
+        });
+      }
     } catch (sapErr) {
       await audit('STAGING_DELIVER_SAP_ERROR', actor(req), `Request #${req.params.id} — ${sapErr.message}`, req);
-      return res.status(422).json({ success: false, error: { message: `SAP rejected the transfer order: ${sapErr.message}` } });
+      return res.status(422).json({
+        success: false,
+        error: { message: `SAP rejected the ${isConsignment ? 'consignment issue' : 'transfer order'}: ${sapErr.message}` },
+      });
     }
 
     if (!transferOrder.success) {
