@@ -876,19 +876,20 @@ export async function getPtfeInvoicedMonthToDate() {
 export async function listOrderBookLineNotes() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
-    SELECT ReferenceDocument, Material, Risk, Reason, WontGet, LastDay, LastDayTime, BringForward
+    SELECT ReferenceDocument, Material, Risk, Reason, WontGet, LastDay, LastDayTime, BringForward, PlannedProductionQty
     FROM dbo.OrderBookLineNotes
   `);
 
   const map = new Map();
   recordset.forEach(r => {
     map.set(`${r.ReferenceDocument}||${r.Material}`, {
-      risk:         r.Risk || '',
-      reason:       r.Reason || '',
-      wontGet:      r.WontGet || '',
-      lastDay:      r.LastDay || '',
-      lastDayTime:  r.LastDayTime || '',
-      bringForward: r.BringForward || '',
+      risk:                 r.Risk || '',
+      reason:                r.Reason || '',
+      wontGet:               r.WontGet || '',
+      lastDay:               r.LastDay || '',
+      lastDayTime:           r.LastDayTime || '',
+      bringForward:          r.BringForward || '',
+      plannedProductionQty:  r.PlannedProductionQty != null ? Number(r.PlannedProductionQty) : null,
     });
   });
   return map;
@@ -908,25 +909,34 @@ export async function upsertOrderBookLineNotes(rows, username) {
   ];
 
   const shaped = rows.map(r => ({
-    referenceDocument: r.referenceDocument,
-    material:          r.material,
-    risk:              r.risk || null,
-    reason:            r.reason || null,
-    wontGet:           r.wontGet || null,
-    lastDay:           r.lastDay || null,
-    lastDayTime:       r.lastDayTime || null,
-    bringForward:      r.bringForward || null,
-    updatedByUsername: username || null,
+    referenceDocument:    r.referenceDocument,
+    material:             r.material,
+    risk:                 r.risk || null,
+    reason:               r.reason || null,
+    wontGet:              r.wontGet || null,
+    lastDay:              r.lastDay || null,
+    lastDayTime:          r.lastDayTime || null,
+    bringForward:         r.bringForward || null,
+    // Whatever's in the Planned Production Qty column at upload time —
+    // not just a delta from Order Qty. That column always carries a real
+    // number (it defaults to Order Qty on every export), so "unedited" and
+    // "confirmed at the default" are the same signal here: this is the
+    // planner's current best answer for what will actually be produced.
+    plannedProductionQty: (r.plannedProductionQty === '' || r.plannedProductionQty == null)
+      ? null
+      : Number(r.plannedProductionQty),
+    updatedByUsername:    username || null,
   }));
 
   await upsertBatch('dbo.OrderBookLineNotes', keyColumns, [
-    ['Risk',              'risk',              sql.VarChar(1)],
-    ['Reason',            'reason',            sql.NVarChar(500)],
-    ['WontGet',           'wontGet',           sql.VarChar(1)],
-    ['LastDay',           'lastDay',           sql.VarChar(1)],
-    ['LastDayTime',       'lastDayTime',       sql.VarChar(20)],
-    ['BringForward',      'bringForward',      sql.VarChar(1)],
-    ['UpdatedByUsername', 'updatedByUsername', sql.NVarChar(80)],
+    ['Risk',                 'risk',                 sql.VarChar(1)],
+    ['Reason',               'reason',               sql.NVarChar(500)],
+    ['WontGet',              'wontGet',              sql.VarChar(1)],
+    ['LastDay',              'lastDay',              sql.VarChar(1)],
+    ['LastDayTime',          'lastDayTime',          sql.VarChar(20)],
+    ['BringForward',         'bringForward',         sql.VarChar(1)],
+    ['PlannedProductionQty', 'plannedProductionQty', sql.Decimal(15, 3)],
+    ['UpdatedByUsername',    'updatedByUsername',    sql.NVarChar(80)],
   ], shaped);
 }
 

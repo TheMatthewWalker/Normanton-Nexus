@@ -1285,6 +1285,12 @@ document.getElementById('dateTo').onchange = renderDashboard;
 
 document.getElementById('fullBreakdownBtn').onclick = () => openBreakdownModal('full');
 document.getElementById('monthEndBreakdownBtn').onclick = () => openBreakdownModal('monthEnd');
+// Server-rendered, standalone printable page (no fetch/blob needed) — opens
+// in a new tab and auto-triggers the browser's print dialog, same pattern
+// as the batch label preview elsewhere in this app.
+document.getElementById('productionPlanBtn').onclick = () => {
+  window.open(BASE + '/orderbook-breakdown/production-plan/print', '_blank');
+};
 document.getElementById('closeBreakdownBtn').onclick = closeBreakdownModal;
 document.getElementById('exportBreakdownBtn').onclick = exportBreakdown;
 document.getElementById('uploadNotesBtn').onclick = () => document.getElementById('uploadNotesInput').click();

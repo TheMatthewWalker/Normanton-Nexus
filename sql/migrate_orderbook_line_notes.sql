@@ -43,6 +43,13 @@ BEGIN
     -- upload; nothing in this app acts on it automatically.
     BringForward      VARCHAR(1)    NULL,      -- 'x' = flagged to bring forward
 
+    -- Optional override of Planned Production Qty (Data tab), which
+    -- otherwise just defaults to Order Qty every export. NULL means "no
+    -- override recorded" — the export and the printable Production Plan
+    -- both fall back to live Order Qty in that case. See
+    -- getProductionPlan() in performancesql.js.
+    PlannedProductionQty DECIMAL(15,3) NULL,
+
     LastUpdatedUtc    DATETIME      NOT NULL DEFAULT GETUTCDATE(),
     UpdatedByUsername NVARCHAR(80)  NULL,
 
@@ -53,6 +60,17 @@ BEGIN
 END
 ELSE
   PRINT 'dbo.OrderBookLineNotes already exists — skipped';
+
+
+/* ── Add PlannedProductionQty to an existing install ─────────────────────────
+   Guarded ALTER, same COL_LENGTH() pattern used elsewhere in this codebase
+   (see migrate_vendor_master_data.sql) — safe to re-run every time this
+   script executes, whether the table was just created above or already
+   existed from before this column was added. */
+IF COL_LENGTH('dbo.OrderBookLineNotes', 'PlannedProductionQty') IS NULL
+  ALTER TABLE dbo.OrderBookLineNotes ADD PlannedProductionQty DECIMAL(15,3) NULL;
+
+PRINT 'dbo.OrderBookLineNotes PlannedProductionQty column verified/added';
 
 
 /* ── Verify ───────────────────────────────────────────────────────────────── */

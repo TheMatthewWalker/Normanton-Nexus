@@ -1086,11 +1086,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         reason: notes.reason || '',
         lastDay: notes.lastDay || '',
         lastDayTime: notes.lastDayTime || '',
-        // Defaults to Order Qty — planners can overtype per line, but this
-        // way the Value-by-Hour "Planned" bucket and the Invoiced + Planned
-        // card start from what was actually ordered rather than what's
-        // physically in stock right now.
-        plannedProductionQty: Number(r.OrderQty || 0)
+        // Prefills from whatever was last uploaded for this line (see
+        // dbo.OrderBookLineNotes.PlannedProductionQty) so a planner's
+        // override survives a re-download instead of reverting to the
+        // default every time; falls back to Order Qty when nothing's been
+        // uploaded yet — this way the Value-by-Hour "Planned" bucket and
+        // the Invoiced + Planned card start from what was actually ordered
+        // rather than what's physically in stock right now.
+        plannedProductionQty: notes.plannedProductionQty != null
+          ? Number(notes.plannedProductionQty)
+          : Number(r.OrderQty || 0)
         // stockValue / pickedValue / plannedProductionValue / atRiskSeq set as
         // formulas below.
       });
@@ -1686,12 +1691,13 @@ router.post('/orderbook-breakdown/upload-notes',
         notesByKey.set(`${referenceDocument}||${material}`, {
           referenceDocument,
           material,
-          risk:         readCellText(row, dataHeaderMap['Risk']),
-          reason:       readCellText(row, dataHeaderMap['Reason']),
-          wontGet:      readCellText(row, dataHeaderMap["Won't Get"]),
-          lastDay:      readCellText(row, dataHeaderMap['Last Day']),
-          lastDayTime:  readCellText(row, dataHeaderMap['Last Day Time']),
-          bringForward: '',
+          risk:                 readCellText(row, dataHeaderMap['Risk']),
+          reason:                readCellText(row, dataHeaderMap['Reason']),
+          wontGet:               readCellText(row, dataHeaderMap["Won't Get"]),
+          lastDay:               readCellText(row, dataHeaderMap['Last Day']),
+          lastDayTime:           readCellText(row, dataHeaderMap['Last Day Time']),
+          bringForward:          '',
+          plannedProductionQty:  readCellText(row, dataHeaderMap['Planned Production Qty']),
         });
       });
 
@@ -1711,7 +1717,7 @@ router.post('/orderbook-breakdown/upload-notes',
 
           const key = `${referenceDocument}||${material}`;
           const existing = notesByKey.get(key) || {
-            referenceDocument, material, risk: '', reason: '', wontGet: '', lastDay: '', lastDayTime: ''
+            referenceDocument, material, risk: '', reason: '', wontGet: '', lastDay: '', lastDayTime: '', plannedProductionQty: ''
           };
           existing.bringForward = readCellText(row, nmHeaderMap['Bring Forward']);
           notesByKey.set(key, existing);
@@ -1736,6 +1742,143 @@ router.post('/orderbook-breakdown/upload-notes',
     }
   }
 );
+
+// ── Printable Production Plan ────────────────────────────────────────────
+// Bare, standalone HTML report — same convention as routes/labels.js's
+// browser-preview route (buildHTML/GET /process/:code/:id). The rest of
+// the Management page has too much on it to print sensibly, so this
+// deliberately skips all app chrome (sidebar, header, charts, filters) and
+// is just a clean table meant to go straight to a printer, auto-firing
+// window.print() on load the same way the label preview does.
+//
+// Scope: PTFE lines flagged Last Day = "x" in dbo.OrderBookLineNotes,
+// excluding anything also flagged Won't Get, sorted by Last Day Time.
+// Quantity is whatever's been uploaded as Planned Production Qty for that
+// line (falling back to Order Qty if nothing's been uploaded yet) — the
+// same figure the Data tab itself defaults to and the Dashboard's Last Day
+// cards are built from, so this always matches what's on the spreadsheet.
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// "15:00" -> 900 (minutes since midnight) for sorting; blank or anything
+// that doesn't start with H:MM sorts first — same "defaults to the Hour 0
+// bucket" convention as the Excel Value-by-Hour table, so a plan printed
+// straight after upload lines up with what the Dashboard already implies.
+function parseLastDayTimeMinutes(text) {
+  const match = String(text || '').trim().match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return -1;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return -1;
+  return hours * 60 + minutes;
+}
+
+function buildProductionPlanHTML(plan) {
+  const generatedAt = new Date().toLocaleString('en-GB', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+
+  const totalQty   = plan.reduce((sum, p) => sum + p.quantity, 0);
+  const totalValue = plan.reduce((sum, p) => sum + p.value, 0);
+
+  const rowsHtml = plan.length
+    ? plan.map(p => `
+      <tr>
+        <td>${esc(p.time || '—')}</td>
+        <td>${esc(p.customer)}</td>
+        <td>${esc(p.material)}${p.materialText ? ` — ${esc(p.materialText)}` : ''}</td>
+        <td class="num">${p.quantity.toLocaleString('en-GB', { maximumFractionDigits: 3 })}</td>
+        <td class="num">£${p.value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="5" class="empty">Nothing is currently flagged Last Day on the PTFE order book.</td></tr>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Production Plan — Last Day of Month</title>
+<style>
+  @page { size: A4 portrait; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; color: #0F172A; margin: 0; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .subtitle { font-size: 11px; color: #64748B; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th, td { border: 1px solid #CBD5E1; padding: 6px 8px; text-align: left; }
+  th { background: #1F3864; color: #fff; font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  tbody tr:nth-child(even) { background: #F1F5F9; }
+  tfoot td { font-weight: 700; border-top: 2px solid #1F3864; }
+  .empty { text-align: center; color: #64748B; font-style: italic; }
+  @media print {
+    .no-print { display: none; }
+  }
+  .no-print { margin-top: 16px; font-size: 11px; color: #64748B; }
+</style>
+</head>
+<body>
+  <h1>Production Plan — Last Day of Month (PTFE)</h1>
+  <p class="subtitle">Generated ${esc(generatedAt)} &middot; sorted by time &middot; ${plan.length} line(s)</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Customer</th>
+        <th>Material</th>
+        <th class="num">Quantity</th>
+        <th class="num">Value</th>
+      </tr>
+    </thead>
+    <tbody>${rowsHtml}</tbody>
+    ${plan.length ? `<tfoot><tr><td colspan="3">Total</td><td class="num">${totalQty.toLocaleString('en-GB', { maximumFractionDigits: 3 })}</td><td class="num">£${totalValue.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td></tr></tfoot>` : ''}
+  </table>
+  <p class="no-print">This window should print automatically. If it doesn't, use your browser's Print command (Ctrl/Cmd+P).</p>
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 300));</script>
+</body>
+</html>`;
+}
+
+router.get('/orderbook-breakdown/production-plan/print', async (req, res) => {
+  try {
+    const [rows, lineNotesMap] = await Promise.all([
+      db.getOrderBookBreakdown(),
+      db.listOrderBookLineNotes(),
+    ]);
+
+    const plan = rows
+      .filter(r => r.ValueStream === 'PTFE')
+      .map(r => ({ r, notes: lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {} }))
+      .filter(({ notes }) =>
+        String(notes.lastDay || '').toLowerCase() === 'x' &&
+        String(notes.wontGet || '').toLowerCase() !== 'x'
+      )
+      .map(({ r, notes }) => {
+        const orderQty   = Number(r.OrderQty || 0);
+        const orderValue = Number(r.OrderValue || 0);
+        const quantity   = notes.plannedProductionQty != null ? Number(notes.plannedProductionQty) : orderQty;
+        const value       = orderQty > 0 ? quantity * (orderValue / orderQty) : 0;
+
+        return {
+          time:         notes.lastDayTime || '',
+          sortMinutes:  parseLastDayTimeMinutes(notes.lastDayTime),
+          customer:     r.CustomerName || r.Customer,
+          material:     r.Material,
+          materialText: r.MaterialText,
+          quantity,
+          value,
+        };
+      })
+      .sort((a, b) => a.sortMinutes - b.sortMinutes || a.time.localeCompare(b.time));
+
+    res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.send(buildProductionPlanHTML(plan));
+
+  } catch (err) {
+    console.error('[production-plan/print]', err.message);
+    res.status(500).send(`<pre>Failed to build production plan: ${esc(err.message)}</pre>`);
+  }
+});
 
 
 // ══════════════════════════════════════════════════════════════════════════
