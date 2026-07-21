@@ -521,6 +521,16 @@ router.get('/:deliveryId/pallets', async (req, res) => {
 });
 
 // ── Mark delivery as complete — rolls up pallet weights/volume/count ──
+//
+// After the rollup, pushes the same actual gross/net weight and pallet count
+// out to SAP via transaction ZDEL (LIKP-BTGEW/NTGEW/GEWEI/ANZPK), so the
+// delivery in SAP reflects what was really picked and packed rather than
+// whatever placeholder figures it had before. Net weight is gross minus
+// packaging, same subtraction the rollup itself just did. Best-effort: the
+// delivery is already correctly marked complete in the portal by the time
+// this runs, so a SAP-side failure here is surfaced as a warning rather than
+// failing the whole completion — the operator doesn't lose their finished
+// pallets over a SAP hiccup, but does get told to fix LIKP by hand.
 router.patch('/:deliveryId/complete', async (req, res) => {
     try {
         const pool = await getPool();
@@ -554,7 +564,34 @@ router.patch('/:deliveryId/complete', async (req, res) => {
                             WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                         )
                     WHERE deliveryID = @deliveryId`);
-        res.json({ success: true });
+
+        const rolledUp = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`SELECT palletCount, grossWeight, netWeight
+                    FROM Logistics.dbo.DeliveryMain
+                    WHERE deliveryID = @deliveryId`);
+        const totals = rolledUp.recordset[0] || {};
+
+        let sapWarning = null;
+        try {
+            const response = await axios.post(
+                `${sapConfig.url}/api/warehouse/set-delivery-weight`,
+                {
+                    deliveryNumber: String(req.params.deliveryId),
+                    grossWeight: Number(totals.grossWeight || 0),
+                    netWeight:   Number(totals.netWeight || 0),
+                    palletCount: Number(totals.palletCount || 0),
+                },
+                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+            );
+            if (!response.data?.success) {
+                sapWarning = response.data?.error?.message || 'SAP rejected the ZDEL weight update.';
+            }
+        } catch (sapErr) {
+            sapWarning = `Could not update SAP (ZDEL) with the actual weights/pallet count: ${sapErr.message}. Update LIKP manually.`;
+        }
+
+        res.json({ success: true, data: { ...totals, sapWarning } });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

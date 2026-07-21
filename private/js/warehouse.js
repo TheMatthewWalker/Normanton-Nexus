@@ -2280,6 +2280,9 @@ async function completeDelivery() {
     if (!json.success) throw new Error(json.error || 'Update failed');
     closePickModal();
     await runOpenPicksheets();
+    if (json.data?.sapWarning) {
+      wConfirm({ title: 'Delivery Complete — SAP Not Updated', message: json.data.sapWarning, confirmText: 'OK', variant: '' });
+    }
   } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
