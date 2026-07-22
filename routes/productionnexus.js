@@ -49,6 +49,10 @@ async function sapPost(path, body, timeout = 30000) {
   return response.data;
 }
 
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 const router = express.Router();
 
 // ── Process configuration ─────────────────────────────────────────────────────
@@ -2392,7 +2396,7 @@ router.post('/drumming/entry', async (req, res) => {
 async function submitDrumming(req, res, entryType) {
   const {
     material, shiftID,
-    customerNumber, orderNumber,
+    customerNumber, orderNumber, orderItem,
     packagingID, weightKG,
     parentBatches = [],
     coilLengths = [],
@@ -2521,11 +2525,37 @@ async function submitDrumming(req, res, entryType) {
       });
     } catch (_) {}
 
+    // Locally patch the AgreementSnapshot row's dock-stock figure so the
+    // Required quantity operators see on Order Lookup / the Production
+    // Schedule report reflects this drum immediately, rather than waiting
+    // for the next 30-min sync. Targeted UPDATE, not a separate overlay
+    // table — self-healing regardless of outcome, since the next sync
+    // overwrites this row with fresh SAP truth either way.
+    let stockSyncWarning;
+    if (entryType === 'customer' && orderNumber && orderItem) {
+      try {
+        const kPool = await sql.connect(sqlConfig);
+        await kPool.request()
+          .input('ref',  sql.NVarChar(10),  orderNumber)
+          .input('item', sql.NVarChar(6),   orderItem)
+          .input('qty',  sql.Decimal(15,3), totalLength)
+          .query(`
+            UPDATE dbo.AgreementSnapshot
+            SET DockStockAllocated = ISNULL(DockStockAllocated,0) + @qty
+            WHERE ReferenceDocument = @ref AND Item = @item`);
+      } catch (err) {
+        console.error('[drumming] local AgreementSnapshot stock patch failed', err.message);
+        stockSyncWarning = 'Drum posted successfully, but the live order-schedule figure could not be refreshed immediately (it will catch up on the next sync).';
+      }
+    }
+
+    const sapWarning = messageNumber === '190' ? 'SAP 190: posted but no components consumed — flagged for data review.' : null;
+
     return res.status(201).json({
       success: true,
       data: {
         drummingID, materialDocument: sapMatDoc, status: 'COMPLETE',
-        ...(messageNumber === '190' ? { warning: 'SAP 190: posted but no components consumed — flagged for data review.' } : {}),
+        ...((sapWarning || stockSyncWarning) ? { warning: [sapWarning, stockSyncWarning].filter(Boolean).join(' ') } : {}),
       },
     });
 
@@ -2607,6 +2637,225 @@ router.get('/drumming/:drummingId/reversal-status', async (req, res) => {
     if (!r.recordset.length) return res.status(404).json({ success: false, error: 'Drumming record not found.' });
     res.json({ success: true, data: { isReversed: !!r.recordset[0].IsReversed } });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── Drumming Ticket / Order Lookup ────────────────────────────────────────
+// Searches dbo.AgreementSnapshot — a separate database (kongsberg, via
+// sqlConfig) from the prod.* schema the rest of this file uses (Production
+// database, via getProductionPool()) — see config.js's comment on
+// getProductionPool for why these are two pools. Unlike the Production
+// Schedule report (routes/productionschedulesql.js), this is PTFE-only-free
+// and unwindowed: every open value stream, every due date, since an
+// operator drumming up an order needs to find it regardless of which
+// report bucket it'd otherwise fall into.
+// ══════════════════════════════════════════════════════════════════════════
+
+const AGREEMENT_LOOKUP_COLUMNS = `
+        Customer, CustomerName, ReferenceDocument, Item, Material, MaterialText,
+        CustomerMaterial, ValueStream,
+        CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
+        OrderQty, Uom,
+        DockStockAllocated   AS StockQty,
+        (OrderQty - DockStockAllocated) AS RequiredQty`;
+
+router.get('/order-lookup', async (req, res) => {
+  try {
+    const material = String(req.query.material || '').trim();
+    const customer = String(req.query.customer || '').trim();
+    if (!material && !customer)
+      return res.status(400).json({ success: false, error: 'Enter a part number or customer number to search.' });
+
+    const pool = await sql.connect(sqlConfig);
+    const r = pool.request();
+    const conditions = [];
+    if (material) { r.input('mat', sql.NVarChar(40), `%${material}%`); conditions.push('Material LIKE @mat'); }
+    if (customer) {
+      r.input('cust',     sql.NVarChar(40), `%${customer}%`);
+      r.input('custName', sql.NVarChar(40), `%${customer}%`);
+      conditions.push('(Customer LIKE @cust OR CustomerName LIKE @custName)');
+    }
+
+    const result = await r.query(`
+      SELECT ${AGREEMENT_LOOKUP_COLUMNS}
+      FROM dbo.AgreementSnapshot
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY RequestDate, CustomerName, ReferenceDocument, Item`);
+
+    res.json({ success: true, data: result.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// Every open item on a specific order — used by the reworked Make-to-Order
+// wizard: operator enters an order number first, picks which item they're
+// drumming, and material/customer auto-fill from the selected row.
+router.get('/order-lookup/by-order/:orderNumber', async (req, res) => {
+  try {
+    const pool = await sql.connect(sqlConfig);
+    const result = await pool.request()
+      .input('ref', sql.NVarChar(10), req.params.orderNumber.trim())
+      .query(`
+        SELECT ${AGREEMENT_LOOKUP_COLUMNS}
+        FROM dbo.AgreementSnapshot
+        WHERE ReferenceDocument = @ref
+        ORDER BY Item`);
+
+    if (!result.recordset.length)
+      return res.status(404).json({ success: false, error: `No open items found on order ${req.params.orderNumber}.` });
+
+    res.json({ success: true, data: result.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── Drumming Ticket (printable) ───────────────────────────────────────────
+// Combines the AgreementSnapshot line, a live SAP RFC_READ_TEXT lookup for
+// the order's special-instructions text (via the new SapServer endpoint —
+// deliberately NOT cached, per the user's "process critical" instruction),
+// and the standing dbo.CustomerStandardInstructions text for the customer.
+// Served as a full HTML page (same pattern as buildProductionPlanHTML in
+// routes/performance.js) and opened client-side with window.open(...,
+// '_blank'), which auto-triggers window.print() — prints to the operator's
+// OS-default printer via the browser's native dialog, NOT the network-
+// printer TCP flow labelPrint()/tcpPrint() use elsewhere in this app.
+
+async function loadDrummingTicketData(referenceDocument, item) {
+  const pool = await sql.connect(sqlConfig);
+  const lineRes = await pool.request()
+    .input('ref', sql.NVarChar(10), referenceDocument)
+    .input('item', sql.NVarChar(6), item)
+    .query(`
+      SELECT ${AGREEMENT_LOOKUP_COLUMNS}
+      FROM dbo.AgreementSnapshot
+      WHERE ReferenceDocument = @ref AND Item = @item`);
+
+  const line = lineRes.recordset[0];
+  if (!line) return { line: null };
+
+  const custRes = await pool.request()
+    .input('cust', sql.NVarChar(10), line.Customer)
+    .query(`SELECT Instructions FROM dbo.CustomerStandardInstructions WHERE Customer = @cust`);
+  const customerStandardInstructions = custRes.recordset[0]?.Instructions || '';
+
+  let sapInstructions = '';
+  try {
+    const sapRes = await sapGet(`/api/production/order-text/${encodeURIComponent(referenceDocument)}/${encodeURIComponent(item)}`);
+    sapInstructions = sapRes?.success !== false ? (sapRes?.data || '') : '';
+  } catch (err) {
+    sapInstructions = `[Could not reach SAP for special instructions: ${err.message}]`;
+  }
+
+  return { line, customerStandardInstructions, sapInstructions };
+}
+
+function buildDrummingTicketHTML({ line, customerStandardInstructions, sapInstructions }) {
+  const generatedAt = new Date().toLocaleString('en-GB', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+  const orderRef = `${line.ReferenceDocument}-${line.Item}`;
+
+  // Hand-fill coil checklist — 35 numbered slots across 3 columns (No / Coil / ID OK),
+  // matching the Excel Ticket tab's operator grid.
+  const perCol = Math.ceil(35 / 3);
+  const coilCol = (start, end) => `
+    <table class="coil-grid">
+      <thead><tr><th>No</th><th>Coil</th><th>ID OK</th></tr></thead>
+      <tbody>
+        ${Array.from({ length: end - start + 1 }, (_, i) => `
+          <tr><td class="num">${start + i}</td><td></td><td></td></tr>`).join('')}
+      </tbody>
+    </table>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Drumming Ticket — ${esc(orderRef)}</title>
+<style>
+  @page { size: A4 portrait; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; color: #0F172A; margin: 0; font-size: 12px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .subtitle { font-size: 11px; color: #64748B; margin: 0 0 16px; }
+  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid #CBD5E1; margin-bottom: 14px; }
+  .info-cell { border: 1px solid #CBD5E1; padding: 6px 10px; }
+  .info-label { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: #64748B; font-weight: 700; }
+  .info-value { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .info-value.blank { border-bottom: 1px solid #94A3B8; min-height: 16px; }
+  .section-title { background: #1F3864; color: #fff; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 5px 10px; margin: 14px 0 0; }
+  .section-body { border: 1px solid #CBD5E1; border-top: none; padding: 8px 10px; white-space: pre-wrap; min-height: 20px; }
+  .section-body.empty { color: #94A3B8; font-style: italic; }
+  .coils-wrap { display: flex; gap: 10px; margin-top: 14px; }
+  table.coil-grid { border-collapse: collapse; font-size: 10px; flex: 1; }
+  table.coil-grid th, table.coil-grid td { border: 1px solid #CBD5E1; padding: 2px 6px; text-align: left; }
+  table.coil-grid th { background: #F1F5F9; font-size: 9px; text-transform: uppercase; }
+  table.coil-grid td.num { text-align: center; color: #64748B; width: 20px; }
+  .signoff-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+  .signoff-cell { border-bottom: 1px solid #94A3B8; padding: 12px 4px 4px; }
+  .signoff-label { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: #64748B; }
+  @media print { .no-print { display: none; } }
+  .no-print { margin-top: 16px; font-size: 11px; color: #64748B; }
+</style>
+</head>
+<body>
+  <h1>Drumming Ticket</h1>
+  <p class="subtitle">Order ${esc(orderRef)} &middot; Generated ${esc(generatedAt)}</p>
+
+  <div class="info-grid">
+    <div class="info-cell"><div class="info-label">Customer</div><div class="info-value">${esc(line.Customer)} — ${esc(line.CustomerName || '')}</div></div>
+    <div class="info-cell"><div class="info-label">Customer Material</div><div class="info-value">${esc(line.CustomerMaterial || '—')}</div></div>
+    <div class="info-cell"><div class="info-label">Material</div><div class="info-value">${esc(line.Material)} — ${esc(line.MaterialText || '')}</div></div>
+    <div class="info-cell"><div class="info-label">Required Length</div><div class="info-value">${Number(line.RequiredQty || 0).toLocaleString('en-GB', { maximumFractionDigits: 3 })} ${esc(line.Uom || '')}</div></div>
+    <div class="info-cell"><div class="info-label">Packaging</div><div class="info-value blank">&nbsp;</div></div>
+    <div class="info-cell"><div class="info-label">Packaging Barcode</div><div class="info-value blank">&nbsp;</div></div>
+    <div class="info-cell"><div class="info-label">Batch Traceability Number</div><div class="info-value blank">&nbsp;</div></div>
+    <div class="info-cell"><div class="info-label">Drum No</div><div class="info-value blank">&nbsp;</div></div>
+  </div>
+
+  <div class="section-title">Special Instructions</div>
+  <div class="section-body">Order Number: ${esc(orderRef)}</div>
+  <div class="section-title">Customer Requirement (SAP)</div>
+  <div class="section-body ${sapInstructions ? '' : 'empty'}">${sapInstructions ? esc(sapInstructions) : 'No special instructions held against this order in SAP.'}</div>
+  <div class="section-title">Customer Standard Instructions</div>
+  <div class="section-body ${customerStandardInstructions ? '' : 'empty'}">${customerStandardInstructions ? esc(customerStandardInstructions) : 'No standard instructions held for this customer.'}</div>
+
+  <div class="section-title">Operator Coil Checklist</div>
+  <div class="section-body" style="padding-top:10px">
+    <div class="coils-wrap">
+      ${coilCol(1, perCol)}
+      ${coilCol(perCol + 1, perCol * 2)}
+      ${coilCol(perCol * 2 + 1, 35)}
+    </div>
+    <div class="signoff-grid">
+      <div class="signoff-cell"><div class="signoff-label">Stripped By</div></div>
+      <div class="signoff-cell"><div class="signoff-label">Swaged By</div></div>
+      <div class="signoff-cell"><div class="signoff-label">No of Joints</div></div>
+      <div class="signoff-cell"><div class="signoff-label">Checked By</div></div>
+      <div class="signoff-cell"><div class="signoff-label">Date</div></div>
+      <div class="signoff-cell"><div class="signoff-label">Shift</div></div>
+    </div>
+  </div>
+
+  <p class="no-print">This window should print automatically. If it doesn't, use your browser's Print command (Ctrl/Cmd+P).</p>
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 300));</script>
+</body>
+</html>`;
+}
+
+router.get('/drumming/ticket/:referenceDocument/:item/print', async (req, res) => {
+  try {
+    const { line, customerStandardInstructions, sapInstructions } =
+      await loadDrummingTicketData(req.params.referenceDocument.trim(), req.params.item.trim());
+
+    if (!line)
+      return res.status(404).send(`<pre>No open order line found for ${esc(req.params.referenceDocument)} / ${esc(req.params.item)}.</pre>`);
+
+    res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.send(buildDrummingTicketHTML({ line, customerStandardInstructions, sapInstructions }));
+  } catch (err) {
+    console.error('[drumming/ticket/print]', err.message);
+    res.status(500).send(`<pre>Failed to build drumming ticket: ${esc(err.message)}</pre>`);
+  }
 });
 
 

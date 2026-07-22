@@ -3934,7 +3934,10 @@ async function runDrummingEntry() {
     type: null,
     phase: 0,
     customerNumber: '',
+    customerName: '',
     orderNumber: '',
+    orderItem: '',
+    materialText: '',
     material: '',
     operatorName: sessionRes.username || '',
     shiftID:   shift.id,
@@ -3956,9 +3959,9 @@ function renderDrummingWizard(state, reasons, packagingOptions) {
 
   if (state.phase === 0) {
     body.innerHTML = `
-      <div style="padding:20px;max-width:600px">
+      <div style="padding:20px;max-width:900px">
         <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Select the production type for this drumming entry.</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
           <button class="dw-type-btn" data-type="stock"
             style="padding:24px 16px;border:2px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;transition:border-color 0.15s">
             <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Make-to-Stock</div>
@@ -3969,6 +3972,11 @@ function renderDrummingWizard(state, reasons, packagingOptions) {
             <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Make-to-Order</div>
             <div style="font-size:12px;color:var(--text-muted)">Production against a specific customer order</div>
           </button>
+          <button class="dw-type-btn" data-type="lookup"
+            style="padding:24px 16px;border:2px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;transition:border-color 0.15s">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Order Lookup</div>
+            <div style="font-size:12px;color:var(--text-muted)">Find an open order, check stock & required, print a Drumming Ticket</div>
+          </button>
         </div>
       </div>`;
 
@@ -3976,6 +3984,10 @@ function renderDrummingWizard(state, reasons, packagingOptions) {
       btn.addEventListener('mouseenter', () => { btn.style.borderColor = 'var(--accent)'; });
       btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'var(--border)'; });
       btn.addEventListener('click', () => {
+        if (btn.dataset.type === 'lookup') {
+          renderOrderLookupScreen(state, reasons, packagingOptions);
+          return;
+        }
         state.type  = btn.dataset.type;
         state.phase = 1;
         renderDrummingWizard(state, reasons, packagingOptions);
@@ -4022,18 +4034,88 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
   const step = dwStepName(state);
 
   if (step === 'customer') {
+    // Order-number-driven: enter the order, pick which item on it you're
+    // drumming, and Material/Customer auto-fill from there — replaces the
+    // old free-text Customer Number + optional Order Number entry so an
+    // operator can no longer drum against a mistyped/mismatched material.
+    if (state.orderNumber && state.orderItem) {
+      body.innerHTML = `
+        <div class="bm-section" style="margin-bottom:0">
+          <div class="bm-section-title">Order Selected</div>
+          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;margin-bottom:10px">
+            <div class="pn-batch-mono">Order: ${esc(state.orderNumber)} / Item ${esc(state.orderItem)}</div>
+            <div class="pn-batch-mono">Customer: ${esc(state.customerNumber)} — ${esc(state.customerName || '')}</div>
+            <div class="pn-batch-mono">Material: ${esc(state.material)} — ${esc(state.materialText || '')}</div>
+          </div>
+          <button class="btn-secondary" id="dw-order-change">Change Order</button>
+        </div>`;
+      document.getElementById('dw-order-change').addEventListener('click', () => {
+        state.orderNumber = ''; state.orderItem = ''; state.customerNumber = ''; state.customerName = '';
+        state.material = ''; state.materialText = '';
+        renderDrummingPhaseBody(state, reasons, packagingOptions);
+      });
+      return;
+    }
+
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
-        <div class="bm-section-title">Customer Information</div>
-        <div class="tf-field" style="margin-bottom:12px">
-          <label class="tf-label">Customer Number <span style="color:var(--error)">*</span></label>
-          <input class="tf-input" id="dw-cust-num" value="${esc(state.customerNumber)}" placeholder="e.g. 10001234">
+        <div class="bm-section-title">Order Number</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Enter the SAP order number you're drumming up — the item, material and customer will be confirmed from it.</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <input class="tf-input" id="dw-order-num" value="${esc(state.orderNumber)}" placeholder="e.g. 0012345678" style="flex:1">
+          <button class="btn-secondary" id="dw-order-lookup">Look Up</button>
         </div>
-        <div class="tf-field">
-          <label class="tf-label">Order Number <span style="font-weight:400;color:var(--text-muted)">(optional)</span></label>
-          <input class="tf-input" id="dw-order-num" value="${esc(state.orderNumber)}" placeholder="e.g. ORD-0012345">
-        </div>
+        <div id="dw-order-items"></div>
+        <div id="dw-order-msg" style="font-size:12px;color:var(--error)"></div>
       </div>`;
+
+    document.getElementById('dw-order-lookup').addEventListener('click', async () => {
+      const orderNum = document.getElementById('dw-order-num')?.value.trim();
+      const msgEl    = document.getElementById('dw-order-msg');
+      const itemsEl  = document.getElementById('dw-order-items');
+      if (msgEl) msgEl.textContent = '';
+      if (itemsEl) itemsEl.innerHTML = '';
+      if (!orderNum) { if (msgEl) msgEl.textContent = 'Enter an order number.'; return; }
+
+      try {
+        const json = await api(`/order-lookup/by-order/${encodeURIComponent(orderNum)}`);
+        const items = json.data || [];
+        if (!items.length) { if (msgEl) msgEl.textContent = 'No open items found on that order.'; return; }
+
+        itemsEl.innerHTML = `
+          <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px">
+            <thead><tr style="text-align:left;color:var(--text-muted);font-size:11px">
+              <th style="padding:4px 6px">Item</th><th style="padding:4px 6px">Material</th>
+              <th style="padding:4px 6px">Customer</th><th style="padding:4px 6px;text-align:right">Required</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${items.map((it, i) => `
+                <tr style="border-top:1px solid var(--border)">
+                  <td style="padding:6px">${esc(it.Item)}</td>
+                  <td style="padding:6px">${esc(it.Material)}${it.MaterialText ? ' — '+esc(it.MaterialText) : ''}</td>
+                  <td style="padding:6px">${esc(it.Customer)} — ${esc(it.CustomerName || '')}</td>
+                  <td style="padding:6px;text-align:right">${Number(it.RequiredQty||0).toLocaleString('en-GB',{maximumFractionDigits:3})} ${esc(it.Uom||'')}</td>
+                  <td style="padding:6px"><button class="btn-secondary dw-order-item-pick" data-idx="${i}">Select</button></td>
+                </tr>`).join('')}
+            </tbody>
+          </table>`;
+
+        document.querySelectorAll('.dw-order-item-pick').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const it = items[Number(btn.dataset.idx)];
+            state.orderNumber    = orderNum;
+            state.orderItem      = it.Item;
+            state.customerNumber = it.Customer;
+            state.customerName   = it.CustomerName || '';
+            state.material       = it.Material;
+            state.materialText   = it.MaterialText || '';
+            renderDrummingPhaseBody(state, reasons, packagingOptions);
+          });
+        });
+      } catch (err) {
+        if (msgEl) msgEl.textContent = err.message;
+      }
+    });
 
   } else if (step === 'details') {
     body.innerHTML = `
@@ -4041,7 +4123,9 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
         <div class="bm-section-title">Batch Details</div>
         <div class="tf-field" style="margin-bottom:12px">
           <label class="tf-label">Material Number <span style="color:var(--error)">*</span></label>
-          <input class="tf-input" id="dw-material" value="${esc(state.material)}" placeholder="e.g. TSHV3-4B01">
+          ${state.type === 'customer'
+            ? `<div class="tf-input" style="background:var(--surface2);color:var(--text-muted);cursor:default;user-select:none">${esc(state.material)}${state.materialText ? ' — '+esc(state.materialText) : ''}</div>`
+            : `<input class="tf-input" id="dw-material" value="${esc(state.material)}" placeholder="e.g. TSHV3-4B01">`}
         </div>
         <div class="tf-row" style="margin-bottom:12px">
           <div class="tf-field">
@@ -4216,7 +4300,7 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
   } else if (step === 'review') {
     const total = state.coilLengths.reduce((s, l) => s + Number(l), 0);
     const typeLine = state.type === 'customer'
-      ? `<div class="pn-batch-mono">Customer: ${esc(state.customerNumber)}${state.orderNumber ? ' / Order: '+esc(state.orderNumber) : ''}</div>`
+      ? `<div class="pn-batch-mono">Customer: ${esc(state.customerNumber)} — ${esc(state.customerName || '')}${state.orderNumber ? ' / Order: '+esc(state.orderNumber)+(state.orderItem ? ' / Item: '+esc(state.orderItem) : '') : ''}</div>`
       : `<div class="pn-batch-mono">Type: Make-to-Stock</div>`;
 
     body.innerHTML = `
@@ -4247,13 +4331,13 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
   if (msg) msg.textContent = '';
 
   if (step === 'customer') {
-    const custNum = document.getElementById('dw-cust-num')?.value.trim();
-    if (!custNum) { if (msg) msg.textContent = 'Customer number is required.'; return; }
-    state.customerNumber = custNum;
-    state.orderNumber    = document.getElementById('dw-order-num')?.value.trim() || '';
+    if (!state.orderNumber || !state.orderItem || !state.customerNumber || !state.material) {
+      if (msg) msg.textContent = 'Look up the order and select an item to continue.';
+      return;
+    }
 
   } else if (step === 'details') {
-    const mat = document.getElementById('dw-material')?.value.trim();
+    const mat = state.type === 'customer' ? state.material : document.getElementById('dw-material')?.value.trim();
     const pkg = document.getElementById('dw-pkg')?.value;
     const wt  = Number(document.getElementById('dw-weight')?.value);
     if (!mat) { if (msg) msg.textContent = 'Material number is required.'; return; }
@@ -4302,6 +4386,7 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
           shiftID:        state.shiftID,
           customerNumber: state.customerNumber || undefined,
           orderNumber:    state.orderNumber    || undefined,
+          orderItem:      state.orderItem      || undefined,
           packagingID:    state.packagingID,
           weightKG:       state.weightKG,
           parentBatches:  state.parentBatches,
@@ -4335,6 +4420,119 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
 
   state.phase++;
   renderDrummingWizard(state, reasons, packagingOptions);
+}
+
+// ── ORDER LOOKUP / DRUMMING TICKET ────────────────────────────────────────────
+// Search by part number or customer number across ALL open orders (no
+// value-stream/date restriction, unlike the Production Schedule report).
+// From a result row an operator can print a Drumming Ticket (SAP special
+// instructions + Customer Standard Instructions, opened via window.open so
+// it prints to their OS-default printer) or jump straight into the
+// Make-to-Order wizard pre-filled with that order/item ("Start Production").
+
+function renderOrderLookupScreen(state, reasons, packagingOptions) {
+  const body = document.getElementById('result-body');
+  body.innerHTML = `
+    <div style="padding:20px;max-width:900px">
+      <button class="btn-secondary" id="ol-back" style="margin-bottom:14px">&larr; Back</button>
+      <div class="bm-section" style="margin-bottom:0">
+        <div class="bm-section-title">Order Lookup</div>
+        <div style="display:flex;gap:8px;margin-bottom:14px">
+          <input class="tf-input" id="ol-material" placeholder="Part number (or part of it)" style="flex:1">
+          <input class="tf-input" id="ol-customer" placeholder="Customer number (or part of it)" style="flex:1">
+          <button class="btn-submit" id="ol-search">Search</button>
+        </div>
+        <div id="ol-results"></div>
+        <div id="ol-msg" style="font-size:12px;color:var(--error)"></div>
+      </div>
+    </div>`;
+
+  document.getElementById('ol-back').addEventListener('click', () => {
+    state.phase = 0; state.type = null;
+    renderDrummingWizard(state, reasons, packagingOptions);
+  });
+
+  async function runSearch() {
+    const material = document.getElementById('ol-material')?.value.trim();
+    const customer = document.getElementById('ol-customer')?.value.trim();
+    const msgEl     = document.getElementById('ol-msg');
+    const resultsEl = document.getElementById('ol-results');
+    if (msgEl) msgEl.textContent = '';
+    resultsEl.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Searching…</div>';
+
+    if (!material && !customer) {
+      resultsEl.innerHTML = '';
+      if (msgEl) msgEl.textContent = 'Enter a part number or customer number.';
+      return;
+    }
+
+    try {
+      const qs = new URLSearchParams();
+      if (material) qs.set('material', material);
+      if (customer) qs.set('customer', customer);
+      const json = await api(`/order-lookup?${qs.toString()}`);
+      const rows = json.data || [];
+
+      if (!rows.length) {
+        resultsEl.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:12px 0">No open orders found.</div>';
+        return;
+      }
+
+      resultsEl.innerHTML = `
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="text-align:left;color:var(--text-muted);font-size:11px">
+            <th style="padding:6px">Order / Item</th><th style="padding:6px">Customer</th>
+            <th style="padding:6px">Material</th><th style="padding:6px;text-align:right">Ordered</th>
+            <th style="padding:6px;text-align:right">Stock</th><th style="padding:6px;text-align:right">Required</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${rows.map((r, i) => `
+              <tr style="border-top:1px solid var(--border)">
+                <td style="padding:6px" class="pn-batch-mono">${esc(r.ReferenceDocument)} / ${esc(r.Item)}</td>
+                <td style="padding:6px">${esc(r.Customer)} — ${esc(r.CustomerName || '')}</td>
+                <td style="padding:6px">${esc(r.Material)}${r.MaterialText ? ' — '+esc(r.MaterialText) : ''}</td>
+                <td style="padding:6px;text-align:right">${Number(r.OrderQty||0).toLocaleString('en-GB',{maximumFractionDigits:3})} ${esc(r.Uom||'')}</td>
+                <td style="padding:6px;text-align:right">${Number(r.StockQty||0).toLocaleString('en-GB',{maximumFractionDigits:3})}</td>
+                <td style="padding:6px;text-align:right;font-weight:700;color:${Number(r.RequiredQty||0) <= 0 ? 'var(--success,#059669)' : 'var(--text)'}">${Number(r.RequiredQty||0).toLocaleString('en-GB',{maximumFractionDigits:3})}</td>
+                <td style="padding:6px;white-space:nowrap">
+                  <button class="btn-secondary ol-print" data-idx="${i}">Print Ticket</button>
+                  <button class="btn-submit ol-start" data-idx="${i}" style="margin-left:4px">Start Production</button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+
+      document.querySelectorAll('.ol-print').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const r = rows[Number(btn.dataset.idx)];
+          window.open(`/api/productionnexus/drumming/ticket/${encodeURIComponent(r.ReferenceDocument)}/${encodeURIComponent(r.Item)}/print`, '_blank');
+        });
+      });
+
+      document.querySelectorAll('.ol-start').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const r = rows[Number(btn.dataset.idx)];
+          state.type           = 'customer';
+          state.phase           = 2; // 'details' — order/item/material/customer already confirmed
+          state.orderNumber     = r.ReferenceDocument;
+          state.orderItem       = r.Item;
+          state.customerNumber  = r.Customer;
+          state.customerName    = r.CustomerName || '';
+          state.material        = r.Material;
+          state.materialText    = r.MaterialText || '';
+          renderDrummingWizard(state, reasons, packagingOptions);
+        });
+      });
+    } catch (err) {
+      resultsEl.innerHTML = '';
+      if (msgEl) msgEl.textContent = err.message;
+    }
+  }
+
+  document.getElementById('ol-search').addEventListener('click', runSearch);
+  ['ol-material', 'ol-customer'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+  });
 }
 
 // ── FAILED BACKFLUSH QUEUE ────────────────────────────────────────────────────
