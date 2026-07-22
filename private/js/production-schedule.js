@@ -175,11 +175,18 @@
 
     renderActions();
 
-    // Group by RequestDate (yyyy-mm-dd) — same shape as the source Excel's
-    // Date-blocked layout, just rendered as sub-header rows in one table.
+    // Group by date — same shape as the source Excel's Date-blocked layout,
+    // just rendered as sub-header rows in one table. Schedule rows carry a
+    // DisplayDate (RequestDate shifted back by the working-day offset —
+    // see getProductionSchedule's comment in productionschedulesql.js): the
+    // user only ever sees the date they need to have finished by, not the
+    // real SAP RequestDate two working days later. Arrears rows have no
+    // offset (there's nothing to lead-time-adjust for something already
+    // overdue) and fall back to RequestDate.
     const groups = new Map();
     currentRows.forEach(r => {
-      const key = r.RequestDate ? String(r.RequestDate).slice(0, 10) : 'unknown';
+      const groupDate = r.DisplayDate || r.RequestDate;
+      const key = groupDate ? String(groupDate).slice(0, 10) : 'unknown';
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(r);
     });

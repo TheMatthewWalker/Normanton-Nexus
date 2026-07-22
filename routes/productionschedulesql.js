@@ -51,6 +51,14 @@ function addWorkingDaysUtc(date, days) {
 // and it runs 5 working days from there (through the Friday after next).
 // PTFE only, per the same scoping as the existing Order Book reports
 // (getOrderBookBreakdown in performancesql.js).
+//
+// The offset is a lead-time adjustment, not just a query window: a line
+// whose real SAP RequestDate is Friday needs to be FINISHED by Wednesday to
+// actually make that Friday date, so the report must show it grouped under
+// Wednesday — not Friday — or it reads as due two days later than it really
+// is. DisplayDate (= RequestDate shifted back by the same offset) is what
+// the frontend groups/labels rows by; RequestDate itself is left on the row
+// too, but only DisplayDate should ever be shown to the user.
 // ══════════════════════════════════════════════════════════════════════════
 const SCHEDULE_OFFSET_WORKING_DAYS = 2;
 const SCHEDULE_WINDOW_WORKING_DAYS = 5;
@@ -80,7 +88,14 @@ export async function getProductionSchedule() {
       ORDER BY RequestDate, CustomerName, ReferenceDocument, Item
     `);
 
-  return { rows: recordset, windowStart, windowEnd };
+  const rows = recordset.map(r => ({
+    ...r,
+    DisplayDate: r.RequestDate
+      ? addWorkingDaysUtc(new Date(r.RequestDate), -SCHEDULE_OFFSET_WORKING_DAYS)
+      : null,
+  }));
+
+  return { rows, windowStart, windowEnd };
 }
 
 // Every open PTFE line whose RequestDate has already passed. "Still open" is
