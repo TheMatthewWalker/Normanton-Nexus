@@ -47,6 +47,19 @@ ALTER TABLE Logistics.dbo.ShipmentCost ADD poShipmentID INT NULL;
 
 CREATE INDEX IX_ShipmentCost_poShipmentID ON Logistics.dbo.ShipmentCost(poShipmentID);
 
+-- Recorded per cost line (not inherited live from the shipment) so it's
+-- fixed at the point the cost was raised. For inbound lines this is
+-- defaulted from PurchaseOrderShipment.ModeOfTransport at insert time (see
+-- insertInboundCostLine in routes/inboundcosts.js) but can differ from the
+-- shipment's current value if that's changed since. Per the user: this will
+-- drive the material group of the PO the freight cost eventually needs
+-- (Road/Sea/Air use different material groups) — that PO-creation step
+-- itself is NOT built yet (BAPI_ACC_DOCUMENT_POST, the only working SAP
+-- posting call currently wired up, posts a straight FI/AP document, not a
+-- PO/goods-receipt pair), so this column is captured now ready for that
+-- follow-up work.
+ALTER TABLE Logistics.dbo.ShipmentCost ADD modeOfTransport NVARCHAR(20) NULL;
+
 -- ── Runs against the kongsberg database ─────────────────────────────────────
 
 -- Haulier moves from free text to a Logistics.dbo.Forwarders-backed

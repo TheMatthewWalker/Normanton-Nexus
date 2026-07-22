@@ -11,8 +11,11 @@ const sapAgent = fs.existsSync(certPath)
     ? new https.Agent({ ca: fs.readFileSync(certPath), rejectUnauthorized: true })
     : null;
 
-function makeSapToken() {
-    return jwt.sign({ userId: 0 }, sapServerSecret,
+// userId is threaded through so SapServer's per-user permission check
+// (CostingHelper.FnReadTables) is evaluated against whoever actually
+// clicked Post to SAP, not a fixed service account.
+function makeSapToken(userId) {
+    return jwt.sign({ userId: userId ?? 0 }, sapServerSecret,
         { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' });
 }
 
@@ -77,12 +80,14 @@ router.post('/', async (req, res) => {
     try {
         const {
             shipmentID, costType, costElement, costCenter,
-            expectedCost, actualCost, migoStatus, materialDocument
+            expectedCost, actualCost, migoStatus, materialDocument,
+            poShipmentID, modeOfTransport
         } = req.body;
 
         const pool = await getPool();
         const result = await pool.request()
-            .input('shipmentID', sql.BigInt, shipmentID)
+            .input('shipmentID', sql.BigInt, shipmentID ?? null)
+            .input('poShipmentID', sql.Int, poShipmentID ?? null)
             .input('costType', sql.NVarChar, costType)
             .input('costElement', sql.NVarChar, costElement)
             .input('costCenter', sql.NVarChar, costCenter)
@@ -90,12 +95,13 @@ router.post('/', async (req, res) => {
             .input('actualCost', sql.Decimal, actualCost)
             .input('migoStatus', sql.Bit, migoStatus ?? 0)
             .input('materialDocument', sql.NVarChar, materialDocument)
+            .input('modeOfTransport', sql.NVarChar(20), modeOfTransport || null)
             .query(`INSERT INTO Logistics.dbo.ShipmentCost
-                (shipmentID, costType, costElement, costCenter,
-                 expectedCost, actualCost, migoStatus, materialDocument)
+                (shipmentID, poShipmentID, costType, costElement, costCenter,
+                 expectedCost, actualCost, migoStatus, materialDocument, modeOfTransport)
                 VALUES
-                (@shipmentID, @costType, @costElement, @costCenter,
-                 @expectedCost, @actualCost, @migoStatus, @materialDocument);
+                (@shipmentID, @poShipmentID, @costType, @costElement, @costCenter,
+                 @expectedCost, @actualCost, @migoStatus, @materialDocument, @modeOfTransport);
                 SELECT SCOPE_IDENTITY() AS costID;`);
 
         const newId = result.recordset[0].costID;
@@ -197,13 +203,23 @@ router.get('/estimate/:shipmentId', async (req, res) => {
 });
 
 // ── Unprocessed costs (migoStatus = 0) ───────────────────────────────────────
+// Unified outbound + inbound — a single UNION ALL rather than two separate
+// tiles/endpoints, per the user: inbound cost lines (Logistics.dbo.
+// ShipmentCost.poShipmentID set, from routes/inboundcosts.js) belong in the
+// exact same log as outbound (shipmentID set), and post through the same
+// POST /post-migo below. `direction` distinguishes the two in the UI;
+// `shipmentRef` is a display-ready reference for both (outbound has no
+// text reference of its own, so it's the zero-padded shipmentID, matching
+// the frontend's existing formatting).
 router.get('/unprocessed', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
             .query(`SELECT
                 sc.costID,
+                'outbound' AS direction,
                 sm.shipmentID,
+                RIGHT('000000' + CONVERT(VARCHAR(12), sm.shipmentID), 6) AS shipmentRef,
                 sm.forwarderID,
                 sm.plannedCollection,
                 sm.actualCollection,
@@ -213,6 +229,7 @@ router.get('/unprocessed', async (req, res) => {
                 sc.expectedCost,
                 sc.actualCost,
                 sc.costType,
+                sc.modeOfTransport,
                 sm.destinationCountry,
                 sm.destinationPostCode,
                 sm.trackingNumber
@@ -221,8 +238,36 @@ router.get('/unprocessed', async (req, res) => {
             LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
             LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
-            WHERE ISNULL(sc.migoStatus, 0) = 0
-            ORDER BY sm.plannedCollection ASC, sm.shipmentID ASC`);
+            WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.shipmentID IS NOT NULL
+
+            UNION ALL
+
+            SELECT
+                sc.costID,
+                'inbound' AS direction,
+                NULL AS shipmentID,
+                ps.ShipmentReference AS shipmentRef,
+                ps.ForwarderID AS forwarderID,
+                ps.DispatchDate AS plannedCollection,
+                NULL AS actualCollection,
+                f.forwarderName,
+                cc.centerCode  AS costCenter,
+                ce.elementCode AS costElement,
+                sc.expectedCost,
+                sc.actualCost,
+                sc.costType,
+                sc.modeOfTransport,
+                NULL AS destinationCountry,
+                NULL AS destinationPostCode,
+                ps.TrackingNumber AS trackingNumber
+            FROM Logistics.dbo.ShipmentCost sc
+            INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+            LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = ps.ForwarderID
+            LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
+            LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
+            WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.poShipmentID IS NOT NULL
+
+            ORDER BY plannedCollection ASC, shipmentID ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -359,9 +404,20 @@ router.get('/analytics', async (req, res) => {
     }
 });
 
-// ── Post selected costs to SAP (MIGO) ────────────────────────────────────────
+// ── Post selected costs to SAP ───────────────────────────────────────────────
 // Body: { costIDs: [1, 2, 3, ...] }
-// Groups by shipmentID, sends to SapServer, marks successful lines migoStatus=1.
+// Unified outbound + inbound (see GET /unprocessed above) — one call to
+// SapServer's BAPI_ACC_DOCUMENT_POST per cost line via the real, working
+// /api/costing/freight-posting endpoint. NOT the old grouped-by-shipment
+// design this route used to have: that assumed a SapServer endpoint
+// (/api/logistics/post-freight) that could take several GL lines in one
+// call and post them as a single document — that endpoint never existed in
+// SapServer (confirmed via grep), so this route never actually worked.
+// freight-posting only accepts one GL line per call, so each cost line
+// becomes its own accounting document; results are still shaped as
+// [{shipmentID, success, materialDocument?, error?, costIDs:[costID]}] (one
+// entry per line, costIDs always length 1) to keep the existing frontend
+// unchanged — it only reads result.costIDs to find which rows to update.
 router.post('/post-migo', async (req, res) => {
     const { costIDs } = req.body;
     if (!Array.isArray(costIDs) || !costIDs.length)
@@ -370,78 +426,73 @@ router.post('/post-migo', async (req, res) => {
     try {
         const pool = await getPool();
 
-        // Build parameterised IN clause
         const req2 = pool.request();
         costIDs.forEach((id, i) => req2.input(`id${i}`, sql.BigInt, Number(id)));
         const inClause = costIDs.map((_, i) => `@id${i}`).join(',');
 
         const fetched = await req2.query(`
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost,
-                   sm.shipmentID, sm.forwarderID, sm.actualCollection, sm.trackingNumber,
-                   sm.destinationCountry, sm.destinationPostCode
+                   'outbound' AS direction, sm.shipmentID AS refID,
+                   RIGHT('000000' + CONVERT(VARCHAR(12), sm.shipmentID), 6) AS shipmentRef,
+                   sm.forwarderID
             FROM Logistics.dbo.ShipmentCost sc
             INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-            WHERE sc.costID IN (${inClause})
-              AND ISNULL(sc.migoStatus, 0) = 0`);
+            WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0
+
+            UNION ALL
+
+            SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost,
+                   'inbound' AS direction, ps.ShipmentId AS refID,
+                   ps.ShipmentReference AS shipmentRef,
+                   ps.ForwarderID AS forwarderID
+            FROM Logistics.dbo.ShipmentCost sc
+            INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+            WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0`);
 
         if (!fetched.recordset.length)
             return res.status(404).json({ success: false, error: 'No unprocessed records found for the given IDs.' });
 
-        // Group cost lines by shipmentID
-        const groups = {};
+        const docDate = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const token   = makeSapToken(req.session?.user?.userID);
+        const results = [];
+
         for (const r of fetched.recordset) {
-            const key = String(r.shipmentID);
-            if (!groups[key]) {
-                groups[key] = {
-                    shipmentID:           r.shipmentID,
-                    actualCollectionDate: r.actualCollection,
-                    forwarderID:          r.forwarderID,
-                    location:             `${(r.destinationCountry  || '').slice(0, 2).toUpperCase()}` +
-                                          `${(r.destinationPostCode || '').slice(0, 2).toUpperCase()}`,
-                    trackingNumber:       r.trackingNumber || null,
-                    costLines:            [],
-                    _costIDs:             [],
-                };
+            if (!r.forwarderID) {
+                results.push({ shipmentID: r.refID, success: false, error: 'No haulier/forwarder set on this shipment — vendor is required to post.', costIDs: [r.costID] });
+                continue;
             }
-            groups[key].costLines.push({
-                costCenter:   r.costCenter   || null,
-                costElement:  r.costElement  || null,
-                expectedCost: r.expectedCost != null ? Number(r.expectedCost) : null,
-            });
-            groups[key]._costIDs.push(r.costID);
-        }
-
-        const payload = Object.values(groups).map(({ _costIDs, ...g }) => g);
-
-        // Call SapServer
-        const sapResp = await axios.post(
-            `${sapConfig.url}/api/logistics/post-freight`,
-            { shipments: payload },
-            { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
-        );
-
-        const sapBody = sapResp.data;
-        if (!sapBody.success) throw new Error(sapBody.error ?? 'SapServer returned success=false');
-
-        const sapResults = Array.isArray(sapBody.data) ? sapBody.data : [];
-        const results    = [];
-
-        for (const sr of sapResults) {
-            const group = groups[String(sr.shipmentID)];
-            if (!group) continue;
-
-            if (sr.success && sr.materialDocument) {
-                for (const costID of group._costIDs) {
-                    await pool.request()
-                        .input('costID',           sql.BigInt,     costID)
-                        .input('materialDocument', sql.NVarChar(20), sr.materialDocument)
-                        .query(`UPDATE Logistics.dbo.ShipmentCost
-                                SET migoStatus = 1, materialDocument = @materialDocument
-                                WHERE costID = @costID`);
+            if (!r.costElement || !r.costCenter) {
+                results.push({ shipmentID: r.refID, success: false, error: 'Cost line is missing a GL element or cost centre.', costIDs: [r.costID] });
+                continue;
+            }
+            try {
+                const sapResp = await axios.post(
+                    `${sapConfig.url}/api/costing/freight-posting`,
+                    {
+                        docDate,
+                        vendor:       String(r.forwarderID),
+                        amount:       Number(r.expectedCost),
+                        currency:     'GBP',
+                        glAccount:    r.costElement,
+                        profitCenter: r.costCenter,
+                        shipment:     r.shipmentRef,
+                        information:  `${r.direction === 'inbound' ? 'Inbound' : 'Outbound'} freight — ${r.shipmentRef}`,
+                    },
+                    { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${token}` }, validateStatus: () => true }
+                );
+                const body = sapResp.data;
+                const accountingNumber = body?.data?.accountingNumber;
+                if (!body?.success || !accountingNumber) {
+                    results.push({ shipmentID: r.refID, success: false, error: body?.error?.message || 'Posting failed.', costIDs: [r.costID] });
+                    continue;
                 }
-                results.push({ shipmentID: sr.shipmentID, success: true,  materialDocument: sr.materialDocument, costIDs: group._costIDs });
-            } else {
-                results.push({ shipmentID: sr.shipmentID, success: false, error: sr.error || 'No material document returned', costIDs: group._costIDs });
+                await pool.request()
+                    .input('costID', sql.BigInt, r.costID)
+                    .input('materialDocument', sql.NVarChar(20), accountingNumber)
+                    .query(`UPDATE Logistics.dbo.ShipmentCost SET migoStatus = 1, materialDocument = @materialDocument WHERE costID = @costID`);
+                results.push({ shipmentID: r.refID, success: true, materialDocument: accountingNumber, costIDs: [r.costID] });
+            } catch (err) {
+                results.push({ shipmentID: r.refID, success: false, error: err.message, costIDs: [r.costID] });
             }
         }
 

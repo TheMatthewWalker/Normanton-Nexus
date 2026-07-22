@@ -3651,11 +3651,13 @@ async function runUnprocessedCosts() {
 
     const thead = `<tr>
       <th style="width:32px"><input type="checkbox" id="migo-check-all" title="Select all"></th>
+      <th>Dir.</th>
       <th>Shipment</th>
       <th>Type</th>
       <th>Planned</th>
       <th>Collected</th>
       <th>Haulier</th>
+      <th>Mode</th>
       <th>Cost Centre</th>
       <th>Cost Element</th>
       <th style="text-align:right">Expected</th>
@@ -3667,15 +3669,17 @@ async function runUnprocessedCosts() {
     const tbody = rows.map(r => `
       <tr data-cost-id="${r.costID}" class="migo-row">
         <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}"></td>
-        <td>${String(r.shipmentID).padStart(6,'0')}</td>
+        <td>${r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>'}</td>
+        <td>${esc(r.shipmentRef || (r.shipmentID != null ? String(r.shipmentID).padStart(6,'0') : '—'))}</td>
         <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
         <td>${fmt(r.plannedCollection)}</td>
         <td>${fmt(r.actualCollection)}</td>
         <td>${esc(r.forwarderName || '—')}</td>
+        <td>${esc(r.modeOfTransport || '—')}</td>
         <td class="pn-batch-mono">${esc(r.costCenter  || '—')}</td>
         <td class="pn-batch-mono">${esc(r.costElement || '—')}</td>
         <td style="text-align:right">${gbp(r.expectedCost)}</td>
-        <td class="pn-batch-mono">${location(r)}</td>
+        <td class="pn-batch-mono">${r.direction === 'inbound' ? '—' : location(r)}</td>
         <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
         <td class="migo-result-cell"></td>
       </tr>`).join('');
@@ -7201,7 +7205,7 @@ async function renderAssociatedCosts(shipmentId, shipment) {
         </div>
       </div>
       ${!shipment.ForwarderID ? '<div class="toolbar-hint" style="color:var(--error,#DC2626)">Select a haulier and save before posting costs to SAP — the haulier is used as the vendor.</div>' : ''}
-      ${unprocessed.length ? `<div style="margin-top:8px"><button type="button" class="btn-submit" id="isd-cost-post-btn">Post ${unprocessed.length} Unprocessed to SAP</button></div>` : ''}
+      ${unprocessed.length ? `<div class="toolbar-hint" style="margin-top:8px">${unprocessed.length} line${unprocessed.length === 1 ? '' : 's'} awaiting SAP posting — post from Admin &rarr; Unprocessed Costs, alongside outbound freight.</div>` : ''}
       <div id="isd-cost-result" style="margin-top:8px"></div>`;
 
     document.getElementById('isd-cost-add-btn').addEventListener('click', async () => {
@@ -7239,27 +7243,6 @@ async function renderAssociatedCosts(shipmentId, shipment) {
       });
     });
 
-    const postBtn = document.getElementById('isd-cost-post-btn');
-    if (postBtn) {
-      postBtn.addEventListener('click', async () => {
-        if (!confirm(`Post ${unprocessed.length} cost line(s) to SAP as accounting documents? This cannot be undone.`)) return;
-        const result = document.getElementById('isd-cost-result');
-        postBtn.disabled = true; postBtn.textContent = 'Posting…';
-        try {
-          const res2 = await fetch(`/api/inboundcosts/shipment/${shipmentId}/post-migo`, { method: 'POST' });
-          const json2 = await res2.json();
-          if (!json2.success) throw new Error(json2.error?.message || 'Failed to post to SAP');
-          const failed = (json2.data || []).filter(r => !r.success);
-          if (failed.length) {
-            result.innerHTML = `<div class="sap-error">${failed.length} of ${json2.data.length} line(s) failed: ${esc(failed.map(f => f.error).join('; '))}</div>`;
-          }
-          renderAssociatedCosts(shipmentId, shipment);
-        } catch (err) {
-          result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-          postBtn.disabled = false; postBtn.textContent = `Post ${unprocessed.length} Unprocessed to SAP`;
-        }
-      });
-    }
   } catch (err) {
     container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
