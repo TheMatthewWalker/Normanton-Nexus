@@ -6338,13 +6338,17 @@ const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
 // — forwarderName as the label). Used everywhere Haulier used to be free
 // text: Create Shipment, the Inbound Log detail form, and Manual Inbound
 // Shipment creation.
+//
+// Uses the existing loadApprovedForwarders()/dedupeForwardersByName() pair
+// (see above) rather than fetching /api/forwarders/approved directly — a
+// forwarder can have multiple rows sharing the same name, one per service/
+// rate category (e.g. Road vs Sea vs Air for the same haulier), and this
+// dropdown needs exactly one option per name, same as the booking modal.
 async function loadForwarderOptionsInto(selectId, selectedForwarderId) {
   const el = document.getElementById(selectId);
   if (!el) return;
   try {
-    const res = await fetch('/api/forwarders/approved');
-    const forwarders = await res.json();
-    if (!Array.isArray(forwarders)) throw new Error('bad response');
+    const forwarders = await loadApprovedForwarders();
     const sel = selectedForwarderId != null ? String(selectedForwarderId) : '';
     el.innerHTML = `<option value="">— Select haulier —</option>${forwarders.map(f =>
       `<option value="${esc(String(f.forwarderID))}" ${String(f.forwarderID) === sel ? 'selected' : ''}>${esc(f.forwarderName)}</option>`
