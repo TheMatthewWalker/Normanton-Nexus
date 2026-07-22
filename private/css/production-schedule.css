@@ -78,10 +78,12 @@
 .psched-mono { font-family: 'JetBrains Mono', monospace; color: var(--text-muted); font-size: 12px; }
 .psched-sub  { font-family: 'JetBrains Mono', monospace; color: var(--text-muted); font-size: 11px; }
 
-.psched-date-hdr td {
-  background: var(--surface2); font-weight: 700; font-size: 12px;
-  color: var(--text); padding: 10px 12px; border-bottom: 1px solid var(--border);
-}
+/* "In full" — enough stock already allocated to cover the whole order (see
+   rowHtml's inFull calc in production-schedule.js). Tinted rather than
+   solid so the row stays readable and doesn't fight the bucket header's
+   own colour dot. */
+.psched-row--full td { background: rgba(5,150,105,0.10); }
+.psched-row--full:hover td { background: rgba(5,150,105,0.16); }
 
 .psched-eta-input, .psched-comment-input {
   font-family: 'Manrope', sans-serif; font-size: 12px;

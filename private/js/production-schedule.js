@@ -165,6 +165,14 @@
     document.getElementById('psched-save-selected-btn').addEventListener('click', saveSelected);
   }
 
+  // Bucket UI — reuses the exact .ps-section/.ps-section-header/.ps-sections
+  // classes from logistics.css's Inbound Log ("Late/Today/Upcoming") pattern,
+  // already loaded on every page this component runs on (production-nexus.html
+  // and sales.html both link logistics.css for their base tile system). Using
+  // those classes as-is, rather than inventing new ones, is what makes this
+  // look identical wherever it's mounted — no custom bucket CSS to keep in
+  // sync. See ilBucketFor/IL_BUCKET_DEFS/renderInboundLog in
+  // private/js/logistics.js for the source pattern this mirrors.
   function renderTableView(container) {
     if (!currentRows.length) {
       container.innerHTML = '<div class="psched-empty" style="color:var(--accent)">✓ Nothing here.</div>';
@@ -175,14 +183,13 @@
 
     renderActions();
 
-    // Group by date — same shape as the source Excel's Date-blocked layout,
-    // just rendered as sub-header rows in one table. Schedule rows carry a
-    // DisplayDate (RequestDate shifted back by the working-day offset —
-    // see getProductionSchedule's comment in productionschedulesql.js): the
-    // user only ever sees the date they need to have finished by, not the
-    // real SAP RequestDate two working days later. Arrears rows have no
-    // offset (there's nothing to lead-time-adjust for something already
-    // overdue) and fall back to RequestDate.
+    // Group by date. Schedule rows carry a DisplayDate (RequestDate shifted
+    // back by the working-day offset — see getProductionSchedule's comment
+    // in productionschedulesql.js): the user only ever sees the date they
+    // need to have finished by, not the real SAP RequestDate two working
+    // days later. Arrears rows have no offset (there's nothing to
+    // lead-time-adjust for something already overdue) and fall back to
+    // RequestDate.
     const groups = new Map();
     currentRows.forEach(r => {
       const groupDate = r.DisplayDate || r.RequestDate;
@@ -193,27 +200,49 @@
     const sortedKeys = [...groups.keys()].sort();
 
     const showOverdue = currentView === 'arrears';
-    const colCount = (canEdit ? 1 : 0) + 12 + (showOverdue ? 1 : 0);
 
-    let bodyRows = '';
-    sortedKeys.forEach(key => {
-      bodyRows += `<tr class="psched-date-hdr"><td colspan="${colCount}">${esc(fmtDateHeader(key))}</td></tr>`;
-      groups.get(key).forEach(r => { bodyRows += rowHtml(r, showOverdue); });
-    });
+    const sectionsHtml = sortedKeys.map((key, idx) => {
+      const rows = groups.get(key);
+      // Arrears buckets are all inherently overdue — red dot, same semantic
+      // as Inbound Log's "Late" bucket. Schedule buckets: the soonest date
+      // gets the "today" green dot (most urgent), the rest "week" blue —
+      // same dot colours Inbound Log uses for its Today/Upcoming buckets.
+      const dot = showOverdue ? 'priority' : (idx === 0 ? 'today' : 'week');
 
-    container.innerHTML = `
-      <div style="overflow-x:auto">
-      <table class="psched-table">
-        <thead><tr>
-          ${canEdit ? '<th></th>' : ''}
-          <th>Customer</th><th>Agreement</th><th>Item</th><th>Material</th><th>Description</th>
-          <th style="text-align:right">Qty</th><th style="text-align:right">Stock</th><th style="text-align:right">Picked</th>
-          <th style="text-align:right">Unit Price</th><th style="text-align:right">Value</th>
-          ${showOverdue ? '<th>Overdue</th>' : ''}
-          <th>ETA</th><th>Comment</th>
-        </tr></thead>
-        <tbody>${bodyRows}</tbody>
-      </table></div>`;
+      return `
+        <div class="ps-section" data-group-key="${esc(key)}">
+          <div class="ps-section-header">
+            <span class="ps-section-dot ps-section-dot--${dot}"></span>
+            <span class="ps-section-title">${esc(fmtDateHeader(key))}</span>
+            <span class="ps-section-count">${rows.length}</span>
+            <span class="ps-chevron">v</span>
+          </div>
+          <div class="ps-section-body">
+            <div style="overflow-x:auto">
+              <table class="psched-table">
+                <thead><tr>
+                  ${canEdit ? '<th></th>' : ''}
+                  <th>Customer</th><th>Agreement</th><th>Item</th><th>Material</th><th>Description</th>
+                  <th style="text-align:right">Qty</th><th style="text-align:right">Stock</th><th style="text-align:right">Picked</th>
+                  <th style="text-align:right">Unit Price</th><th style="text-align:right">Value</th>
+                  ${showOverdue ? '<th>Overdue</th>' : ''}
+                  <th>ETA</th><th>Comment</th>
+                </tr></thead>
+                <tbody>${rows.map(r => rowHtml(r, showOverdue)).join('')}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+
+    container.innerHTML = `<div class="ps-sections">${sectionsHtml}</div>`;
+
+    // Same one-line toggle-on-click-anywhere-in-header pattern as
+    // logistics.js — no state persistence, every bucket opens fresh
+    // (defaultOpen) on each render, matching Inbound Log's behaviour.
+    container.querySelectorAll('.ps-section-header').forEach(h =>
+      h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed'))
+    );
 
     if (canEdit) {
       container.querySelectorAll('.psched-check').forEach(cb => cb.addEventListener('change', onCheckToggle));
@@ -225,7 +254,15 @@
     const etaVal = r.eta ? String(r.eta).slice(0, 10) : '';
     const overdue = showOverdue ? daysOverdue(r.RequestDate) : null;
 
-    return `<tr data-key="${esc(key)}">
+    // "In full" — enough stock already allocated to cover the whole order,
+    // nothing further needs producing. Mirrors the source Excel, where
+    // fully-stocked lines were manually marked "COMPLETED" in the Comment
+    // column — this makes that visible at a glance instead of requiring a
+    // comment.
+    const orderQty = Number(r.OrderQty) || 0;
+    const inFull = orderQty > 0 && Number(r.StockQty) >= orderQty;
+
+    return `<tr data-key="${esc(key)}" class="${inFull ? 'psched-row--full' : ''}">
       ${canEdit ? `<td><input type="checkbox" class="psched-check" data-key="${esc(key)}"></td>` : ''}
       <td>${esc(r.CustomerName || '—')}<div class="psched-sub">${esc(r.Customer || '')}</div></td>
       <td class="psched-mono">${esc(r.ReferenceDocument)}</td>
