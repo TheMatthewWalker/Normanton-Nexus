@@ -18,7 +18,7 @@ import bcrypt       from 'bcrypt';
 import sql          from 'mssql';
 import jwt          from 'jsonwebtoken';
 import rateLimit    from 'express-rate-limit';
-import { sqlConfig, sapServerSecret } from '../config.js';
+import { sqlConfig, sapServerSecret, idleTimeoutMsFor } from '../config.js';
 import { notify }    from '../lib/notify.js';
 
 const router = express.Router();
@@ -71,7 +71,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       .query(`
         SELECT
           u.UserID, u.Username, u.Email, u.PasswordHash,
-          u.Role, u.IsActive, u.IsLocked, u.FailedLogins
+          u.Role, u.IsActive, u.IsLocked, u.FailedLogins, u.ShortIdleTimeout
         FROM kongsberg.dbo.PortalUsers u
         WHERE u.Username = @username
       `);
@@ -158,7 +158,12 @@ router.post('/login', loginLimiter, async (req, res) => {
         role:        user.Role,
         departments,
         permissions,
+        shortIdleTimeout: !!user.ShortIdleTimeout,
       };
+      // Set immediately rather than waiting for server.js's cookie-maxAge
+      // middleware on the next request — covers the (unlikely but free to
+      // handle) case of the browser closing before another request fires.
+      req.session.cookie.maxAge = idleTimeoutMsFor(req.session.user);
 
       res.redirect('/private/landing.html');
     });
@@ -367,12 +372,19 @@ router.get('/session-check', (req, res) => {
   const user = req.session?.user;
   if (!user) return res.json({ loggedIn: false });
 
+  // expiresAt reflects the idle-timeout expiry as of the last time this
+  // session was touched/saved (rolling: true in server.js refreshes it on
+  // every request, including this one once the response finishes) — good
+  // enough for landing.js's live countdown, which re-polls periodically
+  // rather than trusting a single reading indefinitely.
   res.json({
-    loggedIn:    true,
-    username:    user.username,
-    role:        user.role,
-    departments: user.departments,
-    permissions: user.permissions || [],
+    loggedIn:          true,
+    username:          user.username,
+    role:              user.role,
+    departments:       user.departments,
+    permissions:       user.permissions || [],
+    expiresAt:         req.session.cookie.expires,
+    idleTimeoutMinutes: idleTimeoutMsFor(user) / 60000,
   });
 });
 

@@ -63,6 +63,7 @@ import adminRoutes             from './routes/useradmin.js';
 import deployRoutes            from './routes/deploy.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
 import { SqlSessionStore }     from './lib/sqlSessionStore.js';
+import { IDLE_TIMEOUT_MS, idleTimeoutMsFor } from './config.js';
 
 const httpsOptions = {
   key: fs.readFileSync("./certs/key.pem"),
@@ -111,12 +112,28 @@ app.use(session({
   saveUninitialized: false,
   rolling: true,                          // reset expiry on each request
   cookie: {
-    maxAge:   0.5 * 1000 * 60 * 60,            // 0.5 hour idle timeout
+    maxAge:   IDLE_TIMEOUT_MS,            // 30 min default — see config.js
     httpOnly: true,                       // JS cannot read cookie
     sameSite: 'strict',                   // CSRF protection
     secure: true,                      // uncomment when running HTTPS
   }
 }));
+
+// Per-user idle-timeout override — users with ShortIdleTimeout = 1 on
+// PortalUsers (toggled in User Administration) get a 5-minute idle timeout
+// instead of the 30-minute default. req.session.user.shortIdleTimeout is
+// set once at login (routes/auth.js); this just re-applies the right
+// maxAge to the cookie on every request so `rolling: true` refreshes it to
+// the correct duration each time, not always the default. Cheap: mutating
+// cookie.maxAge doesn't count as a session change for resave purposes
+// (express-session's dirty-check ignores the cookie), so this still only
+// costs a touch(), not a full set(), on the SQL session store.
+app.use((req, res, next) => {
+  if (req.session?.user) {
+    req.session.cookie.maxAge = idleTimeoutMsFor(req.session.user);
+  }
+  next();
+});
 
 app.set('trust proxy', 1);
 
@@ -190,6 +207,18 @@ cron.schedule('* * * * *', async () => {
   } catch (err) {
     console.error('[cron] deployment checker failed', err);
   }
+});
+
+// ── Login page → landing page if already signed in ───────────────────────────
+// GET / is normally served as a static file (public/index.html, the login
+// form) below. If the browser already has a valid session — e.g. they hit
+// back, bookmarked /, or opened a new tab while already logged in — skip
+// the form and send them straight to the hub, same as a fresh login would.
+app.get('/', (req, res, next) => {
+  if (req.session?.user) {
+    return res.redirect('/private/landing.html');
+  }
+  next();
 });
 
 // ── Auth routes (public — no requireLogin) ───────────────────────────────────

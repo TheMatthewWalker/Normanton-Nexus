@@ -27,10 +27,69 @@ const sendBtn = document.getElementById('gemini-send');
     loadLogisticsSparkline();
     checkSapAvailability();
     setInterval(checkSapAvailability, 60000);
+    armSessionTimer(session.expiresAt, session.idleTimeoutMinutes);
+    tickSessionTimer();
+    setInterval(tickSessionTimer, 1000);
   } catch {
     window.location.href = '/';
   }
 })();
+
+// ── Live session countdown ────────────────────────────────────────────────────
+// Shows time remaining before the idle timeout (server.js/config.js —
+// 30 min default, 5 min for users flagged ShortIdleTimeout in User
+// Administration) signs the user out. Purely client-side ticking between
+// syncs: sessionExpiresAt is set once from /session-check's server-computed
+// value, then nudged forward by idleTimeoutMs on every subsequent
+// same-origin fetch this page makes — mirroring what the server's own
+// `rolling: true` session already does (any request refreshes the idle
+// timer), so the display matches what will actually happen rather than
+// drifting from it or resetting the real timer just to redraw a number.
+let sessionExpiresAt = null;
+let idleTimeoutMs    = null;
+
+function armSessionTimer(expiresAt, idleTimeoutMinutes) {
+  if (!expiresAt || !idleTimeoutMinutes) return; // older/unexpected response shape — leave the pill at its default "--:--"
+  sessionExpiresAt = new Date(expiresAt).getTime();
+  idleTimeoutMs     = idleTimeoutMinutes * 60000;
+}
+
+(function watchFetchForSessionTimer() {
+  const wrapped = window.fetch.bind(window);
+  window.fetch = async function (...args) {
+    const res = await wrapped(...args);
+    if (sessionExpiresAt && idleTimeoutMs && res.ok) {
+      sessionExpiresAt = Date.now() + idleTimeoutMs;
+    }
+    return res;
+  };
+})();
+
+function tickSessionTimer() {
+  const textEl = document.getElementById('session-timer-text');
+  const dotEl  = document.getElementById('session-timer-dot');
+  if (!textEl || !sessionExpiresAt) return;
+
+  const remainingMs = sessionExpiresAt - Date.now();
+  if (remainingMs <= 0) {
+    textEl.textContent = '0:00';
+    window.location.href = '/?error=session_expired';
+    return;
+  }
+
+  const totalSec = Math.floor(remainingMs / 1000);
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  textEl.textContent = `${mins}:${String(secs).padStart(2, '0')}`;
+
+  if (dotEl) {
+    dotEl.className = 'hero-pill-dot ' + (
+      remainingMs < 60000  ? 'hero-pill-dot--error' :
+      remainingMs < 120000 ? 'hero-pill-dot--warn'  :
+                              'hero-pill-dot--ok'
+    );
+  }
+}
 
 async function checkSapAvailability() {
   const dot = document.getElementById('sap-dot');

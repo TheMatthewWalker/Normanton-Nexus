@@ -196,6 +196,7 @@
               <option value="PERM_DELETE">Permission deleted</option>
               <option value="USERNAME_CHANGE">Username changes</option>
               <option value="PROFILE_CHANGE">Profile changes</option>
+              <option value="IDLE_TIMEOUT_CHANGE">Idle timeout changes</option>
             </select>
             <button type="button" class="btn-secondary" onclick="loadAudit()">Refresh</button>
           </div>
@@ -490,6 +491,17 @@
               <span class="toggle-slider toggle-slider--danger"></span>
             </label>
             <span class="toggle-label" id="edit-locked-label">Locked</span>
+          </div>
+        </div>
+
+        <div class="modal-row">
+          <label class="modal-label">Session Idle Timeout</label>
+          <div class="toggle-row">
+            <label class="toggle">
+              <input type="checkbox" id="edit-short-timeout" aria-label="Short idle timeout">
+              <span class="toggle-slider"></span>
+            </label>
+            <span class="toggle-label" id="edit-short-timeout-label">Standard (30 min)</span>
           </div>
         </div>
 

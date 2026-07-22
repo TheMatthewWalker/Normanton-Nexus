@@ -222,6 +222,7 @@ async function openEditModal(userID) {
   document.getElementById('edit-username').textContent = user.Username;
   document.getElementById('edit-active').checked       = !!user.IsActive;
   document.getElementById('edit-locked').checked       = !!user.IsLocked;
+  document.getElementById('edit-short-timeout').checked = !!user.ShortIdleTimeout;
   document.getElementById('edit-notes').value          = user.Notes || '';
 
   // Build role dropdown filtered to what this actor can assign
@@ -231,11 +232,14 @@ async function openEditModal(userID) {
 
   updateToggleLabel('edit-active', 'edit-active-label', 'Active',  'Inactive');
   updateToggleLabel('edit-locked', 'edit-locked-label', 'Locked',  'Unlocked');
+  updateToggleLabel('edit-short-timeout', 'edit-short-timeout-label', 'Short (5 min)', 'Standard (30 min)');
 
   document.getElementById('edit-active').onchange = () =>
     updateToggleLabel('edit-active', 'edit-active-label', 'Active', 'Inactive');
   document.getElementById('edit-locked').onchange = () =>
     updateToggleLabel('edit-locked', 'edit-locked-label', 'Locked', 'Unlocked');
+  document.getElementById('edit-short-timeout').onchange = () =>
+    updateToggleLabel('edit-short-timeout', 'edit-short-timeout-label', 'Short (5 min)', 'Standard (30 min)');
 
   // Identity section — superadmin only
   const identitySection = document.getElementById('edit-identity-section');
@@ -315,10 +319,11 @@ async function saveUser() {
   const role        = document.getElementById('edit-role').value;
   const isActive    = document.getElementById('edit-active').checked ? 1 : 0;
   const isLocked    = document.getElementById('edit-locked').checked ? 1 : 0;
+  const shortIdleTimeout = document.getElementById('edit-short-timeout').checked ? 1 : 0;
   const notes       = document.getElementById('edit-notes').value.trim();
   const departments = getCheckedDepts('edit-depts');
 
-  const payload = { role, isActive, isLocked, notes, departments };
+  const payload = { role, isActive, isLocked, shortIdleTimeout, notes, departments };
 
   // Include identity fields for superadmins
   if (sessionRole === 'superadmin') {

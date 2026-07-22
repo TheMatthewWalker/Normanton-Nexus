@@ -85,7 +85,7 @@ router.get('/users', async (req, res) => {
       pool.request().query(`
         SELECT
           UserID, Username, FirstName, LastName, Email, Role,
-          IsActive, IsLocked, FailedLogins,
+          IsActive, IsLocked, FailedLogins, ShortIdleTimeout,
           CreatedAt, LastLogin, Notes
         FROM kongsberg.dbo.PortalUsers
         ORDER BY CreatedAt DESC
@@ -132,7 +132,7 @@ router.put('/users/:id', async (req, res) => {
   }
 
   const { role, isActive, isLocked, notes, departments,
-          username, firstName, lastName, email } = req.body;
+          username, firstName, lastName, email, shortIdleTimeout } = req.body;
 
   if (role && !VALID_ROLES.includes(role)) {
     return res.status(400).json({ success: false, error: 'Invalid role' });
@@ -174,7 +174,7 @@ router.put('/users/:id', async (req, res) => {
 
     const current = await pool.request()
       .input('userID', sql.Int, userID)
-      .query(`SELECT Username, FirstName, LastName, Email, Role, IsActive, IsLocked
+      .query(`SELECT Username, FirstName, LastName, Email, Role, IsActive, IsLocked, ShortIdleTimeout
               FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID`);
 
     if (!current.recordset[0]) {
@@ -233,6 +233,7 @@ router.put('/users/:id', async (req, res) => {
       .input('fname',     sql.NVarChar(80),  firstName !== undefined ? (firstName?.trim() || null) : prev.FirstName)
       .input('lname',     sql.NVarChar(80),  lastName  !== undefined ? (lastName?.trim()  || null) : prev.LastName)
       .input('email',     sql.NVarChar(160), newEmail  ?? prev.Email)
+      .input('shortTimeout', sql.Bit,        shortIdleTimeout !== undefined ? (shortIdleTimeout ? 1 : 0) : prev.ShortIdleTimeout)
       .query(`
         UPDATE kongsberg.dbo.PortalUsers
         SET Role       = @role,
@@ -243,6 +244,7 @@ router.put('/users/:id', async (req, res) => {
             FirstName  = @fname,
             LastName   = @lname,
             Email      = @email,
+            ShortIdleTimeout = @shortTimeout,
             FailedLogins = CASE WHEN @isLocked = 0 THEN 0 ELSE FailedLogins END
         WHERE UserID = @userID
       `);
@@ -311,6 +313,10 @@ router.put('/users/:id', async (req, res) => {
     if (isLocked !== undefined && !!isLocked !== !!prev.IsLocked) {
       await audit(isLocked ? 'LOCKED' : 'UNLOCKED', actor,
         `${isLocked ? 'Locked' : 'Unlocked'} account: ${newUsername ?? oldUsername}`, req);
+    }
+    if (shortIdleTimeout !== undefined && !!shortIdleTimeout !== !!prev.ShortIdleTimeout) {
+      await audit('IDLE_TIMEOUT_CHANGE', actor,
+        `${shortIdleTimeout ? 'Enabled' : 'Disabled'} 5-minute idle timeout for ${newUsername ?? oldUsername}`, req);
     }
 
     res.json({ success: true });
@@ -432,7 +438,7 @@ router.get('/audit', async (req, res) => {
   const VALID_EVENTS = [
     'LOGIN_OK','LOGIN_FAIL','LOGOUT','REGISTER',
     'APPROVED','REJECTED','ROLE_CHANGE','DEPT_CHANGE','LOCKED','UNLOCKED',
-    'USERNAME_CHANGE','PROFILE_CHANGE',
+    'USERNAME_CHANGE','PROFILE_CHANGE','IDLE_TIMEOUT_CHANGE',
     'RAW_SQL','RAW_SQL_BLOCKED','RAW_SQL_ERROR',
     'SAP_OK','SAP_ERROR',
     'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE',

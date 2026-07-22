@@ -18,6 +18,21 @@ export const sqlConfig = {
   }
 };
 
+
+// ── Session idle timeout ──────────────────────────────────────────────────
+// Default session cookie maxAge (server.js's session() config), and the
+// shorter override for users with ShortIdleTimeout = 1 on PortalUsers
+// (toggled per user in User Administration — see routes/useradmin.js and
+// sql/migrate_short_idle_timeout.sql). Shared here so server.js's
+// cookie-maxAge-refresh middleware and routes/auth.js's login handler
+// always compute the exact same value from the exact same place.
+export const IDLE_TIMEOUT_MS       = 0.5 * 1000 * 60 * 60; // 30 minutes — default
+export const SHORT_IDLE_TIMEOUT_MS = 5   * 1000 * 60;      // 5 minutes — flagged users
+
+export function idleTimeoutMsFor(sessionUser) {
+  return sessionUser?.shortIdleTimeout ? SHORT_IDLE_TIMEOUT_MS : IDLE_TIMEOUT_MS;
+}
+
 export const sapConfig = {
   system: config.sapConfig.system,
   systemNumber: config.sapConfig.systemNumber,
