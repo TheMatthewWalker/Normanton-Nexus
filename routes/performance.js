@@ -9,6 +9,7 @@ import sql from 'mssql';
 import ExcelJS from 'exceljs';
 import { sqlConfig, auditQuery } from '../config.js';
 import { requirePermission, requireSessionOrApiToken } from '../middleware/auth.js';
+import { insertInboundCostLine } from './inboundcosts.js';
 
 async function getPool() {
   return await sql.connect(sqlConfig);
@@ -2863,6 +2864,47 @@ router.post('/order-suggestions/shipments', requirePermission('LOG_MRP'), async 
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Manual Inbound Shipment — a shipment not derived from any tracked-order
+// selection (e.g. a customer return). Registered BEFORE the :shipmentId
+// routes below so 'manual' can't be mistaken for a shipment id — same
+// route-ordering caution used elsewhere in this file (see the supplier
+// invoice upload section's comment). Body: { originDestinationID,
+// forwarderID, modeOfTransport, dispatchDate, expectedEta, trackingNumber,
+// notes, price?, costCentre?, tier? }. price/costCentre/tier are optional —
+// supplying a price auto-creates one Associated Costs line for the new
+// shipment via insertInboundCostLine (see routes/inboundcosts.js).
+router.post('/order-suggestions/shipments/manual', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { originDestinationID, forwarderID, modeOfTransport, dispatchDate, expectedEta, trackingNumber, notes, price, costCentre, tier } = req.body;
+
+    const data = await db.createManualOrderShipment({
+      originDestinationID: originDestinationID || null,
+      forwarderID: forwarderID || null,
+      modeOfTransport: modeOfTransport || null,
+      dispatchDate: dispatchDate || null,
+      expectedEta: expectedEta || null,
+      trackingNumber: trackingNumber || null,
+      notes: notes || null,
+    });
+
+    let cost = null;
+    if (price && Number(price) > 0) {
+      const pool = await getPool();
+      cost = await insertInboundCostLine(pool, {
+        poShipmentID: data.shipmentId,
+        costCenter: costCentre || null,
+        tier: tier === 'premium' ? 'premium' : 'standard',
+        amount: Number(price),
+        information: `Manual inbound shipment — ${data.shipmentReference}`,
+      });
+    }
+
+    res.json({ success: true, data: { ...data, cost } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
   }
 });
 

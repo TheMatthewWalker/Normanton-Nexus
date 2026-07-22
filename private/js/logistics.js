@@ -110,6 +110,7 @@ function setupTiles() {
       if (fn === 'updatePalletData')    runUpdatePalletData();
       if (fn === 'updatePackagingData') runUpdatePackagingData();
       if (fn === 'updateDestinations')  runUpdateDestinations();
+      if (fn === 'updateForwarders')    runUpdateForwarders();
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
       if (fn === 'turnsValClassTable')  runTurnsValClassTable();
@@ -3132,6 +3133,107 @@ async function runUpdateDestinations() {
             if (!emailJson2.success) throw new Error(emailJson2.error || 'Email save failed');
 
             Object.assign(r, destValues);
+          }
+        );
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Admin: Update Forwarders ──────────────────────────────────────────────────
+// forwarderID doubles as the SAP vendor code (confirmed with the user — no
+// separate mapping column), so unlike Destinations there's an explicit
+// "Add Forwarder" flow that asks for it up front rather than an
+// auto-generated id.
+async function runUpdateForwarders() {
+  showResultPanel('Update Forwarders', 'Click a row to edit · Add Forwarder for a new haulier');
+  try {
+    const rows = await fetch('/api/forwarders').then(r => r.json());
+    if (!Array.isArray(rows)) throw new Error('Failed to load forwarders');
+
+    rows.sort((a, b) => (a.forwarderName ?? '').localeCompare(b.forwarderName ?? ''));
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} forwarders`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const thead = `<tr><th>Vendor Code</th><th>Name</th><th>Delivery Mode</th><th>Approved</th></tr>`;
+    const tbody = rows.map((r, i) => `<tr class="admin-row" data-idx="${i}" style="cursor:pointer">
+      <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted)">${esc(String(r.forwarderID))}</td>
+      <td><strong>${esc(r.forwarderName ?? '')}</strong></td>
+      <td>${esc(r.forwarderMode ?? '')}</td>
+      <td>${r.forwarderApproval ? '<span style="color:var(--success,#059669)">Approved</span>' : '<span style="color:var(--text-secondary,#666)">Not approved</span>'}</td>
+    </tr>`).join('');
+
+    document.getElementById('result-body').innerHTML = `
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+        <button type="button" class="btn-submit" id="fwd-add-btn">+ Add Forwarder</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>
+      </div>`;
+
+    document.getElementById('fwd-add-btn').addEventListener('click', () => {
+      openAdminEditModal(
+        'Add Forwarder',
+        'Vendor Code must match the forwarder\'s SAP vendor number',
+        [
+          { key: 'forwarderID',       label: 'Vendor Code (SAP)' },
+          { key: 'forwarderName',     label: 'Name', wide: true },
+          { key: 'forwarderMode',     label: 'Delivery Mode' },
+          { key: 'forwarderApproval', label: 'Approved (yes/no)' },
+        ],
+        { forwarderID: '', forwarderName: '', forwarderMode: '', forwarderApproval: 'no' },
+        async values => {
+          if (!values.forwarderID || !values.forwarderName) throw new Error('Vendor Code and Name are required.');
+          const res2 = await fetch('/api/forwarders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              forwarderID: values.forwarderID,
+              forwarderName: values.forwarderName,
+              forwarderMode: values.forwarderMode || null,
+              forwarderApproval: /^y/i.test(values.forwarderApproval) ? 1 : 0,
+            }),
+          });
+          const json = await res2.json();
+          if (!json.success) throw new Error(json.error || 'Save failed');
+          runUpdateForwarders();
+        }
+      );
+    });
+
+    document.querySelectorAll('.admin-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const r = rows[parseInt(tr.dataset.idx, 10)];
+        openAdminEditModal(
+          `Edit Forwarder — ${r.forwarderID}`,
+          r.forwarderName || '',
+          [
+            { key: 'forwarderName',     label: 'Name', wide: true },
+            { key: 'forwarderMode',     label: 'Delivery Mode' },
+            { key: 'forwarderApproval', label: 'Approved (yes/no)' },
+          ],
+          { ...r, forwarderApproval: r.forwarderApproval ? 'yes' : 'no' },
+          async values => {
+            const res2 = await fetch(`/api/forwarders/${encodeURIComponent(r.forwarderID)}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                forwarderName: values.forwarderName,
+                forwarderMode: values.forwarderMode || null,
+                forwarderApproval: /^y/i.test(values.forwarderApproval) ? 1 : 0,
+              }),
+            });
+            const json = await res2.json();
+            if (!json.success) throw new Error(json.error || 'Save failed');
+            Object.assign(r, {
+              forwarderName: values.forwarderName,
+              forwarderMode: values.forwarderMode,
+              forwarderApproval: /^y/i.test(values.forwarderApproval) ? 1 : 0,
+            });
+            runUpdateForwarders();
           }
         );
       });
@@ -6227,6 +6329,27 @@ async function saveSelectedTrackedOrders() {
 
 const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
 
+// Populates a <select id="selectId"> with approved forwarders (forwarderID
+// as the value — it doubles as the SAP vendor code, see routes/forwarders.js
+// — forwarderName as the label). Used everywhere Haulier used to be free
+// text: Create Shipment, the Inbound Log detail form, and Manual Inbound
+// Shipment creation.
+async function loadForwarderOptionsInto(selectId, selectedForwarderId) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  try {
+    const res = await fetch('/api/forwarders/approved');
+    const forwarders = await res.json();
+    if (!Array.isArray(forwarders)) throw new Error('bad response');
+    const sel = selectedForwarderId != null ? String(selectedForwarderId) : '';
+    el.innerHTML = `<option value="">— Select haulier —</option>${forwarders.map(f =>
+      `<option value="${esc(String(f.forwarderID))}" ${String(f.forwarderID) === sel ? 'selected' : ''}>${esc(f.forwarderName)}</option>`
+    ).join('')}`;
+  } catch (err) {
+    el.innerHTML = '<option value="">Failed to load forwarders</option>';
+  }
+}
+
 // Links (or unlinks) a single tracked order to an already-created shipment
 // — for adding a stray order to a load after the fact. Shipment CREATION
 // itself now happens in bulk from the Tracked Orders selection (see
@@ -6345,7 +6468,7 @@ async function openCreateShipmentModal() {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Haulier</label>
-          <input class="tf-input" type="text" id="cs-haulier">
+          <select class="tf-input" id="cs-haulier"><option value="">Loading…</option></select>
         </div>
         <div class="tf-field">
           <label class="tf-label">Mode of Transport</label>
@@ -6385,6 +6508,8 @@ async function openCreateShipmentModal() {
     </div>
   </div>`);
 
+  loadForwarderOptionsInto('cs-haulier');
+
   document.getElementById('cs-save-btn').addEventListener('click', async () => {
     const btn = document.getElementById('cs-save-btn');
     const result = document.getElementById('cs-result');
@@ -6394,7 +6519,7 @@ async function openCreateShipmentModal() {
     const body = {
       dispatchDate: document.getElementById('cs-dispatch').value || null,
       expectedEta: document.getElementById('cs-eta').value || null,
-      haulier: document.getElementById('cs-haulier').value.trim() || null,
+      forwarderID: document.getElementById('cs-haulier').value || null,
       modeOfTransport: document.getElementById('cs-mode').value || null,
       trackingNumber: document.getElementById('cs-tracking').value.trim() || null,
       containerNumber: document.getElementById('cs-container').value.trim() || null,
@@ -6707,15 +6832,21 @@ function ilSortByEta(rows) {
 }
 
 function renderInboundLog() {
+  const addBtnHtml = `<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+    <button type="button" class="btn-secondary" id="il-manual-btn">+ Manual Shipment</button>
+  </div>`;
+
   if (!inboundShipmentRows.length) {
-    document.getElementById('result-body').innerHTML = '<div class="sap-empty">No inbound shipments yet — create one from Tracked Orders by selecting order lines.</div>';
+    document.getElementById('result-body').innerHTML = addBtnHtml +
+      '<div class="sap-empty">No inbound shipments yet — create one from Tracked Orders by selecting order lines, or add a Manual Shipment above.</div>';
+    document.getElementById('il-manual-btn').addEventListener('click', openManualInboundShipmentModal);
     return;
   }
 
   const renderRow = s => `
     <tr class="admin-row lg-row" data-id="${s.ShipmentId}">
       <td><strong>${esc(s.ShipmentReference || `#${s.ShipmentId}`)}</strong></td>
-      <td>${esc(s.Suppliers || '-')}</td>
+      <td>${s.IsManual ? `<span style="color:var(--text-secondary,#666)">Manual — ${esc(s.OriginName || 'no origin')}</span>` : esc(s.Suppliers || '-')}</td>
       <td>${esc(s.Haulier || '-')}</td>
       <td>${esc(s.ModeOfTransport || '-')}</td>
       <td>${formatDisplayDate(s.DispatchDate)}</td>
@@ -6746,11 +6877,148 @@ function renderInboundLog() {
     </div>`;
   }).join('');
 
-  document.getElementById('result-body').innerHTML = `<div class="ps-sections">${sections}</div>`;
+  document.getElementById('result-body').innerHTML = addBtnHtml + `<div class="ps-sections">${sections}</div>`;
 
+  document.getElementById('il-manual-btn').addEventListener('click', openManualInboundShipmentModal);
   document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
   document.querySelectorAll('.lg-row').forEach(row => {
     row.addEventListener('click', () => openInboundShipmentDetail(Number(row.dataset.id)));
+  });
+}
+
+// ── Manual Inbound Shipment — not derived from any tracked order (e.g. a
+// customer return). Origin is picked from Destinations, haulier from
+// Forwarders (same dropdown as everywhere else in the Inbound Log), and an
+// optional price auto-creates one Associated Costs line via the same
+// insertInboundCostLine helper the shipment detail's "+ Add Cost" uses —
+// see routes/performance.js's /order-suggestions/shipments/manual route.
+async function openManualInboundShipmentModal() {
+  openModal(`<div class="ps-modal lg-modal" style="max-width:560px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Manual Inbound Shipment</div><div class="ps-modal-sub">Not linked to a tracked order — e.g. a customer return</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Origin</label>
+          <select class="tf-input" id="mi-origin"><option value="">Loading…</option></select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Haulier</label>
+          <select class="tf-input" id="mi-haulier"><option value="">Loading…</option></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Mode of Transport</label>
+          <select class="tf-input" id="mi-mode">
+            <option value="">—</option>
+            ${OS_TRANSPORT_MODES.map(m => `<option value="${m}">${m}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Dispatch Date</label>
+          <input class="tf-input" type="date" id="mi-dispatch">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Expected ETA</label>
+          <input class="tf-input" type="date" id="mi-eta">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Tracking Number</label>
+          <input class="tf-input" type="text" id="mi-tracking">
+        </div>
+      </div>
+      <div class="tf-section-label">Cost (optional)</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Price (£)</label>
+          <input class="tf-input" type="number" step="0.01" id="mi-price">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Cost Centre</label>
+          <select class="tf-input" id="mi-costcentre"><option value="">Loading…</option></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">GL Tier</label>
+          <select class="tf-input" id="mi-tier">
+            <option value="standard">Standard (602200)</option>
+            <option value="premium">Premium (602100)</option>
+          </select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="mi-notes">
+        </div>
+      </div>
+      <div id="mi-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="mi-save-btn">Create Shipment</button>
+    </div>
+  </div>`);
+
+  loadForwarderOptionsInto('mi-haulier');
+
+  const originSelect = document.getElementById('mi-origin');
+  fetch('/api/destinations').then(r => r.json()).then(rows => {
+    if (!Array.isArray(rows)) throw new Error('bad response');
+    rows.sort((a, b) => (a.destinationName ?? '').localeCompare(b.destinationName ?? ''));
+    originSelect.innerHTML = `<option value="">— Select origin —</option>${rows.map(d =>
+      `<option value="${esc(String(d.destinationID))}">${esc(d.destinationName)}${d.destinationCountry ? ' — ' + esc(d.destinationCountry) : ''}</option>`
+    ).join('')}`;
+  }).catch(() => { originSelect.innerHTML = '<option value="">Failed to load destinations</option>'; });
+
+  const costCentreSelect = document.getElementById('mi-costcentre');
+  fetch('/api/costcenters').then(r => r.json()).then(rows => {
+    if (!Array.isArray(rows)) throw new Error('bad response');
+    costCentreSelect.innerHTML = `<option value="">— Select cost centre —</option>${rows.map(c =>
+      `<option value="${esc(c.centerCode)}" ${c.centerCode === '0000002012' ? 'selected' : ''}>${esc(c.centerDescription)} (${esc(c.centerCode)})</option>`
+    ).join('')}`;
+  }).catch(() => { costCentreSelect.innerHTML = '<option value="">Failed to load cost centres</option>'; });
+
+  document.getElementById('mi-save-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('mi-save-btn');
+    const result = document.getElementById('mi-result');
+    result.innerHTML = '';
+    btn.disabled = true; btn.textContent = 'Creating…';
+
+    const price = document.getElementById('mi-price').value;
+    const body = {
+      originDestinationID: originSelect.value || null,
+      forwarderID: document.getElementById('mi-haulier').value || null,
+      modeOfTransport: document.getElementById('mi-mode').value || null,
+      dispatchDate: document.getElementById('mi-dispatch').value || null,
+      expectedEta: document.getElementById('mi-eta').value || null,
+      trackingNumber: document.getElementById('mi-tracking').value.trim() || null,
+      notes: document.getElementById('mi-notes').value.trim() || null,
+      price: price ? Number(price) : null,
+      costCentre: costCentreSelect.value || null,
+      tier: document.getElementById('mi-tier').value,
+    };
+
+    try {
+      const res = await fetch('/api/performance/order-suggestions/shipments/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to create shipment');
+      closePickModal();
+      runInboundLog();
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Create Shipment';
+    }
   });
 }
 
@@ -6798,6 +7066,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       </tr>`).join('');
 
     body.innerHTML = `
+      ${s.IsManual ? `<div class="toolbar-hint" style="margin-bottom:10px">Manual shipment — not linked to any tracked order. Origin: <strong>${esc(s.OriginName || '—')}</strong></div>` : ''}
       <form id="isd-form" class="transfer-form">
         <div class="tf-row">
           <div class="tf-field">
@@ -6812,7 +7081,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <div class="tf-row">
           <div class="tf-field">
             <label class="tf-label">Haulier</label>
-            <input class="tf-input" type="text" id="isd-haulier" value="${esc(s.Haulier || '')}">
+            <select class="tf-input" id="isd-haulier"><option value="">Loading…</option></select>
           </div>
           <div class="tf-field">
             <label class="tf-label">Mode of Transport</label>
@@ -6846,13 +7115,19 @@ async function refreshInboundShipmentDetail(shipmentId) {
         </div>
         <div id="isd-result"></div>
       </form>
+      ${s.orders.length ? `
       <div class="tf-section-label">Order Lines</div>
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
           <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Status</th><th>Supplier Ref</th></tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
-      </div>`;
+      </div>` : ''}
+      <div class="tf-section-label">Associated Costs</div>
+      <div id="isd-costs"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>`;
+
+    loadForwarderOptionsInto('isd-haulier', s.ForwarderID);
+    renderAssociatedCosts(shipmentId, s);
 
     // Cancelling is allowed any time up until the shipment is itself
     // cancelled — including after it's been marked received (see
@@ -6880,6 +7155,116 @@ async function refreshInboundShipmentDetail(shipmentId) {
   }
 }
 
+// ── Associated Costs (Inbound Log detail) ───────────────────────────────────
+// Cost centre is always the fixed inbound default (2012) here, per the
+// user's spec — only the GL tier (standard/premium -> 602200/602100) is
+// chosen per line. See routes/inboundcosts.js for the posting mechanics.
+async function renderAssociatedCosts(shipmentId, shipment) {
+  const container = document.getElementById('isd-costs');
+  if (!container) return;
+  try {
+    const res = await fetch(`/api/inboundcosts/shipment/${shipmentId}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load costs');
+    const lines = json.data || [];
+    const unprocessed = lines.filter(l => !l.migoStatus);
+
+    const rows = lines.map(l => `
+      <tr class="admin-row">
+        <td>${esc(l.elementDescription || l.costElement)}</td>
+        <td>£${Number(l.expectedCost).toFixed(2)}</td>
+        <td>${l.migoStatus ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
+        <td>${l.migoStatus ? '' : `<button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
+      </tr>`).join('');
+
+    container.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>GL Element</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="tf-row" style="margin-top:10px;align-items:flex-end">
+        <div class="tf-field">
+          <label class="tf-label">Tier</label>
+          <select class="tf-input" id="isd-cost-tier">
+            <option value="standard">Standard (602200)</option>
+            <option value="premium">Premium (602100)</option>
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Amount (£)</label>
+          <input class="tf-input" type="number" step="0.01" id="isd-cost-amount">
+        </div>
+        <div class="tf-field">
+          <button type="button" class="btn-secondary" id="isd-cost-add-btn">+ Add Cost</button>
+        </div>
+      </div>
+      ${!shipment.ForwarderID ? '<div class="toolbar-hint" style="color:var(--error,#DC2626)">Select a haulier and save before posting costs to SAP — the haulier is used as the vendor.</div>' : ''}
+      ${unprocessed.length ? `<div style="margin-top:8px"><button type="button" class="btn-submit" id="isd-cost-post-btn">Post ${unprocessed.length} Unprocessed to SAP</button></div>` : ''}
+      <div id="isd-cost-result" style="margin-top:8px"></div>`;
+
+    document.getElementById('isd-cost-add-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('isd-cost-add-btn');
+      const result = document.getElementById('isd-cost-result');
+      const amount = document.getElementById('isd-cost-amount').value;
+      const tier = document.getElementById('isd-cost-tier').value;
+      if (!amount || Number(amount) <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
+      btn.disabled = true; btn.textContent = 'Adding…';
+      try {
+        const res2 = await fetch('/api/inboundcosts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ poShipmentID: shipmentId, tier, amount: Number(amount) }),
+        });
+        const json2 = await res2.json();
+        if (!json2.success) throw new Error(json2.error?.message || 'Failed to add cost');
+        renderAssociatedCosts(shipmentId, shipment);
+      } catch (err) {
+        result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = '+ Add Cost';
+      }
+    });
+
+    document.querySelectorAll('.isd-cost-delete').forEach(b => {
+      b.addEventListener('click', async () => {
+        try {
+          const res2 = await fetch(`/api/inboundcosts/${b.dataset.costId}`, { method: 'DELETE' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error?.message || 'Failed to remove cost');
+          renderAssociatedCosts(shipmentId, shipment);
+        } catch (err) {
+          document.getElementById('isd-cost-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        }
+      });
+    });
+
+    const postBtn = document.getElementById('isd-cost-post-btn');
+    if (postBtn) {
+      postBtn.addEventListener('click', async () => {
+        if (!confirm(`Post ${unprocessed.length} cost line(s) to SAP as accounting documents? This cannot be undone.`)) return;
+        const result = document.getElementById('isd-cost-result');
+        postBtn.disabled = true; postBtn.textContent = 'Posting…';
+        try {
+          const res2 = await fetch(`/api/inboundcosts/shipment/${shipmentId}/post-migo`, { method: 'POST' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error?.message || 'Failed to post to SAP');
+          const failed = (json2.data || []).filter(r => !r.success);
+          if (failed.length) {
+            result.innerHTML = `<div class="sap-error">${failed.length} of ${json2.data.length} line(s) failed: ${esc(failed.map(f => f.error).join('; '))}</div>`;
+          }
+          renderAssociatedCosts(shipmentId, shipment);
+        } catch (err) {
+          result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+          postBtn.disabled = false; postBtn.textContent = `Post ${unprocessed.length} Unprocessed to SAP`;
+        }
+      });
+    }
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
 async function saveInboundShipmentDetail(shipmentId) {
   const btn = document.getElementById('isd-save-btn');
   const result = document.getElementById('isd-result');
@@ -6887,7 +7272,7 @@ async function saveInboundShipmentDetail(shipmentId) {
   const body = {
     dispatchDate: document.getElementById('isd-dispatch').value || null,
     expectedEta: document.getElementById('isd-eta').value || null,
-    haulier: document.getElementById('isd-haulier').value.trim() || null,
+    forwarderID: document.getElementById('isd-haulier').value || null,
     modeOfTransport: document.getElementById('isd-mode').value || null,
     trackingNumber: document.getElementById('isd-tracking').value.trim() || null,
     containerNumber: document.getElementById('isd-container').value.trim() || null,

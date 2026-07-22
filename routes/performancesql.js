@@ -1394,15 +1394,33 @@ export async function deleteOrderSuggestion(suggestionId) {
 // section introduces. Mirrors the Open Deliveries pattern: select order
 // lines, Create Shipment — so creation and line-assignment happen in one
 // call (createOrderShipment), not two.
+// forwarderID is looked up against Logistics.dbo.Forwarders (cross-database
+// three-part name — same pattern already used in destinations.js/
+// forwarders.js) and its name stored into Haulier as a display snapshot, so
+// every existing read of PurchaseOrderShipment.Haulier keeps working with
+// no changes. When forwarderID isn't supplied (e.g. Auto-Shipment's
+// 'Supplier Transport', which isn't a real forwarder), the caller's free-text
+// haulier is kept as-is — same behaviour as before this function learned
+// about forwarders.
+async function resolveForwarderName(pool, forwarderID) {
+  if (!forwarderID) return null;
+  const { recordset } = await pool.request()
+    .input('forwarderID', sql.BigInt, forwarderID)
+    .query('SELECT forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = @forwarderID');
+  return recordset[0]?.forwarderName ?? null;
+}
+
 export async function createOrderShipment({
-  dispatchDate, expectedEta, haulier, modeOfTransport, trackingNumber,
+  dispatchDate, expectedEta, haulier, forwarderID, modeOfTransport, trackingNumber,
   billOfLading, containerNumber, notes, suggestionIds
 }) {
   const pool = await getPool();
+  const resolvedName = forwarderID ? await resolveForwarderName(pool, forwarderID) : null;
   const { recordset } = await pool.request()
     .input('dispatchDate',    sql.DateTime,      dispatchDate ?? null)
     .input('expectedEta',     sql.DateTime,      expectedEta ?? null)
-    .input('haulier',         sql.NVarChar(100), haulier || null)
+    .input('haulier',         sql.NVarChar(100), resolvedName || haulier || null)
+    .input('forwarderID',     sql.BigInt,        forwarderID || null)
     .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport || null)
     .input('trackingNumber',  sql.NVarChar(100), trackingNumber || null)
     .input('billOfLading',    sql.NVarChar(50),  billOfLading || null)
@@ -1410,9 +1428,9 @@ export async function createOrderShipment({
     .input('notes',           sql.NVarChar(500), notes || null)
     .query(`
       INSERT INTO dbo.PurchaseOrderShipment
-        (DispatchDate, ExpectedEta, Haulier, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber, Notes)
+        (DispatchDate, ExpectedEta, Haulier, ForwarderID, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber, Notes)
       OUTPUT INSERTED.ShipmentId
-      VALUES (@dispatchDate, @expectedEta, @haulier, @modeOfTransport, @trackingNumber, @billOfLading, @containerNumber, @notes)
+      VALUES (@dispatchDate, @expectedEta, @haulier, @forwarderID, @modeOfTransport, @trackingNumber, @billOfLading, @containerNumber, @notes)
     `);
   const shipmentId = recordset[0].ShipmentId;
 
@@ -1447,9 +1465,9 @@ export async function listOrderShipments() {
   const { recordset } = await pool.request().query(`
     SELECT
       s.ShipmentId, s.ShipmentReference, s.DispatchDate, s.ExpectedEta,
-      s.Haulier, s.ModeOfTransport, s.TrackingNumber, s.BillOfLading, s.ContainerNumber,
+      s.Haulier, s.ForwarderID, s.ModeOfTransport, s.TrackingNumber, s.BillOfLading, s.ContainerNumber,
       s.Notes, s.ReceivedAtUtc, s.ReceivedBy, s.CancelledAtUtc, s.CancelledBy,
-      s.CreatedAtUtc, s.UpdatedAtUtc,
+      s.CreatedAtUtc, s.UpdatedAtUtc, s.IsManual, s.OriginName,
       (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount,
       -- Distinct vendor names of orders currently linked to this shipment,
       -- comma-joined. No STRING_AGG on SQL Server 2005+, so FOR XML PATH is
@@ -1478,8 +1496,9 @@ export async function getOrderShipmentWithOrders(shipmentId) {
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
       SELECT ShipmentId, ShipmentReference, DispatchDate, ExpectedEta,
-             Haulier, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber,
-             Notes, ReceivedAtUtc, ReceivedBy, CancelledAtUtc, CancelledBy, CreatedAtUtc, UpdatedAtUtc
+             Haulier, ForwarderID, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber,
+             Notes, ReceivedAtUtc, ReceivedBy, CancelledAtUtc, CancelledBy, CreatedAtUtc, UpdatedAtUtc,
+             IsManual, OriginDestinationID, OriginName
       FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId
     `);
   const shipment = shipmentRows[0] || null;
@@ -1502,15 +1521,17 @@ export async function getOrderShipmentWithOrders(shipmentId) {
 // ShipmentReference is intentionally excluded here — it's auto-generated at
 // creation and permanent (see createOrderShipment), never user-editable.
 export async function updateOrderShipment(shipmentId, {
-  dispatchDate, expectedEta, haulier, modeOfTransport, trackingNumber,
+  dispatchDate, expectedEta, haulier, forwarderID, modeOfTransport, trackingNumber,
   billOfLading, containerNumber, notes
 }) {
   const pool = await getPool();
+  const resolvedName = forwarderID ? await resolveForwarderName(pool, forwarderID) : null;
   await pool.request()
     .input('shipmentId',      sql.Int, shipmentId)
     .input('dispatchDate',    sql.DateTime,      dispatchDate ?? null)
     .input('expectedEta',     sql.DateTime,      expectedEta ?? null)
-    .input('haulier',         sql.NVarChar(100), haulier || null)
+    .input('haulier',         sql.NVarChar(100), resolvedName || haulier || null)
+    .input('forwarderID',     sql.BigInt,        forwarderID || null)
     .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport || null)
     .input('trackingNumber',  sql.NVarChar(100), trackingNumber || null)
     .input('billOfLading',    sql.NVarChar(50),  billOfLading || null)
@@ -1519,11 +1540,65 @@ export async function updateOrderShipment(shipmentId, {
     .query(`
       UPDATE dbo.PurchaseOrderShipment SET
         DispatchDate = @dispatchDate, ExpectedEta = @expectedEta, Haulier = @haulier,
+        ForwarderID = @forwarderID,
         ModeOfTransport = @modeOfTransport, TrackingNumber = @trackingNumber,
         BillOfLading = @billOfLading, ContainerNumber = @containerNumber, Notes = @notes,
         UpdatedAtUtc = GETUTCDATE()
       WHERE ShipmentId = @shipmentId
     `);
+}
+
+// ── Manual Inbound Shipment — a PurchaseOrderShipment row not derived from
+// any PurchaseOrderSuggestion selection (e.g. a customer return). Origin is
+// captured via the Destinations lookup (cross-database, same pattern as
+// resolveForwarderName above) and snapshotted into OriginName. If a price
+// is supplied, one Logistics.dbo.ShipmentCost row is created alongside it
+// via the same helper the Associated Costs feature uses
+// (insertInboundCostLine, routes/inboundcosts.js) — see that file for why
+// cost lines live in one place rather than duplicating cost fields onto
+// PurchaseOrderShipment itself.
+export async function createManualOrderShipment({
+  originDestinationID, forwarderID, modeOfTransport, dispatchDate, expectedEta,
+  trackingNumber, notes
+}) {
+  const pool = await getPool();
+  const resolvedForwarder = forwarderID ? await resolveForwarderName(pool, forwarderID) : null;
+
+  let originName = null;
+  if (originDestinationID) {
+    const { recordset } = await pool.request()
+      .input('destinationId', sql.BigInt, originDestinationID)
+      .query('SELECT destinationName FROM Logistics.dbo.Destinations WHERE destinationID = @destinationId');
+    originName = recordset[0]?.destinationName ?? null;
+  }
+
+  const { recordset } = await pool.request()
+    .input('dispatchDate',    sql.DateTime,      dispatchDate ?? null)
+    .input('expectedEta',     sql.DateTime,      expectedEta ?? null)
+    .input('haulier',         sql.NVarChar(100), resolvedForwarder || null)
+    .input('forwarderID',     sql.BigInt,        forwarderID || null)
+    .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport || null)
+    .input('trackingNumber',  sql.NVarChar(100), trackingNumber || null)
+    .input('notes',           sql.NVarChar(500), notes || null)
+    .input('originDestinationID', sql.BigInt,     originDestinationID || null)
+    .input('originName',          sql.NVarChar(200), originName)
+    .query(`
+      INSERT INTO dbo.PurchaseOrderShipment
+        (DispatchDate, ExpectedEta, Haulier, ForwarderID, ModeOfTransport, TrackingNumber, Notes,
+         IsManual, OriginDestinationID, OriginName)
+      OUTPUT INSERTED.ShipmentId
+      VALUES (@dispatchDate, @expectedEta, @haulier, @forwarderID, @modeOfTransport, @trackingNumber, @notes,
+              1, @originDestinationID, @originName)
+    `);
+  const shipmentId = recordset[0].ShipmentId;
+
+  const shipmentReference = `INB-${String(shipmentId).padStart(6, '0')}`;
+  await pool.request()
+    .input('shipmentId',        sql.Int, shipmentId)
+    .input('shipmentReference', sql.NVarChar(50), shipmentReference)
+    .query('UPDATE dbo.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
+
+  return { shipmentId, shipmentReference };
 }
 
 // shipmentId may be null to unassign (e.g. an order was linked to the wrong
