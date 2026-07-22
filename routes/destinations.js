@@ -6,12 +6,25 @@ import { requirePermission } from '../middleware/auth.js';
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
 
-// ── Get all records ──
+// ── Get all records (optionally filtered by ?search= for typeahead lookups) ──
+// search mode mirrors the Mass Packaging Update material lookup
+// (routes/packaging.js's GET /materials): TOP 200, name-matched, used for
+// the Manual Inbound Shipment origin combobox. No search param = existing
+// unfiltered full-list behaviour, unchanged for callers like Update
+// Destinations that need every row.
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
-        const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.Destinations');
+        const search = String(req.query.search || '').trim();
+        const request = pool.request();
+        let top = '';
+        let where = '';
+        if (search) {
+            top = 'TOP 200 ';
+            where = 'WHERE destinationName LIKE @search OR destinationCity LIKE @search';
+            request.input('search', sql.NVarChar(202), `%${search}%`);
+        }
+        const result = await request.query(`SELECT ${top}* FROM Logistics.dbo.Destinations ${where} ORDER BY destinationName`);
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });

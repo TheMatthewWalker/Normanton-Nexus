@@ -32,7 +32,13 @@
 -- '0000002004' PTFE / '0000002011' PV etc. in the same zero-padded SAP
 -- format — see migrate_shipment_costing.sql).
 INSERT INTO Logistics.dbo.CostCenters (centerCode, centerDescription)
-VALUES ('0000002012', 'Inbound Logistics');
+VALUES ('0000002012', 'PTFE Raw Material');
+
+-- 2011 was already seeded as 'PV' by migrate_shipment_costing.sql (an
+-- earlier migration, presumably already run) — UPDATE rather than INSERT
+-- to rename it without a duplicate-key error if that script has run, and
+-- without silently doing nothing if it somehow hasn't.
+UPDATE Logistics.dbo.CostCenters SET centerDescription = 'PV Raw Material' WHERE centerCode = '0000002011';
 
 -- Logistics.dbo.ShipmentCost.shipmentID is scoped to Logistics.dbo.
 -- ShipmentMain (outbound only, different DB/identity space than kongsberg's

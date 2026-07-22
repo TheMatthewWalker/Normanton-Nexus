@@ -3177,11 +3177,11 @@ async function runUpdateForwarders() {
     document.getElementById('fwd-add-btn').addEventListener('click', () => {
       openAdminEditModal(
         'Add Forwarder',
-        'Vendor Code must match the forwarder\'s SAP vendor number',
+        'Vendor Code must match the SAP vendor number — reuse the same code with a different Delivery Mode to add another mode for an existing haulier',
         [
           { key: 'forwarderID',       label: 'Vendor Code (SAP)' },
           { key: 'forwarderName',     label: 'Name', wide: true },
-          { key: 'forwarderMode',     label: 'Delivery Mode' },
+          { key: 'forwarderMode',     label: 'Delivery Mode', type: 'select', options: OS_TRANSPORT_MODES },
           { key: 'forwarderApproval', label: 'Approved (yes/no)' },
         ],
         { forwarderID: '', forwarderName: '', forwarderMode: '', forwarderApproval: 'no' },
@@ -3207,12 +3207,16 @@ async function runUpdateForwarders() {
     document.querySelectorAll('.admin-row').forEach(tr => {
       tr.addEventListener('click', () => {
         const r = rows[parseInt(tr.dataset.idx, 10)];
+        // originalMode pins the UPDATE to exactly this row — forwarderID
+        // alone isn't unique when a vendor has one row per shipping mode
+        // (see the PUT route's comment in routes/forwarders.js).
+        const originalMode = r.forwarderMode || null;
         openAdminEditModal(
           `Edit Forwarder — ${r.forwarderID}`,
-          r.forwarderName || '',
+          `${r.forwarderName || ''}${r.forwarderMode ? ' · ' + r.forwarderMode : ''}`,
           [
             { key: 'forwarderName',     label: 'Name', wide: true },
-            { key: 'forwarderMode',     label: 'Delivery Mode' },
+            { key: 'forwarderMode',     label: 'Delivery Mode', type: 'select', options: OS_TRANSPORT_MODES },
             { key: 'forwarderApproval', label: 'Approved (yes/no)' },
           ],
           { ...r, forwarderApproval: r.forwarderApproval ? 'yes' : 'no' },
@@ -3224,6 +3228,7 @@ async function runUpdateForwarders() {
                 forwarderName: values.forwarderName,
                 forwarderMode: values.forwarderMode || null,
                 forwarderApproval: /^y/i.test(values.forwarderApproval) ? 1 : 0,
+                originalMode,
               }),
             });
             const json = await res2.json();
@@ -6358,6 +6363,41 @@ async function loadForwarderOptionsInto(selectId, selectedForwarderId) {
   }
 }
 
+// Manual Inbound Shipment: mode of transport is chosen first, and the
+// haulier list is filtered to only forwarders approved for that mode —
+// uses loadAllForwarders() (undeduped, has forwarderMode per row) rather
+// than loadApprovedForwarders() since dedupe-by-name has to happen AFTER
+// the mode filter here, not before (a forwarder can have separate rows for
+// Road vs Sea vs Air under the same name — see dedupeForwardersByName's
+// comment).
+async function loadForwarderOptionsByMode(selectId, mode, selectedForwarderId) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  if (!mode) {
+    el.innerHTML = '<option value="">Select mode of transport first</option>';
+    el.disabled = true;
+    return;
+  }
+  el.disabled = false;
+  el.innerHTML = '<option value="">Loading…</option>';
+  try {
+    const all = await loadAllForwarders();
+    const matching = all.filter(f => f.forwarderApproval &&
+      String(f.forwarderMode || '').trim().toLowerCase() === mode.trim().toLowerCase());
+    const filtered = dedupeForwardersByName(matching);
+    if (!filtered.length) {
+      el.innerHTML = '<option value="">No approved hauliers for this mode</option>';
+      return;
+    }
+    const sel = selectedForwarderId != null ? String(selectedForwarderId) : '';
+    el.innerHTML = `<option value="">— Select haulier —</option>${filtered.map(f =>
+      `<option value="${esc(String(f.forwarderID))}" ${String(f.forwarderID) === sel ? 'selected' : ''}>${esc(f.forwarderName)}</option>`
+    ).join('')}`;
+  } catch (err) {
+    el.innerHTML = '<option value="">Failed to load forwarders</option>';
+  }
+}
+
 // Links (or unlinks) a single tracked order to an already-created shipment
 // — for adding a stray order to a load after the fact. Shipment CREATION
 // itself now happens in bulk from the Tracked Orders selection (see
@@ -6908,22 +6948,26 @@ async function openManualInboundShipmentModal() {
     </div>
     <div class="ps-modal-body">
       <div class="tf-row">
-        <div class="tf-field tf-field--wide">
+        <div class="tf-field tf-field--wide" style="position:relative">
           <label class="tf-label">Origin</label>
-          <select class="tf-input" id="mi-origin"><option value="">Loading…</option></select>
+          <input class="tf-input" type="text" id="mi-origin-search" placeholder="Start typing a destination name…" autocomplete="off">
+          <input type="hidden" id="mi-origin-id">
+          <div id="mi-origin-results" class="hidden" style="position:absolute;top:100%;left:0;right:0;z-index:20;
+            background:var(--surface,#fff);border:1px solid var(--border);border-radius:0 0 8px 8px;
+            max-height:220px;overflow-y:auto;box-shadow:0 8px 20px rgba(0,0,0,0.12)"></div>
         </div>
       </div>
       <div class="tf-row">
         <div class="tf-field">
-          <label class="tf-label">Haulier</label>
-          <select class="tf-input" id="mi-haulier"><option value="">Loading…</option></select>
-        </div>
-        <div class="tf-field">
           <label class="tf-label">Mode of Transport</label>
           <select class="tf-input" id="mi-mode">
-            <option value="">—</option>
+            <option value="">— Select mode —</option>
             ${OS_TRANSPORT_MODES.map(m => `<option value="${m}">${m}</option>`).join('')}
           </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Haulier</label>
+          <select class="tf-input" id="mi-haulier" disabled><option value="">Select mode of transport first</option></select>
         </div>
       </div>
       <div class="tf-row">
@@ -6974,16 +7018,66 @@ async function openManualInboundShipmentModal() {
     </div>
   </div>`);
 
-  loadForwarderOptionsInto('mi-haulier');
+  // Origin — search-as-you-type against Logistics.dbo.Destinations, same
+  // pattern as the Mass Packaging Update material lookup (debounced,
+  // server-filtered, TOP 200) rather than a single big <select> of every
+  // destination.
+  const originInput   = document.getElementById('mi-origin-search');
+  const originIdInput = document.getElementById('mi-origin-id');
+  const originResults = document.getElementById('mi-origin-results');
+  let originDebounce = null;
 
-  const originSelect = document.getElementById('mi-origin');
-  fetch('/api/destinations').then(r => r.json()).then(rows => {
-    if (!Array.isArray(rows)) throw new Error('bad response');
-    rows.sort((a, b) => (a.destinationName ?? '').localeCompare(b.destinationName ?? ''));
-    originSelect.innerHTML = `<option value="">— Select origin —</option>${rows.map(d =>
-      `<option value="${esc(String(d.destinationID))}">${esc(d.destinationName)}${d.destinationCountry ? ' — ' + esc(d.destinationCountry) : ''}</option>`
-    ).join('')}`;
-  }).catch(() => { originSelect.innerHTML = '<option value="">Failed to load destinations</option>'; });
+  function renderOriginResults(rows) {
+    if (!rows.length) {
+      originResults.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-secondary,#666)">No matches</div>';
+    } else {
+      originResults.innerHTML = rows.map(d =>
+        `<div class="mi-origin-row" data-id="${esc(String(d.destinationID))}" data-name="${esc(d.destinationName)}"
+           style="padding:7px 10px;font-size:13px;cursor:pointer">${esc(d.destinationName)}${d.destinationCountry ? ` — ${esc(d.destinationCountry)}` : ''}</div>`
+      ).join('');
+      originResults.querySelectorAll('.mi-origin-row').forEach(row => {
+        row.addEventListener('mouseenter', () => { row.style.background = 'var(--surface2,#f3f4f6)'; });
+        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+        // mousedown (not click) so this fires before the input's blur handler hides the list
+        row.addEventListener('mousedown', e => {
+          e.preventDefault();
+          originIdInput.value = row.dataset.id;
+          originInput.value = row.dataset.name;
+          originResults.classList.add('hidden');
+        });
+      });
+    }
+    originResults.classList.remove('hidden');
+  }
+
+  originInput.addEventListener('input', () => {
+    originIdInput.value = ''; // typing invalidates whatever was previously selected
+    clearTimeout(originDebounce);
+    const q = originInput.value.trim();
+    if (!q) { originResults.classList.add('hidden'); return; }
+    originDebounce = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/destinations?search=${encodeURIComponent(q)}`);
+        const rows = await res.json();
+        renderOriginResults(Array.isArray(rows) ? rows : []);
+      } catch (err) {
+        originResults.innerHTML = '<div style="padding:8px 10px;font-size:12px" class="sap-error">Search failed</div>';
+        originResults.classList.remove('hidden');
+      }
+    }, 250);
+  });
+  originInput.addEventListener('focus', () => {
+    if (originInput.value.trim() && originResults.innerHTML) originResults.classList.remove('hidden');
+  });
+  originInput.addEventListener('blur', () => {
+    setTimeout(() => originResults.classList.add('hidden'), 150);
+  });
+
+  // Mode of Transport chosen first, then Haulier is filtered to only
+  // forwarders approved for that mode.
+  document.getElementById('mi-mode').addEventListener('change', () => {
+    loadForwarderOptionsByMode('mi-haulier', document.getElementById('mi-mode').value);
+  });
 
   const costCentreSelect = document.getElementById('mi-costcentre');
   fetch('/api/costcenters').then(r => r.json()).then(rows => {
@@ -6999,9 +7093,15 @@ async function openManualInboundShipmentModal() {
     result.innerHTML = '';
     btn.disabled = true; btn.textContent = 'Creating…';
 
+    if (originInput.value.trim() && !originIdInput.value) {
+      result.innerHTML = '<div class="sap-error">Select an origin from the dropdown list.</div>';
+      btn.disabled = false; btn.textContent = 'Create Shipment';
+      return;
+    }
+
     const price = document.getElementById('mi-price').value;
     const body = {
-      originDestinationID: originSelect.value || null,
+      originDestinationID: originIdInput.value || null,
       forwarderID: document.getElementById('mi-haulier').value || null,
       modeOfTransport: document.getElementById('mi-mode').value || null,
       dispatchDate: document.getElementById('mi-dispatch').value || null,
