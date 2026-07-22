@@ -21,6 +21,7 @@ const sendBtn = document.getElementById('gemini-send');
     document.getElementById('session-user').textContent = session.username.split('.')[0].toProperCase(); // Show the first name (username before the dot)
     const heroName = document.getElementById('hero-username');
     if (heroName) heroName.textContent = session.username.split('.')[0].toProperCase(); // Show first name in hero section, properly capitalized
+    filterDeptTiles(session);
     loadProductionSparkline();
     loadSalesSparkline();
     loadWarehouseSparkline();
@@ -34,6 +35,36 @@ const sendBtn = document.getElementById('gemini-send');
     window.location.href = '/';
   }
 })();
+
+// ── Filter department tiles to what this user can actually open ─────────────
+// Mirrors server.js's page-serving gate exactly (requireDepartment via
+// config.js's DEPT_PAGE_MAP, requireRole('admin') for admin.html) so a tile
+// is shown here if and only if clicking it would actually get in — no dead
+// tiles, no clutter for departments/roles the user doesn't have.
+// Same ROLE_LEVEL ordering as middleware/auth.js (not exported, so mirrored
+// here rather than reached into from the frontend).
+const ROLE_LEVEL = { operator: 1, admin: 2, superadmin: 3 };
+
+function filterDeptTiles(session) {
+  const departments = Array.isArray(session.departments) ? session.departments : [];
+  const userLevel    = ROLE_LEVEL[session.role] ?? 0;
+  const isSuperadmin = session.role === 'superadmin';
+
+  let visibleCount = 0;
+  document.querySelectorAll('.dept-card').forEach(card => {
+    const dept    = card.dataset.dept;
+    const roleMin = card.dataset.roleMin;
+
+    let allowed = true;
+    if (dept && !isSuperadmin)    allowed = departments.includes(dept);
+    if (roleMin && !isSuperadmin) allowed = allowed && userLevel >= (ROLE_LEVEL[roleMin] ?? 99);
+
+    card.classList.toggle('hidden', !allowed);
+    if (allowed) visibleCount++;
+  });
+
+  document.getElementById('dept-grid-empty')?.classList.toggle('hidden', visibleCount > 0);
+}
 
 // ── Live session countdown ────────────────────────────────────────────────────
 // Shows time remaining before the idle timeout (server.js/config.js —

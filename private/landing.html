@@ -57,30 +57,6 @@
           <span id="session-timer-dot" class="hero-pill-dot hero-pill-dot--ok"></span>Session: <span id="session-timer-text">--:--</span>
         </div>
       </div>
-
-      <!-- Quick numbers strip -->
-      <div class="hero-quicknums">
-        <div class="hero-qn-item">
-          <span class="hero-qn">9</span>
-          <span class="hero-ql">Departments</span>
-        </div>
-        <div class="hero-qn-sep"></div>
-        <div class="hero-qn-item">
-          <span class="hero-qn" id="qn-shipments">—</span>
-          <span class="hero-ql">Open Shipments</span>
-        </div>
-        <div class="hero-qn-sep"></div>
-        <div class="hero-qn-item">
-          <span class="hero-qn" id="qn-deliveries">—</span>
-          <span class="hero-ql">Pending Deliveries</span>
-        </div>
-        <div class="hero-qn-sep"></div>
-        <div class="hero-qn-item">
-          <span class="hero-qn" id="qn-session">60m</span>
-          <span class="hero-ql">Session remaining</span>
-        </div>
-      </div>
-
     </div>
   </section>
 
@@ -95,7 +71,7 @@
 
     <div class="dept-grid">
 
-      <a href="./logistics.html" class="dept-card" style="--delay:0.04s">
+      <a href="./logistics.html" class="dept-card" data-dept="logistics" style="--delay:0.04s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -124,7 +100,7 @@
         </div>
       </a>
 
-      <a href="./warehouse.html" class="dept-card" style="--delay:0.08s">
+      <a href="./warehouse.html" class="dept-card" data-dept="warehouse" style="--delay:0.08s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -153,7 +129,7 @@
         </div>
       </a>
 
-      <a href="./finance.html" class="dept-card" style="--delay:0.12s">
+      <a href="./finance.html" class="dept-card" data-dept="finance" style="--delay:0.12s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -173,7 +149,7 @@
         </div>
       </a>
 
-      <a href="./sales.html" class="dept-card" style="--delay:0.16s">
+      <a href="./sales.html" class="dept-card" data-dept="sales" style="--delay:0.16s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -201,7 +177,7 @@
         </div>
       </a>
 
-      <a href="./quality.html" class="dept-card" style="--delay:0.20s">
+      <a href="./quality.html" class="dept-card" data-dept="quality" style="--delay:0.20s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -221,7 +197,7 @@
         </div>
       </a>
 
-      <a href="./engineering.html" class="dept-card" style="--delay:0.24s">
+      <a href="./engineering.html" class="dept-card" data-dept="engineering" style="--delay:0.24s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -241,7 +217,7 @@
         </div>
       </a>
 
-      <a href="./management.html" class="dept-card" style="--delay:0.28s">
+      <a href="./management.html" class="dept-card" data-dept="management" style="--delay:0.28s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -263,7 +239,7 @@
         </div>
       </a>
 
-      <a href="./production.html" class="dept-card" style="--delay:0.32s">
+      <a href="./production.html" class="dept-card" data-dept="production" style="--delay:0.32s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -284,7 +260,7 @@
         </div>
       </a>
 
-      <a href="./production-nexus.html" class="dept-card dept-card--nexus" style="--delay:0.36s">
+      <a href="./production-nexus.html" class="dept-card dept-card--nexus" data-dept="production" style="--delay:0.36s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -312,7 +288,7 @@
         </div>
       </a>
 
-      <a href="./admin.html" class="dept-card dept-card--admin" style="--delay:0.40s">
+      <a href="./admin.html" class="dept-card dept-card--admin" data-role-min="admin" style="--delay:0.40s">
         <div class="dept-card-top">
           <div class="dept-icon">
             <svg viewBox="0 0 28 28" fill="none">
@@ -334,6 +310,10 @@
         </div>
       </a>
 
+    </div>
+
+    <div class="dept-grid-empty hidden" id="dept-grid-empty" style="text-align:center;padding:40px 20px;color:var(--text-muted,#8DA3BE);font-size:13px">
+      You don't have access to any department areas yet. Contact an administrator if this looks wrong.
     </div>
   </main>
 
