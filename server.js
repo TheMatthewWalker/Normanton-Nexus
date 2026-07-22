@@ -53,6 +53,7 @@ import financeRoutes           from './routes/finance.js';
 import notificationsRoutes     from './routes/notifications.js';
 import performanceRoutes       from './routes/performance.js';
 import stagingRoutes           from './routes/staging.js';
+import productionScheduleRoutes, { runProductionScheduleOtifDiff } from './routes/productionschedule.js';
 import sqlQueriesRoutes        from './routes/sqlqueries.js';
 import { runFullRefresh, runTurnsValClassRefresh } from './routes/performancesync.js';
 //import testOtifInsertRoutes     from './routes/test-otif-insert.js';
@@ -176,6 +177,20 @@ cron.schedule('20 * * * *', () => {
     .catch(err => console.error('[cron] session cleanup failed', err));
 });
 
+// Production Schedule OTIF tracker — once a day at 06:10 (after the 05:45
+// turns-valclass job, clear of the 30-min refresh at xx:00/xx:30 and the
+// warehouse sync at xx:55). Deliberately daily, not every 30 min: this
+// diffs dbo.AgreementSnapshot against dbo.OrderFulfillmentTracking and
+// treats a line's disappearance as "completed" — running it every 30 min
+// would risk reading a transient SAP sync gap as a real completion. See
+// sql/migrate_production_schedule.sql and routes/productionschedulesql.js.
+cron.schedule('10 6 * * *', () => {
+  console.log('[cron] starting production schedule OTIF diff');
+  runProductionScheduleOtifDiff()
+    .then(result => console.log('[cron] production schedule OTIF diff complete', result))
+    .catch(err => console.error('[cron] production schedule OTIF diff failed', err));
+});
+
 // Scheduled deployment checker — every minute. Looks for due, pending rows
 // in ScheduledDeployments and hands each one off to a detached
 // deploy-runner.cjs process (git pull + Windows Service restart). Detached
@@ -277,6 +292,7 @@ app.use('/api/finance',       requireLogin,   financeRoutes);
 app.use('/api/notifications', requireLogin,   notificationsRoutes);
 app.use('/api/performance', requireLogin, performanceRoutes);
 app.use('/api/staging', requireLogin, stagingRoutes);
+app.use('/api/production-schedule', requireLogin, productionScheduleRoutes);
 app.use('/sql', requireLogin, sqlQueriesRoutes);
 //app.use('/test-otif-insert', requireLogin, testOtifInsertRoutes);
 app.use('/api/debug', debugRoutes);

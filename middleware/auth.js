@@ -7,6 +7,9 @@
  *   requireLogin        — any authenticated user
  *   requireRole(role)   — user must have at least this role level
  *   requireDepartment(dept) — user must have access to this department
+ *   requireAnyDepartment(depts) — user must have access to at least one of these departments
+ *   requirePermission(code) — user must hold this permission code
+ *   requireAnyPermission(codes) — user must hold at least one of these permission codes
  *   requireSessionOrApiToken — session cookie OR bearer token (Excel macro)
  *
  * Role hierarchy (lowest → highest):
@@ -103,6 +106,66 @@ export function requireDepartment(department) {
     }
     // Redirect back to landing page with a query param so the UI can show a message
     res.redirect('/private/landing.html?denied=' + encodeURIComponent(department));
+  };
+}
+
+// ── requireAnyDepartment ──────────────────────────────────────────────────────
+// Like requireDepartment, but passes if the user has access to ANY of the
+// given departments. For pages/routes shared across departments — e.g. the
+// Production Schedule report, viewable from both Production and Sales.
+//
+// Usage:
+//   router.get('/', requireAnyDepartment(['production','sales']), handler)
+
+export function requireAnyDepartment(departments) {
+  return (req, res, next) => {
+    const user = req.session?.user;
+    if (!user) return res.redirect('/');
+
+    if (user.role === 'superadmin') return next();
+
+    const userDepts = Array.isArray(user.departments) ? user.departments : [];
+    const permitted = departments.some(d => userDepts.includes(d));
+
+    if (permitted) return next();
+
+    const isApiRoute = req.path.startsWith('/api/') || req.xhr ||
+                       req.headers.accept?.includes('application/json');
+
+    if (isApiRoute) {
+      return res.status(403).json({
+        success: false,
+        error: `You do not have access to any of: ${departments.join(', ')}.`,
+      });
+    }
+    res.redirect('/private/landing.html?denied=' + encodeURIComponent(departments.join(',')));
+  };
+}
+
+// ── requireAnyPermission ──────────────────────────────────────────────────────
+// Like requirePermission, but passes if the user holds ANY of the given
+// permission codes. For actions two different departments' supervisors can
+// both take — e.g. editing Production Schedule rows (PROD_SUPERVISOR OR
+// SALES_SUPERVISOR).
+//
+// Usage:
+//   router.put('/:id', requireAnyPermission(['PROD_SUPERVISOR','SALES_SUPERVISOR']), handler)
+
+export function requireAnyPermission(permissionCodes) {
+  return (req, res, next) => {
+    const user = req.session?.user;
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'Not authenticated' });
+    }
+    if (user.role === 'superadmin') return next();
+
+    const userPerms = Array.isArray(user.permissions) ? user.permissions : [];
+    if (permissionCodes.some(code => userPerms.includes(code))) return next();
+
+    return res.status(403).json({
+      success: false,
+      error: `Requires one of: ${permissionCodes.join(', ')}`,
+    });
   };
 }
 

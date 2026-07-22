@@ -185,6 +185,7 @@ function openFunction(fn) {
     reportOperator:  ['Operator Output',    'Production output ranked by primary operator'],
     reportMaterial:  ['Material Throughput','Output volume ranked by material code'],
     stagingPost:     ['Staging Post',       'Request material from Stores — track status by due date'],
+    productionSchedule: ['Production Schedule', 'Open PTFE order lines due in the next 5 working days — comments, ETA and OTIF KPI'],
   };
   const [title, hint] = titles[fn] || [fn, ''];
   document.getElementById('result-title').textContent = title;
@@ -224,6 +225,7 @@ function openFunction(fn) {
     reportOperator:  runReportOperator,
     reportMaterial:  runReportMaterial,
     stagingPost:     runStagingPost,
+    productionSchedule: () => window.ProductionScheduleReport.mount(),
   };
   if (fns[fn]) fns[fn]();
 }

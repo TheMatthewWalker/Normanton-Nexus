@@ -8,6 +8,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/logistics.css">
   <link rel="stylesheet" href="./css/production-nexus.css">
+  <link rel="stylesheet" href="./css/production-schedule.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
   <link rel="stylesheet" href="./css/notifications.css">
   <script src="./js/notifications.js" defer></script>
@@ -245,6 +246,12 @@
             <div class="tile-title">Open Runs</div>
             <div class="tile-desc">View all open runs and cancel entries that cannot be completed</div>
           </div>
+          <div class="sap-tile sap-tile--live" data-fn="productionSchedule">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Production Schedule</div>
+            <div class="tile-desc">Open PTFE order lines due in the next 5 working days · Arrears · OTIF KPI</div>
+          </div>
         </div>
       </div>
       <!-- Reports -->
@@ -317,6 +324,7 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="./js/production-schedule.js"></script>
   <script src="./js/production-nexus.js"></script>
 </body>
 </html>

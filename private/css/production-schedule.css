@@ -1,0 +1,99 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   production-schedule.css — Shared "Production Schedule" report component
+   (private/js/production-schedule.js). Loaded on both production-nexus.html
+   and sales.html — self-contained (psched- prefixed) so it never depends on
+   whichever page's own CSS happens to load alongside it. Relies only on the
+   same design-token variables every department page already defines
+   (--surface, --border, --text, --text-muted, --accent, --error, --surface2)
+   — same assumption nexus-common.css makes.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.psched-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px;
+  padding: 14px 20px; border-bottom: 1px solid var(--border);
+}
+
+.psched-tabs { display: flex; gap: 6px; }
+
+.psched-tab {
+  font-family: 'Manrope', sans-serif;
+  font-size: 13px; font-weight: 600;
+  padding: 6px 14px; border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.psched-tab:hover { color: var(--text); border-color: var(--accent); }
+.psched-tab--active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.psched-actions { display: flex; align-items: center; gap: 10px; }
+
+.psched-selection-hint {
+  font-size: 12px; color: var(--text-muted);
+}
+
+.psched-btn-primary,
+.psched-btn-secondary {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px; font-weight: 600;
+  padding: 6px 14px; border-radius: 8px;
+  cursor: pointer; transition: all 0.15s ease;
+}
+.psched-btn-secondary {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+}
+.psched-btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+.psched-btn-primary {
+  background: var(--accent); border: 1px solid var(--accent); color: #fff;
+}
+.psched-btn-primary:hover { filter: brightness(1.08); }
+.psched-btn-primary:disabled, .psched-btn-secondary:disabled { opacity: 0.5; cursor: default; }
+
+.psched-loading {
+  display: flex; align-items: center; gap: 10px;
+  padding: 40px 20px; color: var(--text-muted); font-size: 13px;
+}
+.psched-spinner {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: psched-spin 0.7s linear infinite;
+}
+@keyframes psched-spin { to { transform: rotate(360deg); } }
+
+.psched-empty { padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
+
+.psched-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.psched-table th {
+  text-align: left; font-size: 11px; font-weight: 700; letter-spacing: 0.4px;
+  text-transform: uppercase; color: var(--text-muted);
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--surface2); position: sticky; top: 0;
+}
+.psched-table td { padding: 8px 12px; border-bottom: 1px solid rgba(208,218,232,0.4); vertical-align: middle; }
+.psched-table tr:last-child td { border-bottom: none; }
+
+.psched-mono { font-family: 'JetBrains Mono', monospace; color: var(--text-muted); font-size: 12px; }
+.psched-sub  { font-family: 'JetBrains Mono', monospace; color: var(--text-muted); font-size: 11px; }
+
+.psched-date-hdr td {
+  background: var(--surface2); font-weight: 700; font-size: 12px;
+  color: var(--text); padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+
+.psched-eta-input, .psched-comment-input {
+  font-family: 'Manrope', sans-serif; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; background: var(--surface); color: var(--text);
+  width: 100%; box-sizing: border-box;
+}
+.psched-eta-input { width: 130px; }
+.psched-comment-input { min-width: 180px; }
+.psched-eta-input:focus, .psched-comment-input:focus { outline: none; border-color: var(--accent); }
+
+.psched-kpi-hdr {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  margin: 4px 0 10px;
+}
