@@ -1,5 +1,8 @@
 /* ============================================================
    Persistent session store — run against the kongsberg database.
+   (No GO, no CONCAT(), no DATETIME2, no MERGE — see
+   create_performance_turnsvalclass_database.sql's header: this project
+   targets SQL Server 2005, which has none of those.)
 
    dbo.PortalSessions — backs lib/sqlSessionStore.js, a SQL Server-backed
    express-session store. Replaces express-session's
@@ -28,9 +31,9 @@ BEGIN
   CREATE TABLE dbo.PortalSessions (
     SessionID   NVARCHAR(128)  NOT NULL,
     SessionData NVARCHAR(MAX)  NOT NULL,
-    ExpiresUtc  DATETIME2      NOT NULL,
-    CreatedUtc  DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
-    UpdatedUtc  DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
+    ExpiresUtc  DATETIME       NOT NULL,
+    CreatedUtc  DATETIME       NOT NULL DEFAULT GETUTCDATE(),
+    UpdatedUtc  DATETIME       NOT NULL DEFAULT GETUTCDATE(),
 
     CONSTRAINT PK_PortalSessions PRIMARY KEY (SessionID)
   );
