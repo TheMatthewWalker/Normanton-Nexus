@@ -105,6 +105,36 @@ function userId(req) {
   return req.session?.user?.userID;
 }
 
+// ── Material search (for the Mass Packaging Update lookup list) ───────────────
+// Reads the existing daily-synced material master list (dbo.TurnsValClassSnapshot
+// — the "mm_turns" list already used by the Stock Turns & Valuation tile in
+// Logistics) rather than calling SAP live or duplicating that sync. That route
+// is gated behind LOG_MRP (a Logistics permission Engineering users won't
+// hold), so this is a thin, read-only, Engineering-gated view over the same
+// table instead of reusing the Logistics endpoint directly.
+
+router.get('/materials', canView, async (req, res) => {
+  try {
+    const search = String(req.query.search || '').trim();
+    const pool = await sql.connect(sqlConfig);
+    const request = pool.request();
+    let where = '';
+    if (search) {
+      where = 'WHERE Material LIKE @search OR MaterialText LIKE @search';
+      request.input('search', sql.VarChar(42), `%${search}%`);
+    }
+    const { recordset } = await request.query(`
+      SELECT TOP 200 Material AS material, MaterialText AS materialText
+      FROM dbo.TurnsValClassSnapshot
+      ${where}
+      ORDER BY Material
+    `);
+    res.json({ success: true, data: recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // ── Material lookups ─────────────────────────────────────────────────────────
 
 router.get('/material/:material/exists', canView, async (req, res) => {

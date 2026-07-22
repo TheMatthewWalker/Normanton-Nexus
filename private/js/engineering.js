@@ -35,7 +35,7 @@ function backToTiles() {
 
 const TITLES = {
   massUpdate:         ['Mass Packaging Update', 'Bulk-update the default (plant-level) packaging instruction assignment for a list of part numbers'],
-  newPackaging:       ['New Packaging Creation', 'Create the material masters & BOMs needed for a customer part’s packaging set-up'],
+  newPackaging:       ['New Packaging Creation', 'Create the material masters & BOMs needed for a part’s packaging set-up'],
   instructionDetail:  ['Packaging Instruction Detail', 'Detailed changes to a material’s packaging instruction'],
 };
 
@@ -79,33 +79,114 @@ const PACKAGING_CODES = ['SD','MD','LD','XD','SB','MB','LB','XB','C1','C2'];
 function renderMassUpdate() {
   const body = document.getElementById('result-body');
   body.innerHTML = `
-    <div style="padding:20px;max-width:720px">
+    <div style="padding:20px;max-width:760px">
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
-        Paste one part per line, as <code>MATERIAL,PACKAGING MATERIAL</code>. Each material must
-        already have a plant-default packaging instruction — this only changes the assigned
-        packaging material, quantities and flags already set are left untouched.
+        Tick the materials to update below, then enter the packaging material to assign to all of
+        them and run the update. Each material must already have a plant-default packaging
+        instruction — this only changes the assigned packaging material, quantities and flags
+        already set are left untouched.
       </div>
-      <textarea id="mu-input" rows="8" placeholder="363515,IB_363515_C2&#10;363643,IB_363643_SB"
-        style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:12px;resize:vertical"></textarea>
-      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+      <div style="margin-bottom:8px">
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Search Materials</label>
+        <input id="mu-search" type="text" placeholder="Filter by part number or description…"
+          style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box">
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;margin-bottom:6px">
+        <span id="mu-list-status" style="font-size:11px;color:var(--text-muted)"></span>
+        <span style="flex:1"></span>
+        <button id="mu-select-all" style="cursor:pointer;background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px">Select All Visible</button>
+        <button id="mu-clear" style="cursor:pointer;background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px">Clear Selection</button>
+      </div>
+      <div id="mu-list" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface)"></div>
+      <div style="margin:14px 0;font-size:12px;color:var(--text-muted)"><span id="mu-selected-count">0</span> material(s) selected</div>
+      <div style="margin-bottom:12px">
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">New Packaging Material</label>
+        <input id="mu-packmat" placeholder="e.g. IB_TSHV3-4B01/S_C2"
+          style="width:280px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace">
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
         <button id="mu-run" class="btn-back" style="border:none;cursor:pointer">Run Update</button>
         <span id="mu-status" style="font-size:12px;color:var(--text-muted)"></span>
       </div>
       <div id="mu-results" style="margin-top:16px"></div>
     </div>`;
 
+  // material -> materialText, persists across search refreshes so selections
+  // survive as the visible/filtered list changes.
+  const selected = new Map();
+
+  function renderCheckboxRow(m) {
+    const checked = selected.has(m.material);
+    return `
+      <label class="mu-row" data-material="${esc(m.material)}" data-text="${esc(m.materialText || '')}"
+        style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12px">
+        <input type="checkbox" class="mu-check" ${checked ? 'checked' : ''} style="cursor:pointer">
+        <span style="font-family:'JetBrains Mono',monospace;font-weight:600;min-width:110px">${esc(m.material)}</span>
+        <span style="color:var(--text-muted)">${esc(m.materialText || '')}</span>
+      </label>`;
+  }
+
+  function updateSelectedCount() {
+    document.getElementById('mu-selected-count').textContent = selected.size;
+  }
+
+  async function loadList(search) {
+    const listEl = document.getElementById('mu-list');
+    const statusEl = document.getElementById('mu-list-status');
+    statusEl.textContent = 'Loading…';
+    try {
+      const json = await pkgApi(`/materials?search=${encodeURIComponent(search || '')}`);
+      const rows = json.data || [];
+      listEl.innerHTML = rows.length
+        ? rows.map(renderCheckboxRow).join('')
+        : '<div style="padding:16px;color:var(--text-muted);font-size:12px">No materials match.</div>';
+      statusEl.textContent = rows.length >= 200 ? `Showing first ${rows.length} — refine your search` : `${rows.length} shown`;
+
+      listEl.querySelectorAll('.mu-row').forEach(row => {
+        const checkbox = row.querySelector('.mu-check');
+        row.addEventListener('click', e => {
+          if (e.target !== checkbox) checkbox.checked = !checkbox.checked;
+          const material = row.dataset.material;
+          if (checkbox.checked) selected.set(material, row.dataset.text);
+          else selected.delete(material);
+          updateSelectedCount();
+        });
+      });
+    } catch (err) {
+      listEl.innerHTML = `<div style="padding:16px;color:var(--error);font-size:12px">${esc(err.message)}</div>`;
+      statusEl.textContent = '';
+    }
+  }
+
+  let searchTimer = null;
+  document.getElementById('mu-search').addEventListener('input', e => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadList(e.target.value.trim()), 250);
+  });
+
+  document.getElementById('mu-select-all').addEventListener('click', () => {
+    document.querySelectorAll('#mu-list .mu-row').forEach(row => {
+      row.querySelector('.mu-check').checked = true;
+      selected.set(row.dataset.material, row.dataset.text);
+    });
+    updateSelectedCount();
+  });
+
+  document.getElementById('mu-clear').addEventListener('click', () => {
+    selected.clear();
+    document.querySelectorAll('#mu-list .mu-check').forEach(cb => { cb.checked = false; });
+    updateSelectedCount();
+  });
+
   document.getElementById('mu-run').addEventListener('click', async () => {
     const statusEl = document.getElementById('mu-status');
     const resultsEl = document.getElementById('mu-results');
-    const lines = document.getElementById('mu-input').value.split('\n').map(l => l.trim()).filter(Boolean);
+    const packMaterial = document.getElementById('mu-packmat').value.trim();
 
-    const rows = [];
-    for (const line of lines) {
-      const [material, packMaterial] = line.split(',').map(s => (s || '').trim());
-      if (!material || !packMaterial) { statusEl.textContent = `Bad line: "${line}" — expected MATERIAL,PACKAGING MATERIAL`; return; }
-      rows.push({ material, packMaterial });
-    }
-    if (rows.length === 0) { statusEl.textContent = 'Nothing to update.'; return; }
+    if (selected.size === 0) { statusEl.textContent = 'Select at least one material.'; return; }
+    if (!packMaterial) { statusEl.textContent = 'New Packaging Material is required.'; return; }
+
+    const rows = [...selected.keys()].map(material => ({ material, packMaterial }));
 
     statusEl.textContent = `Updating ${rows.length} material(s)…`;
     resultsEl.innerHTML = '';
@@ -134,6 +215,8 @@ function renderMassUpdate() {
       statusEl.textContent = err.message;
     }
   });
+
+  loadList('');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -145,14 +228,14 @@ function renderNewPackaging() {
   body.innerHTML = `
     <div style="padding:20px;max-width:720px">
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
-        Enter a customer part number, then choose which packaging types to create. Each selected
+        Enter a part number, then choose which packaging types to create. Each selected
         code creates material <code>IB_&lt;part&gt;_&lt;code&gt;</code> (copied from the standard
         <code>IB_363800_&lt;code&gt;</code> reference material) plus its BOM (the physical drum/box/carton
         component). Codes whose material already exists are skipped, not overwritten.
       </div>
       <div style="margin-bottom:12px">
-        <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Customer Part Number</label>
-        <input id="np-part" placeholder="e.g. 363515"
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Part Number</label>
+        <input id="np-part" placeholder="e.g. TSHV3-4B01/S"
           style="width:280px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace">
       </div>
       <div style="margin-bottom:14px">
@@ -177,7 +260,7 @@ function renderNewPackaging() {
     const customerPart = document.getElementById('np-part').value.trim();
     const codes = [...document.querySelectorAll('.np-code:checked')].map(cb => cb.value);
 
-    if (!customerPart) { statusEl.textContent = 'Customer part number is required.'; return; }
+    if (!customerPart) { statusEl.textContent = 'Part number is required.'; return; }
     if (codes.length === 0) { statusEl.textContent = 'Select at least one packaging type.'; return; }
 
     statusEl.textContent = `Creating ${codes.length} packaging type(s) — this calls SAP MM01/CS01 and can take a while…`;
@@ -224,7 +307,7 @@ function renderInstructionDetail() {
       <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:16px">
         <div>
           <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Material</label>
-          <input id="pi-material" placeholder="e.g. 363515"
+          <input id="pi-material" placeholder="e.g. TSHV3-4B01/S"
             style="width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace">
         </div>
         <button id="pi-load" class="btn-back" style="border:none;cursor:pointer;height:35px">Load</button>
@@ -303,7 +386,7 @@ function renderInstructionDetail() {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;max-width:600px">
         <div>
           <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Packaging Material</label>
-          <input id="pi-packmat" value="${esc(v.packMaterial)}" placeholder="e.g. IB_363515_SB"
+          <input id="pi-packmat" value="${esc(v.packMaterial)}" placeholder="e.g. IB_TSHV3-4B01/S_SB"
             style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace">
         </div>
         <div></div>
@@ -320,16 +403,16 @@ function renderInstructionDetail() {
       </div>
       <div style="margin-bottom:14px">
         <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:2px">Flags</div>
-        ${chk('pi-packprod', 'Pack Prod', v.packProd)}
-        ${chk('pi-boxgen', 'Box Gen', v.boxGen)}
-        ${chk('pi-batchspread', 'Batch Spread', v.batchSpread)}
-        ${chk('pi-partmix', 'Part Mix', v.partMix)}
+        ${chk('pi-packprod', 'Packed in Production', v.packProd)}
+        ${chk('pi-partmix', 'Allow mixed pallets', v.partMix)}
+        ${chk('pi-batchspread', 'Allow batch spread', v.batchSpread)}
+        ${chk('pi-boxgen', 'Generate boxes within batch', v.boxGen)}
       </div>
       <div style="margin-bottom:16px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface2)">
         <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:2px">Trace Flags — plant-default only</div>
-        ${chk('pi-chargereq', 'Trace Charge ID Required', v.chargeReq, '(needed for material customisation)')}
+        ${chk('pi-chargereq', 'Trace Charge ID Required', v.chargeReq, 'needed for material customisation')}
         ${chk('pi-techstatreq', 'Tech Status Required', v.techStatReq)}
-        ${chk('pi-pnumreq', 'Part Number Required', v.pNumReq)}
+        ${chk('pi-pnumreq', 'Trace P-Number', v.pNumReq)}
         ${!isPlant ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px">These only take effect when saved against the plant default (no customer selected) — SAP ignores them on a customer-specific row.</div>' : ''}
       </div>
       <div id="pi-msg" style="font-size:12px;color:var(--error);margin-bottom:10px"></div>
