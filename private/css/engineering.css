@@ -204,6 +204,31 @@ body::before {
 }
 .btn-back:hover { background: var(--accent2); }
 
+/* ── TILE SECTIONS (collapsible buckets, shared tile-grid/result-section base
+   comes from logistics.css — see engineering.html's <head> comment) ───────── */
+.pn-section { margin-bottom: 24px; }
+
+.pn-section-hdr {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px; letter-spacing: 2.5px; text-transform: uppercase;
+  color: var(--text-muted);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  cursor: pointer;
+  user-select: none;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.pn-section-hdr::after {
+  content: '\25BE';
+  font-size: 13px;
+  transition: transform 0.18s;
+  opacity: 0.6;
+  letter-spacing: 0;
+}
+.pn-section--collapsed .pn-section-hdr::after { transform: rotate(-90deg); }
+.pn-section--collapsed .tile-grid { display: none; }
+
 /* ── FOOTER ──────────────────────────────────────────────────────────────── */
 .footer {
   position: relative; z-index: 1;

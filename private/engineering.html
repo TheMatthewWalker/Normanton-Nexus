@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -6,6 +6,11 @@
   <title>Normanton Nexus · Engineering</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- logistics.css supplies the shared tile-grid/result-section base styles —
+       same reuse pattern sales.html/production-nexus.html already use: the
+       base tile system lives there, department pages just add their own
+       colour theme + section tweaks on top. -->
+  <link rel="stylesheet" href="./css/logistics.css">
   <link rel="stylesheet" href="./css/engineering.css">
   <link rel="stylesheet" href="./css/nexus-common.css">
   <link rel="stylesheet" href="./css/notifications.css">
@@ -29,7 +34,7 @@
     <div class="header-right">
       <div class="user-badge">
         <div class="user-dot"></div>
-        <span>Connected</span>
+        <span id="session-user">Connected</span>
       </div>
       <a href="/logout" class="btn-logout">Sign Out</a>
     </div>
@@ -39,31 +44,63 @@
   <div class="page-title-bar">
     <div class="page-title-inner">
       <h1 class="page-title">Engineering</h1>
-      <p class="page-subtitle">Specs, drawings &amp; process control</p>
+      <p class="page-subtitle">Specs, drawings &amp; process control · Select a function to begin</p>
     </div>
   </div>
 
-  <!-- MAIN CONTENT -->
-  <main class="main-content">
+  <!-- MAIN -->
+  <div class="sap-main">
 
-    <div class="placeholder-panel">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 28 28" fill="none"><circle cx="14" cy="14" r="4" stroke="currentColor" stroke-width="1.8"/><path d="M14 2v3M14 23v3M2 14h3M23 14h3M5.5 5.5l2.1 2.1M20.4 20.4l2.1 2.1M5.5 22.5l2.1-2.1M20.4 7.6l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <!-- TILE GRID -->
+    <div class="tile-section" id="tile-section">
+
+      <div class="pn-section">
+        <div class="pn-section-hdr">Packaging Data</div>
+        <div class="tile-grid">
+          <div class="sap-tile" data-fn="massUpdate">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
+            <div class="tile-title">Mass Packaging Update</div>
+            <div class="tile-desc">Bulk-update the default packaging instruction assignment for a list of part numbers</div>
+          </div>
+          <div class="sap-tile" data-fn="newPackaging">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"/><path d="M3 8v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8"/><path d="M3 8h18"/><line x1="12" y1="12" x2="12" y2="17"/><line x1="9.5" y1="14.5" x2="14.5" y2="14.5"/></svg></div>
+            <div class="tile-title">New Packaging Creation</div>
+            <div class="tile-desc">Create the material masters &amp; BOMs needed for a customer part's packaging set-up</div>
+          </div>
+          <div class="sap-tile" data-fn="instructionDetail">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></div>
+            <div class="tile-title">Packaging Instruction Detail</div>
+            <div class="tile-desc">Detailed changes to a material's packaging instruction — quantities, flags &amp; trace charge ID</div>
+          </div>
+        </div>
       </div>
-      <div class="placeholder-title">Engineering — Coming Soon</div>
-      <div class="placeholder-body">
-        This area is reserved for the Engineering department.<br>
-        Content, tools and reports will be added here.
-      </div>
-      <a href="./landing.html" class="btn-back">&larr; Return to Hub</a>
+
     </div>
 
-  </main>
+    <!-- RESULT PANEL (shared across all functions) -->
+    <div class="result-section hidden" id="result-section">
+      <div class="result-toolbar">
+        <button type="button" class="btn-back-tiles" id="btn-back-tiles">&larr; Functions</button>
+        <div class="result-title-wrap">
+          <div class="toolbar-title" id="result-title">—</div>
+          <div class="toolbar-hint"  id="result-hint"></div>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <div class="row-badge hidden" id="result-row-badge"></div>
+      </div>
+      <div class="result-body" id="result-body">
+        <div class="psched-loading"><div class="psched-spinner"></div>Loading…</div>
+      </div>
+    </div>
+
+  </div><!-- /.sap-main -->
 
   <footer class="footer">
     <span>Normanton Nexus &nbsp;&middot;&nbsp; Authorised access only</span>
     <span class="footer-right">Engineering</span>
   </footer>
+
+  <script src="./js/engineering.js"></script>
 
 </body>
 </html>
