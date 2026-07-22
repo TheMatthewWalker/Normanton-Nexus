@@ -62,6 +62,7 @@ import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
 import deployRoutes            from './routes/deploy.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
+import { SqlSessionStore }     from './lib/sqlSessionStore.js';
 
 const httpsOptions = {
   key: fs.readFileSync("./certs/key.pem"),
@@ -96,8 +97,16 @@ const limiter = rateLimit({
 // apply rate limiter to all requests
 app.use(limiter);
 
+// SQL Server-backed session store (lib/sqlSessionStore.js) — persists
+// sessions to kongsberg.dbo.PortalSessions instead of express-session's
+// default in-memory MemoryStore, so a server restart (scheduled deploy,
+// crash, manual bounce) no longer logs everyone out silently. Requires
+// sql/migrate_portal_sessions.sql to have been run.
+const sessionStore = new SqlSessionStore();
+
 app.use(session({
   secret: config.sessionSecret,
+  store: sessionStore,
   resave: false,
   saveUninitialized: false,
   rolling: true,                          // reset expiry on each request
@@ -138,6 +147,16 @@ cron.schedule('55 * * * *', () => {
   runSapSync()
     .then(result => console.log('[cron] warehouse SAP sync complete', result))
     .catch(err => console.error('[cron] warehouse SAP sync failed', err));
+});
+
+// Expired session cleanup — hourly. sessionStore.get() already ignores
+// expired rows on its own, so this is pure housekeeping to stop
+// kongsberg.dbo.PortalSessions growing unbounded with rows nobody will
+// ever read again (logged-out/idle-timed-out sessions).
+cron.schedule('20 * * * *', () => {
+  sessionStore.cleanupExpired()
+    .then(count => { if (count) console.log(`[cron] session cleanup removed ${count} expired session(s)`); })
+    .catch(err => console.error('[cron] session cleanup failed', err));
 });
 
 // Scheduled deployment checker — every minute. Looks for due, pending rows
