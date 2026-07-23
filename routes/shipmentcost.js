@@ -47,16 +47,47 @@ router.get('/id/:costId', async (req, res) => {
     }
 });
 
-// ── Get by ShipmentID ──
+// ── Delete an unprocessed cost line (outbound) — mirrors routes/inboundcosts.js's
+// DELETE for the inbound side; used by the Associated Costs tile on the
+// Search Shipment modal. Blocked once migoStatus=1 (already posted — use
+// POST /:costId/reverse instead).
+router.delete('/:costId', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('costId', sql.BigInt, req.params.costId)
+            .query(`DELETE FROM Logistics.dbo.ShipmentCost
+                    OUTPUT DELETED.costID
+                    WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
+        if (!result.recordset.length)
+            return res.status(400).json({ success: false, error: 'Line not found, or already posted to SAP.' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Get by ShipmentID — used by the Search Shipment modal's Associated
+// Costs tile. Now returns elementDescription/tier like the inbound
+// equivalent (routes/inboundcosts.js GET /shipment/:poShipmentId), wrapped
+// in {success,data} — no existing caller depended on the old raw-array shape.
 router.get('/shipment/:shipmentId', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
             .input('shipmentId', sql.BigInt, req.params.shipmentId)
-            .query('SELECT * FROM Logistics.dbo.ShipmentCost WHERE shipmentID = @shipmentId');
-        res.json(result.recordset);
+            .query(`
+                SELECT sc.costID, sc.shipmentID, sc.costType, sc.costElement, sc.costCenter,
+                       sc.expectedCost, sc.actualCost, sc.migoStatus, sc.materialDocument, sc.modeOfTransport,
+                       ce.elementDescription, ce.tier
+                FROM Logistics.dbo.ShipmentCost sc
+                LEFT JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'outbound'
+                WHERE sc.shipmentID = @shipmentId
+                ORDER BY sc.costID DESC
+            `);
+        res.json({ success: true, data: result.recordset });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -223,7 +254,8 @@ router.get('/unprocessed', async (req, res) => {
                 sm.forwarderID,
                 sm.plannedCollection,
                 sm.actualCollection,
-                f.forwarderName,
+                sm.ActualDelivery AS deliveredDate,
+                (SELECT TOP 1 forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = sm.forwarderID) AS forwarderName,
                 cc.centerCode  AS costCenter,
                 ce.elementCode AS costElement,
                 sc.expectedCost,
@@ -235,7 +267,6 @@ router.get('/unprocessed', async (req, res) => {
                 sm.trackingNumber
             FROM Logistics.dbo.ShipmentCost sc
             INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-            LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
             LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
             WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.shipmentID IS NOT NULL
@@ -250,21 +281,28 @@ router.get('/unprocessed', async (req, res) => {
                 ps.ForwarderID AS forwarderID,
                 ps.DispatchDate AS plannedCollection,
                 NULL AS actualCollection,
-                f.forwarderName,
+                ps.ReceivedAtUtc AS deliveredDate,
+                (SELECT TOP 1 forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = ps.ForwarderID) AS forwarderName,
                 cc.centerCode  AS costCenter,
                 ce.elementCode AS costElement,
                 sc.expectedCost,
                 sc.actualCost,
                 sc.costType,
                 sc.modeOfTransport,
-                NULL AS destinationCountry,
-                NULL AS destinationPostCode,
+                -- Inbound has no destination of its own (goods always come IN
+                -- to Kongsberg) -- "location" here is the shipment's ORIGIN
+                -- instead, resolved via OriginDestinationID. Only Manual
+                -- Inbound Shipments currently set this; regular
+                -- order-suggestion-derived shipments have no origin captured
+                -- yet, so this is '-' for those until that's addressed.
+                d.destinationCountry,
+                d.destinationPostCode,
                 ps.TrackingNumber AS trackingNumber
             FROM Logistics.dbo.ShipmentCost sc
             INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
-            LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = ps.ForwarderID
-            LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
-            LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
+            LEFT  JOIN Logistics.dbo.CostCenters   cc ON cc.centerCode  = sc.costCenter
+            LEFT  JOIN Logistics.dbo.CostElements  ce ON ce.elementCode = sc.costElement
+            LEFT  JOIN Logistics.dbo.Destinations  d  ON d.destinationID = ps.OriginDestinationID
             WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.poShipmentID IS NOT NULL
 
             ORDER BY plannedCollection ASC, shipmentID ASC`);
@@ -432,7 +470,7 @@ router.post('/post-migo', async (req, res) => {
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
                    'outbound' AS direction, sm.shipmentID AS refID,
                    RIGHT('000000' + CONVERT(VARCHAR(12), sm.shipmentID), 6) AS shipmentRef,
-                   sm.forwarderID, sm.actualCollection, sm.trackingNumber,
+                   sm.forwarderID, sm.actualCollection, sm.ActualDelivery AS deliveredDate, sm.trackingNumber,
                    sm.destinationCountry, sm.destinationPostCode
             FROM Logistics.dbo.ShipmentCost sc
             INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
@@ -443,20 +481,40 @@ router.post('/post-migo', async (req, res) => {
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
                    'inbound' AS direction, ps.ShipmentId AS refID,
                    ps.ShipmentReference AS shipmentRef,
-                   ps.ForwarderID AS forwarderID, ps.DispatchDate AS actualCollection, ps.TrackingNumber AS trackingNumber,
-                   NULL AS destinationCountry, NULL AS destinationPostCode
+                   ps.ForwarderID AS forwarderID, ps.DispatchDate AS actualCollection, ps.ReceivedAtUtc AS deliveredDate, ps.TrackingNumber AS trackingNumber,
+                   d.destinationCountry, d.destinationPostCode
             FROM Logistics.dbo.ShipmentCost sc
             INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+            LEFT  JOIN Logistics.dbo.Destinations d ON d.destinationID = ps.OriginDestinationID
             WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0`);
 
         if (!fetched.recordset.length)
             return res.status(404).json({ success: false, error: 'No unprocessed records found for the given IDs.' });
 
+        // Nothing posts to SAP until the shipment has actually been
+        // delivered/received — marked from the in-transit section
+        // (outbound, ShipmentMain.ActualDelivery) or the Inbound Log's Mark
+        // Received action (inbound, PurchaseOrderShipment.ReceivedAtUtc).
+        // This stops costs going to SAP before the service is fully
+        // tendered, in case a price adjustment is still needed. Rows
+        // missing this are dropped from processing and reported back
+        // rather than silently posted or silently ignored.
+        const blockedCostIDs = fetched.recordset.filter(r => !r.deliveredDate).map(r => r.costID);
+        const deliverable    = fetched.recordset.filter(r => r.deliveredDate);
+
+        if (!deliverable.length) {
+            return res.status(400).json({
+                success: false,
+                error: 'None of the selected lines have been delivered/received yet — nothing to post.',
+                blockedCostIDs,
+            });
+        }
+
         // Group cost lines by direction+shipment — direction is part of the
         // key because outbound shipmentID and inbound poShipmentID are
         // separate identity spaces and can collide numerically.
         const groups = {};
-        for (const r of fetched.recordset) {
+        for (const r of deliverable) {
             const key = `${r.direction}:${r.refID}`;
             if (!groups[key]) {
                 groups[key] = {
@@ -465,6 +523,7 @@ router.post('/post-migo', async (req, res) => {
                     poShipmentID:         r.direction === 'inbound'  ? r.refID : null,
                     shipmentReference:    r.shipmentRef,
                     actualCollectionDate: r.actualCollection,
+                    deliveredDate:        r.deliveredDate,
                     forwarderID:          r.forwarderID,
                     modeOfTransport:      r.modeOfTransport,
                     location:             `${(r.destinationCountry  || '').slice(0, 2).toUpperCase()}` +
@@ -516,7 +575,54 @@ router.post('/post-migo', async (req, res) => {
             }
         }
 
-        res.json({ success: true, results });
+        res.json({ success: true, results, blockedCostIDs });
+    } catch (err) {
+        const message = err.response?.data?.error ?? err.message;
+        res.status(500).json({ success: false, error: message });
+    }
+});
+
+// ── Reverse a posted cost line (MB01 goods receipt) ──────────────────────────
+// Works for both directions — costID is the same table/key either way.
+// Calls SapServer's POST /api/purchasing/reverse-goods-receipt, which reuses
+// the existing MBST BDC (see PurchasingController.cs). On a successful
+// reversal (SAP message type "S"), clears migoStatus/materialDocument so the
+// line drops back into Unprocessed Costs for correction and re-posting.
+router.post('/:costId/reverse', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const costId = Number(req.params.costId);
+
+        const { recordset } = await pool.request()
+            .input('costId', sql.BigInt, costId)
+            .query(`SELECT costID, migoStatus, materialDocument FROM Logistics.dbo.ShipmentCost WHERE costID = @costId`);
+
+        const row = recordset[0];
+        if (!row) return res.status(404).json({ success: false, error: 'Cost line not found.' });
+        if (!row.migoStatus || !row.materialDocument)
+            return res.status(400).json({ success: false, error: 'This line has not been posted to SAP yet — nothing to reverse.' });
+
+        const sapResp = await axios.post(
+            `${sapConfig.url}/api/purchasing/reverse-goods-receipt`,
+            { materialDocument: row.materialDocument },
+            { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(req.session?.user?.userID)}` } }
+        );
+
+        const sapBody = sapResp.data;
+        if (!sapBody.success) throw new Error(sapBody.error ?? 'SapServer returned success=false');
+
+        const bdc = sapBody.data || {};
+        const reversed = bdc.type === 'S';
+
+        if (reversed) {
+            await pool.request()
+                .input('costId', sql.BigInt, costId)
+                .query(`UPDATE Logistics.dbo.ShipmentCost
+                        SET migoStatus = 0, materialDocument = NULL
+                        WHERE costID = @costId`);
+        }
+
+        res.json({ success: reversed, message: bdc.message || bdc.rawMessage || '', raw: bdc });
     } catch (err) {
         const message = err.response?.data?.error ?? err.message;
         res.status(500).json({ success: false, error: message });

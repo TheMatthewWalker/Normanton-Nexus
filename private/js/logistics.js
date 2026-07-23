@@ -2375,22 +2375,30 @@ function renderShipmentDetailModal(shipment, deliveries) {
           ${shipment.customsID ? `<div style="margin-top:8px;font-size:12px;color:var(--text-muted)">ID: ${esc(String(shipment.customsID))}</div>` : ''}
         </div>
       </div>
-      <div class="sd-section" style="margin-bottom:16px">
-        <div class="sd-section-title">Haulier</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
-        <div class="sd-haulier-row">
-          <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
-          <button class="btn-secondary" id="sd-forwarder-save">Save</button>
-          <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
+      <div class="sd-grid" style="margin-bottom:16px">
+        <div class="sd-section">
+          <div class="sd-section-title">Haulier</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
+          <div class="sd-haulier-row">
+            <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
+            <button class="btn-secondary" id="sd-forwarder-save">Save</button>
+            <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
+          </div>
+        </div>
+        <div class="sd-section">
+          <div class="sd-section-title">Actions</div>
+          <div class="sd-actions">
+            <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
+            <div id="sd-packing-list-result" style="font-size:12px;color:var(--text-muted)"></div>
+            ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
+            <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
+          </div>
         </div>
       </div>
-      <div class="sd-section">
-        <div class="sd-section-title">Actions</div>
-        <div class="sd-actions">
-          <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
-          <div id="sd-packing-list-result" style="font-size:12px;color:var(--text-muted)"></div>
-          ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
-          <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
+      <div class="sd-section" style="margin-bottom:16px">
+        <div class="sd-section-title">Associated Costs</div>
+        <div id="sd-costs">
+          <div class="sap-loading"><div class="spinner"></div>Loading...</div>
         </div>
       </div>
     </div>
@@ -2400,6 +2408,8 @@ function renderShipmentDetailModal(shipment, deliveries) {
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`;
+
+  renderShipmentAssociatedCosts(shipment.shipmentID);
 
   // Load hauliers
   loadApprovedForwarders().then(forwarders => {
@@ -2480,6 +2490,77 @@ function renderShipmentDetailModal(shipment, deliveries) {
   document.getElementById('sd-deliveries-btn').addEventListener('click', () => {
     openShipmentDeliveriesPanel(shipment.shipmentID, shipment, deliveries);
   });
+}
+
+
+// ── Associated Costs (Search Shipment / Shipment Details modal, outbound) ──
+// Mirrors renderAssociatedCosts (Inbound Log detail) — list, remove while
+// unprocessed, and show the material document + a Reverse option once
+// posted. Unlike inbound, there's no add-line form here: outbound cost
+// lines are created automatically at booking time (freight + customs, see
+// routes/shipmentmain.js), so ad-hoc adding isn't wired up on this side yet.
+async function renderShipmentAssociatedCosts(shipmentId) {
+  const container = document.getElementById('sd-costs');
+  if (!container) return;
+  try {
+    const res = await fetch(`/api/shipmentcost/shipment/${shipmentId}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load costs');
+    const lines = json.data || [];
+
+    const rows = lines.map(l => `
+      <tr class="admin-row">
+        <td>${esc(l.elementDescription || l.costElement || '—')}</td>
+        <td>£${Number(l.expectedCost).toFixed(2)}</td>
+        <td>${l.migoStatus
+          ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>`
+          : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
+        <td>${l.migoStatus
+          ? `<button type="button" class="btn-secondary sd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
+          : `<button type="button" class="btn-secondary sd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
+      </tr>`).join('');
+
+    container.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>GL Element</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div id="sd-cost-result" style="margin-top:8px"></div>`;
+
+    document.querySelectorAll('.sd-cost-delete').forEach(b => {
+      b.addEventListener('click', async () => {
+        try {
+          const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}`, { method: 'DELETE' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error || 'Failed to remove cost');
+          renderShipmentAssociatedCosts(shipmentId);
+        } catch (err) {
+          document.getElementById('sd-cost-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        }
+      });
+    });
+
+    document.querySelectorAll('.sd-cost-reverse').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.')) return;
+        b.disabled = true; b.textContent = 'Reversing…';
+        try {
+          const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error || json2.message || 'Reversal failed');
+          renderShipmentAssociatedCosts(shipmentId);
+        } catch (err) {
+          document.getElementById('sd-cost-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+          b.disabled = false; b.textContent = 'Reverse';
+        }
+      });
+    });
+
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
 }
 
 
@@ -3660,7 +3741,7 @@ async function runUnprocessedCosts() {
       <th>Shipment</th>
       <th>Type</th>
       <th>Planned</th>
-      <th>Collected</th>
+      <th>Delivered</th>
       <th>Haulier</th>
       <th>Mode</th>
       <th>Cost Centre</th>
@@ -3671,23 +3752,33 @@ async function runUnprocessedCosts() {
       <th>Result</th>
     </tr>`;
 
-    const tbody = rows.map(r => `
-      <tr data-cost-id="${r.costID}" class="migo-row">
-        <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}"></td>
+    // Nothing posts to SAP until the shipment has actually been delivered
+    // (outbound: marked delivered from the in-transit section) or received
+    // (inbound: Mark Received on the Inbound Log) — stops costs going to
+    // SAP before the service is fully tendered, in case a price adjustment
+    // is still needed. See POST /post-migo, which enforces this
+    // server-side too (this is just so the checkbox doesn't invite a click
+    // that'll only bounce).
+    const tbody = rows.map(r => {
+      const delivered = Boolean(r.deliveredDate);
+      return `
+      <tr data-cost-id="${r.costID}" class="migo-row" ${delivered ? '' : 'style="opacity:0.6"'}>
+        <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}" ${delivered ? '' : 'disabled title="Not delivered/received yet"'}></td>
         <td>${r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>'}</td>
         <td>${esc(r.shipmentRef || (r.shipmentID != null ? String(r.shipmentID).padStart(6,'0') : '—'))}</td>
         <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
         <td>${fmt(r.plannedCollection)}</td>
-        <td>${fmt(r.actualCollection)}</td>
+        <td>${fmt(r.deliveredDate)}</td>
         <td>${esc(r.forwarderName || '—')}</td>
         <td>${esc(r.modeOfTransport || '—')}</td>
         <td class="pn-batch-mono">${esc(r.costCenter  || '—')}</td>
         <td class="pn-batch-mono">${esc(r.costElement || '—')}</td>
         <td style="text-align:right">${gbp(r.expectedCost)}</td>
-        <td class="pn-batch-mono">${r.direction === 'inbound' ? '—' : location(r)}</td>
+        <td class="pn-batch-mono">${location(r)}</td>
         <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
-        <td class="migo-result-cell"></td>
-      </tr>`).join('');
+        <td class="migo-result-cell">${delivered ? '' : '<span style="color:var(--text-muted);font-size:11px">Awaiting delivery</span>'}</td>
+      </tr>`;
+    }).join('');
 
     body.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;padding:10px 0 12px;border-bottom:1px solid var(--border);margin-bottom:12px">
@@ -3701,9 +3792,9 @@ async function runUnprocessedCosts() {
         </table>
       </div>`;
 
-    // Select-all toggle
+    // Select-all toggle (skips rows disabled for not being delivered/received yet)
     document.getElementById('migo-check-all').addEventListener('change', function () {
-      document.querySelectorAll('.migo-check').forEach(cb => { cb.checked = this.checked; });
+      document.querySelectorAll('.migo-check:not(:disabled)').forEach(cb => { cb.checked = this.checked; });
       updateMigoSelection();
     });
 
@@ -3757,12 +3848,21 @@ async function postMigoSelected() {
       body: JSON.stringify({ costIDs }),
     });
     const json = await resp.json();
-    if (!json.success) throw new Error(json.error);
+    if (!json.success && !json.blockedCostIDs) throw new Error(json.error);
 
     let okCount = 0;
     let failCount = 0;
+    let blockedCount = 0;
 
-    for (const result of json.results) {
+    for (const costID of (json.blockedCostIDs || [])) {
+      const row  = document.querySelector(`tr[data-cost-id="${costID}"]`);
+      const cell = row?.querySelector('.migo-result-cell');
+      if (!row || !cell) continue;
+      cell.innerHTML = `<span style="color:var(--text-muted);font-size:11px">Not delivered yet</span>`;
+      blockedCount++;
+    }
+
+    for (const result of (json.results || [])) {
       for (const costID of result.costIDs) {
         const row  = document.querySelector(`tr[data-cost-id="${costID}"]`);
         const cell = row?.querySelector('.migo-result-cell');
@@ -3785,8 +3885,9 @@ async function postMigoSelected() {
     btn.textContent = 'Post to SAP';
 
     const parts = [];
-    if (okCount)   parts.push(`${okCount} posted`);
-    if (failCount) parts.push(`${failCount} failed`);
+    if (okCount)      parts.push(`${okCount} posted`);
+    if (failCount)    parts.push(`${failCount} failed`);
+    if (blockedCount) parts.push(`${blockedCount} not delivered yet`);
     countEl.textContent = parts.join(' · ') || 'Done';
 
   } catch (err) {
@@ -7282,7 +7383,9 @@ async function renderAssociatedCosts(shipmentId, shipment) {
         <td>${esc(l.elementDescription || l.costElement)}</td>
         <td>£${Number(l.expectedCost).toFixed(2)}</td>
         <td>${l.migoStatus ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
-        <td>${l.migoStatus ? '' : `<button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
+        <td>${l.migoStatus
+          ? `<button type="button" class="btn-secondary isd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
+          : `<button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
       </tr>`).join('');
 
     container.innerHTML = `
@@ -7343,6 +7446,22 @@ async function renderAssociatedCosts(shipmentId, shipment) {
           renderAssociatedCosts(shipmentId, shipment);
         } catch (err) {
           document.getElementById('isd-cost-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        }
+      });
+    });
+
+    document.querySelectorAll('.isd-cost-reverse').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.')) return;
+        b.disabled = true; b.textContent = 'Reversing…';
+        try {
+          const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error || json2.message || 'Reversal failed');
+          renderAssociatedCosts(shipmentId, shipment);
+        } catch (err) {
+          document.getElementById('isd-cost-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+          b.disabled = false; b.textContent = 'Reverse';
         }
       });
     });
