@@ -324,7 +324,13 @@ function buildPdfFromPages(pageStreams) {
 
 
 function createShipmentPackingListPdfBuffer(context) {
-  const { shipment, deliveries, pallets } = context;
+  const { shipment, deliveries, pallets, manualCargo } = context;
+  // Manual Outbound Shipments (shipment.IsManual) have no PalletMain/DeliveryLink
+  // rows to pull from — their cargo lives in ManualCargoItem instead (see
+  // getShipmentContext above and sql/migrate_manual_outbound_shipment.sql).
+  // Everything below branches on isManual to build the packing-list table from
+  // context.manualCargo rather than context.pallets for those shipments.
+  const isManual = !!shipment.IsManual;
   const ref = formatShipmentRef(shipment.shipmentID);
   const plannedDate = shipment.plannedDelivery || shipment.plannedCollection;
   const linkedRefs = deliveries.map(row => String(row.deliveryID)).join(', ') || '-';
@@ -343,16 +349,25 @@ function createShipmentPackingListPdfBuffer(context) {
     white: hexToRgb('#ffffff'),
     line: hexToRgb('#c7d3df'),
   };
-  const rows = pallets.map(pallet => ({
-    deliveryID: pallet.deliveryID || '',
-    palletID: pallet.palletID || '',
-    palletType: pallet.palletType || '',
-    dimensions: `${pallet.palletLength || 0} x ${pallet.palletWidth || 0} x ${pallet.palletHeight || 0}`,
-    grossWeight: `${formatDecimal(pallet.grossWeight)} KG`,
-    netWeight: `${formatDecimal(Number(pallet.grossWeight || 0) - Number(pallet.packagingWeight || 0))} KG`,
-    volume: `${formatDecimal(pallet.palletVolume)} CBM`,
-    location: pallet.palletLocation || '',
-  }));
+  const rows = isManual
+    ? (manualCargo || []).map(item => ({
+        cargoRef: String(item.CargoID || ''),
+        description: String(item.Description || 'Cargo').slice(0, 40),
+        qty: String(item.PackageCount || 1),
+        dimensions: (item.Length || item.Width || item.Height) ? `${item.Length || 0} x ${item.Width || 0} x ${item.Height || 0}` : '-',
+        weight: `${formatDecimal(item.Weight)} KG`,
+        volume: `${formatDecimal(item.Volume || 0)} CBM`,
+      }))
+    : pallets.map(pallet => ({
+        deliveryID: pallet.deliveryID || '',
+        palletID: pallet.palletID || '',
+        palletType: pallet.palletType || '',
+        dimensions: `${pallet.palletLength || 0} x ${pallet.palletWidth || 0} x ${pallet.palletHeight || 0}`,
+        grossWeight: `${formatDecimal(pallet.grossWeight)} KG`,
+        netWeight: `${formatDecimal(Number(pallet.grossWeight || 0) - Number(pallet.packagingWeight || 0))} KG`,
+        volume: `${formatDecimal(pallet.palletVolume)} CBM`,
+        location: pallet.palletLocation || '',
+      }));
 
   const pageStreams = [];
   const drawText = (parts, x, y, text, size = 10, font = 'F1', color = palette.text) => {
@@ -396,10 +411,10 @@ function createShipmentPackingListPdfBuffer(context) {
     drawText(parts, 319, 673, `Tracking: ${shipment.trackingNumber || '-'}`, 10);
 
     drawRect(parts, 36, 590, 523, 34, palette.light, true);
-    drawText(parts, 48, 602, `Linked Deliveries: ${linkedRefs}`, 10, 'F2', palette.navy);
+    drawText(parts, 48, 602, isManual ? 'Manual Shipment — not linked to SAP deliveries' : `Linked Deliveries: ${linkedRefs}`, 10, 'F2', palette.navy);
 
     const cards = [
-      { label: 'Pallet Count', value: `${formatDecimal(shipment.palletCount)}` },
+      { label: isManual ? 'Package Count' : 'Pallet Count', value: `${formatDecimal(shipment.palletCount)}` },
       { label: 'Gross Weight', value: `${formatDecimal(shipment.grossWeight)} KG` },
       { label: 'Net Weight', value: `${formatDecimal(shipment.netWeight)} KG` },
       { label: 'Volume', value: `${formatDecimal(shipment.shipmentVolume)} CBM` },
@@ -413,16 +428,26 @@ function createShipmentPackingListPdfBuffer(context) {
   };
   const drawTableHeader = parts => {
     drawRect(parts, 36, 500, 523, 22, palette.navy, true);
-    [
-      ['Delivery', 42],
-      ['Pallet', 92],
-      ['Type', 138],
-      ['Dimensions', 230],
-      ['Gross', 332],
-      ['Net', 388],
-      ['Volume', 444],
-      ['Location', 500],
-    ].forEach(([label, x]) => drawText(parts, x, 507, label, 8.5, 'F2', palette.white));
+    const columns = isManual
+      ? [
+          ['Ref', 42],
+          ['Description', 95],
+          ['Qty', 305],
+          ['Dimensions', 345],
+          ['Weight', 440],
+          ['Volume', 505],
+        ]
+      : [
+          ['Delivery', 42],
+          ['Pallet', 92],
+          ['Type', 138],
+          ['Dimensions', 230],
+          ['Gross', 332],
+          ['Net', 388],
+          ['Volume', 444],
+          ['Location', 500],
+        ];
+    columns.forEach(([label, x]) => drawText(parts, x, 507, label, 8.5, 'F2', palette.white));
   };
   const drawFooter = parts => {
     drawLine(parts, 36, 58, 559, 58, palette.line, 1);
@@ -446,20 +471,29 @@ function createShipmentPackingListPdfBuffer(context) {
     drawTableHeader(parts);
     let y = 480;
     if (!rows.length) {
-      drawText(parts, 42, y, 'No pallets linked to this shipment.', 10);
+      drawText(parts, 42, y, isManual ? 'No cargo lines recorded for this manual shipment.' : 'No pallets linked to this shipment.', 10);
       rowIndex = 1;
     } else {
       while (rowIndex < rows.length && y > 90) {
         const row = rows[rowIndex];
         if ((rowIndex % 2) === 0) drawRect(parts, 36, y - 4, 523, 18, palette.soft, true);
-        drawText(parts, 42, y, row.deliveryID, 8.5);
-        drawText(parts, 92, y, row.palletID, 8.5);
-        drawText(parts, 138, y, row.palletType, 8.5);
-        drawText(parts, 230, y, row.dimensions, 8.5);
-        drawText(parts, 332, y, row.grossWeight, 8.5);
-        drawText(parts, 388, y, row.netWeight, 8.5);
-        drawText(parts, 444, y, row.volume, 8.5);
-        drawText(parts, 500, y, row.location, 8.5);
+        if (isManual) {
+          drawText(parts, 42, y, row.cargoRef, 8.5);
+          drawText(parts, 95, y, row.description, 8.5);
+          drawText(parts, 305, y, row.qty, 8.5);
+          drawText(parts, 345, y, row.dimensions, 8.5);
+          drawText(parts, 440, y, row.weight, 8.5);
+          drawText(parts, 505, y, row.volume, 8.5);
+        } else {
+          drawText(parts, 42, y, row.deliveryID, 8.5);
+          drawText(parts, 92, y, row.palletID, 8.5);
+          drawText(parts, 138, y, row.palletType, 8.5);
+          drawText(parts, 230, y, row.dimensions, 8.5);
+          drawText(parts, 332, y, row.grossWeight, 8.5);
+          drawText(parts, 388, y, row.netWeight, 8.5);
+          drawText(parts, 444, y, row.volume, 8.5);
+          drawText(parts, 500, y, row.location, 8.5);
+        }
         drawLine(parts, 36, y - 6, 559, y - 6);
         y -= 20;
         rowIndex += 1;
@@ -633,23 +667,38 @@ async function getShipmentContext(shipmentId) {
   } else {
     shipment.forwarderName = '';
   }
+  // Manual Outbound Shipments have no linked deliveries/pallets at all — their
+  // cargo lives in ManualCargoItem instead (see
+  // sql/migrate_manual_outbound_shipment.sql). Skip the DeliveryLink/PalletMain
+  // joins entirely for these; downstream document generation
+  // (createShipmentPackingListPdfBuffer) reads context.manualCargo instead of
+  // context.pallets when shipment.IsManual is set.
+  if (shipment.IsManual) {
+    const cargoResult = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
+      SELECT CargoID, Description, PackageCount, Weight, Length, Width, Height, Volume
+      FROM Logistics.dbo.ManualCargoItem
+      WHERE ShipmentID = @shipmentId AND Removed = 0
+      ORDER BY CargoID ASC`);
+    return { shipment, deliveries: [], pallets: [], manualCargo: cargoResult.recordset };
+  }
+
   const deliveries = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
     SELECT dm.deliveryID, dm.customerID, dm.dispatchDate, dm.completionDate, dm.deliveryService, dm.picksheetComment,
       CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS netWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
-      CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume, 
-      d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, 
+      CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS palletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
+      d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry,
     STUFF((
       SELECT '; ' + e.address
       FROM Logistics.dbo.Email e
       WHERE e.ID = dm.customerID
       FOR XML PATH('')
     ), 1, 2, '') AS destinationEmail
-    FROM Logistics.dbo.ShipmentLink sl 
-      INNER JOIN Logistics.dbo.DeliveryMain dm ON dm.deliveryID = sl.deliveryID 
-      LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID 
+    FROM Logistics.dbo.ShipmentLink sl
+      INNER JOIN Logistics.dbo.DeliveryMain dm ON dm.deliveryID = sl.deliveryID
+      LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
     WHERE sl.shipmentID = @shipmentId ORDER BY dm.deliveryID ASC`);
   const pallets = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`SELECT sl.deliveryID, pm.palletID, pm.palletType, pm.palletFinish, CAST(ISNULL(pm.packagingWeight, 0) AS decimal(18,3)) AS packagingWeight, CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, CAST(ISNULL(pm.palletVolume, 0) AS decimal(18,3)) AS palletVolume, pm.palletLength, pm.palletWidth, pm.palletHeight, pm.palletLocation FROM Logistics.dbo.ShipmentLink sl INNER JOIN Logistics.dbo.DeliveryLink dl ON dl.deliveryID = sl.deliveryID INNER JOIN Logistics.dbo.PalletMain pm ON pm.palletID = dl.palletID WHERE sl.shipmentID = @shipmentId AND ISNULL(pm.palletRemoved, 0) = 0 ORDER BY sl.deliveryID ASC, pm.palletID ASC`);
-  return { shipment, deliveries: deliveries.recordset, pallets: pallets.recordset };
+  return { shipment, deliveries: deliveries.recordset, pallets: pallets.recordset, manualCargo: [] };
 }
 
 
@@ -1143,6 +1192,20 @@ async function writeShipmentEvent(pool, shipmentId, category, description) {
 
 async function syncShipmentAggregateData(shipmentId) {
   const pool = await getPool();
+
+  // Manual Outbound Shipments' ShipmentMain totals are kept in sync directly
+  // off ManualCargoItem every time a cargo line is added/edited/removed (see
+  // recalcManualShipmentTotals near the manual-cargo routes below) — there's
+  // no PalletMain/DeliveryLink data to resync from here, and running the
+  // normal resync below would silently zero grossWeight/palletCount/etc back
+  // out to 0 (the DeliveryLink/ShipmentLink joins return nothing for a
+  // manual shipment). Skip straight to returning the context instead.
+  const manualCheck = await pool.request().input('shipmentId', sql.BigInt, shipmentId)
+    .query('SELECT IsManual FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+  if (manualCheck.recordset[0]?.IsManual) {
+    return getShipmentContext(shipmentId);
+  }
+
   const tx = new sql.Transaction(pool);
   await tx.begin();
   try {
