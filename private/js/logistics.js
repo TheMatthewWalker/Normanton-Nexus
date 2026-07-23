@@ -819,7 +819,8 @@ async function runOpenDeliveries() {
     badge.textContent = `${deliveryRows.length} ready`;
     badge.classList.remove('hidden');
     if (!deliveryRows.length) {
-      document.getElementById('result-body').innerHTML = '<div class="sap-error">No completed deliveries are currently available for shipment creation.</div>';
+      document.getElementById('result-body').innerHTML = '<div class="lg-actions"><div><div class="lg-selection-title">Completed picksheets</div><div class="toolbar-hint">No completed deliveries are currently available for shipment creation.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="lg-manual-btn">+ Manual Shipment</button></div>';
+      document.getElementById('lg-manual-btn').addEventListener('click', openManualShipmentModal);
       return;
     }
     renderOpenDeliveries();
@@ -842,7 +843,7 @@ function renderOpenDeliveries() {
     }).join('');
     return `<div class="ps-section${collapsed}"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--${b.dot}"></span><span class="ps-section-title">${b.label}</span><span class="ps-section-count">${bucketMap[b.key].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Completed</th><th>Due</th><th>Service</th><th>Pallets</th><th>Weight</th><th>Volume</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }).join('');
-  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Completed picksheets</div><div class="toolbar-hint" id="lg-selection-hint">Select deliveries for one customer, then create a shipment.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="lg-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="lg-create-btn" disabled>Create Shipment</button></div><div id="lg-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
+  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Completed picksheets</div><div class="toolbar-hint" id="lg-selection-hint">Select deliveries for one customer, then create a shipment.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="lg-manual-btn">+ Manual Shipment</button><button type="button" class="btn-secondary" id="lg-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="lg-create-btn" disabled>Create Shipment</button></div><div id="lg-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
   bindOpenDeliveriesEvents();
   updateSelectionUI();
 }
@@ -864,6 +865,7 @@ function bindOpenDeliveriesEvents() {
     updateSelectionUI();
   });
   document.getElementById('lg-create-btn').addEventListener('click', openShipmentModal);
+  document.getElementById('lg-manual-btn').addEventListener('click', openManualShipmentModal);
 }
 
 // Right-click menu on a Create Shipment picksheet row — mirrors the Order
@@ -1626,6 +1628,273 @@ async function runShipmentAction(action, resultId, showLinks = false) {
     if (showLinks) { result.textContent = json.data.folderPath; document.getElementById('lg-doc-links').innerHTML = (json.data.files || []).map(file => `<a class="lg-doc-link" target="_blank" href="${esc(file.downloadUrl)}">${esc(file.fileName)}</a>`).join(''); }
   } catch (err) { result.textContent = err.message; }
 }
+
+
+// ── Manual Outbound Shipment ────────────────────────────────────────────────
+// For goods that never go through the picksheet/pallet-builder process (not
+// managed in SAP). Mirrors openShipmentModal's header-field UX (destination,
+// forwarder mode/name, incoterms, customs flags) but replaces the read-only
+// "Calculated Totals" section — sourced from linked deliveries there — with
+// an editable cargo-line list, since a manual shipment has no deliveries to
+// total up. Posts to /api/shipmentmain/create-manual then one
+// /api/shipmentmain/:id/manual-cargo call per cargo row. See
+// sql/migrate_manual_outbound_shipment.sql for why this cargo lives in its
+// own ManualCargoItem table rather than PalletMain.
+let _moRowSeq = 0;
+
+function moCargoRowHtml(rowId) {
+  return `<tr class="mo-cargo-row" data-row-id="${rowId}">
+    <td><input class="tf-input mo-c-desc" type="text" placeholder="e.g. Steel brackets"></td>
+    <td><input class="tf-input mo-c-qty" type="number" min="1" step="1" value="1" style="width:64px"></td>
+    <td><input class="tf-input mo-c-weight" type="number" min="0" step="0.1" placeholder="kg" style="width:80px"></td>
+    <td><input class="tf-input mo-c-length" type="number" min="0" step="0.1" placeholder="cm" style="width:70px"></td>
+    <td><input class="tf-input mo-c-width" type="number" min="0" step="0.1" placeholder="cm" style="width:70px"></td>
+    <td><input class="tf-input mo-c-height" type="number" min="0" step="0.1" placeholder="cm" style="width:70px"></td>
+    <td><button type="button" class="mo-row-remove" title="Remove row" style="background:none;border:none;color:var(--text-secondary,#888);cursor:pointer;font-size:16px;line-height:1">×</button></td>
+  </tr>`;
+}
+
+function moAddCargoRow() {
+  const tbody = document.getElementById('mo-cargo-body');
+  if (!tbody) return;
+  tbody.insertAdjacentHTML('beforeend', moCargoRowHtml(++_moRowSeq));
+  const row = tbody.lastElementChild;
+  row.querySelector('.mo-row-remove').addEventListener('click', () => { row.remove(); moRecalcTotals(); });
+  row.querySelectorAll('input').forEach(input => input.addEventListener('input', moRecalcTotals));
+}
+
+function moRecalcTotals() {
+  let totalWeight = 0, totalPackages = 0, totalVolume = 0;
+  document.querySelectorAll('#mo-cargo-body .mo-cargo-row').forEach(row => {
+    const weight = Number(row.querySelector('.mo-c-weight').value) || 0;
+    const qty    = Number(row.querySelector('.mo-c-qty').value) || 0;
+    const l = Number(row.querySelector('.mo-c-length').value) || 0;
+    const w = Number(row.querySelector('.mo-c-width').value) || 0;
+    const h = Number(row.querySelector('.mo-c-height').value) || 0;
+    totalWeight += weight;
+    totalPackages += qty;
+    if (l && w && h) totalVolume += (l * w * h) / 1000000;
+  });
+  const wEl = document.getElementById('mo-total-weight');
+  const pEl = document.getElementById('mo-total-packages');
+  const vEl = document.getElementById('mo-total-volume');
+  if (wEl) wEl.textContent = totalWeight.toFixed(3);
+  if (pEl) pEl.textContent = String(totalPackages);
+  if (vEl) vEl.textContent = totalVolume.toFixed(3);
+}
+
+function onManualShipmentForwarderModeChange() {
+  const modeSelect = document.getElementById('mo-forwarder-mode');
+  const nameSelect = document.getElementById('mo-forwarder-name');
+  if (!modeSelect || !nameSelect) return;
+  const selectedMode = modeSelect.value;
+  const matches = (allForwarders || []).filter(item => String(item.forwarderMode || '').trim() === selectedMode);
+  const uniqueForwarders = matches.filter((item, index, arr) => arr.findIndex(other => String(other.forwarderName || '').trim() === String(item.forwarderName || '').trim()) === index);
+  nameSelect.innerHTML = `<option value="">Select forwarder</option>${uniqueForwarders.map(item => `<option value="${esc(String(item.forwarderID))}">${esc(String(item.forwarderName || '').trim())}</option>`).join('')}`;
+  nameSelect.disabled = !selectedMode;
+  if (uniqueForwarders.length === 1) nameSelect.value = String(uniqueForwarders[0].forwarderID);
+}
+
+async function openManualShipmentModal() {
+  if (!await checkSession()) return;
+  const forwarders = await loadAllForwarders();
+  const modeOptions = [...new Set(forwarders.map(item => String(item.forwarderMode || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+  openModal(`<div class="ps-modal lg-modal">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Manual Shipment</div><div class="ps-modal-sub">Goods not managed through SAP — enter cargo manually</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <form id="mo-shipment-form" class="transfer-form">
+        <div class="tf-section-label">Shipment Header</div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide" style="position:relative">
+            <label class="tf-label">Destination</label>
+            <input class="tf-input" type="text" id="mo-dest-search" placeholder="Start typing a destination name…" autocomplete="off">
+            <input type="hidden" id="mo-dest-id">
+            <div id="mo-dest-results" class="hidden" style="position:absolute;top:100%;left:0;right:0;z-index:20;
+              background:var(--surface,#fff);border:1px solid var(--border);border-radius:0 0 8px 8px;
+              max-height:220px;overflow-y:auto;box-shadow:0 8px 20px rgba(0,0,0,0.12)"></div>
+          </div>
+          <div class="tf-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="mo-planned" value="${esc(new Date().toISOString().slice(0, 10))}"></div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field"><label class="tf-label">Forwarder Mode</label><select class="tf-input" id="mo-forwarder-mode"><option value="">Select mode</option>${modeOptions.map(mode => `<option value="${esc(mode)}">${esc(mode)}</option>`).join('')}</select></div>
+          <div class="tf-field"><label class="tf-label">Forwarder Name</label><select class="tf-input" id="mo-forwarder-name" disabled><option value="">Select forwarder</option></select></div>
+          <div class="tf-field"><label class="tf-label">Incoterms</label><input class="tf-input" type="text" id="mo-incoterms"></div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide"><label class="tf-label">Destination Street</label><input class="tf-input" type="text" id="mo-dest-street"></div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field"><label class="tf-label">City</label><input class="tf-input" type="text" id="mo-dest-city"></div>
+          <div class="tf-field"><label class="tf-label">Post Code</label><input class="tf-input" type="text" id="mo-dest-postcode"></div>
+          <div class="tf-field"><label class="tf-label">Country</label><input class="tf-input" type="text" id="mo-dest-country"></div>
+        </div>
+        <div class="tf-row">
+          <label class="lg-flag"><input type="checkbox" id="mo-customs-required"> Customs Required</label>
+          <label class="lg-flag"><input type="checkbox" id="mo-customs-complete"> Customs Complete</label>
+        </div>
+        <div class="tf-section-label">Cargo</div>
+        <table class="ps-table" style="font-size:12px">
+          <thead><tr><th>Description</th><th>Qty</th><th>Weight</th><th>Length</th><th>Width</th><th>Height</th><th></th></tr></thead>
+          <tbody id="mo-cargo-body"></tbody>
+        </table>
+        <button type="button" class="btn-secondary" id="mo-add-row-btn" style="margin-top:8px">+ Add Line</button>
+        <div class="tf-section-label">Calculated Totals <span class="tf-locked">Read only</span></div>
+        <div class="tf-row">
+          <div class="tf-field"><label class="tf-label">Package Count</label><input class="tf-input" readonly id="mo-total-packages" value="0"></div>
+          <div class="tf-field"><label class="tf-label">Gross Weight (kg)</label><input class="tf-input" readonly id="mo-total-weight" value="0.000"></div>
+          <div class="tf-field"><label class="tf-label">Volume (m³)</label><input class="tf-input" readonly id="mo-total-volume" value="0.000"></div>
+        </div>
+        <div id="mo-submit-result"></div>
+      </form>
+    </div>
+    <div class="ps-modal-actions"><button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button><button type="button" class="btn-submit" id="mo-confirm-btn">Create Shipment</button></div>
+  </div>`);
+
+  moAddCargoRow();
+  document.getElementById('mo-add-row-btn').addEventListener('click', moAddCargoRow);
+  document.getElementById('mo-forwarder-mode').addEventListener('change', onManualShipmentForwarderModeChange);
+  document.getElementById('mo-confirm-btn').addEventListener('click', submitManualShipmentCreate);
+
+  // Destination — search-as-you-type against Logistics.dbo.Destinations,
+  // same pattern as Manual Inbound Shipment's origin combobox.
+  const destInput   = document.getElementById('mo-dest-search');
+  const destIdInput = document.getElementById('mo-dest-id');
+  const destResults = document.getElementById('mo-dest-results');
+  let destDebounce = null;
+
+  function applyDestination(d) {
+    document.getElementById('mo-dest-street').value   = d.destinationStreet || '';
+    document.getElementById('mo-dest-city').value      = d.destinationCity || '';
+    document.getElementById('mo-dest-postcode').value  = d.destinationPostCode || '';
+    document.getElementById('mo-dest-country').value   = d.destinationCountry || '';
+    if (d.defaultIncoterms) document.getElementById('mo-incoterms').value = d.defaultIncoterms;
+    if (d.defaultForwarder) {
+      const nameSelect = document.getElementById('mo-forwarder-name');
+      const modeSelect = document.getElementById('mo-forwarder-mode');
+      const fwd = forwarders.find(item => String(item.forwarderName || '').trim().toLowerCase() === String(d.defaultForwarder).trim().toLowerCase());
+      if (fwd && fwd.forwarderMode) {
+        modeSelect.value = fwd.forwarderMode;
+        onManualShipmentForwarderModeChange();
+        nameSelect.value = String(fwd.forwarderID);
+      }
+    }
+  }
+
+  function renderDestResults(rows) {
+    if (!rows.length) {
+      destResults.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-secondary,#666)">No matches</div>';
+    } else {
+      destResults.innerHTML = rows.map(d =>
+        `<div class="mo-dest-row" data-id="${esc(String(d.destinationID))}"
+           style="padding:7px 10px;font-size:13px;cursor:pointer">${esc(d.destinationName)}${d.destinationCountry ? ` — ${esc(d.destinationCountry)}` : ''}</div>`
+      ).join('');
+      destResults.querySelectorAll('.mo-dest-row').forEach(row => {
+        row.addEventListener('mouseenter', () => { row.style.background = 'var(--surface2,#f3f4f6)'; });
+        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+        row.addEventListener('mousedown', e => {
+          e.preventDefault();
+          const match = rows.find(r => String(r.destinationID) === row.dataset.id);
+          destIdInput.value = row.dataset.id;
+          destInput.value = match ? match.destinationName : '';
+          destResults.classList.add('hidden');
+          if (match) applyDestination(match);
+        });
+      });
+    }
+    destResults.classList.remove('hidden');
+  }
+
+  destInput.addEventListener('input', () => {
+    destIdInput.value = ''; // typing invalidates whatever was previously selected
+    clearTimeout(destDebounce);
+    const q = destInput.value.trim();
+    if (!q) { destResults.classList.add('hidden'); return; }
+    destDebounce = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/destinations?search=${encodeURIComponent(q)}`);
+        const rows = await res.json();
+        renderDestResults(Array.isArray(rows) ? rows : []);
+      } catch (err) {
+        destResults.innerHTML = '<div style="padding:8px 10px;font-size:12px" class="sap-error">Search failed</div>';
+        destResults.classList.remove('hidden');
+      }
+    }, 250);
+  });
+  destInput.addEventListener('focus', () => {
+    if (destInput.value.trim() && destResults.innerHTML) destResults.classList.remove('hidden');
+  });
+  destInput.addEventListener('blur', () => {
+    setTimeout(() => destResults.classList.add('hidden'), 150);
+  });
+}
+
+async function submitManualShipmentCreate() {
+  const button = document.getElementById('mo-confirm-btn');
+  const result = document.getElementById('mo-submit-result');
+  result.innerHTML = '';
+
+  const destinationID = document.getElementById('mo-dest-id').value;
+  if (!destinationID) {
+    result.innerHTML = '<div class="sap-error tf-inline-error">Select a destination from the dropdown list.</div>';
+    return;
+  }
+
+  const cargoRows = [...document.querySelectorAll('#mo-cargo-body .mo-cargo-row')].map(row => ({
+    description:  row.querySelector('.mo-c-desc').value.trim(),
+    packageCount: Number(row.querySelector('.mo-c-qty').value) || 1,
+    weight:       Number(row.querySelector('.mo-c-weight').value) || 0,
+    length:       row.querySelector('.mo-c-length').value || '',
+    width:        row.querySelector('.mo-c-width').value || '',
+    height:       row.querySelector('.mo-c-height').value || '',
+  })).filter(r => r.weight > 0);
+
+  if (!cargoRows.length) {
+    result.innerHTML = '<div class="sap-error tf-inline-error">Add at least one cargo line with a weight greater than 0.</div>';
+    return;
+  }
+
+  button.disabled = true; button.textContent = 'Creating...';
+  try {
+    const incoTerms = document.getElementById('mo-incoterms').value.trim();
+    const headerPayload = {
+      destinationID,
+      destinationStreet: document.getElementById('mo-dest-street').value.trim(),
+      destinationCity: document.getElementById('mo-dest-city').value.trim(),
+      destinationPostCode: document.getElementById('mo-dest-postcode').value.trim(),
+      destinationCountry: document.getElementById('mo-dest-country').value.trim(),
+      plannedCollection: document.getElementById('mo-planned').value || null,
+      forwarderID: document.getElementById('mo-forwarder-name').value || null,
+      incoTerms,
+      customsRequired: document.getElementById('mo-customs-required').checked,
+      customsComplete: document.getElementById('mo-customs-complete').checked,
+    };
+    const res = await fetch('/api/shipmentmain/create-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(headerPayload) });
+    const json = await res.json(); if (!json.success) throw new Error(json.error || 'Failed to create shipment');
+    const shipmentID = json.data.shipmentID;
+
+    for (const row of cargoRows) {
+      const cargoRes = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentID)}/manual-cargo`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row),
+      });
+      const cargoJson = await cargoRes.json();
+      if (!cargoJson.success) throw new Error(cargoJson.error || 'Shipment created, but failed to save a cargo line — check it before booking.');
+    }
+
+    latestShipment = { ...json.data, canSendEmail: isExWorksIncoterms(incoTerms) };
+    closePickModal();
+    await runOpenDeliveries();
+    showPostCreateModal(latestShipment);
+  } catch (err) {
+    result.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
+    button.disabled = false; button.textContent = 'Create Shipment';
+  }
+}
+
+
 // ── Pallet management ─────────────────────────────────────────────────────────
 let _lgPalletCtx   = null;
 let _lgPalletTypes = [];

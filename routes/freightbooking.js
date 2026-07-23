@@ -20,9 +20,16 @@ if (!KN_API_URL || !KN_CUSTOMER_ID || !KN_CUSTOMER_KEY || !KN_SECRET) {
     console.error('[freightbooking] Missing required env vars: KN_API_URL, KN_CUSTOMER_ID, KN_CUSTOMER_KEY, KN_SECRET');
 }
 
-// ── Build KN booking payload from DB records ──────────────────────────────────
-function buildBookingPayload(shipment, pallets, options = {}) {
-    const cargoItems = pallets.map(p => ({
+// ── Build KN cargoItems from either source ────────────────────────────────────
+// Two shapes feed into the same KN cargoItems structure: a normal shipment's
+// linked PalletMain rows, or a Manual Outbound Shipment's ManualCargoItem
+// rows (see routes/shipmentmain.js's create-manual/manual-cargo routes and
+// sql/migrate_manual_outbound_shipment.sql for why manual cargo lives in a
+// separate table rather than PalletMain). buildBookingPayload below takes
+// the finished cargoItems array either way, so it doesn't need to know
+// which source a given shipment came from.
+function mapPalletsToCargoItems(pallets) {
+    return pallets.map(p => ({
         description:     p.palletType   || 'Pallet',
         marksAndNumbers: String(p.palletID),
         stackable:       false,
@@ -37,7 +44,29 @@ function buildBookingPayload(shipment, pallets, options = {}) {
         dimensionHeight: Number(p.palletHeight) * 10  || 0,
         dimensionsUom:   'MMT',
     }));
+}
 
+function mapManualCargoToCargoItems(rows) {
+    return rows.map(r => ({
+        description:     r.Description || 'Cargo',
+        marksAndNumbers: String(r.CargoID),
+        stackable:       false,
+        packageCount:    Number(r.PackageCount) || 1,
+        packageType:     'PKG',
+        weight:          Number(r.Weight) || 0,
+        weightUom:       'KGM',
+        volume:          Number(r.Volume) || 0,
+        volumeUom:       'MTQ',
+        dimensionLength: Number(r.Length) * 10 || 0,
+        dimensionWidth:  Number(r.Width)  * 10 || 0,
+        dimensionHeight: Number(r.Height) * 10 || 0,
+        dimensionsUom:   'MMT',
+    }));
+}
+
+
+// ── Build KN booking payload from DB records ──────────────────────────────────
+function buildBookingPayload(shipment, cargoItems, options = {}) {
     const pickupSource = options.plannedCollection || shipment.plannedCollection;
     const pickupDate = pickupSource
         ? new Date(pickupSource).toISOString().split('T')[0]
@@ -181,7 +210,10 @@ export async function getKnAccessToken() {
 
 // ── POST /api/freight-booking/shipment/:shipmentId ────────────────────────────
 // Creates a KN freight booking for the given shipment, using ShipmentMain as
-// the header and all linked PalletMain records as cargoItems.
+// the header and cargoItems from either its linked PalletMain records (the
+// normal picksheet-driven flow) or its ManualCargoItem rows (Manual
+// Outbound Shipment — shipment.IsManual) — see mapPalletsToCargoItems /
+// mapManualCargoToCargoItems above.
 router.post('/shipment/:shipmentId', async (req, res) => {
     if (!KN_API_URL || !KN_CUSTOMER_ID || !KN_CUSTOMER_KEY) {
         return res.status(503).json({ error: 'Freight booking is not configured. Check KN_API_URL, KN_CUSTOMER_ID, KN_CUSTOMER_KEY in .env.' });
@@ -189,7 +221,7 @@ router.post('/shipment/:shipmentId', async (req, res) => {
 
     const shipmentId = req.params.shipmentId;
 
-    let shipment, pallets;
+    let shipment, cargoItems;
 
     try {
         const pool = await getPool();
@@ -204,29 +236,39 @@ router.post('/shipment/:shipmentId', async (req, res) => {
         }
         shipment = shipmentResult.recordset[0];
 
-        // Fetch all pallets linked to this shipment via ShipmentLink → DeliveryLink → PalletMain
-        const palletsResult = await pool.request()
-            .input('shipmentId', sql.BigInt, shipmentId)
-            .query(`
-                USE Logistics 
-                SELECT pm.*
-                FROM dbo.PalletMain pm
-                INNER JOIN dbo.DeliveryLink dl ON dl.palletID = pm.palletID
-                INNER JOIN dbo.ShipmentLink sl ON sl.deliveryID = dl.deliveryID
-                WHERE sl.shipmentID = @shipmentId
-            `);
+        if (shipment.IsManual) {
+            const cargoResult = await pool.request()
+                .input('shipmentId', sql.BigInt, shipmentId)
+                .query('USE Logistics SELECT * FROM dbo.ManualCargoItem WHERE ShipmentID = @shipmentId AND Removed = 0');
 
-        pallets = palletsResult.recordset;
+            if (cargoResult.recordset.length === 0) {
+                return res.status(422).json({ error: `No cargo lines found for manual shipment ${shipmentId}.` });
+            }
+            cargoItems = mapManualCargoToCargoItems(cargoResult.recordset);
+        } else {
+            // Fetch all pallets linked to this shipment via ShipmentLink → DeliveryLink → PalletMain
+            const palletsResult = await pool.request()
+                .input('shipmentId', sql.BigInt, shipmentId)
+                .query(`
+                    USE Logistics
+                    SELECT pm.*
+                    FROM dbo.PalletMain pm
+                    INNER JOIN dbo.DeliveryLink dl ON dl.palletID = pm.palletID
+                    INNER JOIN dbo.ShipmentLink sl ON sl.deliveryID = dl.deliveryID
+                    WHERE sl.shipmentID = @shipmentId
+                `);
 
-        if (pallets.length === 0) {
-            return res.status(422).json({ error: `No pallets found linked to shipment ${shipmentId}.` });
+            if (palletsResult.recordset.length === 0) {
+                return res.status(422).json({ error: `No pallets found linked to shipment ${shipmentId}.` });
+            }
+            cargoItems = mapPalletsToCargoItems(palletsResult.recordset);
         }
 
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
 
-    const payload = buildBookingPayload(shipment, pallets, {
+    const payload = buildBookingPayload(shipment, cargoItems, {
         plannedCollection: req.body?.plannedCollection || null,
     });
 

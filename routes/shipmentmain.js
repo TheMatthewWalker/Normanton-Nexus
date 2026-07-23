@@ -2054,6 +2054,232 @@ router.post('/:shipmentId/generate-packing-list', requirePermission('LOG_PLANNIN
 });
 
 
+// ── Manual Outbound Shipment ──────────────────────────────────────────────────
+// For goods sent that are NOT managed through SAP and never go through the
+// picksheet/pallet-builder process — see
+// sql/migrate_manual_outbound_shipment.sql for the full "why a new table,
+// not PalletMain" reasoning. A manual shipment has no linked deliveries at
+// all (DeliveryLink stays empty for it); its cargo lives in
+// ManualCargoItem instead, and ShipmentMain.IsManual flags it so
+// freightbooking.js knows to build KN cargoItems from that table rather
+// than the usual DeliveryLink -> PalletMain join.
+router.post('/create-manual', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const destinationID = toNullableInteger(req.body.destinationID);
+    if (!destinationID) {
+      return res.status(400).json({ success: false, error: 'Select a destination before creating a manual shipment.' });
+    }
+
+    const pool = await getPool();
+    const destResult = await pool.request()
+      .input('destinationId', sql.BigInt, destinationID)
+      .query('SELECT destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, defaultIncoterms FROM Logistics.dbo.Destinations WHERE destinationID = @destinationId');
+    const dest = destResult.recordset[0];
+    if (!dest) return res.status(400).json({ success: false, error: 'Destination not found.' });
+
+    const settings = getLogisticsSettings();
+    const shipmentDraft = {
+      destinationID,
+      destinationName: String(req.body.destinationName || dest.destinationName || '').trim(),
+      destinationStreet: String(req.body.destinationStreet || dest.destinationStreet || '').trim(),
+      destinationCity: String(req.body.destinationCity || dest.destinationCity || '').trim(),
+      destinationPostCode: String(req.body.destinationPostCode || dest.destinationPostCode || '').trim(),
+      destinationCountry: String(req.body.destinationCountry || dest.destinationCountry || '').trim(),
+      plannedCollection: req.body.plannedCollection ? new Date(req.body.plannedCollection) : null,
+      forwarderID: toNullableInteger(req.body.forwarderID),
+      incoTerms: String(req.body.incoTerms || dest.defaultIncoterms || '').trim(),
+      customsRequired: toBool(req.body.customsRequired),
+      customsComplete: toBool(req.body.customsComplete),
+    };
+
+    const insertResult = await pool.request()
+      .input('originID', sql.BigInt, settings.originID).input('originName', sql.NVarChar, settings.originName).input('originStreet', sql.NVarChar, settings.originStreet).input('originCity', sql.NVarChar, settings.originCity).input('originPostCode', sql.NVarChar, settings.originPostCode).input('originCountry', sql.NVarChar, settings.originCountry)
+      .input('destinationID', sql.BigInt, shipmentDraft.destinationID).input('destinationName', sql.NVarChar, shipmentDraft.destinationName).input('destinationStreet', sql.NVarChar, shipmentDraft.destinationStreet).input('destinationCity', sql.NVarChar, shipmentDraft.destinationCity).input('destinationPostCode', sql.NVarChar, shipmentDraft.destinationPostCode).input('destinationCountry', sql.NVarChar, shipmentDraft.destinationCountry)
+      .input('plannedCollection', sql.DateTime, shipmentDraft.plannedCollection)
+      .input('forwarderID', sql.BigInt, shipmentDraft.forwarderID)
+      .input('incoTerms', sql.NVarChar, shipmentDraft.incoTerms || null)
+      .input('customsRequired', sql.Bit, shipmentDraft.customsRequired)
+      .input('customsComplete', sql.Bit, shipmentDraft.customsComplete)
+      .query(`INSERT INTO Logistics.dbo.ShipmentMain
+                (originID, originName, originStreet, originCity, originPostCode, originCountry,
+                 destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry,
+                 netWeight, grossWeight, palletCount, shipmentVolume,
+                 plannedCollection, collectionStatus, forwarderID, incoTerms, customsRequired, customsComplete, shipmentCancelled, IsManual)
+              VALUES
+                (@originID, @originName, @originStreet, @originCity, @originPostCode, @originCountry,
+                 @destinationID, @destinationName, @destinationStreet, @destinationCity, @destinationPostCode, @destinationCountry,
+                 0, 0, 0, 0,
+                 @plannedCollection, 0, @forwarderID, @incoTerms, @customsRequired, @customsComplete, 0, 1);
+              SELECT SCOPE_IDENTITY() AS shipmentID;`);
+
+    const shipmentID = Number(insertResult.recordset[0].shipmentID);
+    const username = req.session?.user?.username || 'unknown';
+    stampDbChange(username, 'ShipmentMain');
+    await writeShipmentEvent(pool, shipmentID, 'CREATED', `Manual shipment created by ${username} — ${shipmentDraft.destinationName}`);
+
+    const shipment = await getShipmentById(pool, shipmentID);
+    res.status(201).json({ success: true, data: { shipmentID, shipmentRef: formatShipmentRef(shipmentID), shipment } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+
+// Recomputes ShipmentMain's stored aggregate columns from ManualCargoItem —
+// mirrors how DeliveryMain's own aggregates get summed from PalletMain at
+// completion time (see /:deliveryId/complete in deliverymain.js), just for
+// the manual-cargo path instead. netWeight is set equal to grossWeight —
+// manual cargo entry only asks for one weight per line, there's no
+// separate tare/net concept to enter by hand the way SAP delivery data has.
+async function recalcManualShipmentTotals(pool, shipmentId) {
+  await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
+    UPDATE Logistics.dbo.ShipmentMain SET
+      grossWeight = t.totalWeight,
+      netWeight = t.totalWeight,
+      palletCount = t.totalPackages,
+      shipmentVolume = t.totalVolume
+    FROM Logistics.dbo.ShipmentMain sm
+    CROSS APPLY (
+      SELECT ISNULL(SUM(Weight), 0) AS totalWeight,
+             ISNULL(SUM(PackageCount), 0) AS totalPackages,
+             ISNULL(SUM(Volume), 0) AS totalVolume
+      FROM Logistics.dbo.ManualCargoItem
+      WHERE ShipmentID = sm.shipmentID AND Removed = 0
+    ) t
+    WHERE sm.shipmentID = @shipmentId`);
+}
+
+
+// ── Manual Cargo Items (Manual Outbound Shipment cargo lines) ────────────────
+router.get('/:shipmentId/manual-cargo', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('shipmentId', sql.BigInt, req.params.shipmentId)
+      .query(`SELECT CargoID, ShipmentID, Description, PackageCount, Weight, Length, Width, Height, Volume, CreatedAtUtc, CreatedBy
+              FROM Logistics.dbo.ManualCargoItem
+              WHERE ShipmentID = @shipmentId AND Removed = 0
+              ORDER BY CargoID ASC`);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/:shipmentId/manual-cargo', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const shipmentId = req.params.shipmentId;
+    const pool = await getPool();
+
+    const shipmentResult = await pool.request().input('shipmentId', sql.BigInt, shipmentId)
+      .query('SELECT IsManual FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+    const shipmentRow = shipmentResult.recordset[0];
+    if (!shipmentRow) return res.status(404).json({ success: false, error: 'Shipment not found.' });
+    if (!shipmentRow.IsManual) return res.status(400).json({ success: false, error: 'Cargo lines can only be added to a manual shipment.' });
+
+    const description = String(req.body.description || '').trim() || null;
+    const packageCount = Math.max(1, Number.parseInt(req.body.packageCount, 10) || 1);
+    const weight = toDecimal(req.body.weight);
+    const length = req.body.length !== undefined && req.body.length !== '' ? toDecimal(req.body.length) : null;
+    const width  = req.body.width  !== undefined && req.body.width  !== '' ? toDecimal(req.body.width)  : null;
+    const height = req.body.height !== undefined && req.body.height !== '' ? toDecimal(req.body.height) : null;
+    // Volume in m3 from L/W/H in cm — matches the KN cargoItem convention
+    // elsewhere (buildBookingPayload multiplies pallet dimensions by 10 to
+    // go cm -> mm for KN's own MMT unit); here we just need m3 for the
+    // shipment's own totals, so /1,000,000 converts cm3 -> m3 directly.
+    const volume = (length != null && width != null && height != null)
+      ? (length * width * height) / 1000000
+      : null;
+
+    if (weight <= 0) {
+      return res.status(400).json({ success: false, error: 'Weight must be greater than 0.' });
+    }
+
+    const username = req.session?.user?.username || 'unknown';
+    await pool.request()
+      .input('shipmentId', sql.BigInt, shipmentId)
+      .input('description', sql.NVarChar, description)
+      .input('packageCount', sql.Int, packageCount)
+      .input('weight', sql.Decimal(18, 3), weight)
+      .input('length', sql.Decimal(18, 2), length)
+      .input('width', sql.Decimal(18, 2), width)
+      .input('height', sql.Decimal(18, 2), height)
+      .input('volume', sql.Decimal(18, 3), volume)
+      .input('createdBy', sql.NVarChar, username)
+      .query(`INSERT INTO Logistics.dbo.ManualCargoItem (ShipmentID, Description, PackageCount, Weight, Length, Width, Height, Volume, CreatedBy)
+              VALUES (@shipmentId, @description, @packageCount, @weight, @length, @width, @height, @volume, @createdBy)`);
+
+    await recalcManualShipmentTotals(pool, shipmentId);
+    res.status(201).json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/manual-cargo/:cargoId', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const cargoId = req.params.cargoId;
+    const pool = await getPool();
+    const currentResult = await pool.request().input('cargoId', sql.Int, cargoId)
+      .query('SELECT ShipmentID, Description, PackageCount, Weight, Length, Width, Height FROM Logistics.dbo.ManualCargoItem WHERE CargoID = @cargoId');
+    const current = currentResult.recordset[0];
+    if (!current) return res.status(404).json({ success: false, error: 'Cargo line not found.' });
+
+    const description   = req.body.description   !== undefined ? (String(req.body.description || '').trim() || null) : current.Description;
+    const packageCount  = req.body.packageCount  !== undefined ? Math.max(1, Number.parseInt(req.body.packageCount, 10) || 1) : current.PackageCount;
+    const weight         = req.body.weight        !== undefined ? toDecimal(req.body.weight) : current.Weight;
+    const length = req.body.length !== undefined ? (req.body.length === '' ? null : toDecimal(req.body.length)) : current.Length;
+    const width  = req.body.width  !== undefined ? (req.body.width  === '' ? null : toDecimal(req.body.width))  : current.Width;
+    const height = req.body.height !== undefined ? (req.body.height === '' ? null : toDecimal(req.body.height)) : current.Height;
+    const volume = (length != null && width != null && height != null)
+      ? (Number(length) * Number(width) * Number(height)) / 1000000
+      : null;
+
+    if (weight <= 0) {
+      return res.status(400).json({ success: false, error: 'Weight must be greater than 0.' });
+    }
+
+    await pool.request()
+      .input('cargoId', sql.Int, cargoId)
+      .input('description', sql.NVarChar, description)
+      .input('packageCount', sql.Int, packageCount)
+      .input('weight', sql.Decimal(18, 3), weight)
+      .input('length', sql.Decimal(18, 2), length)
+      .input('width', sql.Decimal(18, 2), width)
+      .input('height', sql.Decimal(18, 2), height)
+      .input('volume', sql.Decimal(18, 3), volume)
+      .query(`UPDATE Logistics.dbo.ManualCargoItem
+              SET Description = @description, PackageCount = @packageCount, Weight = @weight,
+                  Length = @length, Width = @width, Height = @height, Volume = @volume
+              WHERE CargoID = @cargoId`);
+
+    await recalcManualShipmentTotals(pool, current.ShipmentID);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.delete('/manual-cargo/:cargoId', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const cargoId = req.params.cargoId;
+    const pool = await getPool();
+    const existingResult = await pool.request().input('cargoId', sql.Int, cargoId)
+      .query('SELECT ShipmentID FROM Logistics.dbo.ManualCargoItem WHERE CargoID = @cargoId');
+    const existing = existingResult.recordset[0];
+    if (!existing) return res.status(404).json({ success: false, error: 'Cargo line not found.' });
+
+    await pool.request().input('cargoId', sql.Int, cargoId)
+      .query('UPDATE Logistics.dbo.ManualCargoItem SET Removed = 1 WHERE CargoID = @cargoId');
+
+    await recalcManualShipmentTotals(pool, existing.ShipmentID);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 // ── List every document currently sitting in a shipment's export folder ──────
 // Regenerates the packing list first so it's always current, then lists the
 // whole folder — an operator-uploaded invoice and a ClearPort customs PDF
