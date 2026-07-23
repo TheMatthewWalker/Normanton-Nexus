@@ -411,7 +411,7 @@ function createShipmentPackingListPdfBuffer(context) {
     drawText(parts, 319, 673, `Tracking: ${shipment.trackingNumber || '-'}`, 10);
 
     drawRect(parts, 36, 590, 523, 34, palette.light, true);
-    drawText(parts, 48, 602, isManual ? 'Manual Shipment — not linked to SAP deliveries' : `Linked Deliveries: ${linkedRefs}`, 10, 'F2', palette.navy);
+    drawText(parts, 48, 602, isManual ? 'Manual Shipment - not linked to SAP deliveries' : `Linked Deliveries: ${linkedRefs}`, 10, 'F2', palette.navy);
 
     const cards = [
       { label: isManual ? 'Package Count' : 'Pallet Count', value: `${formatDecimal(shipment.palletCount)}` },
@@ -1193,16 +1193,22 @@ async function writeShipmentEvent(pool, shipmentId, category, description) {
 async function syncShipmentAggregateData(shipmentId) {
   const pool = await getPool();
 
-  // Manual Outbound Shipments' ShipmentMain totals are kept in sync directly
-  // off ManualCargoItem every time a cargo line is added/edited/removed (see
-  // recalcManualShipmentTotals near the manual-cargo routes below) — there's
-  // no PalletMain/DeliveryLink data to resync from here, and running the
-  // normal resync below would silently zero grossWeight/palletCount/etc back
-  // out to 0 (the DeliveryLink/ShipmentLink joins return nothing for a
-  // manual shipment). Skip straight to returning the context instead.
+  // Manual Outbound Shipments have no PalletMain/DeliveryLink data to resync
+  // from here — running the normal resync below against those (always-empty,
+  // for a manual shipment) joins would silently zero grossWeight/palletCount/
+  // shipmentVolume back out to 0, which is exactly what happened before this
+  // branch existed: any ShipmentMain row that had "Create Packing List" run
+  // against it while still classed as a normal shipment got its totals wiped
+  // and stayed wiped, because the old code path never wrote them back from
+  // ManualCargoItem afterwards. Actively re-deriving via
+  // recalcManualShipmentTotals here (rather than just trusting whatever is
+  // currently stored) self-heals any shipment left in that state and keeps
+  // this function's contract — "the totals you get back are freshly synced"
+  // — true for manual shipments too.
   const manualCheck = await pool.request().input('shipmentId', sql.BigInt, shipmentId)
     .query('SELECT IsManual FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
   if (manualCheck.recordset[0]?.IsManual) {
+    await recalcManualShipmentTotals(pool, shipmentId);
     return getShipmentContext(shipmentId);
   }
 
