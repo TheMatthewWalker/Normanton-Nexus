@@ -6973,8 +6973,13 @@ async function runInboundLog() {
 // Delivery-date bucket for one shipment — ExpectedEta vs today, same
 // backlog/today/week dot colours as everywhere else in the app (see
 // getDateBucket). No ETA set yet isn't "late" (there's no date to be late
-// against), so it falls into Upcoming until one is entered.
+// against), so it falls into Upcoming until one is entered. Cancelled
+// shipments are pulled out of the ETA-based buckets entirely and into
+// their own bucket — a cancelled shipment's ETA is no longer meaningful,
+// and mixing it into Late/Today/Upcoming just adds noise to the buckets
+// operators actually need to action.
 function ilBucketFor(s) {
+  if (s.CancelledAtUtc) return 'cancelled';
   if (!s.ExpectedEta) return 'upcoming';
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const eta = new Date(s.ExpectedEta); eta.setHours(0, 0, 0, 0);
@@ -6984,9 +6989,10 @@ function ilBucketFor(s) {
 }
 
 const IL_BUCKET_DEFS = [
-  { key: 'late',     label: 'Late',     dot: 'backlog', defaultOpen: true },
-  { key: 'today',    label: 'Today',    dot: 'today',   defaultOpen: true },
-  { key: 'upcoming', label: 'Upcoming', dot: 'week',    defaultOpen: true },
+  { key: 'late',      label: 'Late',      dot: 'backlog', defaultOpen: true },
+  { key: 'today',     label: 'Today',     dot: 'today',   defaultOpen: true },
+  { key: 'upcoming',  label: 'Upcoming',  dot: 'week',    defaultOpen: true },
+  { key: 'cancelled', label: 'Cancelled', dot: 'other',   defaultOpen: false },
 ];
 
 // No-ETA rows sort last within whichever bucket they land in (Upcoming).
@@ -6996,6 +7002,12 @@ function ilSortByEta(rows) {
     const tb = b.ExpectedEta ? new Date(b.ExpectedEta).getTime() : Infinity;
     return ta - tb;
   });
+}
+
+// Cancelled bucket sorts by most-recently-cancelled first — ETA isn't a
+// useful ordering once a shipment's been pulled from the active flow.
+function ilSortByCancelled(rows) {
+  return [...rows].sort((a, b) => new Date(b.CancelledAtUtc).getTime() - new Date(a.CancelledAtUtc).getTime());
 }
 
 function renderInboundLog() {
@@ -7028,7 +7040,8 @@ function renderInboundLog() {
   const tableHead = '<thead><tr><th>Reference</th><th>Supplier</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>';
 
   const sections = IL_BUCKET_DEFS.map(bd => {
-    const bucketRows = ilSortByEta(inboundShipmentRows.filter(s => ilBucketFor(s) === bd.key));
+    const rawRows = inboundShipmentRows.filter(s => ilBucketFor(s) === bd.key);
+    const bucketRows = bd.key === 'cancelled' ? ilSortByCancelled(rawRows) : ilSortByEta(rawRows);
     if (!bucketRows.length) return '';
     const collapsed = bd.defaultOpen ? '' : ' ps-section--collapsed';
     return `<div class="ps-section${collapsed}" data-group-key="${bd.key}">
