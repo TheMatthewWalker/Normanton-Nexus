@@ -278,11 +278,17 @@ router.post('/shipment/:shipmentId', async (req, res) => {
 // used to call (KN_DOCUMENTS_API_URL, multipart, keyed by tracking number)
 // was the wrong API. The correct one is KN_API_URL + '/upload' — the same
 // base URL/OAuth client as booking creation below — which takes a single
-// JSON document per call, base64-encoded, keyed by bookingID rather than
-// tracking number:
+// JSON document per call, base64-encoded, keyed by bookingID:
 //   { customerID, customerKey, documentCode, documentExtension, bookingID,
 //     base64EncodedDocument }
 // with Accept: application/problem+json (KN's convention for this API).
+//
+// bookingID here is exactly what this app already stores as a shipment's
+// trackingNumber — extractTrackingNumber (above) falls back to
+// responseData.bookingID because that's the only identifier KN's booking
+// response actually returns, so the two have always been the same value.
+// The caller (submitBookingModal) just passes item.trackingNumber straight
+// through under the bookingID key KN's document API expects.
 //
 // Uploads are attempted independently and reported per-file: a failure
 // here doesn't unwind the booking, which has already happened and has its
@@ -294,7 +300,6 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
   }
   try {
     const bookingID = String(req.body.bookingID || '').trim();
-    const trackingNumber = String(req.body.trackingNumber || '').trim(); // for event-log readability only
     const requestedFiles = Array.isArray(req.body.files) ? req.body.files : [];
     if (!bookingID) {
       return res.status(400).json({ success: false, error: 'bookingID is required.' });
@@ -353,7 +358,7 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         uploaded.push({ fileName, category, documentCode, documentId });
         await writeShipmentEvent(
           pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD',
-          `Uploaded ${fileName} (${category}, code ${documentCode}) to KN booking ${bookingID}${trackingNumber ? ` (tracking ${trackingNumber})` : ''}${documentId ? ` — documentId ${documentId}` : ''}.`
+          `Uploaded ${fileName} (${category}, code ${documentCode}) to KN booking ${bookingID}${documentId ? ` — documentId ${documentId}` : ''}.`
         );
       } catch (err) {
         const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
@@ -365,7 +370,7 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
       }
     }
 
-    res.json({ success: uploaded.length > 0, data: { bookingID, trackingNumber, uploaded, failed } });
+    res.json({ success: uploaded.length > 0, data: { bookingID, uploaded, failed } });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
 

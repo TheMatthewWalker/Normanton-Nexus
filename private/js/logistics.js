@@ -1408,13 +1408,16 @@ async function submitBookingModal() {
           const json = await response.json();
           if (!response.ok) throw new Error(json.error || 'Failed to send to Kuehne & Nagel.');
           item.trackingNumber = String(json.trackingNumber || item.trackingNumber || '').trim();
-          item.bookingID = String(json.bookingID || '').trim();
 
-          // Booking has now actually happened and has a bookingID — a
+          // Booking has now actually happened and has a tracking number — a
           // document-upload failure from here on is surfaced as a warning,
-          // not rolled back into a failed booking. The KN document-upload API
-          // is keyed by bookingID, not tracking number.
-          if (item.bookingID) {
+          // not rolled back into a failed booking. What this app stores as
+          // "trackingNumber" is KN's own bookingID (extractTrackingNumber in
+          // freightbooking.js falls back to responseData.bookingID, which is
+          // the only identifier KN's booking response actually returns) —
+          // so it's exactly what the document-upload API's bookingID field
+          // needs, no separate value to track.
+          if (item.trackingNumber) {
             const files = [
               { fileName: docs.packingList, category: 'packing-list' },
               { fileName: docs.invoice,     category: 'invoice' },
@@ -1424,7 +1427,7 @@ async function submitBookingModal() {
               const uploadRes  = await fetch(`/api/freight-booking/${encodeURIComponent(item.shipmentID)}/documents/upload-to-kn`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bookingID: item.bookingID, trackingNumber: item.trackingNumber, files }),
+                body: JSON.stringify({ bookingID: item.trackingNumber, files }),
               });
               const uploadJson = await uploadRes.json();
               const failedFiles = uploadJson.data?.failed || [];
