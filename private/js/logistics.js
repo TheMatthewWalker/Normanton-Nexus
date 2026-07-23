@@ -3285,6 +3285,14 @@ async function runUpdateForwarders() {
           });
           const json = await res2.json();
           if (!json.success) throw new Error(json.error || 'Save failed');
+          // Invalidate the haulier-dropdown caches (loadApprovedForwarders /
+          // loadAllForwarders below) — they're only fetched once per page
+          // load, so without this a newly-added/approved forwarder would be
+          // correct in the DB and in this admin table (which always
+          // refetches directly) but invisible in every haulier dropdown
+          // until a hard page refresh.
+          approvedForwarders = null;
+          allForwarders = null;
           runUpdateForwarders();
         }
       );
@@ -3324,6 +3332,11 @@ async function runUpdateForwarders() {
               forwarderMode: values.forwarderMode,
               forwarderApproval: /^y/i.test(values.forwarderApproval) ? 1 : 0,
             });
+            // See the matching comment in the Add Forwarder handler above —
+            // an approval/name/mode change here is just as invisible to the
+            // haulier dropdowns until these caches are cleared.
+            approvedForwarders = null;
+            allForwarders = null;
             runUpdateForwarders();
           }
         );
