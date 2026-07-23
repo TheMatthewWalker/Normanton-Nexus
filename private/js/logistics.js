@@ -1408,21 +1408,23 @@ async function submitBookingModal() {
           const json = await response.json();
           if (!response.ok) throw new Error(json.error || 'Failed to send to Kuehne & Nagel.');
           item.trackingNumber = String(json.trackingNumber || item.trackingNumber || '').trim();
+          item.bookingID = String(json.bookingID || '').trim();
 
-          // Booking has now actually happened and has a tracking number — a
+          // Booking has now actually happened and has a bookingID — a
           // document-upload failure from here on is surfaced as a warning,
-          // not rolled back into a failed booking.
-          if (item.trackingNumber) {
+          // not rolled back into a failed booking. The KN document-upload API
+          // is keyed by bookingID, not tracking number.
+          if (item.bookingID) {
             const files = [
               { fileName: docs.packingList, category: 'packing-list' },
               { fileName: docs.invoice,     category: 'invoice' },
               ...(docs.customs ? [{ fileName: docs.customs, category: 'customs' }] : []),
             ];
             try {
-              const uploadRes  = await fetch(`/api/shipmentmain/${encodeURIComponent(item.shipmentID)}/documents/upload-to-kn`, {
+              const uploadRes  = await fetch(`/api/freight-booking/${encodeURIComponent(item.shipmentID)}/documents/upload-to-kn`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trackingNumber: item.trackingNumber, files }),
+                body: JSON.stringify({ bookingID: item.bookingID, trackingNumber: item.trackingNumber, files }),
               });
               const uploadJson = await uploadRes.json();
               const failedFiles = uploadJson.data?.failed || [];

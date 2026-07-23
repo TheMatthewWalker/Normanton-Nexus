@@ -1,14 +1,12 @@
 ﻿import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
-import FormData from 'form-data';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
 import { sqlConfig, stampDbChange } from '../config.js';
-import { getKnAccessToken } from './freightbooking.js';
 
 import { requirePermission } from '../middleware/auth.js';
 import e from 'express';
@@ -189,35 +187,6 @@ function getClearPortSettings() {
     nationalityOfActiveMeansOfTransportAtBorder: process.env.CLEARPORT_NATIONALITY_OF_ACTIVE_MEANS_AT_BORDER       || clearport.nationalityOfActiveMeansOfTransportAtBorder  || 'GB',
   };
 }
-
-
-// ── Kuehne+Nagel Shipment Document Management API ────────────────────────────
-// Separate service from the booking API (routes/freightbooking.js) — same KN
-// OAuth client-credentials token (getKnAccessToken, imported above) works for
-// both, per KN's API portal. Defaults to the URL in KN's published swagger so
-// this works out of the box; override via KN_DOCUMENTS_API_URL if KN ever
-// versions the path.
-function getKnDocumentsSettings() {
-  return {
-    apiUrl: String(
-      process.env.KN_DOCUMENTS_API_URL ||
-      'https://gateway.api.kuehne-nagel.com/transport/execution/documentation/shipment/v2'
-    ).replace(/\/+$/, ''),
-  };
-}
-
-
-// KN's own classification codes for the document types this app cares about
-// (see the 'Often uploaded document types' list on DocumentTypeCode in KN's
-// ShipmentDocumentManagement swagger): 380 Commercial Invoice, 271 Packing
-// List, 944 Customs Documents. 'customs' maps to Customs Documents rather
-// than Export Declaration (833) since that's what ClearPort's CDS export PDF
-// actually is here.
-const KN_DOCUMENT_TYPE_CODES = {
-  'packing-list': '271',
-  invoice:        '380',
-  customs:        '944',
-};
 
 
 // Every file this app itself writes into a shipment's export folder already
@@ -2199,84 +2168,13 @@ router.post('/:shipmentId/documents/upload',
 );
 
 
-// ── Upload booking documents to Kuehne+Nagel ──────────────────
-// Final step of the KN booking flow (see private/js/logistics.js's
-// submitBookingModal): once a booking has been placed and a tracking number
-// received, the confirmed invoice/packing-list/customs files — already
-// verified present by the operator in the pre-booking popup, never guessed
-// again here — are pushed to KN's ShipmentDocumentManagement API against
-// that tracking number. Uploads are attempted independently and reported
-// per-file: a failure here doesn't unwind the booking, which has already
-// happened and has its own tracking number, so the caller surfaces
-// per-file failures as a warning rather than rolling anything back.
-router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNING'), async (req, res) => {
-  try {
-    const trackingNumber = String(req.body.trackingNumber || '').trim();
-    const requestedFiles = Array.isArray(req.body.files) ? req.body.files : [];
-    if (!trackingNumber) {
-      return res.status(400).json({ success: false, error: 'trackingNumber is required.' });
-    }
-    if (!requestedFiles.length) {
-      return res.status(400).json({ success: false, error: 'At least one file is required.' });
-    }
-
-    const context = await getShipmentContext(req.params.shipmentId);
-    const folder = getShipmentFolderInfo(context.shipment);
-    const docs = getKnDocumentsSettings();
-    const pool = await getPool();
-
-    let accessToken;
-    try {
-      accessToken = (await getKnAccessToken()).access_token;
-    } catch (err) {
-      return res.status(502).json({ success: false, error: `Could not authenticate with Kuehne & Nagel: ${err.message}` });
-    }
-
-    const uploaded = [];
-    const failed = [];
-
-    for (const item of requestedFiles) {
-      const fileName = path.basename(String(item?.fileName || ''));
-      const category = String(item?.category || '');
-      const documentTypeCode = KN_DOCUMENT_TYPE_CODES[category];
-      if (!fileName || !documentTypeCode) {
-        failed.push({ fileName: fileName || '(unnamed)', error: `Unknown document category '${category}'.` });
-        continue;
-      }
-
-      try {
-        const filePath = path.join(folder.shipmentPath, fileName);
-        const fileBuffer = await fsp.readFile(filePath);
-
-        const form = new FormData();
-        form.append('documentContent', fileBuffer, { filename: fileName, contentType: 'application/pdf' });
-        form.append('documentTypeCode', documentTypeCode);
-
-        const url = `${docs.apiUrl}/shipments/${encodeURIComponent(trackingNumber)}/documents`;
-        const response = await axios.post(url, form, {
-          timeout: 30000,
-          headers: { ...form.getHeaders(), Authorization: `Bearer ${accessToken}` },
-        });
-
-        const documentId = response.data?.documentId || null;
-        uploaded.push({ fileName, category, documentTypeCode, documentId });
-        await writeShipmentEvent(
-          pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD',
-          `Uploaded ${fileName} (${category}, type ${documentTypeCode}) to KN tracking ${trackingNumber}${documentId ? ` — documentId ${documentId}` : ''}.`
-        );
-      } catch (err) {
-        const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
-        failed.push({ fileName, category, error: detail });
-        await writeShipmentEvent(
-          pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD_FAILED',
-          `Failed to upload ${fileName} (${category}) to KN tracking ${trackingNumber}: ${detail}`
-        ).catch(() => {});
-      }
-    }
-
-    res.json({ success: uploaded.length > 0, data: { trackingNumber, uploaded, failed } });
-  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
-});
+// Upload-to-KN moved to routes/freightbooking.js — it's part of the KN
+// booking feature (POST /api/freight-booking/:shipmentId/documents/upload-to-kn),
+// which also owns the KN OAuth client and the rest of the KN API surface.
+// getShipmentContext/getShipmentFolderInfo/writeShipmentEvent below are
+// exported (see bottom of file) so that route can still resolve a
+// shipment's export folder and log ShipmentEvents without duplicating this
+// module's logic.
 
 
 router.post('/:shipmentId/send-collection-email', requirePermission('LOG_PLANNING'), async (req, res) => {
@@ -2825,5 +2723,10 @@ router.post('/', async (req, res) => {
     res.status(201).json({ message: 'Record created successfully', shipmentID: result.recordset[0].shipmentID });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// Named exports for routes/freightbooking.js — it owns the KN
+// booking/upload-to-kn feature but reuses this module's shipment context,
+// export-folder resolution, and event log rather than duplicating them.
+export { getShipmentContext, getShipmentFolderInfo, writeShipmentEvent };
 
 export default router;
