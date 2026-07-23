@@ -294,10 +294,20 @@ router.post('/shipment/:shipmentId', async (req, res) => {
 // here doesn't unwind the booking, which has already happened and has its
 // own bookingID, so the caller surfaces per-file failures as a warning
 // rather than rolling anything back.
+//
+// ?dryRun=true (or dryRun=1) skips the actual POST to KN — and skips
+// logging any ShipmentEvent — so it's safe to hit repeatedly while
+// debugging without spamming KN with real uploads. It still does
+// everything that can fail before that point (resolves the shipment's
+// export folder, stats each file on disk, fetches a real OAuth token) and
+// returns the exact payload/headers/URL that would have been sent, so a
+// bad fileName/category/token shows up here instead of as an opaque KN
+// error. See test.http for a ready-made request.
 router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNING'), async (req, res) => {
   if (!KN_API_URL || !KN_CUSTOMER_ID || !KN_CUSTOMER_KEY) {
     return res.status(503).json({ success: false, error: 'Freight booking is not configured. Check KN_API_URL, KN_CUSTOMER_ID, KN_CUSTOMER_KEY in .env.' });
   }
+  const dryRun = ['1', 'true', 'yes'].includes(String(req.query.dryRun || '').trim().toLowerCase());
   try {
     const bookingID = String(req.body.bookingID || '').trim();
     const requestedFiles = Array.isArray(req.body.files) ? req.body.files : [];
@@ -312,15 +322,20 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
     const folder = getShipmentFolderInfo(context.shipment);
     const pool = await getPool();
 
-    let accessToken;
+    let accessToken = null;
+    let authError = null;
     try {
       accessToken = (await getKnAccessToken()).access_token;
     } catch (err) {
-      return res.status(502).json({ success: false, error: `Could not authenticate with Kuehne & Nagel: ${err.message}` });
+      authError = err.message;
+      if (!dryRun) {
+        return res.status(502).json({ success: false, error: `Could not authenticate with Kuehne & Nagel: ${err.message}` });
+      }
     }
 
     const uploaded = [];
     const failed = [];
+    const preview = [];
 
     for (const item of requestedFiles) {
       const fileName = path.basename(String(item?.fileName || ''));
@@ -331,10 +346,40 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         continue;
       }
 
+      const filePath = path.join(folder.shipmentPath, fileName);
+      const documentExtension = (path.extname(fileName).slice(1) || 'pdf').toLowerCase();
+
+      if (dryRun) {
+        let fileSizeBytes = null;
+        let fileError = null;
+        try {
+          fileSizeBytes = (await fsp.stat(filePath)).size;
+        } catch (err) {
+          fileError = `File not found at ${filePath} (${err.code || err.message}).`;
+        }
+        preview.push({
+          fileName, category, documentCode, documentExtension,
+          filePath, fileSizeBytes, fileError,
+          url: `${KN_API_URL}/upload`,
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept':       'application/problem+json',
+            'Authorization': accessToken ? 'Bearer <valid, fetched OK>' : `<KN OAuth FAILED: ${authError}>`,
+          },
+          payload: {
+            customerID:  KN_CUSTOMER_ID,
+            customerKey: KN_CUSTOMER_KEY.length > 8 ? `${KN_CUSTOMER_KEY.slice(0, 4)}...${KN_CUSTOMER_KEY.slice(-4)}` : KN_CUSTOMER_KEY,
+            documentCode,
+            documentExtension,
+            bookingID,
+            base64EncodedDocument: fileSizeBytes != null ? `<base64, ~${Math.ceil(fileSizeBytes * 4 / 3)} chars, ${fileSizeBytes} byte source file>` : '<unavailable — file could not be read, see fileError>',
+          },
+        });
+        continue;
+      }
+
       try {
-        const filePath = path.join(folder.shipmentPath, fileName);
         const fileBuffer = await fsp.readFile(filePath);
-        const documentExtension = (path.extname(fileName).slice(1) || 'pdf').toLowerCase();
 
         const payload = {
           customerID:  KN_CUSTOMER_ID,
@@ -346,7 +391,7 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         };
 
         const response = await axios.post(`${KN_API_URL}/upload`, payload, {
-          timeout: 30000,
+          timeout: 120000,
           headers: {
             'Content-Type': 'application/json',
             'Accept':       'application/problem+json',
@@ -370,6 +415,9 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
       }
     }
 
+    if (dryRun) {
+      return res.json({ success: true, dryRun: true, data: { bookingID, preview } });
+    }
     res.json({ success: uploaded.length > 0, data: { bookingID, uploaded, failed } });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
