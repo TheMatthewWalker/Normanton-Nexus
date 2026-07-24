@@ -6,6 +6,7 @@ import jwt    from 'jsonwebtoken';
 import fs     from 'fs';
 import { sqlConfig, sapConfig, sapServerSecret } from '../config.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
+import { lookupMaterialGroup } from './materialgroups.js';
 
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
 const sapAgent = fs.existsSync(certPath)
@@ -479,10 +480,14 @@ router.get('/analytics', async (req, res) => {
 // fails fast with a clear message rather than a confusing SAP logon error.
 //
 // Vendor = the shipment's forwarderID (forwarderID doubles as the SAP
-// vendor number — see routes/forwarders.js). MaterialGroup is derived from
-// modeOfTransport (e.g. "Road Freight"), matching the intent noted when
-// this endpoint was first stubbed out. GlAccount/CostCenterOrOrder come
-// straight from the cost line's costElement/costCenter.
+// vendor number — see routes/forwarders.js). MaterialGroup used to be
+// derived as free text from modeOfTransport (e.g. "Road Freight") — that
+// wasn't a real SAP material group code and is exactly why PO creation
+// kept rolling back (confirmed by testing the real code, ITLG01A, directly
+// against SapServer). It's now looked up per line via
+// materialgroups.js's lookupMaterialGroup(costElement, modeOfTransport) —
+// see sql/migrate_material_group_mapping.sql. GlAccount/CostCenterOrOrder
+// come straight from the cost line's costElement/costCenter, same as before.
 router.post('/post-migo', async (req, res) => {
     const { costIDs } = req.body;
     if (!Array.isArray(costIDs) || !costIDs.length)
@@ -596,25 +601,46 @@ router.post('/post-migo', async (req, res) => {
         // GR-per-line->logoff as one unit of work, so there's nothing to gain
         // from firing every group at once.
         for (const group of Object.values(groups)) {
-            const materialGroup   = group.modeOfTransport ? `${group.modeOfTransport} Freight` : 'Freight';
             const deliveredDayStr = group.deliveredDate ? new Date(group.deliveredDate).toISOString().slice(0, 10) : today;
 
-            const items = group.costLines.map(line => ({
-                ShortText:              `Freight - ${group.direction} shipment ${group.shipmentReference}`,
-                Quantity:                1,
-                Unit:                    'EA',
-                NetPrice:                line.expectedCost ?? 0,
-                DeliveryDate:            deliveredDayStr,
-                AcctAssCat:              'K',
-                MaterialGroup:           materialGroup,
-                GlAccount:               line.costElement,
-                CostCenterOrOrder:       line.costCenter,
-                Reference:               group.shipmentReference,
-                TrackingNumber:          group.trackingNumber || '',
-                AddressCode:             group.location,
-                ShipmentCompletionDate:  deliveredDayStr,
-                PostingDate:             today,
-            }));
+            // MaterialGroup is looked up per line (not per group) because
+            // costElement/GL account can differ line-to-line within the
+            // same shipment group, and the mapping is keyed on GL account
+            // (+ mode of transport) — see materialgroups.js. A missing
+            // mapping throws with the exact combination that's needed, so
+            // it's resolved BEFORE calling SAP: better to fail clearly here
+            // than send SapServer another bad code that just rolls back
+            // with a confusing SAP-side error.
+            let items;
+            try {
+                items = await Promise.all(group.costLines.map(async line => ({
+                    ShortText:              `Freight - ${group.direction} shipment ${group.shipmentReference}`,
+                    Quantity:                1,
+                    Unit:                    'EA',
+                    NetPrice:                line.expectedCost ?? 0,
+                    DeliveryDate:            deliveredDayStr,
+                    AcctAssCat:              'K',
+                    MaterialGroup:           await lookupMaterialGroup(line.costElement, group.modeOfTransport),
+                    GlAccount:               line.costElement,
+                    CostCenterOrOrder:       line.costCenter,
+                    Reference:               group.shipmentReference,
+                    TrackingNumber:          group.trackingNumber || '',
+                    AddressCode:             group.location,
+                    ShipmentCompletionDate:  deliveredDayStr,
+                    PostingDate:             today,
+                })));
+            } catch (lookupErr) {
+                for (const costID of group._costIDs) {
+                    results.push({
+                        shipmentID: group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                        direction:  group.direction,
+                        costID,
+                        success:    false,
+                        error:      lookupErr.message,
+                    });
+                }
+                continue;
+            }
 
             try {
                 const sapResp = await axios.post(

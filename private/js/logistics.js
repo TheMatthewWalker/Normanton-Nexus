@@ -111,6 +111,7 @@ function setupTiles() {
       if (fn === 'updatePackagingData') runUpdatePackagingData();
       if (fn === 'updateDestinations')  runUpdateDestinations();
       if (fn === 'updateForwarders')    runUpdateForwarders();
+      if (fn === 'materialGroupMapping')runMaterialGroupMapping();
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
       if (fn === 'turnsValClassTable')  runTurnsValClassTable();
@@ -3618,6 +3619,190 @@ async function runUpdateForwarders() {
     });
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Admin: Material Group Mapping ─────────────────────────────────────────────
+// SAP requires a real Material Group code (WGRU/MATKL, e.g. "ITLG01A") on
+// every freight PO item — post-migo (routes/shipmentcost.js) used to build
+// this as free text from modeOfTransport ("Road Freight" etc.), which isn't
+// a valid SAP code and was the root cause of PO creation rolling back. This
+// table (dbo.MaterialGroupMapping, see sql/migrate_material_group_mapping.sql)
+// maps GL account + mode of transport to the real code, with a
+// mode-independent default per GL account also supported (leave Mode of
+// Transport blank when adding/editing).
+let mgmCostElements = null; // cached GL account list — {elementID, elementDescription}[]
+
+async function mgmLoadCostElements() {
+  if (mgmCostElements) return mgmCostElements;
+  const rows = await fetch('/api/costelements').then(r => r.json());
+  mgmCostElements = Array.isArray(rows) ? rows : [];
+  return mgmCostElements;
+}
+
+async function runMaterialGroupMapping() {
+  showResultPanel('Material Group Mapping', 'Click a row to edit · Add Mapping for a new GL account / mode combination');
+  try {
+    const [mappingsResp] = await Promise.all([
+      fetch('/api/material-groups').then(r => r.json()),
+      mgmLoadCostElements(), // warm the cache the modal's GL Account dropdown needs
+    ]);
+    if (!mappingsResp.success) throw new Error(mappingsResp.error?.message || 'Failed to load material group mappings');
+    mgmRenderList(mappingsResp.data);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function mgmCostElementLabel(costElement) {
+  const match = (mgmCostElements || []).find(c => String(c.elementID) === String(costElement));
+  return match ? `${costElement} — ${match.elementDescription || ''}` : String(costElement);
+}
+
+function mgmRenderList(mappings) {
+  document.getElementById('result-row-badge').textContent = `${mappings.length} mapping${mappings.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const rows = mappings.map(m => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${esc(mgmCostElementLabel(m.CostElement))}</td>
+      <td>${esc(m.ModeOfTransport || 'Any (default)')}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(m.MaterialGroup)}</td>
+      <td>${esc(m.Description || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary mgm-edit" data-id="${esc(String(m.MappingId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary mgm-delete" data-id="${esc(String(m.MappingId))}" data-label="${esc(mgmCostElementLabel(m.CostElement))} / ${esc(m.ModeOfTransport || 'Any')}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="mgm-add-btn">+ Add Mapping</button>
+    </div>
+    ${mappings.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>GL Account</th><th>Mode of Transport</th><th>Material Group</th><th>Description</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No mappings yet — add one so freight PO creation knows which SAP Material Group code to use for a GL account.</div>'}
+  `;
+
+  document.getElementById('mgm-add-btn').addEventListener('click', () => mgmOpenModal(null));
+  document.querySelectorAll('.mgm-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const m = mappings.find(x => String(x.MappingId) === btn.dataset.id);
+      if (m) mgmOpenModal(m);
+    });
+  });
+  document.querySelectorAll('.mgm-delete').forEach(btn => {
+    btn.addEventListener('click', () => mgmDeleteMapping(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function mgmOpenModal(mapping) {
+  const isEdit = !!mapping;
+
+  // A mapping being edited might reference a GL account no longer in
+  // costElements (deleted/renamed since) — keep it selectable rather than
+  // silently swapping it for whatever option happens to be first.
+  const currentInList = isEdit && (mgmCostElements || []).some(c => String(c.elementID) === String(mapping.CostElement));
+  const extraOption = isEdit && !currentInList
+    ? `<option value="${esc(mapping.CostElement)}" selected>${esc(mapping.CostElement)} (not in Cost Elements list)</option>`
+    : '';
+  const costElementOptions = (mgmCostElements || [])
+    .slice()
+    .sort((a, b) => String(a.elementID).localeCompare(String(b.elementID)))
+    .map(c => `<option value="${esc(c.elementID)}" ${isEdit && String(mapping.CostElement) === String(c.elementID) ? 'selected' : ''}>${esc(c.elementID)} — ${esc(c.elementDescription || '')}</option>`)
+    .join('');
+
+  openModal(`<div class="ps-modal" style="max-width:520px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Mapping' : 'Add Mapping'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">GL Account</label>
+          <select class="tf-input" id="mgm-cost-element">
+            <option value=""></option>
+            ${extraOption}
+            ${costElementOptions}
+          </select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Mode of Transport</label>
+          <select class="tf-input" id="mgm-mode">
+            <option value="">Any (default for this GL account)</option>
+            ${OS_TRANSPORT_MODES.map(mo => `<option value="${mo}" ${isEdit && mapping.ModeOfTransport === mo ? 'selected' : ''}>${mo}</option>`).join('')}
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Material Group (SAP code)</label>
+          <input class="tf-input" type="text" id="mgm-material-group" maxlength="9" style="text-transform:uppercase" value="${esc(mapping?.MaterialGroup || '')}" placeholder="e.g. ITLG01A">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Description</label>
+          <input class="tf-input" type="text" id="mgm-description" value="${esc(mapping?.Description || '')}" placeholder="e.g. Inbound freight">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Leave Mode of Transport blank to use this code as the default for the GL account regardless of mode. A specific mode always takes priority over the default when both exist.</div>
+      <div id="mgm-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="mgm-save-btn">${isEdit ? 'Save Changes' : 'Add Mapping'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('mgm-save-btn').addEventListener('click', async () => {
+    const body = {
+      costElement: document.getElementById('mgm-cost-element').value.trim(),
+      modeOfTransport: document.getElementById('mgm-mode').value || null,
+      materialGroup: document.getElementById('mgm-material-group').value.trim().toUpperCase(),
+      description: document.getElementById('mgm-description').value.trim() || null,
+    };
+    if (!body.costElement) {
+      document.getElementById('mgm-result').innerHTML = '<div class="sap-error">GL Account is required.</div>';
+      return;
+    }
+    if (!body.materialGroup) {
+      document.getElementById('mgm-result').innerHTML = '<div class="sap-error">Material Group is required.</div>';
+      return;
+    }
+    const btn = document.getElementById('mgm-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/material-groups/${mapping.MappingId}` : '/api/material-groups', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runMaterialGroupMapping();
+    } catch (err) {
+      document.getElementById('mgm-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Mapping';
+    }
+  });
+}
+
+async function mgmDeleteMapping(mappingId, label) {
+  if (!confirm(`Delete the mapping for ${label}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/material-groups/${mappingId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runMaterialGroupMapping();
+  } catch (err) {
+    alert(err.message);
   }
 }
 
