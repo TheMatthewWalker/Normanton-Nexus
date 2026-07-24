@@ -7984,6 +7984,12 @@ async function runInboundLog() {
 // operators actually need to action.
 function ilBucketFor(s) {
   if (s.CancelledAtUtc) return 'cancelled';
+  // A received shipment stays out of the ETA-based buckets entirely —
+  // previously a shipment received after its ETA had passed kept showing
+  // up in Late indefinitely, since ilBucketFor never looked at
+  // ReceivedAtUtc at all. Checked before the ETA comparisons below so a
+  // late-but-now-received shipment lands here instead of Late.
+  if (s.ReceivedAtUtc) return 'completed';
   if (!s.ExpectedEta) return 'upcoming';
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const eta = new Date(s.ExpectedEta); eta.setHours(0, 0, 0, 0);
@@ -7996,6 +8002,7 @@ const IL_BUCKET_DEFS = [
   { key: 'late',      label: 'Late',      dot: 'backlog', defaultOpen: true },
   { key: 'today',     label: 'Today',     dot: 'today',   defaultOpen: true },
   { key: 'upcoming',  label: 'Upcoming',  dot: 'week',    defaultOpen: true },
+  { key: 'completed', label: 'Completed', dot: 'month',   defaultOpen: false },
   { key: 'cancelled', label: 'Cancelled', dot: 'other',   defaultOpen: false },
 ];
 
@@ -8012,6 +8019,12 @@ function ilSortByEta(rows) {
 // useful ordering once a shipment's been pulled from the active flow.
 function ilSortByCancelled(rows) {
   return [...rows].sort((a, b) => new Date(b.CancelledAtUtc).getTime() - new Date(a.CancelledAtUtc).getTime());
+}
+
+// Completed bucket sorts by most-recently-received first, same rationale
+// as ilSortByCancelled.
+function ilSortByReceived(rows) {
+  return [...rows].sort((a, b) => new Date(b.ReceivedAtUtc).getTime() - new Date(a.ReceivedAtUtc).getTime());
 }
 
 function renderInboundLog() {
@@ -8045,7 +8058,9 @@ function renderInboundLog() {
 
   const sections = IL_BUCKET_DEFS.map(bd => {
     const rawRows = inboundShipmentRows.filter(s => ilBucketFor(s) === bd.key);
-    const bucketRows = bd.key === 'cancelled' ? ilSortByCancelled(rawRows) : ilSortByEta(rawRows);
+    const bucketRows = bd.key === 'cancelled' ? ilSortByCancelled(rawRows)
+      : bd.key === 'completed' ? ilSortByReceived(rawRows)
+      : ilSortByEta(rawRows);
     if (!bucketRows.length) return '';
     const collapsed = bd.defaultOpen ? '' : ' ps-section--collapsed';
     return `<div class="ps-section${collapsed}" data-group-key="${bd.key}">
