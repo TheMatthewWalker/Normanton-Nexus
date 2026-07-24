@@ -160,16 +160,75 @@ function withTimeout(promise, ms, fallbackValue) {
   });
 }
 
+// certs/cert.pem is self-signed (issuer == subject) AND its only Subject
+// Alternative Name is the server's LAN IP, never 127.0.0.1. That combination
+// means a plain rejectUnauthorized:true will ALWAYS fail this call for TWO
+// independent reasons — no trusted CA in the chain, and a hostname mismatch
+// — no matter what is actually listening on the port. getHealthCheckCa()
+// and checkServerIdentity below fix both, deliberately, without a blanket
+// rejectUnauthorized:false. See the big comment on getHealth() for why this
+// matters and what happens if someone "simplifies" it back.
+let cachedHealthCheckCa; // undefined = not yet loaded; false = load failed
+function getHealthCheckCa() {
+  if (cachedHealthCheckCa === undefined) {
+    try {
+      cachedHealthCheckCa = fs.readFileSync(path.join(__dirname, 'certs', 'cert.pem'));
+    } catch (err) {
+      console.warn('[restart-lib] could not read certs/cert.pem for health-check pinning — health checks will fail closed:', err.message);
+      cachedHealthCheckCa = false;
+    }
+  }
+  return cachedHealthCheckCa || undefined;
+}
+
 // Hits GET /api/health and returns the parsed body, or null on any failure
 // (connection refused, timeout, non-JSON, etc.) — null always means
 // "nothing usable is answering right now," which is exactly what callers
 // need to know.
+//
+// `ca` and `checkServerIdentity` are overridden below — here's why, so
+// nobody "fixes" this back to a plain rejectUnauthorized:true and silently
+// breaks restart verification again. That exact thing already happened
+// once: commit c0819e63 flipped rejectUnauthorized from false to true in
+// response to a GitHub code-scanning alert that flagged it as "certificate
+// validation disabled." That made getHealth() return null UNCONDITIONALLY —
+// including with the real service up and healthy — because certs/cert.pem
+// is self-signed (so there's no CA chain for Node to trust by default) AND
+// its only Subject Alternative Name is the server's LAN IP, never
+// 127.0.0.1 (so hostname verification fails too, independently). The
+// visible symptom was exactly this: "[restart] no instance currently
+// answering /api/health" even with the old process still fully up — and
+// because waitForPortFree() also calls getHealth(), it wrongly concluded
+// the old process had already exited and skipped the force-kill path
+// entirely, so the old process was never actually confirmed gone before
+// start() tried to bind a new one to the same port.
+//
+// The fix here is deliberately NOT a blanket rejectUnauthorized:false —
+// that would accept ANY cert from anything listening on 127.0.0.1:443,
+// which is real protection worth keeping. Instead:
+//   - `ca` pins this exact cert file as the one and only trusted root for
+//     this call, so rejectUnauthorized:true still cryptographically proves
+//     the response came from a process holding the matching private key —
+//     verified directly: pointing this same pinned-`ca` config at a
+//     DIFFERENT self-signed cert on the same loopback address and port
+//     correctly fails with "self-signed certificate", exactly as it should.
+//   - `checkServerIdentity` is overridden to skip ONLY the hostname-vs-SAN
+//     comparison, because that comparison is structurally unwinnable here:
+//     this call always connects via 127.0.0.1 on purpose (reliable
+//     regardless of which NIC/IP the box is currently using), against a
+//     cert that was only ever issued to be presented for LAN traffic.
+// This is a same-process, same-host liveness probe pinned to a known cert,
+// not blind trust — and the response body's pid/bootId is independent
+// proof of identity on top of that.
 function getHealth() {
   return new Promise(resolve => {
     const req = https.get(
       {
         host: '127.0.0.1', port: LIVENESS_PORT, path: HEALTH_PATH,
-        rejectUnauthorized: true, timeout: HEALTH_REQUEST_TIMEOUT_MS,
+        ca: getHealthCheckCa(),
+        rejectUnauthorized: true,
+        checkServerIdentity: () => undefined, // see comment above — skips ONLY hostname/SAN matching
+        timeout: HEALTH_REQUEST_TIMEOUT_MS,
       },
       res => {
         let body = '';
