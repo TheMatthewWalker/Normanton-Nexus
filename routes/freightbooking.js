@@ -2,6 +2,7 @@ import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
 import fsp from 'fs/promises';
+import fs from 'fs';
 import path from 'path';
 import { sqlConfig } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
@@ -422,6 +423,7 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
 
       try {
         const fileBuffer = await fsp.readFile(filePath);
+        const base64String = fs.readFileSync(filePath, {encoding: 'base64'});
 
         const payload = {
           customerID:  KN_CUSTOMER_ID,
@@ -429,7 +431,7 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
           documentCode,
           documentExtension,
           bookingID,
-          base64EncodedDocument: fileBuffer.toString('base64'),
+          base64EncodedDocument: base64String, //fileBuffer.toString('base64'),
         };
 
         const response = await axios.post(`${KN_API_URL}/upload`, payload, {
