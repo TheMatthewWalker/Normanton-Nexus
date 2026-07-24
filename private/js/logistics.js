@@ -5014,22 +5014,29 @@ async function postMigoSelected() {
       blockedCount++;
     }
 
+    // routes/shipmentcost.js's post-migo pushes one result object per
+    // costID (result.costID, singular) — not a result-per-group with a
+    // costIDs array. Iterating result.costIDs here threw "not iterable" on
+    // the very first result, which meant a line that posted successfully
+    // in SAP (and was already marked migoStatus=1 server-side) never got
+    // its checkmark/material document shown and never got its checkbox
+    // disabled — so it looked stuck/unposted even though it had gone
+    // through, risking a confused re-post attempt.
     for (const result of (json.results || [])) {
-      for (const costID of result.costIDs) {
-        const row  = document.querySelector(`tr[data-cost-id="${costID}"]`);
-        const cell = row?.querySelector('.migo-result-cell');
-        const cb   = row?.querySelector('.migo-check');
-        if (!row || !cell) continue;
+      const costID = result.costID;
+      const row  = document.querySelector(`tr[data-cost-id="${costID}"]`);
+      const cell = row?.querySelector('.migo-result-cell');
+      const cb   = row?.querySelector('.migo-check');
+      if (!row || !cell) continue;
 
-        if (result.success) {
-          cell.innerHTML = `<span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;border-radius:4px;padding:2px 7px;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap">${esc(result.materialDocument)}</span>`;
-          row.style.opacity = '0.45';
-          if (cb) { cb.checked = false; cb.disabled = true; }
-          okCount++;
-        } else {
-          cell.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(result.error || '')}">${esc(result.error || 'Failed')}</span>`;
-          failCount++;
-        }
+      if (result.success) {
+        cell.innerHTML = `<span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;border-radius:4px;padding:2px 7px;font-size:11px;font-family:'JetBrains Mono',monospace;white-space:nowrap">${esc(result.materialDocument)}</span>`;
+        row.style.opacity = '0.45';
+        if (cb) { cb.checked = false; cb.disabled = true; }
+        okCount++;
+      } else {
+        cell.innerHTML = `<span style="color:var(--error);font-size:11px" title="${esc(result.error || '')}">${esc(result.error || 'Failed')}</span>`;
+        failCount++;
       }
     }
 
