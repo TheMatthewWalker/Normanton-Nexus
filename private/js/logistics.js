@@ -18,6 +18,7 @@ let currentBookingRows = [];
 let currentBookingHaulier = '';
 let selectedCustomsShipmentIds = new Set();
 let selectedCollectionIds = new Set();
+let selectedInTransitIds = new Set();
 let trackedRows = [];
 let selectedTrackedIds = new Set();
 let inboundShipmentRows = [];
@@ -328,6 +329,9 @@ async function runShipmentQueue(mode) {
     if (mode === 'awaiting-collection') {
       selectedCollectionIds = new Set();
       renderAwaitingCollection();
+    } else if (mode === 'in-transit') {
+      selectedInTransitIds = new Set();
+      renderInTransitQueue();
     } else {
       renderShipmentQueue(mode);
     }
@@ -402,6 +406,186 @@ function renderShipmentQueue(mode) {
 
   document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">${esc(view.title)}</div><div class="toolbar-hint">${esc(view.hint)}</div></div></div><div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">${esc(view.title)}</span><span class="ps-section-count">${shipmentRows.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th>Shipment</th><th>${esc(view.dateLabel)}</th><th>Tracking</th><th>Forwarder</th><th>${esc(view.locationLabel)}</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div></div></div><div id="shipment-queue-msg" class="lg-selection-msg hidden"></div>`;
   bindShipmentQueueEvents(mode);
+}
+
+
+// ── In Transit — overdue-first, then per-haulier buckets, compact rows,
+// mass "mark selected as delivered on a date" (replaces the old flat list
+// + per-row single-action button that renderShipmentQueue still uses for
+// Awaiting Collection/Inbound). Overdue is judged on Planned Delivery vs
+// today, same as everywhere else in the app; a shipment with no planned
+// delivery date isn't treated as overdue (there's no date to be late
+// against) and falls into its haulier bucket instead.
+function itIsOverdue(row) {
+  const plannedDate = getShipmentPlannedDate(row, 'in-transit');
+  if (!plannedDate) return false;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const planned = new Date(plannedDate); planned.setHours(0, 0, 0, 0);
+  return planned.getTime() < today.getTime();
+}
+
+function renderInTransitQueue() {
+  const view = SHIPMENT_VIEWS['in-transit'];
+
+  const overdueRows = shipmentRows.filter(itIsOverdue)
+    .slice()
+    .sort((a, b) => new Date(getShipmentPlannedDate(a, 'in-transit')).getTime() - new Date(getShipmentPlannedDate(b, 'in-transit')).getTime());
+
+  const haulierGroups = shipmentRows.filter(row => !itIsOverdue(row)).reduce((acc, row) => {
+    const key = hasAssignedHaulier(row) ? row.forwarderName : 'Unassigned Haulier';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(row);
+    return acc;
+  }, {});
+
+  const itRow = row => {
+    const shipmentRef = String(row.shipmentID || '').padStart(8, '0');
+    const plannedDate = getShipmentPlannedDate(row, 'in-transit');
+    const overdueClass = itIsOverdue(row) ? ' it-row--overdue' : '';
+    return `<tr class="it-row${overdueClass}" data-id="${esc(String(row.shipmentID))}">
+      <td class="lg-check-cell"><input type="checkbox" class="it-check" data-id="${esc(String(row.shipmentID))}"></td>
+      <td>${esc(shipmentRef)}</td>
+      <td>${esc(formatDisplayDate(plannedDate))}</td>
+      <td>${esc(row.trackingNumber || '')}</td>
+      <td>${esc(row.forwarderName || '-')}</td>
+      <td>${esc(row[view.locationField] || '-')}</td>
+    </tr>`;
+  };
+
+  const itTableHead = `<thead><tr><th></th><th>Shipment</th><th>${esc(view.dateLabel)}</th><th>Tracking</th><th>Forwarder</th><th>${esc(view.locationLabel)}</th></tr></thead>`;
+  const itSection = (key, label, dot, rows, defaultOpen) => {
+    if (!rows.length) return '';
+    const collapsed = defaultOpen ? '' : ' ps-section--collapsed';
+    return `<div class="ps-section${collapsed}" data-group-key="${esc(key)}">
+      <div class="ps-section-header">
+        <span class="ps-section-dot ps-section-dot--${dot}"></span>
+        <span class="ps-section-title">${esc(label)}</span>
+        <span class="ps-section-count">${rows.length}</span>
+        <span class="ps-chevron">v</span>
+      </div>
+      <div class="ps-section-body">
+        <div style="overflow-x:auto"><table class="it-table">${itTableHead}<tbody>${rows.map(itRow).join('')}</tbody></table></div>
+      </div>
+    </div>`;
+  };
+
+  const sections = [
+    itSection('overdue', `Overdue (${overdueRows.length})`, 'priority', overdueRows, true),
+    ...Object.keys(haulierGroups).sort((a, b) => a.localeCompare(b)).map(name =>
+      itSection(name, name, 'week', haulierGroups[name].slice().sort((a, b) =>
+        new Date(getShipmentPlannedDate(a, 'in-transit') || 0).getTime() - new Date(getShipmentPlannedDate(b, 'in-transit') || 0).getTime()), true)),
+  ].join('');
+
+  const writeBtns = hasPlanning()
+    ? `<button type="button" class="btn-secondary" id="it-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="it-mark-delivered-btn" disabled>Mark Selected Delivered</button>`
+    : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`;
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="lg-actions">
+      <div><div class="lg-selection-title">${esc(view.title)}</div><div class="toolbar-hint" id="it-selection-hint">${esc(view.hint)}</div></div>
+      <div class="toolbar-spacer"></div>
+      ${writeBtns}
+    </div>
+    <div id="it-selection-msg" class="lg-selection-msg hidden"></div>
+    <div class="ps-sections">${sections}</div>`;
+
+  bindInTransitEvents();
+}
+
+function getSelectedInTransitRows() {
+  return shipmentRows.filter(row => selectedInTransitIds.has(Number(row.shipmentID)));
+}
+
+function updateInTransitUI() {
+  const count = selectedInTransitIds.size;
+  const hint = document.getElementById('it-selection-hint');
+  if (hint) hint.textContent = count ? `${count} shipment(s) selected.` : SHIPMENT_VIEWS['in-transit'].hint;
+  const clearBtn = document.getElementById('it-clear-btn');
+  const markBtn  = document.getElementById('it-mark-delivered-btn');
+  if (clearBtn) clearBtn.disabled = count === 0;
+  if (markBtn)  markBtn.disabled  = count === 0;
+}
+
+function bindInTransitEvents() {
+  document.querySelectorAll('.ps-section-header').forEach(header => header.addEventListener('click', () => header.closest('.ps-section').classList.toggle('ps-section--collapsed')));
+  document.querySelectorAll('.it-check').forEach(input => {
+    input.addEventListener('change', e => {
+      const id = Number(e.target.dataset.id);
+      if (e.target.checked) selectedInTransitIds.add(id);
+      else selectedInTransitIds.delete(id);
+      updateInTransitUI();
+    });
+  });
+  document.querySelectorAll('.it-row').forEach(row => row.addEventListener('click', e => {
+    if (e.target.closest('.lg-check-cell')) return;
+    openShipmentDetailModal(Number(row.dataset.id));
+  }));
+  document.getElementById('it-clear-btn')?.addEventListener('click', () => {
+    selectedInTransitIds = new Set();
+    document.querySelectorAll('.it-check').forEach(input => { input.checked = false; });
+    updateInTransitUI();
+  });
+  document.getElementById('it-mark-delivered-btn')?.addEventListener('click', openBulkMarkDeliveredModal);
+}
+
+function openBulkMarkDeliveredModal() {
+  const rows = getSelectedInTransitRows();
+  if (!rows.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  openModal(`<div class="ps-modal" style="max-width:420px;width:92vw">
+    <div class="ps-modal-header">
+      <div>
+        <div class="ps-modal-title">Mark ${rows.length} Shipment${rows.length === 1 ? '' : 's'} as Delivered</div>
+        <div class="ps-modal-sub">Same actual delivery date applied to all selected</div>
+      </div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="transfer-form" style="padding:0">
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Actual Delivery Date <span class="tf-req">*</span></label>
+            <input class="tf-input" id="bmd-date" type="date" value="${today}" required>
+          </div>
+        </div>
+        <div id="bmd-result" style="margin-top:8px;font-size:13px"></div>
+      </div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button class="btn-submit" id="bmd-confirm">Confirm Delivered</button>
+    </div>
+  </div>`);
+
+  document.getElementById('bmd-confirm').addEventListener('click', async () => {
+    const date     = document.getElementById('bmd-date').value;
+    const resultEl = document.getElementById('bmd-result');
+    const btn      = document.getElementById('bmd-confirm');
+    if (!date) { resultEl.innerHTML = '<span style="color:var(--error)">Please select a date.</span>'; return; }
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res  = await fetch('/api/shipmentmain/mark-delivered-bulk', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shipmentIDs: rows.map(r => r.shipmentID), actualDelivery: date }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Update failed');
+      const failed = json.data?.failed || [];
+      closePickModal();
+      selectedInTransitIds = new Set();
+      await runShipmentQueue('in-transit');
+      if (failed.length) {
+        const msg = document.getElementById('it-selection-msg');
+        if (msg) {
+          msg.textContent = `${json.data.completed.length} marked delivered. ${failed.length} failed: ${failed.map(f => `#${String(f.shipmentID).padStart(8,'0')} (${f.error})`).join(', ')}`;
+          msg.classList.remove('hidden');
+        }
+      }
+    } catch (err) {
+      resultEl.innerHTML = `<span style="color:var(--error)">${esc(err.message)}</span>`;
+      btn.disabled = false; btn.textContent = 'Confirm Delivered';
+    }
+  });
 }
 
 

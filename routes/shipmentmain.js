@@ -1836,6 +1836,48 @@ router.post('/:shipmentId/mark-delivered', requirePermission('LOG_PLANNING'), as
 });
 
 
+// ── Bulk mark delivered — In Transit's mass "mark selected as delivered on
+// a given date" action, mirrors mark-collected-bulk's per-shipment
+// try/catch-and-continue shape rather than one transaction, so one bad
+// shipment (already delivered, cancelled, etc.) doesn't block the rest.
+router.post('/mark-delivered-bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
+  const shipmentIds = normalizeIdList(req.body.shipmentIDs);
+  if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
+  const actualDelivery = req.body.actualDelivery ? new Date(req.body.actualDelivery) : new Date();
+
+  const pool = await getPool();
+  const completed = [];
+  const failed    = [];
+
+  for (const shipmentId of shipmentIds) {
+    try {
+      const result = await pool.request()
+        .input('shipmentId',     sql.BigInt,   shipmentId)
+        .input('actualDelivery', sql.DateTime, actualDelivery)
+        .query(`
+          UPDATE Logistics.dbo.ShipmentMain
+          SET deliveryStatus = 1, actualDelivery = COALESCE(@actualDelivery, GETDATE())
+          WHERE shipmentID = @shipmentId
+            AND ISNULL(shipmentCancelled, 0) = 0
+            AND ISNULL(collectionStatus,  0) = 1
+            AND ISNULL(deliveryStatus,    0) = 0;
+          SELECT @@ROWCOUNT AS affectedRows;
+        `);
+      if (!result.recordset[0]?.affectedRows) throw new Error('Already delivered, not yet collected, or cancelled.');
+      const username = req.session?.user?.username || 'unknown';
+      await writeShipmentEvent(pool, shipmentId, 'DELIVERED',
+        `Delivered on ${actualDelivery.toLocaleDateString('en-GB')} - confirmed by ${username} (bulk)`);
+      completed.push(shipmentId);
+    } catch (err) {
+      failed.push({ shipmentID: shipmentId, error: err.message });
+    }
+  }
+
+  if (!completed.length) return res.status(409).json({ success: false, error: 'No shipments were updated.', data: { completed, failed } });
+  res.json({ success: true, data: { completed, failed } });
+});
+
+
 router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentUpdates = normalizeShipmentUpdates(req.body.shipments);
   const shipmentIds = shipmentUpdates.length ? shipmentUpdates.map(item => item.shipmentID) : normalizeIdList(req.body.shipmentIDs);

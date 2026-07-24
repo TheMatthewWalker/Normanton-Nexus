@@ -961,6 +961,21 @@ body::before {
 .admin-table tbody .admin-row:hover  { background: var(--accent-dim); }
 .admin-table tbody .admin-row:active { background: rgba(124,58,237,0.15); }
 
+/* ── In Transit — compact bucketed table (smaller row height than the
+   standard .ps-table 10px/16px padding used by the other shipment queues) ── */
+.it-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.it-table th {
+  text-align: left; padding: 6px 12px;
+  font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
+  letter-spacing: 1px; text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.it-table td { padding: 5px 12px; border-bottom: 1px solid rgba(208,218,232,0.4); }
+.it-table tr:last-child td { border-bottom: none; }
+.it-table tr.it-row:hover td { background: var(--surface2, var(--accent-dim)); cursor: pointer; }
+.it-table tr.it-row--overdue td:first-child { box-shadow: inset 3px 0 0 #DC2626; }
+
 @media (max-width: 960px) {
   .tile-grid,
   .lg-post-grid { grid-template-columns: 1fr; }
