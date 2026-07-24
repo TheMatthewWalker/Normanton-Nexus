@@ -66,6 +66,8 @@
 
 const { execFile } = require('child_process');
 const https         = require('https');
+const fs             = require('fs');
+const path           = require('path');
 
 const HEALTH_PATH               = '/api/health';
 const LIVENESS_PORT             = 443;
@@ -262,6 +264,86 @@ function svcCommandAndWaitAck(svc, command, event, timeoutMs) {
   });
 }
 
+const LOG_TAIL_INITIAL_LINES = 20;
+const LOG_TAIL_POLL_MS       = 500;
+
+// Reads roughly the last N lines of a file without loading the whole thing
+// for a large log — reads the final chunk of bytes, splits on newlines, and
+// keeps the tail. Good enough for "show recent context on startup"; not
+// meant to be byte-exact for a line straddling the chunk boundary.
+function readLastLines(filePath, n) {
+  const CHUNK_BYTES = 64 * 1024;
+  const size = fs.statSync(filePath).size;
+  if (size === 0) return [];
+
+  const start = Math.max(0, size - CHUNK_BYTES);
+  const buf   = Buffer.alloc(size - start);
+  const fd    = fs.openSync(filePath, 'r');
+  try { fs.readSync(fd, buf, 0, buf.length, start); }
+  finally { fs.closeSync(fd); }
+
+  return buf.toString('utf8').split(/\r?\n/).filter(Boolean).slice(-n);
+}
+
+// Streams new lines appended to filePath to the console, prefixed with
+// label, forever — until the process is killed (Ctrl+C). Uses
+// fs.watchFile (stat-polling) rather than fs.watch: fs.watch's behavior on
+// Windows for a file being appended to by a DIFFERENT process (the
+// WinSW-wrapped service, not this one) is not reliable enough to depend on
+// here — stat polling is slower but always correct.
+function tailOneFile(filePath, label) {
+  let pos = 0;
+
+  try {
+    pos = fs.statSync(filePath).size;
+    for (const line of readLastLines(filePath, LOG_TAIL_INITIAL_LINES)) {
+      console.log(`[${label}] ${line}`);
+    }
+  } catch {
+    // File doesn't exist yet (e.g. err.log before the service's first
+    // error) — fine, fs.watchFile below picks it up as soon as it appears.
+  }
+
+  fs.watchFile(filePath, { interval: LOG_TAIL_POLL_MS }, curr => {
+    if (!curr.size) return;               // file missing, or truncated to empty
+    if (curr.size < pos) pos = 0;         // rotated/truncated — read from the top again
+    if (curr.size <= pos) return;         // no new bytes
+
+    const stream = fs.createReadStream(filePath, { start: pos, end: curr.size - 1, encoding: 'utf8' });
+    let buf = '';
+    stream.on('data', chunk => { buf += chunk; });
+    stream.on('error', () => { /* best-effort — a mid-read rotation is just picked up next tick */ });
+    stream.on('end', () => {
+      pos = curr.size;
+      for (const line of buf.split(/\r?\n/)) {
+        if (line) console.log(`[${label}] ${line}`);
+      }
+    });
+  });
+}
+
+// Tails daemon/normantonnexus.out.log and .err.log to stdout, right in the
+// same terminal window a caller (restart.cjs) was run from — so whoever
+// triggered the restart can watch what the service does next without
+// switching to another window and running their own tail command. Prints
+// the last LOG_TAIL_INITIAL_LINES of each file first for context, then
+// streams new lines as they're appended. Never resolves — the caller (an
+// interactive script) is expected to just let the process keep running
+// until the user stops it with Ctrl+C, exactly like `tail -f`.
+function tailLogFiles(repoDir) {
+  const files = [
+    { path: path.join(repoDir, 'daemon', 'normantonnexus.out.log'), label: 'out' },
+    { path: path.join(repoDir, 'daemon', 'normantonnexus.err.log'), label: 'err' },
+  ];
+
+  console.log('');
+  console.log('[restart] watching logs (Ctrl+C to stop):');
+  for (const f of files) console.log(`[restart]   ${f.path}`);
+  console.log('');
+
+  for (const f of files) tailOneFile(f.path, f.label);
+}
+
 module.exports = {
   HEALTH_PATH,
   LIVENESS_PORT,
@@ -274,4 +356,5 @@ module.exports = {
   waitForNewInstance,
   forceKillPort443,
   svcCommandAndWaitAck,
+  tailLogFiles,
 };

@@ -30,6 +30,7 @@ const {
   waitForNewInstance,
   forceKillPort443,
   svcCommandAndWaitAck,
+  tailLogFiles,
   HEALTH_PATH,
   LIVENESS_PORT,
 } = require('./restart-lib.cjs');
@@ -104,7 +105,16 @@ async function main() {
   console.log(`[restart] service restarted and verified stable (pid=${fresh.pid}, bootId=${fresh.bootId}).`);
 }
 
-main().catch(err => {
-  console.error('[restart] fatal error:', err);
-  process.exitCode = 1;
-});
+main()
+  .catch(err => {
+    console.error('[restart] fatal error:', err);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // Whether the restart succeeded, failed a stability check, or hit a
+    // fatal error, this is exactly when someone watching this terminal
+    // wants to see what the service is doing next — so open the log tail
+    // unconditionally rather than only on success. Runs forever; the user
+    // ends the session with Ctrl+C when they're done watching.
+    tailLogFiles(REPO_DIR);
+  });
