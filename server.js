@@ -1,3 +1,4 @@
+import './lib/logTimestamp.js'; // must stay first — see file header for why
 import 'dotenv/config';
 import express from "express";
 import session from "express-session";
