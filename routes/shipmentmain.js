@@ -3017,87 +3017,228 @@ router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async 
 });
 
 
-// ── Shipment search ───────────────────────────────────────────────────────────
-// Query params: shipmentRef, deliveryNumber, forwarder, customer,
+// ── Shipment search — outbound + inbound combined ───────────────────────────
+// Query params: shipmentRef, deliveryNumber, forwarder, customer, tracking,
 //               dateField (plannedCollection|actualCollection|plannedDelivery|actualDelivery),
 //               dateFrom, dateTo
+//
+// Runs two separate queries (outbound against Logistics.dbo.ShipmentMain,
+// inbound against dbo.PurchaseOrderShipment) rather than one SQL UNION ALL —
+// the two tables' ID spaces can numerically collide (see other direction-
+// tagged code in this app) and their column types/shapes differ enough
+// (incoTerms, booking/collection/delivery bit flags, delivery numbers) that
+// combining in JS after the fact is clearer than coercing both into one
+// SELECT list. Each leg only runs if at least one filter actually applies to
+// it, so a search that only makes sense for one direction (e.g. deliveryNumber,
+// which is an outbound-only concept) doesn't fall through to returning every
+// row on the other side. Results are merged and re-sorted by whichever date
+// is most relevant to each row (delivered > planned delivery > collected >
+// planned collection), most recent first.
 router.get('/search', async (req, res) => {
-  const { shipmentRef, deliveryNumber, forwarder, customer, dateField, dateFrom, dateTo } = req.query;
+  const { shipmentRef, deliveryNumber, forwarder, customer, tracking, dateField, dateFrom, dateTo } = req.query;
 
-  const DATE_COLS = {
+  const OUT_DATE_COLS = {
     plannedCollection: 'sm.plannedCollection',
     actualCollection:  'sm.actualCollection',
     plannedDelivery:   'sm.plannedDelivery',
     actualDelivery:    'sm.actualDelivery',
   };
+  // Inbound has no distinct "actual collection" field — DispatchDate is set
+  // once at shipment creation and doubles as the planned collection date, so
+  // an actualCollection search only ever matches outbound rows.
+  const IN_DATE_COLS = {
+    plannedCollection: 'ps.DispatchDate',
+    actualCollection:  null,
+    plannedDelivery:   'ps.ExpectedEta',
+    actualDelivery:    'ps.ReceivedAtUtc',
+  };
 
   try {
-    const pool    = await getPool();
-    const request = pool.request();
-    const where   = [`ISNULL(sm.shipmentCancelled, 0) = 0`];
+    const pool = await getPool();
+
+    // ── Outbound leg ──
+    const outReq   = pool.request();
+    const outWhere = [`ISNULL(sm.shipmentCancelled, 0) = 0`];
 
     if (shipmentRef?.trim()) {
       const ref = parseInt(shipmentRef.trim(), 10);
-      if (!isNaN(ref)) { request.input('shipmentRef', sql.BigInt, ref); where.push('sm.shipmentID = @shipmentRef'); }
+      if (!isNaN(ref)) { outReq.input('shipmentRef', sql.BigInt, ref); outWhere.push('sm.shipmentID = @shipmentRef'); }
     }
     if (customer?.trim()) {
-      request.input('customer', sql.NVarChar, `%${customer.trim()}%`);
-      where.push('sm.destinationName LIKE @customer');
+      outReq.input('customer', sql.NVarChar, `%${customer.trim()}%`);
+      outWhere.push('sm.destinationName LIKE @customer');
     }
     if (forwarder?.trim()) {
-      request.input('forwarder', sql.NVarChar, `%${forwarder.trim()}%`);
-      where.push(`EXISTS (
+      outReq.input('forwarder', sql.NVarChar, `%${forwarder.trim()}%`);
+      outWhere.push(`EXISTS (
         SELECT 1 FROM Logistics.dbo.Forwarders f
         WHERE f.forwarderID = sm.forwarderID AND f.forwarderName LIKE @forwarder
       )`);
     }
-    if (req.query.tracking?.trim()) {
-      request.input('tracking', sql.NVarChar, `%${req.query.tracking.trim()}%`);
-      where.push('sm.trackingNumber LIKE @tracking');
+    if (tracking?.trim()) {
+      outReq.input('tracking', sql.NVarChar, `%${tracking.trim()}%`);
+      outWhere.push('sm.trackingNumber LIKE @tracking');
     }
     if (deliveryNumber?.trim()) {
       const dn = parseInt(deliveryNumber.trim(), 10);
       if (!isNaN(dn)) {
-        request.input('deliveryNumber', sql.BigInt, dn);
-        where.push(`EXISTS (
+        outReq.input('deliveryNumber', sql.BigInt, dn);
+        outWhere.push(`EXISTS (
           SELECT 1 FROM Logistics.dbo.ShipmentLink sl
           WHERE sl.shipmentID = sm.shipmentID AND sl.deliveryID = @deliveryNumber
         )`);
       }
     }
-    const dateCol = DATE_COLS[dateField];
-    if (dateCol) {
-      if (dateFrom?.trim()) { request.input('dateFrom', sql.DateTime, new Date(dateFrom)); where.push(`${dateCol} >= @dateFrom`); }
-      if (dateTo?.trim())   { request.input('dateTo',   sql.DateTime, new Date(dateTo));   where.push(`${dateCol} <= @dateTo`); }
+    const outDateCol = OUT_DATE_COLS[dateField];
+    if (outDateCol) {
+      if (dateFrom?.trim()) { outReq.input('dateFrom', sql.DateTime, new Date(dateFrom)); outWhere.push(`${outDateCol} >= @dateFrom`); }
+      if (dateTo?.trim())   { outReq.input('dateTo',   sql.DateTime, new Date(dateTo));   outWhere.push(`${outDateCol} <= @dateTo`); }
     }
 
-    if (where.length === 1) {
+    // ── Inbound leg ──
+    const inReq   = pool.request();
+    const inWhere = [`ps.CancelledAtUtc IS NULL`];
+
+    if (shipmentRef?.trim()) {
+      const refText = shipmentRef.trim();
+      const refNum  = parseInt(refText, 10);
+      const parts   = [];
+      if (!isNaN(refNum)) { inReq.input('shipmentRefNum', sql.Int, refNum); parts.push('ps.ShipmentId = @shipmentRefNum'); }
+      inReq.input('shipmentRefText', sql.NVarChar, `%${refText}%`);
+      parts.push('ps.ShipmentReference LIKE @shipmentRefText');
+      inWhere.push(`(${parts.join(' OR ')})`);
+    }
+    if (customer?.trim()) {
+      inReq.input('customer', sql.NVarChar, `%${customer.trim()}%`);
+      inWhere.push(`(
+        ISNULL(ps.OriginName, '') LIKE @customer
+        OR EXISTS (
+          SELECT 1 FROM dbo.PurchaseOrderSuggestion p2
+          JOIN dbo.Vendor v ON v.VendorId = p2.VendorId
+          WHERE p2.ShipmentId = ps.ShipmentId AND v.VendorName LIKE @customer
+        )
+      )`);
+    }
+    if (forwarder?.trim()) {
+      inReq.input('forwarder', sql.NVarChar, `%${forwarder.trim()}%`);
+      inWhere.push(`(
+        EXISTS (SELECT 1 FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = ps.ForwarderID AND f.forwarderName LIKE @forwarder)
+        OR ps.Haulier LIKE @forwarder
+      )`);
+    }
+    if (tracking?.trim()) {
+      inReq.input('tracking', sql.NVarChar, `%${tracking.trim()}%`);
+      inWhere.push('ps.TrackingNumber LIKE @tracking');
+    }
+    if (deliveryNumber?.trim()) {
+      // Outbound-only concept — see comment above the route.
+      inWhere.push('1 = 0');
+    }
+    const inDateCol = IN_DATE_COLS[dateField];
+    if (dateField && !inDateCol) {
+      inWhere.push('1 = 0');
+    } else if (inDateCol) {
+      if (dateFrom?.trim()) { inReq.input('dateFrom', sql.DateTime, new Date(dateFrom)); inWhere.push(`${inDateCol} >= @dateFrom`); }
+      if (dateTo?.trim())   { inReq.input('dateTo',   sql.DateTime, new Date(dateTo));   inWhere.push(`${inDateCol} <= @dateTo`); }
+    }
+
+    const outActive = outWhere.length > 1;
+    const inActive  = inWhere.length > 1;
+
+    if (!outActive && !inActive) {
       return res.status(400).json({ success: false, error: 'Please provide at least one search term.' });
     }
 
-    const result = await request.query(`
-      SELECT
-        sm.shipmentID,
-        sm.destinationID,
-        sm.destinationName,
-        sm.plannedCollection,
-        sm.actualCollection,
-        sm.PlannedDelivery    AS plannedDelivery,
-        sm.ActualDelivery     AS actualDelivery,
-        sm.trackingNumber,
-        sm.incoTerms,
-        sm.forwarderID,
-        sm.customsID,
-        CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
-        CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
-        CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
-        CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
-        (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
-      FROM Logistics.dbo.ShipmentMain sm
-      WHERE ${where.join(' AND ')}
-      ORDER BY sm.shipmentID DESC`);
+    const results = [];
 
-    res.json({ success: true, data: result.recordset });
+    if (outActive) {
+      const outResult = await outReq.query(`
+        SELECT
+          sm.shipmentID,
+          sm.destinationName,
+          sm.plannedCollection,
+          sm.actualCollection,
+          sm.PlannedDelivery    AS plannedDelivery,
+          sm.ActualDelivery     AS actualDelivery,
+          sm.trackingNumber,
+          sm.incoTerms,
+          sm.forwarderID,
+          CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
+          CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
+          CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
+          CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
+          (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
+        FROM Logistics.dbo.ShipmentMain sm
+        WHERE ${outWhere.join(' AND ')}
+        ORDER BY sm.shipmentID DESC`);
+
+      for (const r of outResult.recordset) {
+        results.push({
+          key:               `O:${r.shipmentID}`,
+          direction:         'outbound',
+          shipmentID:        r.shipmentID,
+          refDisplay:        String(r.shipmentID).padStart(8, '0'),
+          customer:          r.destinationName,
+          forwarderName:     r.forwarderName,
+          incoTerms:         r.incoTerms,
+          plannedCollection: r.plannedCollection,
+          actualCollection:  r.actualCollection,
+          plannedDelivery:   r.plannedDelivery,
+          actualDelivery:    r.actualDelivery,
+          trackingNumber:    r.trackingNumber,
+          bookingStatus:     r.bookingStatus,
+          collectionStatus:  r.collectionStatus,
+          deliveryStatus:    r.deliveryStatus,
+          shipmentCancelled: r.shipmentCancelled,
+          sortDate: r.actualDelivery || r.plannedDelivery || r.actualCollection || r.plannedCollection || null,
+        });
+      }
+    }
+
+    if (inActive) {
+      const inResult = await inReq.query(`
+        SELECT
+          ps.ShipmentId, ps.ShipmentReference, ps.DispatchDate, ps.ExpectedEta,
+          ps.Haulier, ps.ForwarderID, ps.TrackingNumber, ps.ReceivedAtUtc, ps.IsManual, ps.OriginName,
+          (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = ps.ForwarderID) AS forwarderNameLookup,
+          STUFF((
+            SELECT DISTINCT ', ' + v.VendorName
+            FROM dbo.PurchaseOrderSuggestion p2
+            JOIN dbo.Vendor v ON v.VendorId = p2.VendorId
+            WHERE p2.ShipmentId = ps.ShipmentId
+            FOR XML PATH('')
+          ), 1, 2, '') AS Suppliers
+        FROM dbo.PurchaseOrderShipment ps
+        WHERE ${inWhere.join(' AND ')}
+        ORDER BY ps.CreatedAtUtc DESC`);
+
+      for (const r of inResult.recordset) {
+        results.push({
+          key:               `I:${r.ShipmentId}`,
+          direction:         'inbound',
+          shipmentID:        r.ShipmentId,
+          refDisplay:        r.ShipmentReference || `#${r.ShipmentId}`,
+          customer:          r.IsManual ? `Manual — ${r.OriginName || 'no origin'}` : (r.Suppliers || '—'),
+          forwarderName:     r.forwarderNameLookup || r.Haulier,
+          incoTerms:         null,
+          plannedCollection: r.DispatchDate,
+          actualCollection:  null,
+          plannedDelivery:   r.ExpectedEta,
+          actualDelivery:    r.ReceivedAtUtc,
+          trackingNumber:    r.TrackingNumber,
+          receivedAtUtc:     r.ReceivedAtUtc,
+          sortDate: r.ReceivedAtUtc || r.ExpectedEta || r.DispatchDate || null,
+        });
+      }
+    }
+
+    results.sort((a, b) => {
+      const ta = a.sortDate ? new Date(a.sortDate).getTime() : 0;
+      const tb = b.sortDate ? new Date(b.sortDate).getTime() : 0;
+      return tb - ta;
+    });
+
+    res.json({ success: true, data: results });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

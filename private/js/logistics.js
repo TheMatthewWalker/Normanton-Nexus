@@ -4682,7 +4682,7 @@ function shipmentEventCategoryStyle(category) {
 
 // ── Shipment Search ───────────────────────────────────────────────────────────
 function runShipmentSearch() {
-  showResultPanel('Search', 'Find shipments across all statuses');
+  showResultPanel('Search', 'Find outbound and inbound shipments in one place');
 
   document.getElementById('result-body').innerHTML = `
     <form class="transfer-form" id="ss-form" onsubmit="submitShipmentSearch(event)">
@@ -4691,11 +4691,11 @@ function runShipmentSearch() {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Shipment Ref</label>
-          <input class="tf-input" id="ss-ref" type="text" inputmode="numeric"
-            placeholder="e.g. 00000042" autocomplete="off">
+          <input class="tf-input" id="ss-ref" type="text" inputmode="text"
+            placeholder="e.g. 00000042 or INB-000123" autocomplete="off">
         </div>
         <div class="tf-field">
-          <label class="tf-label">Delivery Number</label>
+          <label class="tf-label">Delivery Number <span class="tf-optional">(outbound only)</span></label>
           <input class="tf-input" id="ss-delivery" type="text" inputmode="numeric"
             placeholder="e.g. 82888798" autocomplete="off">
         </div>
@@ -4709,12 +4709,12 @@ function runShipmentSearch() {
       <div class="tf-section-label">Parties</div>
       <div class="tf-row">
         <div class="tf-field tf-field--wide">
-          <label class="tf-label">Customer / Destination</label>
+          <label class="tf-label">Customer / Supplier / Destination</label>
           <input class="tf-input" id="ss-customer" type="text"
             placeholder="Partial name match" autocomplete="off">
         </div>
         <div class="tf-field tf-field--wide">
-          <label class="tf-label">Forwarder</label>
+          <label class="tf-label">Forwarder / Haulier</label>
           <input class="tf-input" id="ss-forwarder" type="text"
             placeholder="Partial name match" autocomplete="off">
         </div>
@@ -4727,7 +4727,7 @@ function runShipmentSearch() {
           <select class="tf-input" id="ss-date-field">
             <option value="">— Select date type —</option>
             <option value="plannedCollection">Planned Collection</option>
-            <option value="actualCollection">Actual Collection</option>
+            <option value="actualCollection">Actual Collection (outbound only)</option>
             <option value="plannedDelivery">Planned Delivery</option>
             <option value="actualDelivery">Actual Delivery</option>
           </select>
@@ -4801,6 +4801,12 @@ async function submitShipmentSearch(e) {
   }
 }
 
+// Combined outbound + inbound search results — routes/shipmentmain.js's
+// /search now runs both legs and returns a merged, direction-tagged list
+// (r.direction: 'outbound'|'inbound', r.key: 'O:<id>'|'I:<id>') so this one
+// tile replaces what used to be two separate search mechanisms (Search
+// Shipment for outbound, browsing Inbound Log buckets for inbound). Each row
+// still opens the same detail modal it always did per direction.
 function renderShipmentSearchResults(rows) {
   const resultsEl = document.getElementById('ss-results');
   if (!rows.length) {
@@ -4809,6 +4815,10 @@ function renderShipmentSearchResults(rows) {
   }
 
   function statusBadge(row) {
+    if (row.direction === 'inbound') {
+      if (row.receivedAtUtc) return `<span class="ps-pcard-badge ps-pcard-badge--done">Received</span>`;
+      return `<span class="ps-pcard-badge" style="background:rgba(217,119,6,.1);color:#D97706;border-color:rgba(217,119,6,.25)">Pending</span>`;
+    }
     if (row.shipmentCancelled) return `<span class="ps-pcard-badge" style="background:rgba(220,38,38,.1);color:var(--error);border-color:rgba(220,38,38,.25)">Cancelled</span>`;
     if (row.deliveryStatus)    return `<span class="ps-pcard-badge ps-pcard-badge--done">Delivered</span>`;
     if (row.collectionStatus)  return `<span class="ps-pcard-badge ps-pcard-badge--wip">In Transit</span>`;
@@ -4816,23 +4826,29 @@ function renderShipmentSearchResults(rows) {
     return `<span class="ps-pcard-badge" style="background:rgba(217,119,6,.1);color:#D97706;border-color:rgba(217,119,6,.25)">Awaiting Booking</span>`;
   }
 
+  function directionBadge(row) {
+    return row.direction === 'inbound'
+      ? `<span class="ps-pcard-badge" style="background:rgba(37,99,235,.1);color:#2563EB;border-color:rgba(37,99,235,.25)">Inbound</span>`
+      : `<span class="ps-pcard-badge" style="background:rgba(5,150,105,.1);color:#059669;border-color:rgba(5,150,105,.25)">Outbound</span>`;
+  }
+
   function fmt(d) { return d ? new Date(d).toLocaleDateString('en-GB') : '—'; }
 
   const thead = `<tr>
-    <th>Ref</th><th>Customer</th><th>Forwarder</th><th>Incoterms</th>
+    <th>Dir.</th><th>Ref</th><th>Customer / Supplier</th><th>Forwarder</th>
     <th>Planned Coll.</th><th>Actual Coll.</th><th>Planned Del.</th><th>Actual Del.</th>
     <th>Tracking</th><th>Status</th>
   </tr>`;
 
   const tbody = rows.map(r => `
-    <tr class="ps-row" style="cursor:pointer" data-id="${r.shipmentID}"
-      onclick="openShipmentDetailModal(${r.shipmentID})">
+    <tr class="ps-row" style="cursor:pointer" data-id="${r.shipmentID}" data-direction="${r.direction}"
+      onclick="${r.direction === 'inbound' ? `openInboundShipmentDetail(${r.shipmentID})` : `openShipmentDetailModal(${r.shipmentID})`}">
+      <td>${directionBadge(r)}</td>
       <td style="font-family:'JetBrains Mono',monospace;font-weight:700">
-        ${String(r.shipmentID).padStart(8, '0')}
+        ${esc(r.refDisplay)}
       </td>
-      <td>${esc(r.destinationName || '—')}</td>
+      <td>${esc(r.customer || '—')}</td>
       <td>${esc(r.forwarderName   || '—')}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(r.incoTerms || '—')}</td>
       <td>${fmt(r.plannedCollection)}</td>
       <td>${fmt(r.actualCollection)}</td>
       <td>${fmt(r.plannedDelivery)}</td>
