@@ -1625,13 +1625,17 @@ router.get('/queue/:mode', async (req, res) => {
 // on-time record should reflect both directions, not just outbound. Only
 // counts shipments that actually have both a planned and an actual/received
 // date (nothing still in flight, nothing cancelled) — "on time" is actual
-// date <= planned date, compared as dates only (time-of-day ignored).
+// date <= planned date, compared as dates only (time-of-day ignored). Uses
+// DATEADD(day, DATEDIFF(day, 0, x), 0) to truncate to midnight rather than
+// CAST(x AS DATE) — SQL Server 2005 has no DATE type (added in 2008), same
+// constraint as everywhere else in this codebase (see performancesql.js's
+// note near line 785).
 const OTIF_OUTBOUND = `
     SELECT f.forwarderName,
            sm.destinationCountry AS country,
            sm.destinationName    AS place,
            sm.actualDelivery     AS periodDate,
-           CASE WHEN CAST(sm.actualDelivery AS DATE) <= CAST(sm.plannedDelivery AS DATE) THEN 1 ELSE 0 END AS isOnTime
+           CASE WHEN DATEADD(day, DATEDIFF(day, 0, sm.actualDelivery), 0) <= DATEADD(day, DATEDIFF(day, 0, sm.plannedDelivery), 0) THEN 1 ELSE 0 END AS isOnTime
     FROM Logistics.dbo.ShipmentMain sm
     LEFT JOIN Logistics.dbo.Forwarders f ON f.forwarderID = sm.forwarderID
     WHERE sm.actualDelivery IS NOT NULL AND sm.plannedDelivery IS NOT NULL
@@ -1641,7 +1645,7 @@ const OTIF_INBOUND = `
            d.destinationCountry AS country,
            d.destinationName    AS place,
            ps.ReceivedAtUtc     AS periodDate,
-           CASE WHEN CAST(ps.ReceivedAtUtc AS DATE) <= CAST(ps.ExpectedEta AS DATE) THEN 1 ELSE 0 END AS isOnTime
+           CASE WHEN DATEADD(day, DATEDIFF(day, 0, ps.ReceivedAtUtc), 0) <= DATEADD(day, DATEDIFF(day, 0, ps.ExpectedEta), 0) THEN 1 ELSE 0 END AS isOnTime
     FROM dbo.PurchaseOrderShipment ps
     LEFT JOIN Logistics.dbo.Forwarders   f ON f.forwarderID = ps.ForwarderID
     LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = ps.OriginDestinationID
