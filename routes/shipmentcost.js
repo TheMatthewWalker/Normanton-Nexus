@@ -303,7 +303,7 @@ router.get('/unprocessed', async (req, res) => {
                 sc.costID,
                 'outbound' AS direction,
                 sm.shipmentID,
-                RIGHT('000000' + CONVERT(VARCHAR(12), sm.shipmentID), 6) AS shipmentRef,
+                RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
                 sm.forwarderID,
                 sm.plannedCollection,
                 sm.actualCollection,
@@ -564,7 +564,7 @@ router.post('/post-migo', async (req, res) => {
         const fetched = await req2.query(`
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
                    'outbound' AS direction, sm.shipmentID AS refID,
-                   RIGHT('000000' + CONVERT(VARCHAR(12), sm.shipmentID), 6) AS shipmentRef,
+                   RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
                    sm.forwarderID, sm.actualCollection, sm.ActualDelivery AS deliveredDate, sm.trackingNumber,
                    sm.destinationCountry, sm.destinationPostCode
             FROM Logistics.dbo.ShipmentCost sc
