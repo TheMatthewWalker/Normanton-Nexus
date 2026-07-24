@@ -114,6 +114,7 @@ function setupTiles() {
       if (fn === 'materialGroupMapping')runMaterialGroupMapping();
       if (fn === 'costCentres')         runCostCentres();
       if (fn === 'glAccounts')          runGlAccounts();
+      if (fn === 'forwarderModeMapping')runForwarderModeMapping();
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
       if (fn === 'turnsValClassTable')  runTurnsValClassTable();
@@ -815,7 +816,7 @@ async function cancelSelectedShipments() {
 
 async function runOpenDeliveries() {
   if (!await checkSession()) return;
-  showResultPanel('Create Shipment', 'Completed deliveries ready for shipment creation');
+  showResultPanel('Create Outbound Shipment', 'Completed deliveries ready for shipment creation');
   try {
     const res = await fetch('/api/deliverymain/completed-unshipped');
     const json = await res.json();
@@ -1005,6 +1006,12 @@ function getBookingRowsWithInputs() {
     trackingNumber:    document.getElementById(`booking-track-${row.shipmentID}`)?.value.trim() || '',
     forwarderID:       document.getElementById(`booking-forwarder-${row.shipmentID}`)?.value || row.forwarderID || '',
     forwarderName:     document.getElementById(`booking-forwarder-${row.shipmentID}`)?.selectedOptions?.[0]?.textContent?.trim() || row.forwarderName || '',
+    // Only populated when the shipment already had a forwarder assigned
+    // (row.forwarderMode, from the queue query's Forwarders join) — the
+    // booking modal's own haulier dropdown is deduped by name across
+    // multiple mode rows (dedupeForwardersByName), so there's no single
+    // right mode to attribute to a haulier picked fresh here.
+    forwarderMode:     row.forwarderMode || null,
     expectedCost:      document.getElementById(`booking-cost-${row.shipmentID}`)?.value.trim() || null,
     skipCost:          Boolean(document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.skipCost),
     elementCode:       document.getElementById(`booking-cost-${row.shipmentID}`)?.dataset.elementCode || null,
@@ -1476,6 +1483,7 @@ async function submitBookingModal() {
           plannedDelivery:   item.plannedDelivery    || null,
           trackingNumber:    item.trackingNumber     || '',
           forwarderID:       item.forwarderID        || null,
+          forwarderMode:     item.forwarderMode      || null,
           expectedCost:      item.expectedCost != null ? Number(item.expectedCost) : null,
           costCenter:        item.costCenter         || null,
           elementCode:       item.elementCode        || null,
@@ -4146,6 +4154,143 @@ async function glaDeleteRow(elementId, label) {
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     mgmCostElements = null;
     runGlAccounts();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Admin: Forwarder Mode Mapping ─────────────────────────────────────────────
+// Translates a forwarder's own mode/type (Forwarders.forwarderMode, e.g.
+// "Road") into the canonical ModeOfTransport value used on
+// ShipmentCost.modeOfTransport and MaterialGroupMapping.ModeOfTransport —
+// previously the booked forwarder's mode was never carried through to the
+// cost lines at all (routes/shipmentmain.js's mark-booked). See
+// sql/migrate_forwarder_mode_mapping.sql for the full writeup.
+async function runForwarderModeMapping() {
+  showResultPanel('Forwarder Mode Mapping', 'Click a row to edit · Maps a forwarder\'s mode/type to the Mode of Transport stored on cost lines.');
+  try {
+    const json = await fetch('/api/forwarder-mode-mapping').then(r => r.json());
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load mappings');
+    fmmRenderList(json.data || []);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function fmmRenderList(rows) {
+  rows = rows.slice().sort((a, b) => String(a.ForwarderMode || '').localeCompare(String(b.ForwarderMode || '')));
+  document.getElementById('result-row-badge').textContent = `${rows.length} mapping${rows.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const tableRows = rows.map(r => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.ForwarderMode || '')}</td>
+      <td>${esc(r.ModeOfTransport || '')}</td>
+      <td>${esc(r.Description || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary fmm-edit" data-id="${esc(String(r.MappingId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary fmm-delete" data-id="${esc(String(r.MappingId))}" data-label="${esc(r.ForwarderMode || '')}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="fmm-add-btn">+ Add Mapping</button>
+    </div>
+    ${rows.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Forwarder Type</th><th>Mode of Transport</th><th>Description</th><th></th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No mappings yet — a forwarder\'s mode is used as-is on cost lines until one is added here.</div>'}
+  `;
+
+  document.getElementById('fmm-add-btn').addEventListener('click', () => fmmOpenModal(null));
+  document.querySelectorAll('.fmm-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = rows.find(x => String(x.MappingId) === btn.dataset.id);
+      if (r) fmmOpenModal(r);
+    });
+  });
+  document.querySelectorAll('.fmm-delete').forEach(btn => {
+    btn.addEventListener('click', () => fmmDeleteRow(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function fmmOpenModal(row) {
+  const isEdit = !!row;
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Mapping' : 'Add Mapping'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Forwarder Type</label>
+          <input class="tf-input" type="text" id="fmm-forwarder-mode" maxlength="20" value="${esc(row?.ForwarderMode || '')}" placeholder="e.g. Road, Groupage, Express Air">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Mode of Transport</label>
+          <select class="tf-input" id="fmm-mode-of-transport">
+            <option value="">Select mode</option>
+            ${OS_TRANSPORT_MODES.map(m => `<option value="${esc(m)}" ${row?.ModeOfTransport === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Description</label>
+          <input class="tf-input" type="text" id="fmm-description" value="${esc(row?.Description || '')}" placeholder="Optional">
+        </div>
+      </div>
+      <div id="fmm-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="fmm-save-btn">${isEdit ? 'Save Changes' : 'Add Mapping'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('fmm-save-btn').addEventListener('click', async () => {
+    const body = {
+      forwarderMode: document.getElementById('fmm-forwarder-mode').value.trim(),
+      modeOfTransport: document.getElementById('fmm-mode-of-transport').value,
+      description: document.getElementById('fmm-description').value.trim() || null,
+    };
+    if (!body.forwarderMode || !body.modeOfTransport) {
+      document.getElementById('fmm-result').innerHTML = '<div class="sap-error">Forwarder Type and Mode of Transport are required.</div>';
+      return;
+    }
+    const btn = document.getElementById('fmm-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/forwarder-mode-mapping/${row.MappingId}` : '/api/forwarder-mode-mapping', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runForwarderModeMapping();
+    } catch (err) {
+      document.getElementById('fmm-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Mapping';
+    }
+  });
+}
+
+async function fmmDeleteRow(mappingId, label) {
+  if (!confirm(`Delete the mapping for "${label}"? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/forwarder-mode-mapping/${mappingId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runForwarderModeMapping();
   } catch (err) {
     alert(err.message);
   }

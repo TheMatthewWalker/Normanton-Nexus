@@ -9,6 +9,7 @@ import tls from 'tls';
 import { sqlConfig, stampDbChange } from '../config.js';
 
 import { requirePermission } from '../middleware/auth.js';
+import { lookupModeOfTransport } from './forwardermodemapping.js';
 import e from 'express';
 
 const router = express.Router();
@@ -95,6 +96,7 @@ function normalizeShipmentUpdates(input) {
       trackingNumber:    String(item?.trackingNumber || '').trim(),
       plannedCollection: item?.plannedCollection ? new Date(item.plannedCollection) : null,
       forwarderID:       item?.forwarderID === '' || item?.forwarderID == null ? null : Number.parseInt(String(item.forwarderID), 10),
+      forwarderMode:     String(item?.forwarderMode || '').trim() || null,
       expectedCost:      Number.isFinite(cost) ? cost : null,
       costCenter:        String(item?.costCenter  || '').trim() || null,
       elementCode:       String(item?.elementCode || '').trim() || null,
@@ -1595,12 +1597,13 @@ router.get('/queue/:mode', async (req, res) => {
       SELECT DISTINCT
         sm.*,
         fa.forwarderName,
+        fa.forwarderMode,
         CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
         CAST(ISNULL(sm.deliveryStatus, 0) AS bit) AS deliveryStatus,
         CASE WHEN ISNULL(sm.plannedDelivery, '1900-01-01') > '1900-01-01' THEN sm.plannedDelivery ELSE sm.plannedCollection END AS plannedMovement
       FROM Logistics.dbo.ShipmentMain sm
       OUTER APPLY (
-        SELECT TOP 1 f.forwarderName
+        SELECT TOP 1 f.forwarderName, f.forwarderMode
         FROM Logistics.dbo.Forwarders f
         WHERE f.forwarderID = sm.forwarderID
       ) fa
@@ -1893,21 +1896,32 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
     for (const item of shipmentUpdates) {
       if (item.skipCost) continue;
 
+      // Translate the booked forwarder's own mode/type (Forwarders.forwarderMode,
+      // e.g. "Road") into the canonical ModeOfTransport value via
+      // dbo.ForwarderModeMapping — previously these INSERTs didn't set
+      // modeOfTransport at all, so every outbound cost line (manual and
+      // SAP-driven shipments alike) ended up with it NULL, and
+      // lookupMaterialGroup (routes/materialgroups.js) could never use a
+      // mode-specific mapping row, only a GL account's default. Best-effort:
+      // never throws, falls back to the raw forwarderMode if unmapped.
+      const modeOfTransport = await lookupModeOfTransport(item.forwarderMode);
+
       // Freight cost (costType 1)
       if (item.expectedCost != null) {
         try {
           await pool2.request()
-            .input('shipmentID',   sql.BigInt,        item.shipmentID)
-            .input('costType',     sql.NVarChar(3),   '1')
-            .input('costElement',  sql.NVarChar(6),   item.elementCode || null)
-            .input('costCenter',   sql.NVarChar(20),  item.costCenter  || null)
-            .input('expectedCost', sql.Decimal(18,2), item.expectedCost)
-            .input('actualCost',   sql.Decimal(18,2), 0)
-            .input('migoStatus',   sql.Bit,           0)
+            .input('shipmentID',      sql.BigInt,        item.shipmentID)
+            .input('costType',        sql.NVarChar(3),   '1')
+            .input('costElement',     sql.NVarChar(6),   item.elementCode || null)
+            .input('costCenter',      sql.NVarChar(20),  item.costCenter  || null)
+            .input('expectedCost',    sql.Decimal(18,2), item.expectedCost)
+            .input('actualCost',      sql.Decimal(18,2), 0)
+            .input('migoStatus',      sql.Bit,           0)
+            .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport)
             .query(`INSERT INTO Logistics.dbo.ShipmentCost
-                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus, modeOfTransport)
                     VALUES
-                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus, @modeOfTransport)`);
         } catch (_) {}
       }
 
@@ -1915,17 +1929,18 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
       if (item.customsCost != null) {
         try {
           await pool2.request()
-            .input('shipmentID',   sql.BigInt,        item.shipmentID)
-            .input('costType',     sql.NVarChar(3),   '2')
-            .input('costElement',  sql.NVarChar(6),   '603120')
-            .input('costCenter',   sql.NVarChar(20),  item.costCenter || null)
-            .input('expectedCost', sql.Decimal(18,2), item.customsCost)
-            .input('actualCost',   sql.Decimal(18,2), 0)
-            .input('migoStatus',   sql.Bit,           0)
+            .input('shipmentID',      sql.BigInt,        item.shipmentID)
+            .input('costType',        sql.NVarChar(3),   '2')
+            .input('costElement',     sql.NVarChar(6),   '603120')
+            .input('costCenter',      sql.NVarChar(20),  item.costCenter || null)
+            .input('expectedCost',    sql.Decimal(18,2), item.customsCost)
+            .input('actualCost',      sql.Decimal(18,2), 0)
+            .input('migoStatus',      sql.Bit,           0)
+            .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport)
             .query(`INSERT INTO Logistics.dbo.ShipmentCost
-                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus)
+                      (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus, modeOfTransport)
                     VALUES
-                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus)`);
+                      (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus, @modeOfTransport)`);
         } catch (_) {}
       }
     }
