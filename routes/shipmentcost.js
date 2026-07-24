@@ -366,6 +366,42 @@ router.get('/unprocessed', async (req, res) => {
 });
 
 // ── Freight spend analytics ───────────────────────────────────────────────────
+// Both queries below UNION ALL an outbound leg (ShipmentCost.shipmentID ->
+// ShipmentMain) with an inbound leg (ShipmentCost.poShipmentID ->
+// dbo.PurchaseOrderShipment, see sql/migrate_order_shipments.sql) —
+// every one of these previously only INNER JOINed ShipmentMain, so any
+// inbound cost line (which has shipmentID NULL and poShipmentID set
+// instead — see the post-migo UNION ALL a little further down this file)
+// was silently dropped from every report entirely. Inbound's "period"
+// date is DispatchDate (falling back to CreatedAtUtc if not yet
+// dispatched) since PurchaseOrderShipment has no plannedCollection
+// equivalent; "country"/"customer" for inbound come from the origin
+// Destinations row (OriginDestinationID) rather than a UK destination.
+const COMBINED_COST_OUTBOUND = `
+    SELECT sc.expectedCost, sc.migoStatus, sc.costCenter,
+           f.forwarderName, f.forwarderMode,
+           sm.destinationCountry AS country,
+           sm.destinationName    AS customerLabel,
+           sm.plannedCollection  AS periodDate,
+           'O:' + CONVERT(VARCHAR(20), sm.shipmentID) AS shipmentKey
+    FROM Logistics.dbo.ShipmentCost sc
+    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
+    WHERE sc.shipmentID IS NOT NULL`;
+const COMBINED_COST_INBOUND = `
+    SELECT sc.expectedCost, sc.migoStatus, sc.costCenter,
+           f.forwarderName, f.forwarderMode,
+           d.destinationCountry AS country,
+           d.destinationName    AS customerLabel,
+           ISNULL(ps.DispatchDate, ps.CreatedAtUtc) AS periodDate,
+           'I:' + CONVERT(VARCHAR(20), ps.ShipmentId) AS shipmentKey
+    FROM Logistics.dbo.ShipmentCost sc
+    INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = ps.ForwarderID
+    LEFT  JOIN Logistics.dbo.Destinations d  ON d.destinationID = ps.OriginDestinationID
+    WHERE sc.poShipmentID IS NOT NULL`;
+const COMBINED_COST = `(${COMBINED_COST_OUTBOUND} UNION ALL ${COMBINED_COST_INBOUND}) cc`;
+
 router.get('/analytics', async (req, res) => {
     try {
         const pool   = await getPool();
@@ -374,107 +410,101 @@ router.get('/analytics', async (req, res) => {
         // By forwarder
         const byForwarder = await pool.request()
             .input('months', sql.Int, months)
-            .query(`SELECT f.forwarderName,
-                           SUM(sc.expectedCost) AS totalCost,
+            .query(`SELECT cc.forwarderName,
+                           SUM(cc.expectedCost) AS totalCost,
                            COUNT(*)                                      AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                    GROUP BY f.forwarderName
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY cc.forwarderName
                     ORDER BY totalCost DESC`);
 
-        // By destination country
+        // By country (destination for outbound, origin for inbound)
         const byCountry = await pool.request()
             .input('months', sql.Int, months)
-            .query(`SELECT sm.destinationCountry AS country,
-                           SUM(sc.expectedCost) AS totalCost,
+            .query(`SELECT cc.country,
+                           SUM(cc.expectedCost) AS totalCost,
                            COUNT(*)                                      AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                      AND sm.destinationCountry IS NOT NULL
-                    GROUP BY sm.destinationCountry
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                      AND cc.country IS NOT NULL
+                    GROUP BY cc.country
                     ORDER BY totalCost DESC`);
 
         // By month
         const byMonth = await pool.request()
             .input('months', sql.Int, months)
             .query(`SELECT
-                        YEAR(sm.plannedCollection)  AS yr,
-                        MONTH(sm.plannedCollection) AS mo,
-                        SUM(sc.expectedCost) AS totalCost,
+                        YEAR(cc.periodDate)  AS yr,
+                        MONTH(cc.periodDate) AS mo,
+                        SUM(cc.expectedCost) AS totalCost,
                         COUNT(*) AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                      AND sm.plannedCollection IS NOT NULL
-                    GROUP BY YEAR(sm.plannedCollection), MONTH(sm.plannedCollection)
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                      AND cc.periodDate IS NOT NULL
+                    GROUP BY YEAR(cc.periodDate), MONTH(cc.periodDate)
                     ORDER BY yr ASC, mo ASC`);
 
-        // By direction
+        // By direction — now meaningful again now that inbound rows are
+        // actually present (previously always all "Outbound", since the
+        // old query could never see an inbound-only cost line at all).
         const byDirection = await pool.request()
             .input('months', sql.Int, months)
             .query(`SELECT
-                        CASE WHEN sm.originID = 0 OR sm.originID IS NULL THEN 'Outbound' ELSE 'Inbound' END AS direction,
-                        SUM(sc.expectedCost) AS totalCost,
+                        CASE WHEN LEFT(cc.shipmentKey, 1) = 'O' THEN 'Outbound' ELSE 'Inbound' END AS direction,
+                        SUM(cc.expectedCost) AS totalCost,
                         COUNT(*) AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                    GROUP BY CASE WHEN sm.originID = 0 OR sm.originID IS NULL THEN 'Outbound' ELSE 'Inbound' END`);
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY CASE WHEN LEFT(cc.shipmentKey, 1) = 'O' THEN 'Outbound' ELSE 'Inbound' END`);
 
         // By cost center
         const byCostCenter = await pool.request()
             .input('months', sql.Int, months)
-            .query(`SELECT cc.centerCode AS costCenter,
-                           SUM(sc.expectedCost) AS totalCost,
+            .query(`SELECT ctr.centerCode AS costCenter,
+                           SUM(cc.expectedCost) AS totalCost,
                            COUNT(*) AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode = sc.costCenter
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                    GROUP BY cc.centerCode
+                    FROM ${COMBINED_COST}
+                    LEFT JOIN Logistics.dbo.CostCenters ctr ON ctr.centerCode = cc.costCenter
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY ctr.centerCode
                     ORDER BY totalCost DESC`);
 
-        // By customer (destination name)
+        // By customer (destination name for outbound, origin name for inbound)
         const byCustomer = await pool.request()
             .input('months', sql.Int, months)
-            .query(`SELECT sm.destinationName AS customer,
-                           SUM(sc.expectedCost) AS totalCost,
+            .query(`SELECT cc.customerLabel AS customer,
+                           SUM(cc.expectedCost) AS totalCost,
                            COUNT(*)             AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                      AND sm.destinationName IS NOT NULL
-                    GROUP BY sm.destinationName
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                      AND cc.customerLabel IS NOT NULL
+                    GROUP BY cc.customerLabel
                     ORDER BY totalCost DESC`);
 
         // By service mode (forwarderMode from Forwarders table)
         const byService = await pool.request()
             .input('months', sql.Int, months)
-            .query(`SELECT ISNULL(f.forwarderMode, 'Unassigned') AS service,
-                           SUM(sc.expectedCost) AS totalCost,
+            .query(`SELECT ISNULL(cc.forwarderMode, 'Unassigned') AS service,
+                           SUM(cc.expectedCost) AS totalCost,
                            COUNT(*)             AS records
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())
-                    GROUP BY f.forwarderMode
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
+                    GROUP BY cc.forwarderMode
                     ORDER BY totalCost DESC`);
 
-        // Totals
+        // Totals — DISTINCT is over shipmentKey (direction-tagged), not the
+        // raw shipmentID, since outbound shipmentID and inbound poShipmentID
+        // are separate identity spaces and can collide numerically.
         const totals = await pool.request()
             .input('months', sql.Int, months)
             .query(`SELECT
-                        COUNT(DISTINCT sc.shipmentID)                       AS shipments,
+                        COUNT(DISTINCT cc.shipmentKey)                       AS shipments,
                         COUNT(*)                                             AS costRecords,
-                        SUM(sc.expectedCost)         AS totalSpend,
-                        SUM(CASE WHEN ISNULL(sc.migoStatus,0) = 0 THEN sc.expectedCost ELSE 0 END) AS unprocessedSpend,
-                        SUM(CASE WHEN sc.migoStatus = 1               THEN sc.expectedCost ELSE 0 END) AS processedSpend
-                    FROM Logistics.dbo.ShipmentCost sc
-                    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-                    WHERE sm.plannedCollection >= DATEADD(month, -@months, GETDATE())`);
+                        SUM(cc.expectedCost)         AS totalSpend,
+                        SUM(CASE WHEN ISNULL(cc.migoStatus,0) = 0 THEN cc.expectedCost ELSE 0 END) AS unprocessedSpend,
+                        SUM(CASE WHEN cc.migoStatus = 1               THEN cc.expectedCost ELSE 0 END) AS processedSpend
+                    FROM ${COMBINED_COST}
+                    WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())`);
 
         res.json({
             success: true,
