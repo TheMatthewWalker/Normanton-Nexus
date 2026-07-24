@@ -44,7 +44,7 @@ const START_VERIFY_POLL_MS     = 3 * 1000;
 const SVC_EVENT_TIMEOUT_MS     = 60 * 1000;
 // Shorter than deploy-runner.cjs's — this is an interactive script; someone
 // is watching it run, rather than it needing to self-supervise unattended.
-const STABILITY_CHECKS_MS = [30 * 1000, 60 * 1000];
+const STABILITY_CHECKS_MS = [10 * 1000, 20 * 1000];
 
 async function main() {
   const svc = new Service({ name: 'Normanton Nexus', script: path.join(REPO_DIR, 'server.js') });
