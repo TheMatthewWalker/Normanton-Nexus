@@ -33,6 +33,26 @@ router.get('/', requirePermission('LOG_ADMIN'), async (req, res) => {
   }
 });
 
+// Distinct forwarderMode values actually in use on Logistics.dbo.Forwarders —
+// the Add/Edit Mapping modal's Forwarder Type field is populated from this
+// rather than free text, so a mapping can only ever be created for a mode
+// that's genuinely set on a real forwarder (no typos silently never matching
+// anything in lookupModeOfTransport).
+router.get('/forwarder-types', requirePermission('LOG_ADMIN'), async (req, res) => {
+  try {
+    const pool = await getPool();
+    const { recordset } = await pool.request().query(`
+      SELECT DISTINCT forwarderMode
+      FROM Logistics.dbo.Forwarders
+      WHERE forwarderMode IS NOT NULL AND LTRIM(RTRIM(forwarderMode)) <> ''
+      ORDER BY forwarderMode
+    `);
+    res.json({ success: true, data: recordset.map(r => r.forwarderMode) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
   try {
     const { forwarderMode, modeOfTransport, description } = req.body;
