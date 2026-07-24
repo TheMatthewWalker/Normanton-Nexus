@@ -125,7 +125,34 @@ async function syncValuationClasses(rows) {
   }
 }
 
-export async function runTurnsValClassRefresh(req) {
+// Guards against two overlapping runs. There are now two ways this can be
+// triggered — the 05:45 cron and the manual "Refresh Now" button on the
+// Stock Value Overview tile (logistics.js) — and neither replaceTable() nor
+// anything else in the call chain has a lock: it's TRUNCATE + batched INSERT
+// with no transaction (deliberate, see replaceTable() comment re: SQL Server
+// 2005 + tedious leaving pool connections dirty after a failed transaction).
+// If two calls overlap (e.g. the button clicked from two tabs/users, or a
+// click landing while the cron is still running), one call's TRUNCATE wipes
+// rows the other just inserted, then both insert overlapping Material+Plant
+// rows — producing PRIMARY KEY constraint 'PK_TurnsValClassSnapshot'
+// violations on the batched INSERT. Sharing one in-flight promise means a
+// second caller just gets the same result instead of racing the first.
+let turnsValClassRefreshPromise = null;
+
+export function runTurnsValClassRefresh(req) {
+  if (turnsValClassRefreshPromise) {
+    console.log('[TurnsValClass] refresh already in progress — reusing in-flight run instead of starting a second one');
+    return turnsValClassRefreshPromise;
+  }
+
+  turnsValClassRefreshPromise = doRunTurnsValClassRefresh(req).finally(() => {
+    turnsValClassRefreshPromise = null;
+  });
+
+  return turnsValClassRefreshPromise;
+}
+
+async function doRunTurnsValClassRefresh(req) {
   const [turnsResult, valClassResult] = await Promise.allSettled([
     sap.getTurnsValClass(req),
     sap.getValuationClassCatalog(req)
