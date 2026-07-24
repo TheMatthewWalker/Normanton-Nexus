@@ -478,6 +478,67 @@ body::before {
 
 .hidden { display: none !important; }
 
+/* ── MY ACCOUNT MODAL ────────────────────────────────────────────────────── */
+.account-modal-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(15,27,48,0.45);
+  display: flex; align-items: center; justify-content: center;
+}
+.account-modal {
+  width: 460px; max-width: 92vw; max-height: 86vh; overflow-y: auto;
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+}
+.account-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.account-modal-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.account-modal-close {
+  background: none; border: none; font-size: 20px; line-height: 1;
+  color: var(--text-muted); cursor: pointer; padding: 2px 6px;
+}
+.account-modal-close:hover { color: var(--text); }
+.account-modal-body { padding: 20px; }
+.account-section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 8px;
+}
+.account-hint { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; margin: 0 0 12px; }
+.account-hint--muted { font-size: 12px; color: var(--text-muted); }
+.account-form { display: flex; flex-direction: column; gap: 6px; }
+.account-field-label { font-size: 11.5px; font-weight: 600; color: var(--text-dim); margin-top: 8px; }
+.account-input {
+  font-family: 'Manrope', sans-serif; font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--border2); border-radius: 6px;
+  background: var(--surface2); color: var(--text);
+}
+.account-input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+.account-result { font-size: 12px; margin-top: 8px; min-height: 16px; }
+.account-result--ok { color: var(--success); }
+.account-result--error { color: var(--error); }
+.account-form-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 14px; gap: 10px;
+}
+.account-btn-primary {
+  font-family: 'Manrope', sans-serif; font-size: 12.5px; font-weight: 600;
+  padding: 8px 18px; border: none; border-radius: 6px;
+  background: var(--accent); color: #fff; cursor: pointer;
+}
+.account-btn-primary:hover { background: var(--accent2); }
+.account-btn-primary:disabled { opacity: 0.6; cursor: default; }
+.account-btn-secondary {
+  font-family: 'Manrope', sans-serif; font-size: 12px;
+  padding: 8px 12px; border: 1px solid var(--border2); border-radius: 6px;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+}
+.account-btn-secondary:hover { border-color: var(--error); color: var(--error); }
+
 /* ── RESPONSIVE ──────────────────────────────────────────────────────────── */
 @media (max-width: 1100px) {
   .dept-grid { grid-template-columns: repeat(2, 1fr); }

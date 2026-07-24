@@ -5,6 +5,20 @@ import sql from "mssql";
 export const sapServerSecret = process.env.SAP_SERVER_SECRET
     ?? (() => { throw new Error('SAP_SERVER_SECRET env var is not set'); })();
 
+// ── Per-user SAP credential encryption key ──────────────────────────────────
+// AES-256-GCM key (32 bytes) for encrypting each user's own SAP password at
+// rest in PortalUsers.SapPasswordEncrypted — see lib/sapCredentials.js.
+// Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+// Expected as a 64-character hex string.
+//
+// Deliberately NOT a hard throw-at-startup like sapServerSecret above: this
+// key is being added to an app that's already running in production, and a
+// missing env var here should only break the one feature that needs it (SAP
+// credential save/use), not take down every other route on next restart.
+// lib/sapCredentials.js throws when this is actually missing and someone
+// tries to encrypt/decrypt — not before.
+export const sapCredEncryptionKey = process.env.SAP_CRED_ENCRYPTION_KEY || null;
+
 export const printersConfig = config.printers || [];
 
 export const sqlConfig = {

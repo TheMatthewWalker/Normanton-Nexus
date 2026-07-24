@@ -5,6 +5,7 @@ import https  from 'https';
 import jwt    from 'jsonwebtoken';
 import fs     from 'fs';
 import { sqlConfig, sapConfig, sapServerSecret } from '../config.js';
+import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
 const sapAgent = fs.existsSync(certPath)
@@ -445,15 +446,23 @@ router.get('/analytics', async (req, res) => {
 // ── Post selected costs to SAP (MIGO) ────────────────────────────────────────
 // Body: { costIDs: [1, 2, 3, ...] }
 // Groups by shipment (outbound shipmentID or inbound poShipmentID — see
-// GET /unprocessed above for the same UNION), sends to SapServer, marks
-// successful lines migoStatus=1. Deliberately calls
-// /api/logistics/post-freight, NOT SapServer's BAPI_ACC_DOCUMENT_POST
-// (/api/costing/freight-posting) — per the user, this needs to go through
-// post-migo and whatever real MIGO/PO mechanism they build there
-// themselves (material group per the modeOfTransport on each line factors
-// into that), not a straight FI/AP document posting. post-freight doesn't
-// exist in SapServer yet, so this will fail until that's built — known and
-// expected, do not "fix" it by substituting a different SAP call.
+// GET /unprocessed above for the same UNION), one PO + one goods receipt per
+// cost line per shipment group, via SapServer's elevated
+// POST /api/purchasing/create-po-and-receipt (task #415). Marks successful
+// lines migoStatus=1.
+//
+// This runs under the CALLING USER's own SAP credentials, not the shared
+// service account — the service account doesn't have (and isn't being
+// given) rights to create purchase orders. The caller must have already
+// saved their SAP username/password via My Account (POST
+// /api/profile/sap-credentials, see lib/sapCredentials.js); if not, this
+// fails fast with a clear message rather than a confusing SAP logon error.
+//
+// Vendor = the shipment's forwarderID (forwarderID doubles as the SAP
+// vendor number — see routes/forwarders.js). MaterialGroup is derived from
+// modeOfTransport (e.g. "Road Freight"), matching the intent noted when
+// this endpoint was first stubbed out. GlAccount/CostCenterOrOrder come
+// straight from the cost line's costElement/costCenter.
 router.post('/post-migo', async (req, res) => {
     const { costIDs } = req.body;
     if (!Array.isArray(costIDs) || !costIDs.length)
@@ -541,37 +550,118 @@ router.post('/post-migo', async (req, res) => {
             groups[key]._costIDs.push(r.costID);
         }
 
-        const payload = Object.values(groups).map(({ _costIDs, ...g }) => g);
+        // PO creation needs to run as the calling user's own SAP account —
+        // the shared service account doesn't have (and isn't being given)
+        // rights to create purchase orders. Decrypted here, in memory, just
+        // before the call, then sent once over the existing TLS-pinned
+        // Node->SapServer connection for this request only — see
+        // lib/sapCredentials.js for the full reasoning.
+        const callerUserId = req.session?.user?.userID;
+        const sapCreds = await getDecryptedSapCredentials(callerUserId);
+        if (!sapCreds) {
+            return res.status(400).json({
+                success: false,
+                error: 'You need to save your SAP username and password in My Account before posting costs to SAP.',
+                blockedCostIDs,
+            });
+        }
 
-        // Call SapServer
-        const sapResp = await axios.post(
-            `${sapConfig.url}/api/logistics/post-freight`,
-            { shipments: payload },
-            { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(req.session?.user?.userID)}` } }
-        );
+        const today = new Date().toISOString().slice(0, 10);
+        const results = [];
 
-        const sapBody = sapResp.data;
-        if (!sapBody.success) throw new Error(sapBody.error ?? 'SapServer returned success=false');
+        // One PO + one goods receipt per cost line, per shipment group — via
+        // SapServer's elevated POST /api/purchasing/create-po-and-receipt
+        // (task #415). Sequential on purpose: the pool only has a handful of
+        // elevated slots, and each call already does logon->PO->commit->
+        // GR-per-line->logoff as one unit of work, so there's nothing to gain
+        // from firing every group at once.
+        for (const group of Object.values(groups)) {
+            const materialGroup   = group.modeOfTransport ? `${group.modeOfTransport} Freight` : 'Freight';
+            const deliveredDayStr = group.deliveredDate ? new Date(group.deliveredDate).toISOString().slice(0, 10) : today;
 
-        const sapResults = Array.isArray(sapBody.data) ? sapBody.data : [];
-        const results    = [];
+            const items = group.costLines.map(line => ({
+                ShortText:              `Freight - ${group.direction} shipment ${group.shipmentReference}`,
+                Quantity:                1,
+                Unit:                    'EA',
+                NetPrice:                line.expectedCost ?? 0,
+                DeliveryDate:            deliveredDayStr,
+                AcctAssCat:              'K',
+                MaterialGroup:           materialGroup,
+                GlAccount:               line.costElement,
+                CostCenterOrOrder:       line.costCenter,
+                Reference:               group.shipmentReference,
+                TrackingNumber:          group.trackingNumber || '',
+                AddressCode:             group.location,
+                ShipmentCompletionDate:  deliveredDayStr,
+                PostingDate:             today,
+            }));
 
-        for (const sr of sapResults) {
-            const group = groups[`${sr.direction || 'outbound'}:${sr.direction === 'inbound' ? sr.poShipmentID : sr.shipmentID}`];
-            if (!group) continue;
+            try {
+                const sapResp = await axios.post(
+                    `${sapConfig.url}/api/purchasing/create-po-and-receipt`,
+                    {
+                        SapUsername: sapCreds.sapUsername,
+                        SapPassword: sapCreds.sapPassword,
+                        Vendor:      String(group.forwarderID || ''),
+                        Currency:    'GBP',
+                        DocDate:     today,
+                        Items:       items,
+                    },
+                    { timeout: 90000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(callerUserId)}` } }
+                );
 
-            if (sr.success && sr.materialDocument) {
-                for (const costID of group._costIDs) {
-                    await pool.request()
-                        .input('costID',           sql.BigInt,     costID)
-                        .input('materialDocument', sql.NVarChar(20), sr.materialDocument)
-                        .query(`UPDATE Logistics.dbo.ShipmentCost
-                                SET migoStatus = 1, materialDocument = @materialDocument
-                                WHERE costID = @costID`);
+                const sapBody = sapResp.data;
+                if (!sapBody.success) throw new Error(sapBody.error?.message || sapBody.error || 'SapServer returned success=false');
+
+                const poResult = sapBody.data || {};
+
+                // group.costLines/_costIDs and items above are all built in
+                // the same order, so poResult.lines[i] lines up with
+                // group._costIDs[i] positionally.
+                for (let i = 0; i < group._costIDs.length; i++) {
+                    const costID = group._costIDs[i];
+                    const line   = poResult.lines?.[i];
+
+                    if (line?.success && line.documentNumber) {
+                        await pool.request()
+                            .input('costID',           sql.BigInt,       costID)
+                            .input('materialDocument', sql.NVarChar(20), line.documentNumber)
+                            .input('purchaseOrder',    sql.NVarChar(20), poResult.purchaseOrder || null)
+                            .query(`UPDATE Logistics.dbo.ShipmentCost
+                                    SET migoStatus = 1, materialDocument = @materialDocument, purchaseOrder = @purchaseOrder
+                                    WHERE costID = @costID`);
+                        results.push({
+                            shipmentID:    group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                            direction:     group.direction,
+                            costID,
+                            success:       true,
+                            purchaseOrder: poResult.purchaseOrder,
+                            materialDocument: line.documentNumber,
+                        });
+                    } else {
+                        results.push({
+                            shipmentID:    group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                            direction:     group.direction,
+                            costID,
+                            success:       false,
+                            purchaseOrder: poResult.purchaseOrder || null,
+                            error:         line?.error || (poResult.poSuccess === false ? 'Purchase order creation failed' : 'Goods receipt failed'),
+                        });
+                    }
                 }
-                results.push({ shipmentID: sr.shipmentID, success: true,  materialDocument: sr.materialDocument, costIDs: group._costIDs });
-            } else {
-                results.push({ shipmentID: sr.shipmentID, success: false, error: sr.error || 'No material document returned', costIDs: group._costIDs });
+            } catch (groupErr) {
+                const message = groupErr.response?.data?.error?.message
+                    || groupErr.response?.data?.error
+                    || groupErr.message;
+                for (const costID of group._costIDs) {
+                    results.push({
+                        shipmentID: group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                        direction:  group.direction,
+                        costID,
+                        success:    false,
+                        error:      message,
+                    });
+                }
             }
         }
 

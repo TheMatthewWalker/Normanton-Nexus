@@ -1,5 +1,107 @@
 'use strict';
 
+// ── My Account modal — My SAP Credentials ───────────────────────────────────
+// Self-service: a user sets/updates their own SAP username+password so
+// elevated SAP actions (PO creation — see routes/shipmentcost.js's
+// /post-migo and SapServer's PurchasingController) can run under their own
+// SAP authorization instead of the shared service account. See
+// routes/profile.js / lib/sapCredentials.js for the backend side.
+const acctBtn        = document.getElementById('btn-my-account');
+const acctOverlay     = document.getElementById('account-modal-overlay');
+const acctCloseBtn    = document.getElementById('account-modal-close');
+const sapCredStatus   = document.getElementById('sap-cred-status');
+const sapCredForm     = document.getElementById('sap-cred-form');
+const sapCredUsername = document.getElementById('sap-cred-username');
+const sapCredPassword = document.getElementById('sap-cred-password');
+const sapCredResult   = document.getElementById('sap-cred-result');
+const sapCredSaveBtn  = document.getElementById('sap-cred-save-btn');
+const sapCredClearBtn = document.getElementById('sap-cred-clear-btn');
+
+async function loadSapCredStatus() {
+  sapCredStatus.textContent = 'Loading…';
+  sapCredResult.textContent = '';
+  sapCredResult.className = 'account-result';
+  try {
+    const res = await fetch('/api/profile/sap-credentials');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load status');
+    const { sapUsername, hasCredentials, updatedAt } = json.data;
+    if (hasCredentials) {
+      const when = updatedAt ? new Date(updatedAt).toLocaleString('en-GB') : '';
+      sapCredStatus.textContent = `Configured — SAP username "${sapUsername}"${when ? ` (saved ${when})` : ''}`;
+      sapCredUsername.value = sapUsername || '';
+      sapCredClearBtn.classList.remove('hidden');
+    } else {
+      sapCredStatus.textContent = 'Not configured yet — required for actions like creating a purchase order.';
+      sapCredUsername.value = '';
+      sapCredClearBtn.classList.add('hidden');
+    }
+    sapCredPassword.value = '';
+  } catch (err) {
+    sapCredStatus.textContent = `Failed to load status: ${err.message}`;
+  }
+}
+
+function openAccountModal() {
+  acctOverlay.classList.remove('hidden');
+  loadSapCredStatus();
+}
+function closeAccountModal() {
+  acctOverlay.classList.add('hidden');
+}
+
+if (acctBtn) acctBtn.addEventListener('click', openAccountModal);
+if (acctCloseBtn) acctCloseBtn.addEventListener('click', closeAccountModal);
+if (acctOverlay) acctOverlay.addEventListener('click', e => { if (e.target === acctOverlay) closeAccountModal(); });
+
+if (sapCredForm) sapCredForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const sapUsername = sapCredUsername.value.trim();
+  const sapPassword = sapCredPassword.value;
+  if (!sapUsername || !sapPassword) {
+    sapCredResult.textContent = 'Both SAP username and password are required.';
+    sapCredResult.className = 'account-result account-result--error';
+    return;
+  }
+  sapCredSaveBtn.disabled = true; sapCredSaveBtn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/profile/sap-credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sapUsername, sapPassword }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to save');
+    sapCredResult.textContent = 'Saved.';
+    sapCredResult.className = 'account-result account-result--ok';
+    await loadSapCredStatus();
+  } catch (err) {
+    sapCredResult.textContent = err.message;
+    sapCredResult.className = 'account-result account-result--error';
+  } finally {
+    sapCredSaveBtn.disabled = false; sapCredSaveBtn.textContent = 'Save';
+  }
+});
+
+if (sapCredClearBtn) sapCredClearBtn.addEventListener('click', async () => {
+  if (!confirm('Clear your saved SAP credentials? Actions that need them (like creating a purchase order) will stop working until you set them again.')) return;
+  sapCredClearBtn.disabled = true;
+  try {
+    const res = await fetch('/api/profile/sap-credentials', { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to clear');
+    sapCredResult.textContent = 'Cleared.';
+    sapCredResult.className = 'account-result account-result--ok';
+    await loadSapCredStatus();
+  } catch (err) {
+    sapCredResult.textContent = err.message;
+    sapCredResult.className = 'account-result account-result--error';
+  } finally {
+    sapCredClearBtn.disabled = false;
+  }
+});
+
+
 const shell = document.getElementById('gemini-shell');
 const openBtn = document.getElementById('btn-gemini-chat');
 const closeBtn = document.getElementById('gemini-close');

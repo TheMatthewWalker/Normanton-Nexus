@@ -27,10 +27,42 @@
         <div class="user-dot"></div>
         <span id="session-user">Connected</span>
       </div>
+      <button type="button" class="btn-logout" id="btn-my-account">My Account</button>
       <button type="button" class="btn-logout btn-gemini" id="btn-gemini-chat">Get Help</button>
       <a href="/logout" class="btn-logout">Sign Out</a>
     </div>
   </header>
+
+  <!-- ── MY ACCOUNT MODAL ─────────────────────────────────────────────────── -->
+  <div class="account-modal-overlay hidden" id="account-modal-overlay">
+    <div class="account-modal">
+      <div class="account-modal-header">
+        <div class="account-modal-title">My Account</div>
+        <button type="button" class="account-modal-close" id="account-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="account-modal-body">
+        <div class="account-section-label">SAP Credentials</div>
+        <p class="account-hint">
+          Some SAP actions (like creating a purchase order) run under your own SAP login
+          instead of the shared service account, since it isn't authorized for those
+          transactions. Enter your SAP username and password here so those actions can
+          run as you. Your password is encrypted and is never shown again after saving.
+        </p>
+        <div id="sap-cred-status" class="account-hint account-hint--muted">Loading…</div>
+        <form id="sap-cred-form" class="account-form">
+          <label class="account-field-label">SAP Username</label>
+          <input type="text" id="sap-cred-username" class="account-input" autocomplete="off" placeholder="e.g. J.SMITH">
+          <label class="account-field-label">SAP Password</label>
+          <input type="password" id="sap-cred-password" class="account-input" autocomplete="new-password" placeholder="••••••••">
+          <div id="sap-cred-result" class="account-result"></div>
+          <div class="account-form-actions">
+            <button type="button" id="sap-cred-clear-btn" class="account-btn-secondary">Clear Saved Credentials</button>
+            <button type="submit" id="sap-cred-save-btn" class="account-btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
 
   <!-- ── HERO ───────────────────────────────────────────────────────────────── -->
   <section class="hero">
