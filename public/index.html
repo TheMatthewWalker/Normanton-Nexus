@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <title>Normanton Nexus</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@700;800&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://googleapis.com" rel="stylesheet">
   <link rel="stylesheet" href="./css/index.css">
   <link rel="icon" href="/images/logo16.png">
 </head>
@@ -35,11 +35,12 @@
           <button class="submit-btn" type="submit">Authenticate</button>
           <div class="error-msg" id="login-error"></div>
         </form>
+        <div class="switch-link" style="margin-bottom: 8px;"><a href="#" id="goto-forgot">Forgot password?</a></div>
         <div class="switch-link">No account? <a href="#" id="goto-register">Request access</a></div>
       </div>
 
       <!-- ── Register panel ─────────────────────────────────────────────── -->
-      <div id="panel-register">
+      <div id="panel-register" style="display: none;">
         <div class="card-title">Request Access</div>
         <form id="register-form" autocomplete="off">
           <div style="display:flex;gap:10px">
@@ -68,7 +69,41 @@
           <button class="submit-btn" type="submit">Submit Request</button>
           <div class="error-msg" id="register-error"></div>
         </form>
-        <div class="switch-link">Already have an account? <a href="#" id="goto-login">Sign in</a></div>
+        <div class="switch-link">Already have an account? <a href="#" id="goto-login-from-reg">Sign in</a></div>
+      </div>
+
+      <!-- ── Forgot Password Panel ──────────────────────────────────────── -->
+      <div id="panel-forgot" style="display: none;">
+        <div class="card-title">Recover Password</div>
+        <p style="font-size: 13px; color: #6b7f99; margin-bottom: 20px;">Enter your email address and we'll send you a secure link to reset your account credentials.</p>
+        <form id="forgot-form" autocomplete="off">
+          <div class="field">
+            <label>Email Address</label>
+            <input id="forgot-email" name="email" type="email" placeholder="your@email.com" required>
+          </div>
+          <button class="submit-btn" type="submit">Send Reset Link</button>
+          <div class="error-msg" id="forgot-error"></div>
+        </form>
+        <div class="switch-link">Remember your password? <a href="#" id="goto-login-from-forgot">Sign in</a></div>
+      </div>
+
+      <!-- ── Reset Password Panel ───────────────────────────────────────── -->
+      <div id="panel-reset" style="display: none;">
+        <div class="card-title">Set New Password</div>
+        <form id="reset-form" autocomplete="off">
+          <input type="hidden" id="reset-token-input">
+          <div class="field">
+            <label>New Password</label>
+            <input id="reset-password" name="password" type="password" placeholder="Min 10 chars, 1 uppercase, 1 number" required>
+          </div>
+          <div class="field">
+            <label>Confirm New Password</label>
+            <input id="reset-confirm" name="confirmPassword" type="password" placeholder="••••••••" required>
+          </div>
+          <button class="submit-btn" type="submit">Update Password</button>
+          <div class="error-msg" id="reset-error"></div>
+        </form>
+        <div class="switch-link"><a href="#" id="goto-login-from-reset">Return to Sign in</a></div>
       </div>
 
     </div>
@@ -76,19 +111,34 @@
     <div class="footer-note">Normanton Nexus &nbsp;·&nbsp; Authorised access only &nbsp;·&nbsp; All activity is logged</div>
   </div>
 
-  <script>
-    // ── Panel toggle ──────────────────────────────────────────────────────────
-    document.getElementById('goto-register').addEventListener('click', e => {
-      e.preventDefault();
-      document.getElementById('panel-login').style.display    = 'none';
-      document.getElementById('panel-register').style.display = 'block';
-    });
+    <script>
+    const panels = {
+      login:    document.getElementById('panel-login'),
+      register: document.getElementById('panel-register'),
+      forgot:   document.getElementById('panel-forgot'),
+      reset:    document.getElementById('panel-reset')
+    };
 
-    document.getElementById('goto-login').addEventListener('click', e => {
-      e.preventDefault();
-      document.getElementById('panel-register').style.display = 'none';
-      document.getElementById('panel-login').style.display    = 'block';
-    });
+    function showPanel(targetKey) {
+      Object.keys(panels).forEach(key => {
+        panels[key].style.display = (key === targetKey) ? 'block' : 'none';
+      });
+    }
+
+    // ── Panel toggles ──────────────────────────────────────────────────────────
+    document.getElementById('goto-register').addEventListener('click', e => { e.preventDefault(); showPanel('register'); });
+    document.getElementById('goto-login-from-reg').addEventListener('click', e => { e.preventDefault(); showPanel('login'); });
+    document.getElementById('goto-forgot').addEventListener('click', e => { e.preventDefault(); showPanel('forgot'); });
+    document.getElementById('goto-login-from-forgot').addEventListener('click', e => { e.preventDefault(); showPanel('login'); });
+    document.getElementById('goto-login-from-reset').addEventListener('click', e => { e.preventDefault(); showPanel('login'); });
+
+    // ── Direct URL Token Detection ─────────────────────────────────────────────
+    const params = new URLSearchParams(window.location.search);
+    const resetToken = params.get('token');
+    if (resetToken) {
+      showPanel('reset');
+      document.getElementById('reset-token-input').value = resetToken;
+    }
 
     // ── URL error param → login error message ─────────────────────────────────
     const errorMessages = {
@@ -100,7 +150,6 @@
       server_error:        'Server error. Please try again.',
       session_expired:     'Your session has expired — please sign in again.',
     };
-    const params = new URLSearchParams(window.location.search);
     const errKey = params.get('error');
     if (errKey) {
       document.getElementById('login-error').textContent = errorMessages[errKey] || 'An error occurred.';
@@ -143,7 +192,7 @@
         const data = await res.json();
 
         if (data.success) {
-          errEl.style.color   = 'var(--success)';
+          errEl.style.color   = '#10b981';
           errEl.textContent   = data.message;
           document.getElementById('register-form').reset();
         } else {
@@ -151,6 +200,73 @@
         }
       } catch {
         errEl.textContent = 'Network error. Please try again.';
+      }
+    });
+
+    // ── Forgot Password Request Submit ─────────────────────────────────────────
+    document.getElementById('forgot-form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const errEl = document.getElementById('forgot-error');
+      errEl.textContent = '';
+      errEl.style.color = '';
+
+      try {
+        const res = await fetch('/forgot-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: document.getElementById('forgot-email').value }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          errEl.style.color = '#10b981';
+          errEl.textContent = data.message;
+          document.getElementById('forgot-form').reset();
+        } else {
+          errEl.textContent = data.error || 'Failed to submit recovery request.';
+        }
+      } catch {
+        errEl.textContent = 'Network error. Please verify server connectivity.';
+      }
+    });
+
+    // ── Reset Password Submission Submit ───────────────────────────────────────
+    document.getElementById('reset-form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const errEl = document.getElementById('reset-error');
+      errEl.textContent = '';
+      errEl.style.color = '';
+
+      const password = document.getElementById('reset-password').value;
+      const confirmPassword = document.getElementById('reset-confirm').value;
+
+      if (password !== confirmPassword) {
+        errEl.textContent = 'Passwords do not match.';
+        return;
+      }
+
+      try {
+        const res = await fetch('/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: document.getElementById('reset-token-input').value,
+            newPassword: password
+          }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          errEl.style.color = '#10b981';
+          errEl.textContent = data.message + ' Redirecting...';
+          setTimeout(() => {
+            window.location.href = window.location.origin + window.location.pathname;
+          }, 3000);
+        } else {
+          errEl.textContent = data.error || 'Failed to update password.';
+        }
+      } catch {
+        errEl.textContent = 'Network error. Password modification failed.';
       }
     });
   </script>

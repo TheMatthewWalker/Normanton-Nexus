@@ -14,12 +14,16 @@
  */
 
 import express      from 'express';
+import crypto       from 'crypto';
 import bcrypt       from 'bcrypt';
 import sql          from 'mssql';
 import jwt          from 'jsonwebtoken';
 import rateLimit    from 'express-rate-limit';
-import { sqlConfig, sapServerSecret, idleTimeoutMsFor } from '../config.js';
+import { sqlConfig, sapServerSecret, idleTimeoutMsFor, resendAPI } from '../config.js';
 import { notify }    from '../lib/notify.js';
+import {Resend } from 'resend';
+
+const resend = new Resend(resendAPI);
 
 const router = express.Router();
 
@@ -289,6 +293,101 @@ router.post('/register', registerLimiter, async (req, res) => {
     res.status(500).json({ success: false, error: 'Registration failed. Please try again.' });
   }
 });
+
+
+
+// ── POST /forgot-password — Generate token and dispatch email ────────────────
+router.post('/forgot-password', loginLimiter, async (req, res) => {
+    const { email } = req.body;
+    if (!email) {
+        return res.status(400).json({ success: false, error: 'Email address is required.' });
+    }
+
+    try {
+        const token = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 604800000).toISOString(); // 1 week window
+
+        const pool = await sql.connect(sqlConfig);
+        const result = await pool.request()
+            .input('email', sql.VarChar(255), email)
+            .input('token', sql.VarChar(255), token)
+            .input('expires', sql.DateTime, expiresAt)
+            .query(`
+                UPDATE kongsberg.dbo.PortalUsers 
+                SET reset_token = @token, reset_token_expires = @expires 
+                WHERE email = @email
+            `);
+
+        if (result.rowsAffected[0] === 0) {
+            // Mitigate enumeration attacks by returning green text even if account missing
+            return res.status(200).json({ success: true, message: 'If the email exists, a password reset link has been dispatched.' });
+        }
+
+        // Generate full absolute URL back to index panel context
+        const resetLink = `${req.protocol}://${req.get('host')}?token=${token}`;
+
+        await resend.emails.send({
+            from: 'Normanton Nexus <onboarding@resend.dev>',
+            to: 'matthew.walker@ka-group.com',
+            subject: 'Password Recovery Request - Normanton Nexus',
+            html: `<p>A password reset request was initiated for ${email}}. Click <a href="${resetLink}">here</a> to select a new password.</p>`
+        });
+
+        return res.status(200).json({ success: true, message: 'Password recovery email dispatched successfully.' });
+
+    } catch (error) {
+        console.error("MSSQL 2005 / Email Exception:", error);
+        return res.status(500).json({ success: false, error: 'An internal application pipeline exception occurred.' });
+    }
+});
+
+// ── POST /reset-password — Accept token and modify the user password hash ───
+router.post('/reset-password', loginLimiter, async (req, res) => {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) {
+        return res.status(400).json({ success: false, error: 'Missing mandatory payload properties.' });
+    }
+
+    try {
+        const pool = await sql.connect(sqlConfig);
+        const now = new Date().toISOString();
+
+        // Target record and extract internal unique primary tracking keys
+        const userCheck = await pool.request()
+            .input('token', sql.VarChar(255), token)
+            .input('now', sql.DateTime, now)
+            .query(`
+                SELECT UserID FROM kongsberg.dbo.PortalUsers 
+                WHERE reset_token = @token AND reset_token_expires > @now
+            `);
+
+        if (userCheck.recordset.length === 0) {
+            return res.status(400).json({ success: false, error: 'The provided recovery verification token is invalid or has expired.' });
+        }
+
+        const userId = userCheck.recordset[0].UserID;
+        const saltRounds = 10;
+        const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
+
+        await pool.request()
+            .input('userId', sql.Int, userId)
+            .input('newPasswordHash', sql.VarChar(255), hashedNewPassword)
+            .query(`
+                UPDATE kongsberg.dbo.PortalUsers 
+                SET passwordhash = @newPasswordHash, 
+                    reset_token = NULL, 
+                    reset_token_expires = NULL 
+                WHERE UserID = @userId
+            `);
+
+        return res.status(200).json({ success: true, message: 'Password updated successfully.' });
+
+    } catch (error) {
+        console.error("MSSQL 2005 Transaction Exception:", error);
+        return res.status(500).json({ success: false, error: 'Database update transaction fault encountered.' });
+    }
+});
+
 
 // ── POST /api/auth/orderbook-token ──────────────────────────────────────────
 // Short-lived credential exchange for the Month End Breakdown Excel macro

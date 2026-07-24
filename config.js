@@ -32,6 +32,8 @@ export const sqlConfig = {
   }
 };
 
+export const resendAPI = process.env.RESEND_API_KEY
+    ?? (() => { throw new Error('RESEND_API_KEY env var is not set'); })();
 
 // ── Session idle timeout ──────────────────────────────────────────────────
 // Default session cookie maxAge (server.js's session() config), and the
