@@ -80,13 +80,30 @@ ELSE
 
 
 /* ── Seed the one code already confirmed working (task #415 manual test:
-   Vendor 0000078712, CostElement 0000602200, ITLG01A, succeeded) ────────── */
-IF NOT EXISTS (SELECT 1 FROM dbo.MaterialGroupMapping WHERE CostElement = '0000602200' AND ModeOfTransport IS NULL)
+   Vendor 0000078712, GL account 0000602200, ITLG01A, succeeded) ──────────
+   CostElement here must match whatever routes/shipmentcost.js's post-migo
+   actually sends as line.costElement at runtime — that's ShipmentCost.
+   costElement, which routes/shipmentmain.js populates from CostElements.
+   elementCode (the app's 6-char short code, e.g. '602200'), NOT the
+   10-digit zero-padded format SAP's own GlAccount field displays as
+   ('0000602200' — see the manual test that confirmed this code works).
+   The first version of this migration seeded the wrong (10-digit) format,
+   which would never actually match a real line.costElement value and so
+   would have silently never been used by the lookup — corrected below. */
+IF EXISTS (SELECT 1 FROM dbo.MaterialGroupMapping WHERE CostElement = '0000602200' AND ModeOfTransport IS NULL)
+BEGIN
+  UPDATE dbo.MaterialGroupMapping SET CostElement = '602200', UpdatedAtUtc = GETUTCDATE()
+  WHERE CostElement = '0000602200' AND ModeOfTransport IS NULL;
+
+  PRINT 'Corrected MaterialGroupMapping seed row: CostElement 0000602200 -> 602200';
+END
+
+IF NOT EXISTS (SELECT 1 FROM dbo.MaterialGroupMapping WHERE CostElement = '602200' AND ModeOfTransport IS NULL)
 BEGIN
   INSERT INTO dbo.MaterialGroupMapping (CostElement, ModeOfTransport, MaterialGroup, Description, CreatedBy)
-  VALUES ('0000602200', NULL, 'ITLG01A', 'Inbound freight — confirmed working via manual SapServer test', 'migration seed');
+  VALUES ('602200', NULL, 'ITLG01A', 'Inbound Standard Freight — confirmed working via manual SapServer test', 'migration seed');
 
-  PRINT 'Seeded default MaterialGroupMapping for CostElement 0000602200';
+  PRINT 'Seeded default MaterialGroupMapping for CostElement 602200';
 END
 
 

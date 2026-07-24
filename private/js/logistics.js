@@ -112,6 +112,8 @@ function setupTiles() {
       if (fn === 'updateDestinations')  runUpdateDestinations();
       if (fn === 'updateForwarders')    runUpdateForwarders();
       if (fn === 'materialGroupMapping')runMaterialGroupMapping();
+      if (fn === 'costCentres')         runCostCentres();
+      if (fn === 'glAccounts')          runGlAccounts();
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
       if (fn === 'turnsValClassTable')  runTurnsValClassTable();
@@ -3631,7 +3633,7 @@ async function runUpdateForwarders() {
 // maps GL account + mode of transport to the real code, with a
 // mode-independent default per GL account also supported (leave Mode of
 // Transport blank when adding/editing).
-let mgmCostElements = null; // cached GL account list — {elementID, elementDescription}[]
+let mgmCostElements = null; // cached GL account list — {elementCode, elementDescription, ...}[]
 
 async function mgmLoadCostElements() {
   if (mgmCostElements) return mgmCostElements;
@@ -3655,7 +3657,12 @@ async function runMaterialGroupMapping() {
 }
 
 function mgmCostElementLabel(costElement) {
-  const match = (mgmCostElements || []).find(c => String(c.elementID) === String(costElement));
+  // Matched by elementCode, not elementID — elementID is CostElements' own
+  // surrogate PK and has no relationship to what's actually stored in
+  // ShipmentCost.costElement / MaterialGroupMapping.CostElement. elementCode
+  // (e.g. '602200') is the real SAP GL account short code both those columns
+  // hold — see routes/shipmentmain.js's INSERT (costElement = item.elementCode).
+  const match = (mgmCostElements || []).find(c => String(c.elementCode) === String(costElement));
   return match ? `${costElement} — ${match.elementDescription || ''}` : String(costElement);
 }
 
@@ -3706,14 +3713,17 @@ function mgmOpenModal(mapping) {
   // A mapping being edited might reference a GL account no longer in
   // costElements (deleted/renamed since) — keep it selectable rather than
   // silently swapping it for whatever option happens to be first.
-  const currentInList = isEdit && (mgmCostElements || []).some(c => String(c.elementID) === String(mapping.CostElement));
+  // Options are keyed on elementCode (the real GL account short code, e.g.
+  // '602200') — NOT elementID, which is just CostElements' own surrogate PK
+  // and has no relationship to what ShipmentCost.costElement actually holds.
+  const currentInList = isEdit && (mgmCostElements || []).some(c => String(c.elementCode) === String(mapping.CostElement));
   const extraOption = isEdit && !currentInList
-    ? `<option value="${esc(mapping.CostElement)}" selected>${esc(mapping.CostElement)} (not in Cost Elements list)</option>`
+    ? `<option value="${esc(mapping.CostElement)}" selected>${esc(mapping.CostElement)} (not in GL Accounts list)</option>`
     : '';
   const costElementOptions = (mgmCostElements || [])
     .slice()
-    .sort((a, b) => String(a.elementID).localeCompare(String(b.elementID)))
-    .map(c => `<option value="${esc(c.elementID)}" ${isEdit && String(mapping.CostElement) === String(c.elementID) ? 'selected' : ''}>${esc(c.elementID)} — ${esc(c.elementDescription || '')}</option>`)
+    .sort((a, b) => String(a.elementCode).localeCompare(String(b.elementCode)))
+    .map(c => `<option value="${esc(c.elementCode)}" ${isEdit && String(mapping.CostElement) === String(c.elementCode) ? 'selected' : ''}>${esc(c.elementCode)} — ${esc(c.elementDescription || '')}</option>`)
     .join('');
 
   openModal(`<div class="ps-modal" style="max-width:520px;width:92vw">
@@ -3801,6 +3811,283 @@ async function mgmDeleteMapping(mappingId, label) {
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runMaterialGroupMapping();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Admin: Cost Centres ────────────────────────────────────────────────────────
+// Logistics.dbo.CostCenters — centerCode is the SAP cost centre code used
+// across booking (private/js/logistics.js's Awaiting Booking modal),
+// Manual Inbound Shipment, and MIGO postings (ShipmentCost.costCenter).
+// centerID is a legacy identity-style column left to the database on
+// create — see routes/costcenters.js.
+async function runCostCentres() {
+  showResultPanel('Cost Centres', 'Click a row to edit · Add Cost Centre for a new SAP cost centre code');
+  try {
+    const rows = await fetch('/api/costcenters').then(r => r.json());
+    if (!Array.isArray(rows)) throw new Error('Failed to load cost centres');
+    ccRenderList(rows);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function ccRenderList(rows) {
+  rows = rows.slice().sort((a, b) => (a.centerDescription || '').localeCompare(b.centerDescription || ''));
+  document.getElementById('result-row-badge').textContent = `${rows.length} cost centre${rows.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const tableRows = rows.map(r => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace">${esc(r.centerCode || '')}</td>
+      <td>${esc(r.centerDescription || '')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary cc-edit" data-id="${esc(String(r.centerID))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary cc-delete" data-id="${esc(String(r.centerID))}" data-label="${esc(r.centerCode || '')} — ${esc(r.centerDescription || '')}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="cc-add-btn">+ Add Cost Centre</button>
+    </div>
+    ${rows.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Cost Centre Code</th><th>Description</th><th></th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No cost centres yet — add one to use across booking and manual shipments.</div>'}
+  `;
+
+  document.getElementById('cc-add-btn').addEventListener('click', () => ccOpenModal(null));
+  document.querySelectorAll('.cc-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = rows.find(x => String(x.centerID) === btn.dataset.id);
+      if (r) ccOpenModal(r);
+    });
+  });
+  document.querySelectorAll('.cc-delete').forEach(btn => {
+    btn.addEventListener('click', () => ccDeleteRow(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function ccOpenModal(row) {
+  const isEdit = !!row;
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Cost Centre' : 'Add Cost Centre'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Cost Centre Code (SAP)</label>
+          <input class="tf-input" type="text" id="cc-code" value="${esc(row?.centerCode || '')}" placeholder="e.g. 0000002004">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Description</label>
+          <input class="tf-input" type="text" id="cc-description" value="${esc(row?.centerDescription || '')}" placeholder="e.g. PTFE">
+        </div>
+      </div>
+      <div id="cc-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="cc-save-btn">${isEdit ? 'Save Changes' : 'Add Cost Centre'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('cc-save-btn').addEventListener('click', async () => {
+    const body = {
+      centerCode: document.getElementById('cc-code').value.trim(),
+      centerDescription: document.getElementById('cc-description').value.trim(),
+    };
+    if (!body.centerCode || !body.centerDescription) {
+      document.getElementById('cc-result').innerHTML = '<div class="sap-error">Both fields are required.</div>';
+      return;
+    }
+    const btn = document.getElementById('cc-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/costcenters/${row.centerID}` : '/api/costcenters', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runCostCentres();
+    } catch (err) {
+      document.getElementById('cc-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Cost Centre';
+    }
+  });
+}
+
+async function ccDeleteRow(centerId, label) {
+  if (!confirm(`Delete cost centre ${label}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/costcenters/${centerId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runCostCentres();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Admin: GL Accounts ─────────────────────────────────────────────────────────
+// Logistics.dbo.CostElements — elementCode is the real SAP GL account short
+// code (e.g. '602200'). This is what ShipmentCost.costElement holds and
+// what Material Group Mapping's CostElement column is keyed on (see
+// mgmCostElementLabel/mgmOpenModal above) — elementID is only a surrogate
+// PK, never used as the GL account value anywhere in the app.
+async function runGlAccounts() {
+  showResultPanel('GL Accounts', 'Click a row to edit · Add GL Account for a new freight cost code — feeds Material Group Mapping\'s GL account list');
+  try {
+    const rows = await fetch('/api/costelements').then(r => r.json());
+    if (!Array.isArray(rows)) throw new Error('Failed to load GL accounts');
+    glaRenderList(rows);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function glaRenderList(rows) {
+  rows = rows.slice().sort((a, b) => String(a.elementCode || '').localeCompare(String(b.elementCode || '')));
+  document.getElementById('result-row-badge').textContent = `${rows.length} GL account${rows.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const tableRows = rows.map(r => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.elementCode || '')}</td>
+      <td>${esc(r.elementDescription || '')}</td>
+      <td>${esc(r.direction || '—')}</td>
+      <td>${esc(r.tier || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary gla-edit" data-id="${esc(String(r.elementID))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary gla-delete" data-id="${esc(String(r.elementID))}" data-label="${esc(r.elementCode || '')} — ${esc(r.elementDescription || '')}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-submit" id="gla-add-btn">+ Add GL Account</button>
+    </div>
+    ${rows.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>GL Account Code</th><th>Description</th><th>Direction</th><th>Tier</th><th></th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No GL accounts yet — add one to use for freight cost postings.</div>'}
+  `;
+
+  document.getElementById('gla-add-btn').addEventListener('click', () => glaOpenModal(null));
+  document.querySelectorAll('.gla-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = rows.find(x => String(x.elementID) === btn.dataset.id);
+      if (r) glaOpenModal(r);
+    });
+  });
+  document.querySelectorAll('.gla-delete').forEach(btn => {
+    btn.addEventListener('click', () => glaDeleteRow(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function glaOpenModal(row) {
+  const isEdit = !!row;
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit GL Account' : 'Add GL Account'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">GL Account Code (SAP)</label>
+          <input class="tf-input" type="text" id="gla-code" maxlength="6" value="${esc(row?.elementCode || '')}" placeholder="e.g. 602200">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Description</label>
+          <input class="tf-input" type="text" id="gla-description" value="${esc(row?.elementDescription || '')}" placeholder="e.g. Inbound Standard Freight">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Direction</label>
+          <select class="tf-input" id="gla-direction">
+            <option value="">—</option>
+            <option value="inbound" ${row?.direction === 'inbound' ? 'selected' : ''}>Inbound</option>
+            <option value="outbound" ${row?.direction === 'outbound' ? 'selected' : ''}>Outbound</option>
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Tier</label>
+          <select class="tf-input" id="gla-tier">
+            <option value="">—</option>
+            <option value="standard" ${row?.tier === 'standard' ? 'selected' : ''}>Standard</option>
+            <option value="premium" ${row?.tier === 'premium' ? 'selected' : ''}>Premium</option>
+          </select>
+        </div>
+      </div>
+      <div id="gla-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="gla-save-btn">${isEdit ? 'Save Changes' : 'Add GL Account'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('gla-save-btn').addEventListener('click', async () => {
+    const body = {
+      elementCode: document.getElementById('gla-code').value.trim(),
+      elementDescription: document.getElementById('gla-description').value.trim(),
+      direction: document.getElementById('gla-direction').value || null,
+      tier: document.getElementById('gla-tier').value || null,
+    };
+    if (!body.elementCode || !body.elementDescription) {
+      document.getElementById('gla-result').innerHTML = '<div class="sap-error">GL Account Code and Description are required.</div>';
+      return;
+    }
+    const btn = document.getElementById('gla-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/costelements/${row.elementID}` : '/api/costelements', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      // Material Group Mapping's GL Account dropdown caches this list
+      // (mgmCostElements) — invalidate so a newly added/renamed code shows
+      // up there without a hard page refresh.
+      mgmCostElements = null;
+      closePickModal();
+      runGlAccounts();
+    } catch (err) {
+      document.getElementById('gla-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add GL Account';
+    }
+  });
+}
+
+async function glaDeleteRow(elementId, label) {
+  if (!confirm(`Delete GL account ${label}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/costelements/${elementId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    mgmCostElements = null;
+    runGlAccounts();
   } catch (err) {
     alert(err.message);
   }
