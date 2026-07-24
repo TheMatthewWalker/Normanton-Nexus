@@ -117,6 +117,7 @@ function setupTiles() {
       if (fn === 'glAccounts')          runGlAccounts();
       if (fn === 'forwarderModeMapping')runForwarderModeMapping();
       if (fn === 'freightSpend')        runFreightSpend();
+      if (fn === 'haulierOtif')         runHaulierOtif();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
       if (fn === 'turnsValClassTable')  runTurnsValClassTable();
       if (fn === 'turnsValClassSummary')runTurnsValClassSummary();
@@ -5229,6 +5230,141 @@ async function runFreightSpend(months) {
   } catch (err) {
     destroyFreightCharts();
     body.innerHTML = `<div class="sap-error">Error loading analytics: ${esc(err.message)}</div>`;
+  }
+}
+
+
+// ── Haulier On-Time Performance ───────────────────────────────────────────────
+// Reuses freightCharts/destroyFreightCharts — only one of Freight Spend /
+// this report is ever open in the result panel at a time, so sharing the
+// same chart-instance registry is safe and avoids a second near-identical
+// destroy helper.
+let otifMonths = 12;
+
+async function runHaulierOtif(months) {
+  months = months || otifMonths;
+  otifMonths = months;
+  showResultPanel('Haulier On-Time Performance', `Last ${months} months — planned vs actual delivery, by haulier, country, destination and month`);
+  destroyFreightCharts();
+
+  const body = document.getElementById('result-body');
+
+  try {
+    const resp = await fetch(`/api/shipmentmain/otif-report?months=${months}`);
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error);
+
+    const d = json.data;
+    const pct = (onTime, total) => total > 0 ? (Number(onTime) / Number(total) * 100) : null;
+    const pctLabel = v => v == null ? '—' : `${v.toFixed(1)}%`;
+
+    const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthLabel  = (yr, mo) => `${MONTH_NAMES[mo - 1]} ${String(yr).slice(-2)}`;
+
+    const periodOptions = [3,6,12,24].map(m =>
+      `<option value="${m}"${m === months ? ' selected' : ''}>${m} months</option>`
+    ).join('');
+
+    const totals = d.totals || {};
+    const overallPct = pct(totals.onTime, totals.total);
+    const kpiHtml = `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px">
+        ${[
+          { label: 'Overall On-Time',   value: pctLabel(overallPct), accent: overallPct != null && overallPct < 90 },
+          { label: 'Total Deliveries',  value: totals.total ?? '—',  accent: false },
+          { label: 'On Time',           value: totals.onTime ?? '—', accent: false },
+          { label: 'Late',              value: (totals.total ?? 0) - (totals.onTime ?? 0), accent: true },
+        ].map(k => `
+          <div style="background:var(--surface);border:1px solid ${k.accent ? 'var(--accent)' : 'var(--border)'};border-radius:8px;padding:14px 18px;min-width:130px;flex:1">
+            <div style="font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${k.label}</div>
+            <div style="font-size:22px;font-weight:800;color:${k.accent ? 'var(--accent)' : 'var(--text)'};font-family:'JetBrains Mono',monospace">${k.value}</div>
+          </div>`).join('')}
+      </div>`;
+
+    const card  = (title, canvasId) => `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">${title}</div>
+        <canvas id="${canvasId}" style="max-height:240px"></canvas>
+      </div>`;
+
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <label style="font-size:13px;color:var(--text-dim);font-weight:600">Period:</label>
+        <select id="otif-period-sel" style="background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:13px">
+          ${periodOptions}
+        </select>
+      </div>
+      ${kpiHtml}
+      <div style="margin-bottom:14px">${card('On-Time % by Month', 'otif-chart-monthly')}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        ${card('On-Time % by Haulier', 'otif-chart-haulier')}
+        ${card('On-Time % by Country', 'otif-chart-country')}
+      </div>
+      <div style="margin-bottom:14px">${card('On-Time % by Destination (top 15 by volume)', 'otif-chart-destination')}</div>`;
+
+    document.getElementById('otif-period-sel').addEventListener('change', e => {
+      runHaulierOtif(Number(e.target.value));
+    });
+
+    const TICK = '#8DA3BE';
+    const GRID = 'rgba(0,0,0,0.06)';
+    const pctTip = ctx => ` ${Number(ctx.parsed.y ?? ctx.parsed).toFixed(1)}%`;
+
+    // Colour bars/points red below 85% on-time, amber below 95%, green
+    // above — a flat single-colour chart doesn't surface the hauliers
+    // actually worth a conversation.
+    const otifColour = v => v == null ? '#94A3B8' : v < 85 ? '#DC2626' : v < 95 ? '#D97706' : '#059669';
+
+    const pctBarDefaults = {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: pctTip } } },
+      scales: {
+        x: { ticks: { color: TICK, font: { size: 10 } }, grid: { color: GRID } },
+        y: { min: 0, max: 100, ticks: { color: TICK, font: { size: 10 }, callback: v => `${v}%` }, grid: { color: GRID } },
+      },
+    };
+
+    if (d.byHaulier.length) {
+      const rows = d.byHaulier.map(r => ({ label: r.haulier || 'Unassigned', v: pct(r.onTime, r.total), total: Number(r.total) }));
+      freightCharts.push(new Chart(document.getElementById('otif-chart-haulier'), {
+        type: 'bar',
+        data: { labels: rows.map(r => `${r.label} (${r.total})`), datasets: [{ data: rows.map(r => r.v), backgroundColor: rows.map(r => otifColour(r.v)), borderRadius: 4 }] },
+        options: { ...pctBarDefaults, indexAxis: 'y' },
+      }));
+    }
+
+    if (d.byCountry.length) {
+      const rows = d.byCountry.map(r => ({ label: r.country || '?', v: pct(r.onTime, r.total) }));
+      freightCharts.push(new Chart(document.getElementById('otif-chart-country'), {
+        type: 'bar',
+        data: { labels: rows.map(r => r.label), datasets: [{ data: rows.map(r => r.v), backgroundColor: rows.map(r => otifColour(r.v)), borderRadius: 4 }] },
+        options: pctBarDefaults,
+      }));
+    }
+
+    if (d.byDestination.length) {
+      const rows = d.byDestination.map(r => ({ label: r.destination || '?', v: pct(r.onTime, r.total), total: Number(r.total) }));
+      freightCharts.push(new Chart(document.getElementById('otif-chart-destination'), {
+        type: 'bar',
+        data: { labels: rows.map(r => `${r.label} (${r.total})`), datasets: [{ data: rows.map(r => r.v), backgroundColor: rows.map(r => otifColour(r.v)), borderRadius: 4 }] },
+        options: { ...pctBarDefaults, indexAxis: 'y' },
+      }));
+    }
+
+    if (d.byMonth.length) {
+      const rows = d.byMonth.map(r => ({ label: monthLabel(r.yr, r.mo), v: pct(r.onTime, r.total) }));
+      freightCharts.push(new Chart(document.getElementById('otif-chart-monthly'), {
+        type: 'line',
+        data: {
+          labels: rows.map(r => r.label),
+          datasets: [{ label: 'On-Time %', data: rows.map(r => r.v), borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.35, pointRadius: 4, pointBackgroundColor: rows.map(r => otifColour(r.v)), pointBorderColor: '#fff', pointBorderWidth: 2 }],
+        },
+        options: { plugins: { legend: { display: false }, tooltip: { callbacks: { label: pctTip } } }, scales: pctBarDefaults.scales },
+      }));
+    }
+
+  } catch (err) {
+    destroyFreightCharts();
+    body.innerHTML = `<div class="sap-error">Error loading OTIF report: ${esc(err.message)}</div>`;
   }
 }
 

@@ -1618,6 +1618,97 @@ router.get('/queue/:mode', async (req, res) => {
 });
 
 
+// ── Haulier On-Time Performance report ────────────────────────────────────────
+// Combines outbound (ShipmentMain.plannedDelivery vs actualDelivery) and
+// inbound (dbo.PurchaseOrderShipment.ExpectedEta vs ReceivedAtUtc) legs —
+// same UNION ALL shape as shipmentcost.js's /analytics, since a haulier's
+// on-time record should reflect both directions, not just outbound. Only
+// counts shipments that actually have both a planned and an actual/received
+// date (nothing still in flight, nothing cancelled) — "on time" is actual
+// date <= planned date, compared as dates only (time-of-day ignored).
+const OTIF_OUTBOUND = `
+    SELECT f.forwarderName,
+           sm.destinationCountry AS country,
+           sm.destinationName    AS place,
+           sm.actualDelivery     AS periodDate,
+           CASE WHEN CAST(sm.actualDelivery AS DATE) <= CAST(sm.plannedDelivery AS DATE) THEN 1 ELSE 0 END AS isOnTime
+    FROM Logistics.dbo.ShipmentMain sm
+    LEFT JOIN Logistics.dbo.Forwarders f ON f.forwarderID = sm.forwarderID
+    WHERE sm.actualDelivery IS NOT NULL AND sm.plannedDelivery IS NOT NULL
+      AND ISNULL(sm.shipmentCancelled, 0) = 0`;
+const OTIF_INBOUND = `
+    SELECT f.forwarderName,
+           d.destinationCountry AS country,
+           d.destinationName    AS place,
+           ps.ReceivedAtUtc     AS periodDate,
+           CASE WHEN CAST(ps.ReceivedAtUtc AS DATE) <= CAST(ps.ExpectedEta AS DATE) THEN 1 ELSE 0 END AS isOnTime
+    FROM dbo.PurchaseOrderShipment ps
+    LEFT JOIN Logistics.dbo.Forwarders   f ON f.forwarderID = ps.ForwarderID
+    LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = ps.OriginDestinationID
+    WHERE ps.ReceivedAtUtc IS NOT NULL AND ps.ExpectedEta IS NOT NULL
+      AND ps.CancelledAtUtc IS NULL`;
+const OTIF_COMBINED = `(${OTIF_OUTBOUND} UNION ALL ${OTIF_INBOUND}) o`;
+
+router.get('/otif-report', async (req, res) => {
+  try {
+    const pool   = await getPool();
+    const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 60);
+
+    const byHaulier = await pool.request()
+      .input('months', sql.Int, months)
+      .query(`SELECT ISNULL(o.forwarderName, 'Unassigned') AS haulier,
+                     SUM(o.isOnTime) AS onTime, COUNT(*) AS total
+              FROM ${OTIF_COMBINED}
+              WHERE o.periodDate >= DATEADD(month, -@months, GETDATE())
+              GROUP BY o.forwarderName
+              ORDER BY total DESC`);
+
+    const byCountry = await pool.request()
+      .input('months', sql.Int, months)
+      .query(`SELECT o.country,
+                     SUM(o.isOnTime) AS onTime, COUNT(*) AS total
+              FROM ${OTIF_COMBINED}
+              WHERE o.periodDate >= DATEADD(month, -@months, GETDATE())
+                AND o.country IS NOT NULL
+              GROUP BY o.country
+              ORDER BY total DESC`);
+
+    const byDestination = await pool.request()
+      .input('months', sql.Int, months)
+      .query(`SELECT TOP 15 o.place AS destination,
+                     SUM(o.isOnTime) AS onTime, COUNT(*) AS total
+              FROM ${OTIF_COMBINED}
+              WHERE o.periodDate >= DATEADD(month, -@months, GETDATE())
+                AND o.place IS NOT NULL
+              GROUP BY o.place
+              ORDER BY total DESC`);
+
+    const byMonth = await pool.request()
+      .input('months', sql.Int, months)
+      .query(`SELECT YEAR(o.periodDate) AS yr, MONTH(o.periodDate) AS mo,
+                     SUM(o.isOnTime) AS onTime, COUNT(*) AS total
+              FROM ${OTIF_COMBINED}
+              WHERE o.periodDate >= DATEADD(month, -@months, GETDATE())
+              GROUP BY YEAR(o.periodDate), MONTH(o.periodDate)
+              ORDER BY yr ASC, mo ASC`);
+
+    const totals = await pool.request()
+      .input('months', sql.Int, months)
+      .query(`SELECT SUM(o.isOnTime) AS onTime, COUNT(*) AS total
+              FROM ${OTIF_COMBINED}
+              WHERE o.periodDate >= DATEADD(month, -@months, GETDATE())`);
+
+    res.json({
+      success: true,
+      months,
+      data: { totals: totals.recordset[0], byHaulier: byHaulier.recordset, byCountry: byCountry.recordset, byDestination: byDestination.recordset, byMonth: byMonth.recordset },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 // ── Bulk mark collected ───────────────────────────────────────────────────────
 router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
