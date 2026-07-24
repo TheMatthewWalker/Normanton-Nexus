@@ -2776,11 +2776,13 @@ function renderShipmentDetailModal(shipment, deliveries) {
 
 
 // ── Associated Costs (Search Shipment / Shipment Details modal, outbound) ──
-// Mirrors renderAssociatedCosts (Inbound Log detail) — list, remove while
-// unprocessed, and show the material document + a Reverse option once
+// Mirrors renderAssociatedCosts (Inbound Log detail) — list, edit/remove
+// while unprocessed, and show the material document + a Reverse option once
 // posted. Unlike inbound, there's no add-line form here: outbound cost
 // lines are created automatically at booking time (freight + customs, see
 // routes/shipmentmain.js), so ad-hoc adding isn't wired up on this side yet.
+// Edit only covers the amount (PATCH /api/shipmentcost/:costId) — GL
+// element/cost centre are set at booking time and not editable here.
 async function renderShipmentAssociatedCosts(shipmentId) {
   const container = document.getElementById('sd-costs');
   if (!container) return;
@@ -2797,9 +2799,10 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         <td>${l.migoStatus
           ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>`
           : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
-        <td>${l.migoStatus
+        <td style="white-space:nowrap">${l.migoStatus
           ? `<button type="button" class="btn-secondary sd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
-          : `<button type="button" class="btn-secondary sd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
+          : `<button type="button" class="btn-secondary sd-cost-edit" data-cost-id="${l.costID}" data-amount="${esc(String(l.expectedCost))}" style="padding:2px 8px;font-size:11px">Edit</button>
+             <button type="button" class="btn-secondary sd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
       </tr>`).join('');
 
     container.innerHTML = `
@@ -2810,6 +2813,12 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         </table>
       </div>
       <div id="sd-cost-result" style="margin-top:8px"></div>`;
+
+    document.querySelectorAll('.sd-cost-edit').forEach(b => {
+      b.addEventListener('click', () => {
+        openSdCostEditModal(b.dataset.costId, b.dataset.amount, shipmentId);
+      });
+    });
 
     document.querySelectorAll('.sd-cost-delete').forEach(b => {
       b.addEventListener('click', async () => {
@@ -2843,6 +2852,55 @@ async function renderShipmentAssociatedCosts(shipmentId) {
   } catch (err) {
     container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
+}
+
+// ── Edit an unprocessed outbound cost line's amount ──
+// PATCH /api/shipmentcost/:costId — only the amount is editable here (GL
+// element/cost centre are set automatically at booking time).
+function openSdCostEditModal(costId, currentAmount, shipmentId) {
+  openModal(`<div class="ps-modal" style="max-width:420px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Edit Cost Amount</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Amount (£)</label>
+          <input class="tf-input" type="number" step="0.01" min="0.01" id="sd-cost-edit-amount" value="${esc(String(currentAmount))}">
+        </div>
+      </div>
+      <div id="sd-cost-edit-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="sd-cost-edit-save-btn">Save Changes</button>
+    </div>
+  </div>`);
+
+  document.getElementById('sd-cost-edit-save-btn').addEventListener('click', async () => {
+    const amount = Number(document.getElementById('sd-cost-edit-amount').value);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      document.getElementById('sd-cost-edit-result').innerHTML = '<div class="sap-error">Enter a valid amount.</div>';
+      return;
+    }
+    const btn = document.getElementById('sd-cost-edit-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(`/api/shipmentcost/${costId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedCost: amount }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Failed to save');
+      closePickModal();
+      renderShipmentAssociatedCosts(shipmentId);
+    } catch (err) {
+      document.getElementById('sd-cost-edit-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Save Changes';
+    }
+  });
 }
 
 

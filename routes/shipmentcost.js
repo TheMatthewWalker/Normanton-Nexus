@@ -4,7 +4,7 @@ import axios  from 'axios';
 import https  from 'https';
 import jwt    from 'jsonwebtoken';
 import fs     from 'fs';
-import { sqlConfig, sapConfig, sapServerSecret } from '../config.js';
+import { sqlConfig, sapConfig, sapServerSecret, getLogisticsPool } from '../config.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 import { lookupMaterialGroup } from './materialgroups.js';
 
@@ -66,6 +66,37 @@ router.get('/id/:costId', async (req, res) => {
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Edit an unprocessed cost line's amount (outbound) — mirrors the DELETE
+// guard below (blocked once migoStatus=1 — reverse first via
+// POST /:costId/reverse, then it drops back to Unprocessed Costs and can be
+// edited/reposted). Lets a wrong amount be corrected in place instead of
+// deleting and re-adding, which the Associated Costs tile on the Search
+// Shipment modal previously had no way to do at all.
+router.patch('/:costId', async (req, res) => {
+    try {
+        const { expectedCost } = req.body;
+        const amount = Number(expectedCost);
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return res.status(400).json({ success: false, error: 'expectedCost must be a positive number.' });
+        }
+
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('costId',       sql.BigInt,         req.params.costId)
+            .input('expectedCost', sql.Decimal(18, 2), amount)
+            .query(`UPDATE Logistics.dbo.ShipmentCost
+                    SET expectedCost = @expectedCost
+                    OUTPUT INSERTED.costID
+                    WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
+
+        if (!result.recordset.length)
+            return res.status(400).json({ success: false, error: 'Line not found, or already posted to SAP.' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -321,7 +352,7 @@ router.get('/unprocessed', async (req, res) => {
                 d.destinationPostCode,
                 ps.TrackingNumber AS trackingNumber
             FROM Logistics.dbo.ShipmentCost sc
-            INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+            INNER JOIN Kongsberg.dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
             LEFT  JOIN Logistics.dbo.CostCenters   cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN Logistics.dbo.CostElements  ce ON ce.elementCode = sc.costElement
             LEFT  JOIN Logistics.dbo.Destinations  d  ON d.destinationID = ps.OriginDestinationID
