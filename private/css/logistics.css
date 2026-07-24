@@ -368,6 +368,18 @@ body::before {
   transition: background 0.15s;
 }
 .btn-export:hover { background: var(--accent2); }
+.btn-export:disabled { opacity: 0.6; cursor: default; }
+
+.tvc-refresh-status {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  max-width: 420px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tvc-refresh-status--ok   { color: var(--success, #10B981); }
+.tvc-refresh-status--warn { color: var(--error); }
 
 .result-body {
   flex: 1;

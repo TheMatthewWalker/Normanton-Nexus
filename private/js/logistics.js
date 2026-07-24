@@ -154,6 +154,11 @@ function showResultPanel(title, hint) {
   document.getElementById('result-hint').textContent = hint;
   document.getElementById('result-row-badge').classList.add('hidden');
   document.getElementById('btn-export-csv').classList.add('hidden');
+  document.getElementById('btn-refresh-turnsvalclass').classList.add('hidden');
+  const tvcStatus = document.getElementById('turnsvalclass-refresh-status');
+  tvcStatus.classList.add('hidden');
+  tvcStatus.textContent = '';
+  tvcStatus.classList.remove('tvc-refresh-status--ok', 'tvc-refresh-status--warn');
   document.getElementById('result-body').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
 }
 
@@ -4490,6 +4495,15 @@ async function runTurnsValClassTable() {
 // ── Tile 2: aggregate KPIs + breakdown charts ────────────────────────────────
 async function runTurnsValClassSummary() {
   showResultPanel('Stock Value Overview', 'Aggregate stock & book value by turnover category, valuation class and material type');
+  document.getElementById('btn-refresh-turnsvalclass').classList.remove('hidden');
+  await loadTurnsValClassSummaryBody();
+}
+
+// Split out of runTurnsValClassSummary() so runTurnsValClassManualRefresh()
+// can reload just the body after a manual refresh, without wiping the
+// toolbar's "Refreshed at ..." status message the way calling
+// showResultPanel() again would.
+async function loadTurnsValClassSummaryBody() {
   destroyTurnsCharts();
   const body = document.getElementById('result-body');
 
@@ -4587,6 +4601,52 @@ async function runTurnsValClassSummary() {
   } catch (err) {
     destroyTurnsCharts();
     body.innerHTML = `<div class="sap-error">Error loading summary: ${esc(err.message)}</div>`;
+  }
+}
+
+// Manual trigger for the daily turns-valclass SAP pull (server.js's cron
+// only runs this at 05:45) — POST /api/performance/turns-valclass/refresh
+// already existed for this (see routes/performance.js), just wasn't wired
+// up to anything in the UI. Runs both sources (TurnsValClass,
+// ValuationClasses) and reports back per-source success/failure exactly
+// like the cron's own console log does, then reloads the summary body so
+// the KPIs/charts reflect whatever just got pulled.
+async function runTurnsValClassManualRefresh() {
+  const btn    = document.getElementById('btn-refresh-turnsvalclass');
+  const status = document.getElementById('turnsvalclass-refresh-status');
+
+  btn.disabled = true;
+  btn.textContent = 'Refreshing…';
+  status.classList.remove('hidden', 'tvc-refresh-status--ok', 'tvc-refresh-status--warn');
+  status.textContent = '';
+
+  try {
+    const resp = await fetch('/api/performance/turns-valclass/refresh', { method: 'POST' });
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Refresh failed');
+
+    const results = json.data || [];
+    const failed  = results.filter(r => r.status === 'failed');
+    const now     = new Date().toLocaleTimeString('en-GB');
+
+    if (failed.length) {
+      status.classList.add('tvc-refresh-status--warn');
+      status.title = failed.map(f => `${f.name}: ${f.error}`).join('\n');
+      status.textContent = `⚠ Refreshed ${now} — ${failed.map(f => `${f.name} failed`).join(', ')}`;
+    } else {
+      status.classList.add('tvc-refresh-status--ok');
+      status.title = '';
+      status.textContent = `✓ Refreshed ${now}`;
+    }
+
+    await loadTurnsValClassSummaryBody();
+  } catch (err) {
+    status.classList.add('tvc-refresh-status--warn');
+    status.title = '';
+    status.textContent = `✕ Refresh failed: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh Now';
   }
 }
 
