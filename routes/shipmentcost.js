@@ -20,6 +20,26 @@ function makeSapToken(userId) {
         { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' });
 }
 
+// SapServer's ApiResponse.Fail() puts the generic error under body.error.message
+// and the real diagnostic (the SAP RETURN-table messages, e.g. "Vendor 12345 does
+// not exist" or "Cost center 4200 is locked for posting") under body.data.poMessages
+// — see PurchasingController.CreatePurchaseOrderAndReceipt. Without this, callers
+// only ever see the generic "Purchase order creation failed. Transaction rolled
+// back." wrapper and never the reason SAP actually gave, which was the whole point
+// of returning PoMessages in the first place.
+function extractSapErrorMessage(body, fallback) {
+    const base = body?.error?.message || body?.error || fallback;
+    const poMessages = body?.data?.poMessages;
+    if (Array.isArray(poMessages) && poMessages.length > 0) {
+        const detail = poMessages
+            .filter(m => m?.message)
+            .map(m => (m.type ? `[${m.type}] ${m.message}` : m.message))
+            .join('; ');
+        if (detail) return `${base} ${detail}`;
+    }
+    return base;
+}
+
 const router = express.Router();
 const getPool = async () => await sql.connect(sqlConfig);
 
@@ -611,7 +631,7 @@ router.post('/post-migo', async (req, res) => {
                 );
 
                 const sapBody = sapResp.data;
-                if (!sapBody.success) throw new Error(sapBody.error?.message || sapBody.error || 'SapServer returned success=false');
+                if (!sapBody.success) throw new Error(extractSapErrorMessage(sapBody, 'SapServer returned success=false'));
 
                 const poResult = sapBody.data || {};
 
@@ -650,9 +670,15 @@ router.post('/post-migo', async (req, res) => {
                     }
                 }
             } catch (groupErr) {
-                const message = groupErr.response?.data?.error?.message
-                    || groupErr.response?.data?.error
-                    || groupErr.message;
+                // SapServer returns PO-creation failures as an HTTP 400 (BadRequest),
+                // so this is the path that actually catches them — the sapBody.success
+                // check above only fires for a 200-with-success:false response, which
+                // this endpoint never sends. extractSapErrorMessage pulls in the real
+                // SAP RETURN-table text from groupErr.response.data.data.poMessages,
+                // not just the generic "Purchase order creation failed. Transaction
+                // rolled back." wrapper — that's the fix for the message shown here
+                // previously carrying no diagnostic detail at all.
+                const message = extractSapErrorMessage(groupErr.response?.data, groupErr.message);
                 for (const costID of group._costIDs) {
                     results.push({
                         shipmentID: group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
