@@ -76,6 +76,30 @@ function processConfig(code) {
   return cfg;
 }
 
+// Resolves each traceability parent link's own Material, for the Drumming
+// backflush BOM-mismatch check (see submitDrumming). parentBatches only
+// carries {processCode, recordID} — portal genealogy pointing at a prior
+// production record (see assertParentBatchesReversed above) — not a SAP
+// material, so the material each link actually points at has to be looked
+// up per parent before it can be compared against the finished good's BOM;
+// SapServer has no access to these tables to do this lookup itself. Skips
+// any parent it can't resolve (unknown code, missing row) rather than
+// failing the whole submission over it — a shorter resolved list just means
+// less for the BOM check downstream to verify, not an error.
+async function resolveTraceabilityMaterials(pool, parentBatches) {
+  const materials = new Set();
+  for (const pb of parentBatches || []) {
+    if (!pb.processCode || !pb.recordID) continue;
+    let cfg;
+    try { cfg = processConfig(pb.processCode.toUpperCase()); } catch { continue; }
+    const r = await pool.request().input('id', sql.Int, Number(pb.recordID))
+      .query(`SELECT Material FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
+    const mat = r.recordset[0]?.Material;
+    if (mat) materials.add(mat);
+  }
+  return [...materials];
+}
+
 // Metre-based linear processes that share a common entry/data pattern
 const METRE_PROCESSES = new Set(['EX','CO','BR','CL','TW']);
 
@@ -2486,18 +2510,27 @@ async function submitDrumming(req, res, entryType) {
   const drumRef = `DR-${String(drummingID).padStart(8, '0')}`;
 
   try {
-    const sapRaw = await sapPost(`/drumming/${entryType}`, {
-      Material:    material,
-      TotalLength: totalLength,
-      WeightKG:    Number(weightKG),
-      Header:      drumRef,
-      Packaging:   packagingID,
-      Customer:    customerNumber || '',
-      Order:       orderNumber    || '',
+    // Resolve what each traceability link the operator entered actually
+    // points at (see resolveTraceabilityMaterials above) — SapServer needs
+    // the real materials to check against this drum's BOM, not the portal
+    // process-code/record-id references stored in prod.ProductionTrace.
+    const traceMaterials = await resolveTraceabilityMaterials(pool, parentBatches);
+
+    const sapRaw = await sapPost('/api/production/drumming-backflush', {
+      Material:              material,
+      Quantity:              totalLength,
+      Header:                drumRef,
+      Customer:              customerNumber || '',
+      PackCode:              packagingID,
+      WeightKG:              Number(weightKG),
+      TraceabilityMaterials: traceMaterials,
     });
 
-    const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
-    audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+    const {
+      documentNumber: sapMatDoc, batch: sapBatch, rcBatch, rcPack,
+      messageNumber, message, bomMismatch, expectedComponents, actualComponents,
+    } = parseDrumBackflush(sapRaw);
+    audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'${sapBatch ? ` - Batch = '${sapBatch}'` : ''}`, req);
 
     if (messageNumber === '190') {
       await logBackflushAlert(pool, 'DR', drummingID, drumRef, sapMatDoc, messageNumber, message);
@@ -2510,11 +2543,38 @@ async function submitDrumming(req, res, entryType) {
       .input('type',sql.NVarChar(20),  'BACKFLUSH')
       .input('qty', sql.Decimal(12,3), totalLength)
       .input('doc', sql.NVarChar(10),  sapMatDoc)
+      .input('batch',sql.NVarChar(10), sapBatch || null)
       .input('uid', sql.Int,           uid)
-      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,SAPBatchNumber,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,@batch,1,@uid)`);
 
     await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
-      `Backflush posted — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
+      `Backflush posted — MatDoc: ${sapMatDoc}${sapBatch ? `, Batch: ${sapBatch}` : ''}${messageNumber === '190' ? ' (190: no components consumed)' : ''}${rcBatch && rcBatch !== '0' ? ` — Z_ZPRODBATCH_MAINT RC_BATCH=${rcBatch}` : ''}${rcPack && rcPack !== '0' ? ` RC_PACK=${rcPack}` : ''}`, 0, uid);
+
+    // BOM vs traceability mismatch — never blocks (the drum is already
+    // produced by this point), but the wrong raw material may have been
+    // recorded against it, so flag it loudly: log it against the drum,
+    // warn the operator in the response, and alert PROD_SUPERVISOR with
+    // enough detail to go investigate.
+    let bomWarning;
+    if (bomMismatch) {
+      const expectedText = expectedComponents?.length ? expectedComponents.join(', ') : '(no components found)';
+      const actualText   = actualComponents?.length   ? actualComponents.join(', ')   : '(none)';
+      const username     = req.session?.user?.username || `user #${uid}`;
+      bomWarning = `Traceability does not match this material's BOM — expected ${expectedText}, traceability shows ${actualText}.`;
+
+      await writeEvent(pool, 'DR', drummingID, 'NOTE',
+        `BOM mismatch: backflushed ${material}, BOM expects ${expectedText}, traceability shows ${actualText} (entered by ${username}).`, 2, uid);
+
+      sql.connect(sqlConfig).then(kPool => notify(kPool, {
+        title:       'Drumming traceability does not match BOM',
+        body:        `${drumRef} backflushed ${material} — BOM expects ${expectedText}, but traceability shows ${actualText}. Entered by ${username}.`,
+        severity:    2,
+        category:    'production',
+        actionLabel: 'Open Queue',
+        actionURL:   '/private/production-nexus.html',
+        target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+      })).catch(() => {});
+    }
 
     try {
       await sapPost('/api/production/label', {
@@ -2554,8 +2614,8 @@ async function submitDrumming(req, res, entryType) {
     return res.status(201).json({
       success: true,
       data: {
-        drummingID, materialDocument: sapMatDoc, status: 'COMPLETE',
-        ...((sapWarning || stockSyncWarning) ? { warning: [sapWarning, stockSyncWarning].filter(Boolean).join(' ') } : {}),
+        drummingID, materialDocument: sapMatDoc, batch: sapBatch, bomMismatch: !!bomMismatch, status: 'COMPLETE',
+        ...((sapWarning || bomWarning || stockSyncWarning) ? { warning: [sapWarning, bomWarning, stockSyncWarning].filter(Boolean).join(' ') } : {}),
       },
     });
 
@@ -3853,6 +3913,38 @@ function parseSapBackflush(result) {
   }
 
   throw new Error(message || `SAP backflush rejected: ${type} ${messageClass} ${messageNumber}`);
+}
+
+// Validates the combined drumming-backflush response (SapServer's
+// POST /api/production/drumming-backflush, DrumBackflushResponse) — same
+// success criteria as parseSapBackflush (the underlying ZF40N call's own
+// S/RM/190|191), just nested one level deeper under `backflush` since this
+// response also carries the produced batch, the Z_ZPRODBATCH_MAINT result
+// (rcBatch/rcPack) and the BOM-vs-traceability check.
+function parseDrumBackflush(result) {
+  if (result?.success === false) {
+    throw new Error(result.error || result.message || 'SAP server error');
+  }
+
+  const data = result?.data ?? result;
+  const zf = data?.backflush ?? {};
+  const { type, messageClass, messageNumber, documentNumber, message } = zf;
+
+  if (!(type === 'S' && messageClass === 'RM' && (messageNumber === '190' || messageNumber === '191'))) {
+    throw new Error(message || `SAP backflush rejected: ${type} ${messageClass} ${messageNumber}`);
+  }
+
+  return {
+    documentNumber:     data.materialDocument || documentNumber || null,
+    batch:              data.batch || null,
+    rcBatch:             data.rcBatch || null,
+    rcPack:              data.rcPack || null,
+    messageNumber,
+    message:             message || '',
+    bomMismatch:         !!data.bomMismatch,
+    expectedComponents:  data.expectedComponents || [],
+    actualComponents:    data.actualComponents || [],
+  };
 }
 
 // Logs a 190 (no component consumption) to prod.BackflushAlerts for data review.
