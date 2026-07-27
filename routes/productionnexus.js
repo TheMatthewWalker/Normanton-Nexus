@@ -2647,14 +2647,19 @@ async function submitDrumming(req, res, entryType) {
       await writeEvent(pool, 'DR', drummingID, 'NOTE', `Backflushed braided component(s) before drum backflush: ${summary}.`, 0, uid);
 
       // The ProductionTrace link rows for all parents were already inserted
-      // unconditionally above; fill in the consumed quantity for just the
-      // BR ones now that it's known.
+      // unconditionally above; fill in the consumed quantity and the SAP
+      // document it was posted under for just the BR ones now that it's
+      // known. MaterialDocumentSAP is what lets redrumReversal.js find and
+      // reverse this exact braid backflush later if the drum gets reversed
+      // — without it, there'd be no reliable way to tell which of possibly
+      // several postings against the same braid batch belonged to this drum.
       for (const b of braidConsumption) {
         await pool.request()
           .input('cc',  sql.NVarChar(5),   'DR').input('cr', sql.Int, drummingID)
           .input('pc',  sql.NVarChar(5),   'BR').input('pr', sql.Int, b.braidingID)
           .input('qty', sql.Decimal(12,3), b.qty)
-          .query(`UPDATE prod.ProductionTrace SET QuantityConsumed=@qty, UnitOfMeasure='M'
+          .input('doc', sql.NVarChar(10),  b.documentNumber || null)
+          .query(`UPDATE prod.ProductionTrace SET QuantityConsumed=@qty, UnitOfMeasure='M', MaterialDocumentSAP=@doc
                   WHERE ChildProcessCode=@cc AND ChildRecordID=@cr AND ParentProcessCode=@pc AND ParentRecordID=@pr`);
       }
     }
