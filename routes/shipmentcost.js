@@ -7,6 +7,7 @@ import fs     from 'fs';
 import { sqlConfig, sapConfig, sapServerSecret, getLogisticsPool } from '../config.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 import { lookupMaterialGroup } from './materialgroups.js';
+import { requireAnyPermission } from '../middleware/auth.js';
 
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
 const sapAgent = fs.existsSync(certPath)
@@ -402,7 +403,14 @@ const COMBINED_COST_INBOUND = `
     WHERE sc.poShipmentID IS NOT NULL`;
 const COMBINED_COST = `(${COMBINED_COST_OUTBOUND} UNION ALL ${COMBINED_COST_INBOUND}) cc`;
 
-router.get('/analytics', async (req, res) => {
+// Freight Spend Analytics — read-only dashboard, moved into the Logistics
+// page's Reports section (see sql/migrate_log_reports_permission.sql).
+// Gated on any of LOG_ADMIN/LOG_MRP/LOG_REPORTS: LOG_ADMIN already had this
+// (it lived under the old Admin section), LOG_MRP is included so the tile's
+// shared Reports section (which Stock Value Overview/by Price also sit in,
+// those being LOG_MRP-gated) doesn't show a tile that then 403s on click,
+// and LOG_REPORTS is the new report-only path in.
+router.get('/analytics', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
     try {
         const pool   = await getPool();
         const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 60);

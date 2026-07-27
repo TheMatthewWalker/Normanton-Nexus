@@ -205,28 +205,6 @@
             <div class="tile-desc">Full material list &mdash; stock, valuation class, turns and days-in-stock, filterable</div>
           </div>
 
-          <div class="sap-tile sap-tile--live" data-fn="turnsValClassSummary">
-            <div class="tile-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21.21 15.89A10 10 0 118 2.83"/><path d="M22 12A10 10 0 0012 2v10z"/>
-              </svg>
-            </div>
-            <span class="tile-badge tile-badge--live">LIVE</span>
-            <div class="tile-title">Stock Value Overview</div>
-            <div class="tile-desc">Aggregate stock &amp; book value by turnover category, valuation class and material type</div>
-          </div>
-
-          <div class="sap-tile sap-tile--live" data-fn="stockValueByPrice">
-            <div class="tile-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
-              </svg>
-            </div>
-            <span class="tile-badge tile-badge--live">LIVE</span>
-            <div class="tile-title">Stock Value by Price</div>
-            <div class="tile-desc">Breakdown of stock value across unit-price bands</div>
-          </div>
-
           <div class="sap-tile sap-tile--live" data-fn="changeValuationClass">
             <div class="tile-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -263,9 +241,14 @@
         </div>
       </div>
 
-      <!-- Admin — LOG_ADMIN -->
-      <div class="pn-section" data-permission="LOG_ADMIN">
-        <div class="pn-section-hdr">Admin</div>
+      <!-- Reports — read-only dashboards, gated on LOG_ADMIN/LOG_MRP/
+           LOG_REPORTS so LOG_ADMIN and LOG_MRP holders keep exactly the
+           access they had before this section existed (see
+           sql/migrate_log_reports_permission.sql), and LOG_REPORTS is a
+           new, narrower way in for someone who should see reports but not
+           change data. -->
+      <div class="pn-section" data-permission="LOG_ADMIN,LOG_MRP,LOG_REPORTS">
+        <div class="pn-section-hdr">Reports</div>
         <div class="tile-grid">
 
           <div class="sap-tile sap-tile--live" data-fn="freightSpend">
@@ -274,7 +257,7 @@
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
               </svg>
             </div>
-            <span class="tile-badge tile-badge--live" style="background:rgba(217,119,6,0.12);color:#D97706;border-color:rgba(217,119,6,0.3)">ADMIN</span>
+            <span class="tile-badge tile-badge--live" style="background:rgba(37,99,235,0.12);color:#2563EB;border-color:rgba(37,99,235,0.3)">REPORT</span>
             <div class="tile-title">Freight Spend</div>
             <div class="tile-desc">Analytics dashboard — spend by forwarder, country, month and direction</div>
           </div>
@@ -285,10 +268,40 @@
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
             </div>
-            <span class="tile-badge tile-badge--live" style="background:rgba(217,119,6,0.12);color:#D97706;border-color:rgba(217,119,6,0.3)">ADMIN</span>
+            <span class="tile-badge tile-badge--live" style="background:rgba(37,99,235,0.12);color:#2563EB;border-color:rgba(37,99,235,0.3)">REPORT</span>
             <div class="tile-title">Haulier On-Time Performance</div>
             <div class="tile-desc">Planned vs actual delivery — by haulier, country, destination and month</div>
           </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="turnsValClassSummary">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.21 15.89A10 10 0 118 2.83"/><path d="M22 12A10 10 0 0012 2v10z"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live" style="background:rgba(37,99,235,0.12);color:#2563EB;border-color:rgba(37,99,235,0.3)">REPORT</span>
+            <div class="tile-title">Stock Value Overview</div>
+            <div class="tile-desc">Aggregate stock &amp; book value by turnover category, valuation class and material type</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="stockValueByPrice">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live" style="background:rgba(37,99,235,0.12);color:#2563EB;border-color:rgba(37,99,235,0.3)">REPORT</span>
+            <div class="tile-title">Stock Value by Price</div>
+            <div class="tile-desc">Breakdown of stock value across unit-price bands</div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Admin — LOG_ADMIN -->
+      <div class="pn-section" data-permission="LOG_ADMIN">
+        <div class="pn-section-hdr">Admin</div>
+        <div class="tile-grid">
 
           <div class="sap-tile sap-tile--live" data-fn="unprocessedCosts">
             <div class="tile-icon">

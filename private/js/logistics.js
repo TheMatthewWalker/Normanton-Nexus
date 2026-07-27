@@ -88,10 +88,16 @@ const SHIPMENT_VIEWS = {
   setupTiles();
 })();
 
+// data-permission accepts a comma-separated list, meaning "any of these" —
+// used by the Reports section (LOG_ADMIN,LOG_MRP,LOG_REPORTS: see
+// sql/migrate_log_reports_permission.sql) so it stays visible to everyone
+// who already had access to its tiles under their old section names, with
+// LOG_REPORTS as the new report-only way in. A single code still works
+// exactly as before.
 function applyPermissionVisibility() {
   document.querySelectorAll('[data-permission]').forEach(el => {
-    const code    = el.dataset.permission;
-    const allowed = sessionRole === 'superadmin' || userPermissions.includes(code);
+    const codes   = el.dataset.permission.split(',').map(c => c.trim()).filter(Boolean);
+    const allowed = sessionRole === 'superadmin' || codes.some(code => userPermissions.includes(code));
     el.style.display = allowed ? '' : 'none';
   });
 }
@@ -5525,7 +5531,13 @@ async function runTurnsValClassTable() {
 // ── Tile 2: aggregate KPIs + breakdown charts ────────────────────────────────
 async function runTurnsValClassSummary() {
   showResultPanel('Stock Value Overview', 'Aggregate stock & book value by turnover category, valuation class and material type');
-  document.getElementById('btn-refresh-turnsvalclass').classList.remove('hidden');
+  // Viewing this tile no longer requires LOG_MRP (see
+  // sql/migrate_log_reports_permission.sql — it's LOG_ADMIN/LOG_MRP/
+  // LOG_REPORTS now), but the manual-refresh action underneath it still
+  // does (POST /turns-valclass/refresh pulls live SAP data). A LOG_REPORTS-
+  // only viewer would get a 403 clicking this, so it's hidden for them.
+  const canRefresh = sessionRole === 'superadmin' || userPermissions.includes('LOG_MRP');
+  document.getElementById('btn-refresh-turnsvalclass').classList.toggle('hidden', !canRefresh);
   await loadTurnsValClassSummaryBody();
 }
 

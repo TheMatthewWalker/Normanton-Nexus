@@ -8,7 +8,7 @@ import net from 'net';
 import tls from 'tls';
 import { sqlConfig, stampDbChange } from '../config.js';
 
-import { requirePermission } from '../middleware/auth.js';
+import { requirePermission, requireAnyPermission } from '../middleware/auth.js';
 import { lookupModeOfTransport } from './forwardermodemapping.js';
 import e from 'express';
 
@@ -1653,7 +1653,13 @@ const OTIF_INBOUND = `
       AND ps.CancelledAtUtc IS NULL`;
 const OTIF_COMBINED = `(${OTIF_OUTBOUND} UNION ALL ${OTIF_INBOUND}) o`;
 
-router.get('/otif-report', async (req, res) => {
+// Read-only dashboard, moved into the Logistics page's Reports section (see
+// sql/migrate_log_reports_permission.sql) — same LOG_ADMIN/LOG_MRP/
+// LOG_REPORTS gate as shipmentcost.js's /analytics, for the same reason
+// (shared Reports section, Stock Value Overview/by Price sit alongside this
+// and are LOG_MRP-gated, so this needs to accept LOG_MRP too or a LOG_MRP-
+// only viewer would see a tile here that 403s on click).
+router.get('/otif-report', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
   try {
     const pool   = await getPool();
     const months = Math.min(Math.max(Number(req.query.months) || 12, 1), 60);

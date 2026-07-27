@@ -8,7 +8,7 @@ import * as db  from './performancesql.js';
 import sql from 'mssql';
 import ExcelJS from 'exceljs';
 import { sqlConfig, auditQuery } from '../config.js';
-import { requirePermission, requireSessionOrApiToken } from '../middleware/auth.js';
+import { requirePermission, requireAnyPermission, requireSessionOrApiToken } from '../middleware/auth.js';
 import { insertInboundCostLine } from './inboundcosts.js';
 
 async function getPool() {
@@ -1954,7 +1954,14 @@ router.get('/turns-valclass', requirePermission('LOG_MRP'), async (req, res) => 
 });
 
 // ── Aggregate / KPI tile ─────────────────────────────────────────────────────
-router.get('/turns-valclass/aggregates', requirePermission('LOG_MRP'), async (req, res) => {
+// Stock Value Overview — moved from Material Planning into the Logistics
+// page's Reports section (see sql/migrate_log_reports_permission.sql).
+// Widened from LOG_MRP-only to also accept LOG_ADMIN/LOG_REPORTS: the
+// Reports section is shared with Freight Spend/Haulier OTIF (LOG_ADMIN-
+// gated) so all four tiles in that section need the same permission set,
+// and LOG_REPORTS is the new report-only path in. LOG_MRP holders keep
+// exactly the access they already had.
+router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
   try {
     const pool = await getPool();
 
@@ -2005,7 +2012,9 @@ router.get('/turns-valclass/aggregates', requirePermission('LOG_MRP'), async (re
 });
 
 // ── Stock value breakdown by unit price band ────────────────────────────────
-router.get('/turns-valclass/value-by-price', requirePermission('LOG_MRP'), async (req, res) => {
+// Stock Value by Price — same move/widening as /turns-valclass/aggregates
+// directly above (see its comment).
+router.get('/turns-valclass/value-by-price', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
   try {
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
