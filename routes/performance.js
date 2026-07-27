@@ -1333,10 +1333,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const dataRiskQtyRange               = `'Data'!$${riskQtyCol}:$${riskQtyCol}`;
     const dataRiskValueRange             = `'Data'!$${riskValueCol}:$${riskValueCol}`;
 
-    // Bounded (not full-column) ranges for the two array-style formulas below
-    // (At-Risk Lines list, Value-by-Hour table) — SUMPRODUCT/TEXTJOIN over a
-    // full column is needlessly slow, so these are capped generously past the
-    // current row count to leave room for rows added later.
+    // Bounded (not full-column) ranges, capped generously past the current
+    // row count to leave room for rows added later. Some of these (the "B"
+    // suffix ranges below) were originally shared with the now-removed
+    // Value-by-Hour table and are unused elsewhere; left in place as they're
+    // harmless and may be useful again if a hour-level view is rebuilt.
     const maxDataRow = Math.max(2000, rows.length + 500);
     const b = (col) => `'Data'!$${col}$2:$${col}$${maxDataRow}`;
     const dataStreamRangeB      = b(valueStreamCol);
@@ -1357,14 +1358,12 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const invoicedPlusPicked = invoicedToDate + pickedTotalPtfe;
     const invoicedPlusStock  = invoicedPlusPicked + stockTotalPtfe;
 
-    // 12 columns instead of the old 6 — landscape layout, three cards per
-    // row rather than one long single-column stack, so the sheet uses
-    // screen width instead of forcing everything into one narrow strip.
-    // Each card still spans 4 columns at width 24 (=96 units), identical
-    // total width to the old 6-columns-at-16 single card, so text wrapping
-    // per card is unchanged — the fix for clipped description text is the
-    // explicit taller row heights below, not extra width.
-    dashboardWs.columns = Array.from({ length: 12 }, (_, i) => ({ key: String.fromCharCode(97 + i), width: 24 }));
+    // 16 columns (A:P) — 12 for the main value-card grid plus 4 (M:P) for a
+    // dedicated risk section to the right of it. Width dropped from 24 to 15
+    // per request to shrink the cards down (Excel showed 24 as ~23.29 once
+    // opened — the exact number doesn't map 1:1 to the ExcelJS setting due
+    // to font-width rounding, but this is a straightforward reduction).
+    dashboardWs.columns = Array.from({ length: 16 }, (_, i) => ({ key: String.fromCharCode(97 + i), width: 15 }));
 
     const titleFill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
     const titleFont      = { name: 'Arial', bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
@@ -1401,21 +1400,23 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     });
 
     dashboardWs.getRow(1).height = 30;
-    setMergedCell('A1:L1', 'PTFE Order Book Dashboard', titleFont, titleFill);
+    setMergedCell('A1:P1', 'PTFE Order Book Dashboard', titleFont, titleFill);
     dashboardWs.getRow(2).height = 20;
-    setMergedCell('A2:L2', `${modeLabel} — generated ${generatedAt}`, subFont, null);
+    setMergedCell('A2:P2', `${modeLabel} — generated ${generatedAt}`, subFont, null);
 
-    // ── Card grid — 3 rows x 3 cards, each card 4 columns wide ──────────────
-    // Column groups: A:D, E:H, I:L. Row groups: label / value / description /
-    // spacer, 4 rows per card row. Card 1's value cell is deliberately kept
-    // at A5 (unchanged from the old layout) since a good number of other
-    // formulas below reference it as an absolute anchor ($A$5); Card 4's
-    // value cell moved from the old $A$17 to $A$9 here, so Final Day Total
-    // and the hour-by-hour cumulative column reference $A$9 now instead.
-    // Description rows are 60px tall (vs. the old ~15px default) so wrapped
-    // 3-4 line text isn't clipped — Excel doesn't auto-size row height for
-    // wrapped merged cells, so this has to be set explicitly.
-    const colGroups = [['A', 'D'], ['E', 'H'], ['I', 'L']];
+    // ── Card grid — 3 rows x 3 value cards (A:L) plus a risk section to the
+    // right (M:P) ────────────────────────────────────────────────────────
+    // Column groups: A:D, E:H, I:L for the main value cards, M:P for the two
+    // risk-styled cards (Confirmed Not Getting, Value at Risk — Shortfall),
+    // kept visually and structurally separate from the "good news" totals.
+    // Row groups: label / value / description / spacer, 4 rows per card row.
+    // Card 1's value cell is deliberately kept at A5 (unchanged from the old
+    // layout) since a good number of other formulas below reference it as an
+    // absolute anchor ($A$5). Description rows are 60px tall (vs. the old
+    // ~15px default) so wrapped 3-4 line text isn't clipped — Excel doesn't
+    // auto-size row height for wrapped merged cells, so this has to be set
+    // explicitly.
+    const colGroups = [['A', 'D'], ['E', 'H'], ['I', 'L'], ['M', 'P']];
     const gridRowStarts = [4, 8, 12]; // label row of each of the 3 card rows
 
     function placeCard(rowIdx, colIdx, { label, value, numFmt, desc, risk }) {
@@ -1463,13 +1464,28 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       desc: 'Full month-end prediction: invoiced + stock not flagged at risk or Won\'t Get on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.'
     });
 
-    // Row 2 of the grid — Expected to Invoice, Final Day Total, and the new
-    // calculated shortfall risk card (replaces the old manual-flag "Value
-    // at Risk" card entirely — that concept is superseded by this one).
+    // Confirmed Not Getting — top of the risk section (M:P), aligned with
+    // row 1 of the main grid. Deliberately kept apart from the value cards:
+    // this is a confirmed miss, not a maybe, so it's tracked on its own so
+    // it never gets conflated with the shortfall card below it.
+    placeCard(0, 3, {
+      label: 'CONFIRMED NOT GETTING (PTFE)',
+      value: { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataWontGetRange},"x")`, result: 0 },
+      numFmt: '#,##0.00',
+      desc: {
+        formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataWontGetRange},"x")&" line(s) confirmed not getting. Excluded from Invoiced + Potential Stock, Invoiced + Expected to Invoice and Final Day Total. Filter the Won't Get column on the Data tab for detail."`,
+        result: '0 line(s) confirmed not getting.'
+      },
+      risk: true
+    });
+
+    // Row 2 of the main grid — Expected to Invoice, Final Day Total and
+    // Value Due (Last Day) — swapped in from its old row-3 slot so the risk
+    // shortfall card below can move out to the risk section on the right.
     // Excludes rows flagged Last Day = "x" (tracked separately in Final Day
-    // Total and the hour-by-hour table) and Risk = "x" (belt-and-braces
-    // alongside Expected to Invoice Qty/Value themselves, which should
-    // already be reduced to reflect a known shortfall).
+    // Total) and Risk = "x" (belt-and-braces alongside Expected to Invoice
+    // Qty/Value themselves, which should already be reduced to reflect a
+    // known shortfall).
     const plannedCellAddr = placeCard(1, 0, {
       label: 'INVOICED + EXPECTED TO INVOICE (PTFE)',
       value: {
@@ -1487,16 +1503,29 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         result: 0
       },
       numFmt: '#,##0.00',
-      desc: 'Invoiced + Expected to Invoice (left) plus the Expected to Invoice Value of everything flagged Last Day but NOT Won\'t Get — see the hour-by-hour breakdown below for when it lands.'
+      desc: 'Invoiced + Expected to Invoice (left) plus the Expected to Invoice Value of everything flagged Last Day but NOT Won\'t Get.'
     });
 
-    // Value at Risk — Shortfall. Calculated, not a manual flag: SUM(Risk
+    placeCard(1, 2, {
+      label: 'VALUE DUE (PTFE) — LAST DAY',
+      value: { formula: `SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
+      numFmt: '#,##0.00',
+      desc: {
+        formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataLastDayRange},"x")&" item(s) due. What product, value and time is coming through on the last day of the month — filter the Data tab by Last Day for detail."`,
+        result: '0 item(s) due.'
+      }
+    });
+
+    // Value at Risk — Shortfall — bottom of the risk section (M:P), aligned
+    // with row 2 of the main grid. Calculated, not a manual flag: SUM(Risk
     // Value) on the Data tab, where Risk Value = MAX(Order Qty - Expected
     // to Invoice Qty, 0) priced at the order's unit value — the £ value of
     // whatever we now expect to fall short of the order. This is the only
     // "value at risk" card on the dashboard now; the old manual Risk="x"
-    // flag card has been removed rather than kept alongside it.
-    placeCard(1, 2, {
+    // flag card has been removed rather than kept alongside it. Swapped out
+    // of the main grid's row-2 slot (now Value Due — Last Day) and into
+    // this dedicated risk section, next to Confirmed Not Getting above.
+    placeCard(1, 3, {
       label: 'VALUE AT RISK — SHORTFALL (PTFE)',
       value: { formula: `SUMIFS(${dataRiskValueRange},${dataStreamRange},"PTFE")`, result: 0 },
       numFmt: '#,##0.00',
@@ -1507,32 +1536,9 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       risk: true
     });
 
-    // Row 3 of the grid — exclusions/detail. Won't Get is deliberately
-    // separate from the Risk shortfall card above: this is a confirmed
-    // miss, not a maybe, so it's tracked on its own so the two never get
-    // conflated when someone's reading the dashboard quickly.
-    placeCard(2, 0, {
-      label: 'CONFIRMED NOT GETTING (PTFE)',
-      value: { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataWontGetRange},"x")`, result: 0 },
-      numFmt: '#,##0.00',
-      desc: {
-        formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataWontGetRange},"x")&" line(s) confirmed not getting. Excluded from Invoiced + Potential Stock, Invoiced + Expected to Invoice and Final Day Total above. Filter the Won't Get column on the Data tab for detail."`,
-        result: '0 line(s) confirmed not getting.'
-      },
-      risk: true
-    });
-
-    placeCard(2, 1, {
-      label: 'VALUE DUE (PTFE) — LAST DAY',
-      value: { formula: `SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
-      numFmt: '#,##0.00',
-      desc: {
-        formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataLastDayRange},"x")&" item(s) due. What product, value and time is coming through on the last day of the month — filter the Data tab by Last Day for detail."`,
-        result: '0 item(s) due.'
-      }
-    });
-
-    // Bring Forward Value is a calculated column now (= Stock Value, not a
+    // Row 3 of the main grid — just Bring Forward now that Confirmed Not
+    // Getting and Value at Risk — Shortfall have moved to the risk section.
+    // Bring Forward Value is a calculated column (= Stock Value, not a
     // manual "x" flag — see the Next Month tab), so this totals the whole
     // column rather than SUMIF-ing a flag, and counts rows with any stock
     // instead of counting flagged rows. Only meaningful for a Month End
@@ -1542,7 +1548,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       const nextMonthBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
       nextMonthBringForwardRange = `'Next Month'!$${nextMonthBringForwardCol}:$${nextMonthBringForwardCol}`;
     }
-    placeCard(2, 2, {
+    placeCard(2, 0, {
       label: 'VALUE AVAILABLE TO BRING FORWARD (NEXT MONTH)',
       value: nextMonthBringForwardRange
         ? { formula: `SUM(${nextMonthBringForwardRange})`, result: 0 }
@@ -1564,11 +1570,12 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // INDEX/MATCH against the hidden "At Risk Seq" helper column on the Data
     // tab, not TEXTJOIN/dynamic arrays, so it evaluates correctly on any
     // Excel version (2007 and up), not just 365/2021+. Shows each line's
-    // Risk Value (the calculated shortfall), not Stock Value — consistent
-    // with the Value at Risk — Shortfall card above.
-    setMergedCell('A16:L16', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
+    // Risk Value (the calculated shortfall), rounded to the nearest whole
+    // pound so the figure reads cleanly at a glance — not Stock Value,
+    // consistent with the Value at Risk — Shortfall card above.
+    setMergedCell('A16:P16', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
     setMergedCell(
-      'A17:L17',
+      'A17:P17',
       { text: 'Open the Data tab and use the Risk column filter arrow to show every flagged row', hyperlink: "#'Data'!A1" },
       { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
       null,
@@ -1581,98 +1588,24 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       const r = atRiskListStartRow + idx;
       const n = idx + 1;
       dashboardWs.getRow(r).height = 16;
-      dashboardWs.mergeCells(`A${r}:L${r}`);
+      dashboardWs.mergeCells(`A${r}:P${r}`);
       const cell = dashboardWs.getCell(`A${r}`);
       cell.value = {
-        formula: `IFERROR(INDEX(Data!$${materialCol}:$${materialCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | Order "&INDEX(Data!$${referenceDocumentCol}:$${referenceDocumentCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | £"&TEXT(INDEX(Data!$${riskValueCol}:$${riskValueCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0)),"#,##0.00")&" at risk","")`,
+        formula: `IFERROR(INDEX(Data!$${materialCol}:$${materialCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | Order "&INDEX(Data!$${referenceDocumentCol}:$${referenceDocumentCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | £"&TEXT(INDEX(Data!$${riskValueCol}:$${riskValueCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0)),"#,##0")&" at risk","")`,
         result: ''
       };
       cell.font = { name: 'Arial', size: 9, color: { argb: 'FF444444' } };
       cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
     }
     setMergedCell(
-      `A${atRiskListStartRow + atRiskListCount}:L${atRiskListStartRow + atRiskListCount}`,
+      `A${atRiskListStartRow + atRiskListCount}:P${atRiskListStartRow + atRiskListCount}`,
       `Shows the first ${atRiskListCount} flagged lines, in the order they appear on the Data tab — works on every Excel version. More than ${atRiskListCount}? Use the link above for the full list. Blank rows above just mean fewer than ${atRiskListCount} are flagged.`,
       cardDescFont, null
     );
 
-    // ── Value-by-hour for Last Day items — full width ───────────────────────
-    // Sourced from Expected to Invoice Value — that's the "expected
-    // production" figure, not Stock Value, since Last Day items are
-    // typically not made yet. ExcelJS can't create native embedded chart
-    // objects (no chart API), so this pairs a live SUMPRODUCT column with
-    // Excel's built-in Data Bar conditional formatting for an automatic
-    // in-cell visual. Rows with Last Day = "x" but no parseable Last Day
-    // Time default into the Hour 0 bucket rather than being dropped.
-    const hourSectionRow = atRiskListStartRow + atRiskListCount + 2; // 30
-    setMergedCell(`A${hourSectionRow}:L${hourSectionRow}`, 'LAST DAY — EXPECTED VALUE BY HOUR (PTFE)', cardLabelFont, cardLabelFill);
-
-    const hourHeaderRow = hourSectionRow + 1; // 31
-    dashboardWs.getCell(`A${hourHeaderRow}`).value = 'Hour';
-    dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Expected Value (Expected to Invoice)';
-    dashboardWs.getCell(`G${hourHeaderRow}`).value = 'Cumulative Invoiced Total';
-    [`A${hourHeaderRow}`, `B${hourHeaderRow}`, `G${hourHeaderRow}`].forEach(ref => {
-      const cell = dashboardWs.getCell(ref);
-      cell.font = cardLabelFont;
-      cell.fill = cardLabelFill;
-      cell.alignment = { horizontal: 'center', wrapText: true };
-    });
-    dashboardWs.mergeCells(`B${hourHeaderRow}:F${hourHeaderRow}`);
-    dashboardWs.mergeCells(`G${hourHeaderRow}:L${hourHeaderRow}`);
-
-    const firstHourRow = hourHeaderRow + 1;
-    const lastHourRow = firstHourRow + 23;
-
-    for (let hour = 0; hour <= 23; hour++) {
-      const r = firstHourRow + hour;
-      dashboardWs.getCell(`A${r}`).value = hour;
-      dashboardWs.getCell(`A${r}`).alignment = { horizontal: 'center' };
-
-      // Hour extraction is done with TEXT/LEFT/FIND rather than HOUR() —
-      // HOUR() only works reliably on a genuine Excel time value, but Last
-      // Day Time is free text (so planners can write "TBC" etc.), and text
-      // typed or pasted in isn't always auto-converted to a real time by
-      // Excel. TEXT(cell,"hh:mm") normalises a real time value to a 2-digit
-      // "hh:mm" string but passes plain text straight through unchanged, so
-      // this reads the hour correctly whether the cell holds a true Excel
-      // time (e.g. from typing "15:00" and Excel auto-converting it) or
-      // plain text (e.g. "9:00", "15:00", pasted rather than typed).
-      // Defaults an unparseable/blank Last Day Time to hour 0 (per request).
-      const hourExpr = `LEFT(TEXT(${dataLastDayTimeRangeB},"hh:mm"),FIND(":",TEXT(${dataLastDayTimeRangeB},"hh:mm"))-1)`;
-      dashboardWs.mergeCells(`B${r}:F${r}`);
-      const valueCell = dashboardWs.getCell(`B${r}`);
-      valueCell.value = {
-        formula: `SUMPRODUCT((${dataStreamRangeB}="PTFE")*(${dataLastDayRangeB}="x")*(IFERROR(VALUE(${hourExpr}),0)=A${r})*${dataPlannedValueRangeB})`,
-        result: 0
-      };
-      valueCell.numFmt = '#,##0.00';
-
-      dashboardWs.mergeCells(`G${r}:L${r}`);
-      const cumulativeCell = dashboardWs.getCell(`G${r}`);
-      cumulativeCell.value = {
-        formula: `$${plannedCellAddr}+SUM($B$${firstHourRow}:B${r})`,
-        result: 0
-      };
-      cumulativeCell.numFmt = '#,##0.00';
-      cumulativeCell.font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF1F3864' } };
-    }
-
-    dashboardWs.addConditionalFormatting({
-      ref: `B${firstHourRow}:B${lastHourRow}`,
-      rules: [{
-        type: 'dataBar',
-        cfvo: [{ type: 'min' }, { type: 'max' }],
-        color: { argb: 'FF638EC6' },
-        priority: 1
-      }]
-    });
-
-    const hourTableCaptionRow = lastHourRow + 1;
-    setMergedCell(
-      `A${hourTableCaptionRow}:L${hourTableCaptionRow}`,
-      `Data bars approximate a value-by-hour chart — this export can't embed a native Excel chart object. For a full axis chart, select A${hourHeaderRow}:F${lastHourRow} and Insert > Chart. Blank/unrecognised Last Day Time defaults to the Hour 0 row.`,
-      cardDescFont, null
-    );
+    // Value-by-hour table removed per request (wasn't working reliably).
+    // Value Due (PTFE) — Last Day, in the main grid above, still surfaces
+    // the total due on the last day; the hour-level breakdown is gone.
 
     // Landscape print orientation, fit to page width — matches the wide grid
     // layout above so a printed copy doesn't get sliced into narrow strips.
