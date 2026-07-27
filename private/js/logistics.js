@@ -21,6 +21,7 @@ let selectedCollectionIds = new Set();
 let selectedInTransitIds = new Set();
 let trackedRows = [];
 let selectedTrackedIds = new Set();
+let trackedSearchQuery = '';
 let inboundShipmentRows = [];
 let latestShipment = null;
 let currentShipmentView = null;
@@ -7493,10 +7494,48 @@ function osEffectiveDueDate(t) {
   return d ? new Date(d).getTime() : Infinity;
 }
 
+// Live client-side filter — no server round trip, since the full tracked
+// list is already in memory. Matches on Material (part number), MaterialText
+// (description, so a partial name still finds the right part), or PoNumber.
+function osMatchesSearch(t, query) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return String(t.Material || '').toLowerCase().includes(needle)
+    || String(t.MaterialText || '').toLowerCase().includes(needle)
+    || String(t.PoNumber || '').toLowerCase().includes(needle);
+}
+
+// Re-applies the search box's current value and re-renders. Called on every
+// keystroke (oninput) — filtering is over in-memory data so this is cheap,
+// but the re-render replaces #result-body's innerHTML wholesale, which would
+// normally drop focus out of the search input on every character. Captures
+// and restores focus + caret position around the render to keep typing feel
+// uninterrupted.
+function osApplySearch() {
+  const input = document.getElementById('os-search-input');
+  trackedSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  osRenderTrackedList(trackedRows);
+  const newInput = document.getElementById('os-search-input');
+  if (newInput) {
+    newInput.focus();
+    if (caret != null) newInput.setSelectionRange(caret, caret);
+  }
+}
+
 function osRenderTrackedList(tracked) {
   trackedRows = tracked;
   selectedTrackedIds = new Set();
-  document.getElementById('result-row-badge').textContent = `${tracked.length} tracked`;
+
+  const query = trackedSearchQuery.trim();
+  // Filtering happens over the full set, but trackedRows above always keeps
+  // everything — search only changes what's rendered/wired up below, not
+  // what's held in memory for save/edit operations on rows still on screen.
+  const rows = query ? tracked.filter(t => osMatchesSearch(t, query)) : tracked;
+
+  document.getElementById('result-row-badge').textContent = query
+    ? `${rows.length} of ${tracked.length} matching`
+    : `${tracked.length} tracked`;
   document.getElementById('result-row-badge').classList.remove('hidden');
 
   const renderTrackedRow = (t) => {
@@ -7564,30 +7603,34 @@ function osRenderTrackedList(tracked) {
   // save-triggered re-render — see those functions' comment for why this
   // exists. Keyed on bucket + vendor name rather than array index, since
   // index isn't stable once rows move between buckets after a status change.
-  const renderSupplierGroup = (bucketKey, name, rows) => `<div class="ps-section ps-section--collapsed ps-section--nested" data-group-key="${esc(bucketKey)}::${esc(name)}">
+  // While a search is active, groups render already expanded (collapsedCls
+  // below) — the point of searching is to surface matches immediately, not
+  // make the user open every bucket/supplier to find them.
+  const collapsedCls = query ? '' : ' ps-section--collapsed';
+  const renderSupplierGroup = (bucketKey, name, groupRows) => `<div class="ps-section${collapsedCls} ps-section--nested" data-group-key="${esc(bucketKey)}::${esc(name)}">
     <div class="ps-section-header">
       <span class="ps-section-dot ps-section-dot--other"></span>
       <span class="ps-section-title">${esc(name)}</span>
-      <span class="ps-section-count">${rows.length}</span>
+      <span class="ps-section-count">${groupRows.length}</span>
       <span class="ps-chevron">v</span>
     </div>
     <div class="ps-section-body">
-      <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${rows.map(renderTrackedRow).join('')}</tbody></table></div>
+      <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${groupRows.map(renderTrackedRow).join('')}</tbody></table></div>
     </div>
   </div>`;
 
   const bucketSections = BUCKET_DEFS.map(bd => {
-    const bucketRows = tracked.filter(bd.match);
+    const bucketRows = rows.filter(bd.match);
     if (!bucketRows.length) return '';
     const byVendor = {};
     bucketRows.forEach(t => { const key = t.VendorName || 'Unknown Vendor'; (byVendor[key] = byVendor[key] || []).push(t); });
     // Sort each vendor's orders by the same due date shown in the Due Date
     // column (ready-to-collect date for spot POs, delivery date otherwise) —
     // earliest due first, no-date rows pushed to the end.
-    Object.values(byVendor).forEach(rows => rows.sort((a, b) => osEffectiveDueDate(a) - osEffectiveDueDate(b)));
+    Object.values(byVendor).forEach(groupRows => groupRows.sort((a, b) => osEffectiveDueDate(a) - osEffectiveDueDate(b)));
     const vendorGroups = Object.keys(byVendor).sort((a, b) => a.localeCompare(b))
       .map(name => renderSupplierGroup(bd.key, name, byVendor[name])).join('');
-    return `<div class="ps-section ps-section--collapsed" data-group-key="${esc(bd.key)}">
+    return `<div class="ps-section${collapsedCls}" data-group-key="${esc(bd.key)}">
       <div class="ps-section-header">
         <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
         <span class="ps-section-title">${bd.label}</span>
@@ -7598,10 +7641,15 @@ function osRenderTrackedList(tracked) {
     </div>`;
   }).join('');
 
+  const emptyMessage = query
+    ? `No tracked orders match "${esc(query)}" — try a part number or PO number.`
+    : 'No accepted orders yet.';
+
   document.getElementById('result-body').innerHTML = `
     <div class="lg-actions">
       <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment, auto-ship, or save edits across several lines at once.</div></div>
       <div class="toolbar-spacer"></div>
+      <input class="tf-input" id="os-search-input" type="text" placeholder="Search by part number or PO…" value="${esc(trackedSearchQuery)}" oninput="osApplySearch()" style="max-width:240px">
       <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
       <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
@@ -7609,7 +7657,7 @@ function osRenderTrackedList(tracked) {
       <button type="button" class="btn-secondary" id="os-save-selected-btn" disabled>Save Selected</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
     </div>
-    ${tracked.length ? `<div class="ps-sections">${bucketSections}</div>` : '<div class="sap-empty">No accepted orders yet.</div>'}
+    ${rows.length ? `<div class="ps-sections">${bucketSections}</div>` : `<div class="sap-empty">${emptyMessage}</div>`}
   `;
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
@@ -7622,19 +7670,19 @@ function osRenderTrackedList(tracked) {
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
+      const t = rows.find(x => String(x.SuggestionId) === btn.dataset.id);
       if (t) osSaveTrackedStatus(t);
     });
   });
   document.querySelectorAll('.os-delete-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
+      const t = rows.find(x => String(x.SuggestionId) === btn.dataset.id);
       if (t) osDeleteTracked(t);
     });
   });
   document.querySelectorAll('.os-shipment-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const t = tracked.find(x => String(x.SuggestionId) === btn.dataset.id);
+      const t = rows.find(x => String(x.SuggestionId) === btn.dataset.id);
       if (t) openAssignShipmentModal(t);
     });
   });
