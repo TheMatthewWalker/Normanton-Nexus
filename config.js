@@ -76,6 +76,22 @@ export async function getProductionPool() {
   return _productionPool;
 }
 
+// ── Logistics database pool (separate DB, same SQL Server) ──────────────────
+let _logisticsPool = null;
+export async function getLogisticsPool() {
+  if (!_logisticsPool) {
+    _logisticsPool = new sql.ConnectionPool({
+      user:     config.sqlConfig.user,
+      password: config.sqlConfig.password,
+      server:   config.sqlConfig.server,
+      database: 'Logistics',
+      options:  { encrypt: false, trustServerCertificate: true },
+    });
+    await _logisticsPool.connect();
+  }
+  return _logisticsPool;
+}
+
 
 // ── Department page map — which HTML page requires which department ────────────
 export const DEPT_PAGE_MAP = {
@@ -148,6 +164,7 @@ export default {
     sqlConfig,
     sapConfig,
     getProductionPool,
+    getLogisticsPool,
     DEPT_PAGE_MAP,
     stampDbChange,
     isAdmin,
