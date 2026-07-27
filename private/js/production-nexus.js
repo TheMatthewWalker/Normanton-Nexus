@@ -1352,13 +1352,13 @@ async function runMeterProcessEntry(processCode) {
   document.getElementById('mp-mode-complete').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
   document.getElementById('mp-mode-complete').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
 
-  document.getElementById('mp-mode-new').addEventListener('click', () => runNewEntry(processCode, machines));
+  document.getElementById('mp-mode-new').addEventListener('click', () => runNewEntry(processCode, machines, reasons));
   document.getElementById('mp-mode-complete').addEventListener('click', () => runCompleteRun(processCode, machines, reasons));
 }
 
 // ── New Entry flow ────────────────────────────────────────────────────────────
 
-function runNewEntry(processCode, machines) {
+function runNewEntry(processCode, machines, reasons) {
   const state = { material: '', machineID: null, parentBatches: [] };
 
   const render = () => {
@@ -1461,20 +1461,34 @@ function runNewEntry(processCode, machines) {
           body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches }),
         });
         const d = json.data || {};
+        // Synthetic "open entry" row built entirely from what's already in
+        // hand (the draft response plus this form's own state/closure) —
+        // runCompleteWizard only ever reads RecordID/BatchRef/Material/
+        // MachineName off the entry it's given (see runCompleteRun's picker
+        // above, which passes it a real row from /open-entries the same
+        // shape), so there's no need to re-fetch anything to jump straight
+        // into completing the run that was just created.
+        const machineName = machines.find(m => m.MachineID === state.machineID)?.MachineName
+          || machines.find(m => m.MachineID === state.machineID)?.MachineCode
+          || null;
+        const newEntry = { RecordID: d.recordID, BatchRef: d.batchRef, Material: state.material, MachineName: machineName };
+
         document.getElementById('result-body').innerHTML = `
           <div style="padding:24px;max-width:480px">
             <div style="font-size:22px;color:var(--accent);margin-bottom:8px">✓</div>
             <div style="font-size:15px;font-weight:700;margin-bottom:4px">Entry saved</div>
             <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
-              Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete this run later using <strong>Complete Run</strong>.
+              Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete it now, or come back to it later using <strong>Complete Run</strong>.
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn-submit" id="ne-complete">&#9654; Complete This Run</button>
               <button class="btn-secondary" onclick="labelPrint('${processCode}',${d.recordID},this)">🖨 Print Label</button>
               <button class="btn-secondary" id="ne-another">New Entry</button>
-              <button class="btn-submit" id="ne-done">Done</button>
+              <button class="btn-secondary" id="ne-done">Done</button>
             </div>
           </div>`;
-        document.getElementById('ne-another').addEventListener('click', () => runNewEntry(processCode, machines));
+        document.getElementById('ne-complete').addEventListener('click', () => runCompleteWizard(processCode, newEntry, machines, reasons));
+        document.getElementById('ne-another').addEventListener('click', () => runNewEntry(processCode, machines, reasons));
         document.getElementById('ne-done').addEventListener('click', backToTiles);
       } catch (err) {
         msg.textContent = err.message;
