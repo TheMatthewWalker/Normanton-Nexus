@@ -1900,6 +1900,60 @@ router.post('/turns-valclass/refresh', requirePermission('LOG_MRP'), async (req,
   }
 });
 
+// ── Refresh status (last-run timestamp + any failures) ─────────────────────
+// Same dbo.RefreshLog table and same "no false confidence" pattern as the
+// Management page's /refresh-status (Stock/Agreements/Invoicing/Otif) —
+// scoped here to the two datasets this daily job writes: TurnsValClass and
+// ValuationClasses (see routes/performancesync.js runTurnsValClassRefresh).
+// If either dataset's most recent run failed, lastRefreshUtc comes back
+// null and the failures array is populated instead — the tile should show
+// the failure rather than a "last refreshed" date that no longer reflects
+// what's on screen. Gated the same as /aggregates so Reports-only viewers
+// can see it without needing LOG_MRP.
+router.get('/turns-valclass/refresh-status', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
+  try {
+    const datasets = ['TurnsValClass', 'ValuationClasses'];
+    const pool = await getPool();
+    const { recordset } = await pool.request().query(`
+      SELECT TOP 40 DatasetName, Status, CompletedAtUtc, ErrorMessage, RunId
+      FROM dbo.RefreshLog
+      WHERE DatasetName IN ('TurnsValClass', 'ValuationClasses')
+      ORDER BY RunId DESC
+    `);
+
+    const latest = {};
+    for (const row of recordset) {
+      if (!latest[row.DatasetName]) latest[row.DatasetName] = row;
+    }
+
+    const data = datasets.map(name => ({
+      name,
+      status: latest[name]?.Status || 'Missing',
+      completedAtUtc: latest[name]?.CompletedAtUtc || null,
+      errorMessage: latest[name]?.ErrorMessage || null
+    }));
+
+    const failures = data.filter(row => row.status !== 'Success');
+    const completedTimes = data
+      .filter(row => row.status === 'Success' && row.completedAtUtc)
+      .map(row => new Date(row.completedAtUtc).getTime())
+      .filter(time => !Number.isNaN(time));
+
+    res.json({
+      success: true,
+      data: {
+        lastRefreshUtc: failures.length || completedTimes.length !== datasets.length
+          ? null
+          : new Date(Math.max(...completedTimes)).toISOString(),
+        failures,
+        datasets: data
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // ── Full data table, with filtering ─────────────────────────────────────────
 // Query params (all optional): plant, valuationClass, mrpController,
 // materialType, profitCentre, search (matches Material or MaterialText).
@@ -1976,11 +2030,30 @@ router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG
       FROM dbo.TurnsValClassSnapshot
     `);
 
+    // Ordered chronologically by days-in-stock bucket (see TurnoverCategoryFor
+    // in SapServer/Helpers/PerformanceHelpers.cs for where these exact strings
+    // come from) rather than by value — a turnover trend is easier to read
+    // left-to-right by age than sorted tallest-bar-first. The three non-numeric
+    // states (no requirement to plan against, no stock, negative stock) go
+    // after the timescale buckets in that order; anything unrecognised falls
+    // in at the very end rather than being silently dropped.
     const byTurnoverCategory = await pool.request().query(`
       SELECT TurnoverCategory AS category, COUNT(*) AS materialCount, SUM(StockValue) AS stockValue
       FROM dbo.TurnsValClassSnapshot
       GROUP BY TurnoverCategory
-      ORDER BY stockValue DESC
+      ORDER BY CASE TurnoverCategory
+        WHEN '<10 days'                  THEN 1
+        WHEN '10 - 30 days'               THEN 2
+        WHEN '31 - 90 days'               THEN 3
+        WHEN '91 - 180 days'              THEN 4
+        WHEN '181 - 360 days'             THEN 5
+        WHEN 'More than 360 days'         THEN 6
+        WHEN 'No req. in turnover period' THEN 7
+        WHEN 'No requirement'             THEN 8
+        WHEN 'No stock'                   THEN 9
+        WHEN 'Neg. stock'                 THEN 10
+        ELSE 11
+      END
     `);
 
     const byValuationClass = await pool.request().query(`

@@ -172,6 +172,11 @@ function showResultPanel(title, hint) {
   tvcStatus.classList.add('hidden');
   tvcStatus.textContent = '';
   tvcStatus.classList.remove('tvc-refresh-status--ok', 'tvc-refresh-status--warn');
+  const tvcSummary = document.getElementById('turnsvalclass-refresh-summary');
+  tvcSummary.classList.add('hidden');
+  tvcSummary.textContent = '';
+  tvcSummary.title = '';
+  tvcSummary.classList.remove('tvc-refresh-status--ok', 'tvc-refresh-status--warn');
   document.getElementById('result-body').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
 }
 
@@ -5549,6 +5554,7 @@ async function runTurnsValClassSummary() {
 async function loadTurnsValClassSummaryBody() {
   destroyTurnsCharts();
   const body = document.getElementById('result-body');
+  loadTurnsValClassRefreshSummary();
 
   try {
     const resp = await fetch('/api/performance/turns-valclass/aggregates');
@@ -5647,13 +5653,70 @@ async function loadTurnsValClassSummaryBody() {
   }
 }
 
+// Persisted "Last Refreshed" indicator, backed by dbo.RefreshLog — same
+// table and "no false confidence" pattern as the Management page's refresh
+// summary (see renderRefreshSummary/loadRefreshStatus in management.js and
+// GET /turns-valclass/refresh-status in routes/performance.js), just scoped
+// to the two datasets the daily 05:45 job writes here (TurnsValClass,
+// ValuationClasses) and shown as a dd/mm/yyyy date rather than relative
+// time. Unlike the ephemeral "Refreshed HH:MM:SS" message below (which only
+// exists after a manual click, this browser session), this reflects the
+// real state of the scheduled data any time the tile is opened — including
+// by someone who never clicked Refresh Now. Deliberately doesn't show a
+// date at all if either dataset's most recent run failed; a stale-looking
+// success date next to charts that didn't actually update would be worse
+// than no date.
+async function loadTurnsValClassRefreshSummary() {
+  const el = document.getElementById('turnsvalclass-refresh-summary');
+  if (!el) return;
+  try {
+    const resp = await fetch('/api/performance/turns-valclass/refresh-status');
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load refresh status');
+    renderTurnsValClassRefreshSummary(json.data);
+  } catch (err) {
+    el.classList.remove('hidden', 'tvc-refresh-status--ok');
+    el.classList.add('tvc-refresh-status--warn');
+    el.title = '';
+    el.textContent = 'Refresh status unavailable';
+  }
+}
+
+function renderTurnsValClassRefreshSummary(data) {
+  const el = document.getElementById('turnsvalclass-refresh-summary');
+  if (!el) return;
+  el.classList.remove('hidden', 'tvc-refresh-status--ok', 'tvc-refresh-status--warn');
+
+  const failures = data?.failures || [];
+  if (failures.length) {
+    el.classList.add('tvc-refresh-status--warn');
+    el.title = failures
+      .map(f => `${f.name}: ${f.status}${f.errorMessage ? ' — ' + f.errorMessage : ''}`)
+      .join('\n');
+    el.textContent = `⚠ Refresh failed: ${failures.map(f => f.name).join(', ')}`;
+    return;
+  }
+
+  if (data?.lastRefreshUtc) {
+    el.classList.add('tvc-refresh-status--ok');
+    el.title = (data.datasets || []).map(d => `${d.name}: ${d.status}`).join('\n');
+    el.textContent = `Last Refreshed on ${formatDisplayDate(data.lastRefreshUtc)}`;
+    return;
+  }
+
+  el.title = '';
+  el.textContent = 'Refresh status unavailable';
+}
+
 // Manual trigger for the daily turns-valclass SAP pull (server.js's cron
 // only runs this at 05:45) — POST /api/performance/turns-valclass/refresh
 // already existed for this (see routes/performance.js), just wasn't wired
 // up to anything in the UI. Runs both sources (TurnsValClass,
 // ValuationClasses) and reports back per-source success/failure exactly
-// like the cron's own console log does, then reloads the summary body so
-// the KPIs/charts reflect whatever just got pulled.
+// like the cron's own console log does, then reloads the summary body —
+// which re-fetches the persisted refresh-status above — so both the
+// ephemeral click feedback and the "Last Refreshed" date reflect what just
+// happened.
 async function runTurnsValClassManualRefresh() {
   const btn    = document.getElementById('btn-refresh-turnsvalclass');
   const status = document.getElementById('turnsvalclass-refresh-status');
