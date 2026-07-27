@@ -999,6 +999,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       { header: 'Material',      key: 'material',          width: 16 },
       { header: 'Order Qty',     key: 'orderQty',          width: 14 },
       { header: 'Order Value',   key: 'orderValue',        width: 14 },
+      // +/-10% meters leeway SAP will accept as fulfilling an order without
+      // complaint — live formulas off Order Qty, see the leeway note further
+      // down near where these are populated.
+      { header: 'Min Ship Qty (-10%)', key: 'minShipQty',  width: 16 },
+      { header: 'Max Ship Qty (+10%)', key: 'maxShipQty',  width: 16 },
       { header: 'Stock Qty',     key: 'stockQty',          width: 14 },
       { header: 'Stock Value',   key: 'stockValue',        width: 14 },
       { header: 'Picked Qty',    key: 'pickedQty',         width: 14 },
@@ -1008,8 +1013,15 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       { header: 'Reason',        key: 'reason',            width: 34 },
       { header: 'Last Day',                key: 'lastDay',               width: 10 },
       { header: 'Last Day Time',           key: 'lastDayTime',           width: 14 },
-      { header: 'Planned Production Qty',  key: 'plannedProductionQty',  width: 16 },
-      { header: 'Planned Production Value',key: 'plannedProductionValue',width: 18 },
+      { header: 'Expected to Invoice Qty',  key: 'plannedProductionQty',  width: 18 },
+      { header: 'Expected to Invoice Value',key: 'plannedProductionValue',width: 20 },
+      // Calculated, not manual — the shortfall between what was ordered and
+      // what we now expect to invoice (Expected to Invoice Qty above), and
+      // its £ value. See the formulas further down for exactly how these are
+      // derived; this is "the risk" per the Month End dashboard card built
+      // from Risk Value below.
+      { header: 'Risk Qty',                key: 'riskQty',               width: 14 },
+      { header: 'Risk Value',              key: 'riskValue',             width: 14 },
       { header: 'At Risk Seq',             key: 'atRiskSeq',             width: 10 }
     ];
 
@@ -1040,6 +1052,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // OrderQty = 0.
     const orderQtyCol    = excelColumnLetter(dataWs.getColumn('orderQty').number);
     const orderValueCol  = excelColumnLetter(dataWs.getColumn('orderValue').number);
+    const minShipQtyCol  = excelColumnLetter(dataWs.getColumn('minShipQty').number);
+    const maxShipQtyCol  = excelColumnLetter(dataWs.getColumn('maxShipQty').number);
     const stockQtyCol    = excelColumnLetter(dataWs.getColumn('stockQty').number);
     const stockValueCol  = excelColumnLetter(dataWs.getColumn('stockValue').number);
     const pickedQtyCol   = excelColumnLetter(dataWs.getColumn('pickedQty').number);
@@ -1051,6 +1065,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const lastDayTimeCol          = excelColumnLetter(dataWs.getColumn('lastDayTime').number);
     const plannedProductionQtyCol = excelColumnLetter(dataWs.getColumn('plannedProductionQty').number);
     const plannedProductionValueCol = excelColumnLetter(dataWs.getColumn('plannedProductionValue').number);
+    const riskQtyCol             = excelColumnLetter(dataWs.getColumn('riskQty').number);
+    const riskValueCol           = excelColumnLetter(dataWs.getColumn('riskValue').number);
     const materialCol            = excelColumnLetter(dataWs.getColumn('material').number);
     const referenceDocumentCol   = excelColumnLetter(dataWs.getColumn('referenceDocument').number);
     const atRiskSeqCol           = excelColumnLetter(dataWs.getColumn('atRiskSeq').number);
@@ -1091,14 +1107,14 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         // dbo.OrderBookLineNotes.PlannedProductionQty) so a planner's
         // override survives a re-download instead of reverting to the
         // default every time; falls back to Order Qty when nothing's been
-        // uploaded yet — this way the Value-by-Hour "Planned" bucket and
-        // the Invoiced + Planned card start from what was actually ordered
-        // rather than what's physically in stock right now.
+        // uploaded yet — this way the Value-by-Hour "Expected" bucket and
+        // the Invoiced + Expected to Invoice card start from what was
+        // actually ordered rather than what's physically in stock right now.
         plannedProductionQty: notes.plannedProductionQty != null
           ? Number(notes.plannedProductionQty)
           : Number(r.OrderQty || 0)
-        // stockValue / pickedValue / plannedProductionValue / atRiskSeq set as
-        // formulas below.
+        // stockValue / pickedValue / plannedProductionValue / minShipQty /
+        // maxShipQty / riskQty / riskValue / atRiskSeq set as formulas below.
       });
 
       row.getCell('stockValue').value = {
@@ -1109,12 +1125,45 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         formula: `IF(${orderQtyCol}${excelRow}>0,${pickedQtyCol}${excelRow}*(${orderValueCol}${excelRow}/${orderQtyCol}${excelRow}),0)`,
         result: Number(r.PickedValue || 0)
       };
-      // Planned Production Value — same valuation formula as Stock/Picked Value,
-      // but driven off Planned Production Qty (defaults to Stock Qty above, so
-      // this starts out equal to Stock Value until a planner overtypes it).
+      // Expected to Invoice Value — same valuation formula as Stock/Picked
+      // Value, but driven off Expected to Invoice Qty (defaults to Order Qty
+      // above, so this starts out equal to full Order Value until a planner
+      // overtypes the Qty to reflect a known shortfall).
       row.getCell('plannedProductionValue').value = {
         formula: `IF(${orderQtyCol}${excelRow}>0,${plannedProductionQtyCol}${excelRow}*(${orderValueCol}${excelRow}/${orderQtyCol}${excelRow}),0)`,
         result: Number(r.StockValue || 0)
+      };
+      // Min/Max Ship Qty — the +/-10% metres leeway that applies to every
+      // order (SAP will accept a shipment anywhere in this range without it
+      // being treated as under/over-delivery), so a planner can see at a
+      // glance what could actually go out against this line.
+      row.getCell('minShipQty').value = {
+        formula: `${orderQtyCol}${excelRow}*0.9`,
+        result: Number(r.OrderQty || 0) * 0.9
+      };
+      row.getCell('maxShipQty').value = {
+        formula: `${orderQtyCol}${excelRow}*1.1`,
+        result: Number(r.OrderQty || 0) * 1.1
+      };
+      // Risk Qty / Risk Value — calculated, not manual: the shortfall
+      // between Order Qty and what we now expect to invoice (Expected to
+      // Invoice Qty), and that shortfall's £ value. Floored at zero so a
+      // line that's expected to over-deliver doesn't show a negative risk.
+      // By construction this is exactly Order Value minus Expected to
+      // Invoice Value, so it's already excluded from the Invoiced + Expected
+      // to Invoice dashboard card below — that card sums Expected to Invoice
+      // Value, which never includes the shortfall captured here.
+      row.getCell('riskQty').value = {
+        formula: `MAX(${orderQtyCol}${excelRow}-${plannedProductionQtyCol}${excelRow},0)`,
+        // Expected to Invoice Qty always starts equal to Order Qty at export
+        // time (see the default above), so the shortfall is 0 until a
+        // planner overtypes it — same "starts at zero" convention as the
+        // other Risk-driven cached results in this file.
+        result: 0
+      };
+      row.getCell('riskValue').value = {
+        formula: `IF(${orderQtyCol}${excelRow}>0,${riskQtyCol}${excelRow}*(${orderValueCol}${excelRow}/${orderQtyCol}${excelRow}),0)`,
+        result: 0
       };
       // Running count of PTFE rows flagged Risk = "x", in row order — the
       // Dashboard's At-Risk Lines list uses this with INDEX/MATCH to pull out
@@ -1178,10 +1227,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       row.getCell('plannedProductionQty').fill   = inputFill;
     });
 
-    ['orderQty', 'stockQty', 'pickedQty', 'plannedProductionQty'].forEach(key => {
+    ['orderQty', 'stockQty', 'pickedQty', 'plannedProductionQty', 'minShipQty', 'maxShipQty', 'riskQty'].forEach(key => {
       dataWs.getColumn(key).numFmt = '#,##0';
     });
-    ['orderValue', 'stockValue', 'pickedValue'].forEach(key => {
+    ['orderValue', 'stockValue', 'pickedValue', 'plannedProductionValue', 'riskValue'].forEach(key => {
       dataWs.getColumn(key).numFmt = '#,##0.00';
     });
 
@@ -1190,11 +1239,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
     // ── Next Month sheet (Month End export only) ────────────────────────────
     // PTFE orders due the calendar month after this one — a candidate pool
-    // to pull forward if the Data tab shows this month falling short. Bring
-    // Forward is the same "x" flag pattern as Risk/Last Day, and round-trips
-    // through the same notes upload as the Data tab (see
-    // dbo.OrderBookLineNotes.BringForward) — it's purely a planning flag,
-    // nothing in this app acts on it automatically.
+    // to pull forward if the Data tab shows this month falling short.
+    // Bring Forward Value used to be a manual "x" flag; it's now a live
+    // formula equal to Stock Value — what's already physically in stock for
+    // that order is what could realistically be brought forward, so the
+    // figure is calculated straight off Stock Qty rather than typed in.
+    // getOrderBookBreakdown() carries StockQty/StockValue for every row
+    // regardless of month, so this needs no extra query.
     let nextMonthWs = null;
     if (mode === 'monthEnd') {
       nextMonthWs = wb.addWorksheet('Next Month');
@@ -1206,7 +1257,9 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         { header: 'Material',      key: 'material',          width: 16 },
         { header: 'Order Qty',     key: 'orderQty',          width: 14 },
         { header: 'Order Value',   key: 'orderValue',        width: 14 },
-        { header: 'Bring Forward', key: 'bringForward',      width: 14 },
+        { header: 'Stock Qty',     key: 'stockQty',          width: 14 },
+        { header: 'Stock Value',   key: 'stockValue',        width: 14 },
+        { header: 'Bring Forward Value', key: 'bringForward', width: 18 },
       ];
 
       const nmHeaderRow = nextMonthWs.getRow(1);
@@ -1218,8 +1271,14 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         cell.border    = cellBorder;
       });
 
+      const nmOrderQtyCol   = excelColumnLetter(nextMonthWs.getColumn('orderQty').number);
+      const nmOrderValueCol = excelColumnLetter(nextMonthWs.getColumn('orderValue').number);
+      const nmStockQtyCol   = excelColumnLetter(nextMonthWs.getColumn('stockQty').number);
+      const nmStockValueCol = excelColumnLetter(nextMonthWs.getColumn('stockValue').number);
+      const nmBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
+
       nextMonthRows.forEach((r, i) => {
-        const notes = lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {};
+        const excelRow = i + 2;
 
         const row = nextMonthWs.addRow({
           customer: r.Customer,
@@ -1229,11 +1288,21 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
           material: r.Material,
           orderQty: Number(r.OrderQty || 0),
           orderValue: Number(r.OrderValue || 0),
-          bringForward: notes.bringForward || '',
+          stockQty: Number(r.StockQty || 0),
+          // stockValue / bringForward set as formulas below.
         });
 
-        row.getCell('bringForward').dataValidation = { type: 'list', allowBlank: true, formulae: ['"x"'] };
-        row.getCell('bringForward').alignment = { horizontal: 'center' };
+        row.getCell('stockValue').value = {
+          formula: `IF(${nmOrderQtyCol}${excelRow}>0,${nmStockQtyCol}${excelRow}*(${nmOrderValueCol}${excelRow}/${nmOrderQtyCol}${excelRow}),0)`,
+          result: Number(r.StockValue || 0)
+        };
+        // Bring Forward Value — straight pull-through of Stock Value, not a
+        // separate calculation: what could be brought forward is exactly
+        // what's already in stock for this next-month order.
+        row.getCell('bringForward').value = {
+          formula: `${nmStockValueCol}${excelRow}`,
+          result: Number(r.StockValue || 0)
+        };
 
         const fill = i % 2 === 0 ? oddFill : evenFill;
         row.eachCell(cell => {
@@ -1241,11 +1310,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
           cell.font   = { name: 'Arial', size: 10, color: { argb: 'FF000000' } };
           cell.border = cellBorder;
         });
-        row.getCell('bringForward').fill = inputFill;
       });
 
       nextMonthWs.getColumn('orderQty').numFmt   = '#,##0';
-      nextMonthWs.getColumn('orderValue').numFmt = '#,##0.00';
+      nextMonthWs.getColumn('stockQty').numFmt   = '#,##0';
+      ['orderValue', 'stockValue', 'bringForward'].forEach(key => {
+        nextMonthWs.getColumn(key).numFmt = '#,##0.00';
+      });
       nextMonthWs.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: nextMonthWs.columns.length } };
       nextMonthWs.views = [{ state: 'frozen', ySplit: 1 }];
     }
@@ -1259,6 +1330,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const dataLastDayRange              = `'Data'!$${lastDayCol}:$${lastDayCol}`;
     const dataPlannedQtyRange           = `'Data'!$${plannedProductionQtyCol}:$${plannedProductionQtyCol}`;
     const dataPlannedValueRange         = `'Data'!$${plannedProductionValueCol}:$${plannedProductionValueCol}`;
+    const dataRiskQtyRange               = `'Data'!$${riskQtyCol}:$${riskQtyCol}`;
+    const dataRiskValueRange             = `'Data'!$${riskValueCol}:$${riskValueCol}`;
 
     // Bounded (not full-column) ranges for the two array-style formulas below
     // (At-Risk Lines list, Value-by-Hour table) — SUMPRODUCT/TEXTJOIN over a
@@ -1315,7 +1388,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const modeLabel = mode === 'monthEnd' ? 'Month End Breakdown' : 'Full Breakdown';
     // Date + time, not just date — this is the one clock-in-time reference point
     // for every "as of the moment this file was generated" note on the sheet
-    // (Invoiced to date, Risk/Last Day/Planned Production starting at their
+    // (Invoiced to date, Risk/Last Day/Expected to Invoice starting at their
     // export-time values), so it needs to be precise enough to tell two
     // exports from the same day apart.
     const generatedAt = new Date().toLocaleString('en-GB', {
@@ -1362,26 +1435,31 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     stockCardCell.numFmt = '#,##0.00';
     setMergedCell('A14:F14', 'Full month-end prediction: invoiced + stock not flagged at risk or Won\'t Get on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.', cardDescFont, null);
 
-    // Card 4 — Invoiced + Planned. Excludes rows flagged Last Day = "x" —
-    // those are tracked separately in the Final Day Total card and the
-    // Value-by-Hour table below, so they're deliberately left out here to
-    // avoid double-counting them in both places.
-    setMergedCell('A16:F16', 'INVOICED + PLANNED (PTFE)', cardLabelFont, cardLabelFill);
+    // Card 4 — Invoiced + Expected to Invoice. Excludes rows flagged Last
+    // Day = "x" — those are tracked separately in the Final Day Total card
+    // and the Value-by-Hour table below, so they're deliberately left out
+    // here to avoid double-counting them in both places. Also excludes Risk
+    // = "x" rows, matching Card 3 above — belt-and-braces alongside the
+    // Expected to Invoice Qty/Value columns themselves (which should already
+    // be reduced to reflect a known shortfall): a row flagged at risk before
+    // its Expected to Invoice Qty has actually been edited down would
+    // otherwise still count its full value here.
+    setMergedCell('A16:F16', 'INVOICED + EXPECTED TO INVOICE (PTFE)', cardLabelFont, cardLabelFill);
     dashboardWs.getRow(17).height = 30;
     const plannedCardCell = setMergedCell(
       'A17:F17',
       {
-        formula: `$A$5+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x")`,
+        formula: `$A$5+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x",${dataRiskRange},"<>x")`,
         result: invoicedToDate + ptfeRows.filter(r => String(r.lastDay || '').toLowerCase() !== 'x').reduce((sum, r) => sum + Number(r.StockValue || 0), 0)
       },
       cardValueFont, null
     );
     plannedCardCell.numFmt = '#,##0.00';
-    setMergedCell('A18:F18', 'Invoiced plus Planned Production Value for everything NOT flagged Last Day or Won\'t Get (Last Day items are in Final Day Total below instead; Won\'t Get items are confirmed misses).', cardDescFont, null);
+    setMergedCell('A18:F18', 'Invoiced plus Expected to Invoice Value for everything NOT flagged Last Day, Won\'t Get or Risk (Last Day items are in Final Day Total below instead; Won\'t Get and Risk items are excluded so this stays a conservative minimum).', cardDescFont, null);
 
-    // Card 4b — Final Day Total. Invoiced + Planned above, plus whatever's
-    // flagged Last Day on top — the true month-end grand total once the
-    // final day's production lands.
+    // Card 4b — Final Day Total. Invoiced + Expected to Invoice above, plus
+    // whatever's flagged Last Day on top — the true month-end grand total
+    // once the final day's production lands.
     setMergedCell('A20:F20', 'FINAL DAY TOTAL (PTFE)', cardLabelFont, cardLabelFill);
     dashboardWs.getRow(21).height = 30;
     const finalDayTotalCell = setMergedCell(
@@ -1393,7 +1471,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       cardValueFont, null
     );
     finalDayTotalCell.numFmt = '#,##0.00';
-    setMergedCell('A22:F22', 'Invoiced + Planned (above) plus the Planned Production Value of everything flagged Last Day but NOT Won\'t Get — see the hour-by-hour breakdown below for when it lands.', cardDescFont, null);
+    setMergedCell('A22:F22', 'Invoiced + Expected to Invoice (above) plus the Expected to Invoice Value of everything flagged Last Day but NOT Won\'t Get — see the hour-by-hour breakdown below for when it lands.', cardDescFont, null);
 
     // Card 5 — Risk
     setMergedCell('A24:C24', 'VALUE AT RISK (PTFE)', riskLabelFont, riskLabelFill);
@@ -1490,25 +1568,27 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Sourced from the Next Month tab (not Data — Bring Forward only ever
     // lives there), so it's only meaningful for a Month End export; a Full
     // Breakdown export has no Next Month tab to sum, and shows a static 0
-    // rather than a broken cross-sheet formula.
-    setMergedCell('A50:C50', 'VALUE FLAGGED TO BRING FORWARD (NEXT MONTH)', cardLabelFont, cardLabelFill);
-    setMergedCell('D50:F50', 'ITEMS FLAGGED', cardLabelFont, cardLabelFill);
+    // rather than a broken cross-sheet formula. Bring Forward Value is now a
+    // calculated column (= Stock Value, not a manual "x" flag — see the
+    // Next Month tab), so this totals the whole column rather than SUMIF-ing
+    // an "x" flag, and counts rows with any stock to bring forward instead
+    // of counting flagged rows.
+    setMergedCell('A50:C50', 'VALUE AVAILABLE TO BRING FORWARD (NEXT MONTH)', cardLabelFont, cardLabelFill);
+    setMergedCell('D50:F50', 'LINES WITH STOCK (NEXT MONTH)', cardLabelFont, cardLabelFill);
     dashboardWs.getRow(51).height = 30;
     if (nextMonthWs) {
-      const nextMonthOrderValueCol   = excelColumnLetter(nextMonthWs.getColumn('orderValue').number);
       const nextMonthBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
-      const nextMonthValueRange        = `'Next Month'!$${nextMonthOrderValueCol}:$${nextMonthOrderValueCol}`;
       const nextMonthBringForwardRange = `'Next Month'!$${nextMonthBringForwardCol}:$${nextMonthBringForwardCol}`;
 
       const bringForwardValueCell = setMergedCell(
         'A51:C51',
-        { formula: `SUMIF(${nextMonthBringForwardRange},"x",${nextMonthValueRange})`, result: 0 },
+        { formula: `SUM(${nextMonthBringForwardRange})`, result: 0 },
         cardValueFont, null
       );
       bringForwardValueCell.numFmt = '#,##0.00';
       setMergedCell(
         'D51:F51',
-        { formula: `COUNTIF(${nextMonthBringForwardRange},"x")`, result: 0 },
+        { formula: `COUNTIF(${nextMonthBringForwardRange},">0")`, result: 0 },
         cardValueFont, null
       );
     } else {
@@ -1516,7 +1596,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       zeroValueCell.numFmt = '#,##0.00';
       setMergedCell('D51:F51', 0, cardValueFont, null);
     }
-    setMergedCell('A52:F52', 'Order Value of Next Month tab rows flagged Bring Forward — candidates to pull into this month if it\'s falling short of target. See the Next Month tab for detail.', cardDescFont, null);
+    setMergedCell('A52:F52', 'Stock Value of Next Month tab rows — what\'s already on hand for next month\'s orders and could be pulled into this month if it\'s falling short of target. See the Next Month tab for detail.', cardDescFont, null);
 
     // Card 8 — Value-by-hour for Last Day items. Sourced from Planned
     // Production Value (column R) — that's the "expected production" figure,
@@ -1532,7 +1612,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
     const hourHeaderRow = 55;
     dashboardWs.getCell(`A${hourHeaderRow}`).value = 'Hour';
-    dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Expected Value (Planned Production)';
+    dashboardWs.getCell(`B${hourHeaderRow}`).value = 'Expected Value (Expected to Invoice)';
     dashboardWs.getCell(`C${hourHeaderRow}`).value = 'Cumulative Invoiced Total';
     [`A${hourHeaderRow}`, `B${hourHeaderRow}`, `C${hourHeaderRow}`].forEach(ref => {
       const cell = dashboardWs.getCell(ref);
@@ -1595,6 +1675,36 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       cardDescFont, null
     );
 
+    // Card 9 — Value at Risk (Shortfall). Appended after the hour-by-hour
+    // table rather than inserted alongside Cards 5/6 above, so every row
+    // reference in Cards 5 through 8 (including the At-Risk Lines
+    // INDEX/MATCH block and the hour table) stays untouched. Calculated —
+    // not a manual flag like Card 5's "Value at Risk (Flagged)" above — this
+    // is SUM(Risk Value) on the Data tab: Risk Value = MAX(Order Qty -
+    // Expected to Invoice Qty, 0) priced at the order's unit value, i.e. the
+    // £ value of whatever we now expect to fall short of the order. See the
+    // Risk Qty / Risk Value columns on the Data tab.
+    const riskShortfallRow = hourTableCaptionRow + 2; // 82
+    setMergedCell(`A${riskShortfallRow}:C${riskShortfallRow}`, 'VALUE AT RISK — SHORTFALL (PTFE)', riskLabelFont, riskLabelFill);
+    setMergedCell(`D${riskShortfallRow}:F${riskShortfallRow}`, 'LINES WITH A SHORTFALL (PTFE)', riskLabelFont, riskLabelFill);
+    dashboardWs.getRow(riskShortfallRow + 1).height = 30;
+    const riskShortfallValueCell = setMergedCell(
+      `A${riskShortfallRow + 1}:C${riskShortfallRow + 1}`,
+      { formula: `SUMIFS(${dataRiskValueRange},${dataStreamRange},"PTFE")`, result: 0 },
+      riskValueFont, null
+    );
+    riskShortfallValueCell.numFmt = '#,##0.00';
+    setMergedCell(
+      `D${riskShortfallRow + 1}:F${riskShortfallRow + 1}`,
+      { formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataRiskQtyRange},">0")`, result: 0 },
+      riskValueFont, null
+    );
+    setMergedCell(
+      `A${riskShortfallRow + 2}:F${riskShortfallRow + 2}`,
+      'The £ value of Order Qty minus Expected to Invoice Qty, summed across every PTFE line — what we now expect to fall short of the order book by. Calculated automatically from the Data tab\'s Expected to Invoice Qty column, not a manual flag; already excluded from Invoiced + Expected to Invoice above by construction.',
+      cardDescFont, null
+    );
+
     dashboardWs.views = [{ showGridLines: false }];
     wb.views = [{ activeTab: 0 }];
 
@@ -1618,10 +1728,12 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 // Body is the raw edited .xlsx — same "plain fetch(..., { body: file })",
 // not-multipart pattern as the supplier invoice upload further down this
 // file (see /order-suggestions/shipments/:shipmentId/documents/upload).
-// Reads the Data and Next Month sheets back out with ExcelJS and upserts
-// whatever a planner typed into Risk/Won't Get/Reason/Last Day/Last Day
-// Time/Bring Forward into dbo.OrderBookLineNotes, so the next person to
-// download the sheet sees it prefilled instead of starting blank.
+// Reads the Data sheet back out with ExcelJS and upserts whatever a planner
+// typed into Risk/Won't Get/Reason/Last Day/Last Day Time/Expected to
+// Invoice Qty into dbo.OrderBookLineNotes, so the next person to download
+// the sheet sees it prefilled instead of starting blank. The Next Month
+// tab is read-only now (Stock Qty/Value and Bring Forward Value are all
+// live formulas, not manual input), so nothing on it round-trips back.
 //
 // Column positions are read from the header row rather than assumed fixed
 // — ExcelJS doesn't preserve the `key` metadata used when the file was
@@ -1698,32 +1810,9 @@ router.post('/orderbook-breakdown/upload-notes',
           lastDay:               readCellText(row, dataHeaderMap['Last Day']),
           lastDayTime:           readCellText(row, dataHeaderMap['Last Day Time']),
           bringForward:          '',
-          plannedProductionQty:  readCellText(row, dataHeaderMap['Planned Production Qty']),
+          plannedProductionQty:  readCellText(row, dataHeaderMap['Expected to Invoice Qty']),
         });
       });
-
-      // Next Month tab is optional — a Full Breakdown export (or a Month
-      // End export where nobody touched that tab) won't necessarily carry
-      // one, and that's fine; Bring Forward just stays unset for every row.
-      const nextMonthWs = wb.getWorksheet('Next Month');
-      if (nextMonthWs) {
-        const nmHeaderMap = buildHeaderMap(nextMonthWs.getRow(1));
-
-        nextMonthWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-          if (rowNumber === 1) return;
-
-          const referenceDocument = readCellText(row, nmHeaderMap['Order']);
-          const material          = readCellText(row, nmHeaderMap['Material']);
-          if (!referenceDocument || !material) return;
-
-          const key = `${referenceDocument}||${material}`;
-          const existing = notesByKey.get(key) || {
-            referenceDocument, material, risk: '', reason: '', wontGet: '', lastDay: '', lastDayTime: '', plannedProductionQty: ''
-          };
-          existing.bringForward = readCellText(row, nmHeaderMap['Bring Forward']);
-          notesByKey.set(key, existing);
-        });
-      }
 
       const noteRows = Array.from(notesByKey.values());
       await db.upsertOrderBookLineNotes(noteRows, req.uploadUser?.username);
@@ -1744,6 +1833,56 @@ router.post('/orderbook-breakdown/upload-notes',
   }
 );
 
+// ── Consignment customers ────────────────────────────────────────────────
+// Customers on a consignment stock agreement — shipped but not invoiced
+// until consumed. Excluded server-side from recomputeDailyInvoiced() /
+// getOrderBookSummary() / getOrderBookBreakdown() (performancesql.js) so
+// they stop inflating the Month End Order Book export and the Management
+// page's KPI cards. This is just the admin CRUD for the flag list itself —
+// see sql/migrate_consignment_customers.sql for the table and why this is
+// unrelated to the existing SOBKZ=K "consignment stock" MRP feature.
+// Read: any logged-in user (matches the loose gating on the rest of this
+// router's orderbook-breakdown routes). Write: LOG_ADMIN — already used
+// elsewhere in this router (see /turns-valclass/aggregates,
+// /turns-valclass/value-by-price) as the admin-tier permission code.
+router.get('/consignment-customers', async (req, res) => {
+  try {
+    const rows = await db.listConsignmentCustomers();
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('[consignment-customers] GET failed', err.message);
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.put('/consignment-customers/:customer', requirePermission('LOG_ADMIN'), async (req, res) => {
+  try {
+    const customer = String(req.params.customer || '').trim();
+    if (!customer) {
+      return res.status(400).json({ success: false, error: { message: 'Customer number is required.' } });
+    }
+    const { customerName } = req.body || {};
+    await db.upsertConsignmentCustomer(customer, customerName, req.session?.user?.username);
+    await auditQuery('CONSIGNMENT_CUSTOMER_SAVE', req.session?.user?.username, `Flagged customer '${customer}' as consignment`, req);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[consignment-customers] PUT failed', err.message);
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.delete('/consignment-customers/:customer', requirePermission('LOG_ADMIN'), async (req, res) => {
+  try {
+    const customer = String(req.params.customer || '').trim();
+    await db.deleteConsignmentCustomer(customer);
+    await auditQuery('CONSIGNMENT_CUSTOMER_DELETE', req.session?.user?.username, `Un-flagged customer '${customer}' as consignment`, req);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[consignment-customers] DELETE failed', err.message);
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // ── Printable Production Plan ────────────────────────────────────────────
 // Bare, standalone HTML report — same convention as routes/labels.js's
 // browser-preview route (buildHTML/GET /process/:code/:id). The rest of
@@ -1754,7 +1893,7 @@ router.post('/orderbook-breakdown/upload-notes',
 //
 // Scope: PTFE lines flagged Last Day = "x" in dbo.OrderBookLineNotes,
 // excluding anything also flagged Won't Get, sorted by Last Day Time.
-// Quantity is whatever's been uploaded as Planned Production Qty for that
+// Quantity is whatever's been uploaded as Expected to Invoice Qty for that
 // line (falling back to Order Qty if nothing's been uploaded yet) — the
 // same figure the Data tab itself defaults to and the Dashboard's Last Day
 // cards are built from, so this always matches what's on the spreadsheet.

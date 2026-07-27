@@ -325,6 +325,72 @@
   z-index: 9500;
 }
 
+/* ==============================
+   CONSIGNMENT CUSTOMERS
+   ============================== */
+
+.mgmt-consignment-hint {
+  font-size: 12px;
+  color: #64748B;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.mgmt-consignment-table {
+  margin-bottom: 12px;
+}
+
+.mgmt-consignment-table td:last-child,
+.mgmt-consignment-table th:last-child {
+  width: 32px;
+  text-align: center;
+}
+
+.mgmt-consignment-remove-btn {
+  background: none;
+  border: none;
+  color: #DC2626;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.mgmt-consignment-remove-btn:hover {
+  color: #991B1B;
+}
+
+.mgmt-consignment-add-row {
+  display: flex;
+  gap: 8px;
+}
+
+.mgmt-consignment-add-row input {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  padding: 7px 10px;
+  border: 1.5px solid #DDE6F1;
+  border-radius: 7px;
+  color: #0F172A;
+}
+
+.mgmt-consignment-add-row input#ccAddCustomer {
+  width: 90px;
+}
+
+.mgmt-consignment-add-row input#ccAddCustomerName {
+  flex: 1;
+  min-width: 0;
+}
+
+.mgmt-consignment-status {
+  display: block;
+  font-size: 11px;
+  color: #64748B;
+  margin-top: 6px;
+}
+
 .mgmt-breakdown-modal {
   background: #ffffff;
   border: 1px solid #DDE6F1;

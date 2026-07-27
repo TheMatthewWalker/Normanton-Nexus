@@ -182,6 +182,28 @@
 
       <!-- OPTIONAL DETAIL -->
 
+      <!-- CONSIGNMENT CUSTOMERS -->
+      <div class="mgmt-section tile-half" id="consignmentCustomersSection">
+        <div class="mgmt-section-title mgmt-section-title--flex">
+          <span>Consignment Customers</span>
+        </div>
+        <p class="mgmt-consignment-hint">Customers on a consignment stock agreement — shipped but not invoiced until they consume the stock. Flagged customers are excluded from Invoiced/Order Book figures on this page and the Month End export.</p>
+        <table class="orderbook-table mgmt-consignment-table">
+          <thead>
+            <tr><th>Customer</th><th>Customer Name</th><th></th></tr>
+          </thead>
+          <tbody id="consignmentCustomersBody">
+            <tr><td colspan="3">Loading…</td></tr>
+          </tbody>
+        </table>
+        <div class="mgmt-consignment-add-row">
+          <input type="text" id="ccAddCustomer" placeholder="Customer #" maxlength="10">
+          <input type="text" id="ccAddCustomerName" placeholder="Customer name (optional)" maxlength="35">
+          <button id="ccAddBtn" class="btn-back">Add</button>
+        </div>
+        <span id="ccStatus" class="mgmt-consignment-status"></span>
+      </div>
+
       <details class="mgmt-section tile-full">
 
         <summary class="mgmt-section-title">

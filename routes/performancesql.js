@@ -646,14 +646,22 @@ export async function failRefresh(runId, message) {
 export async function recomputeDailyInvoiced() {
   const pool = await getPool();
 
+  // LEFT JOIN .. IS NULL excludes consignment customers (dbo.ConsignmentCustomer)
+  // — we ship to them but don't invoice until they consume it, so their
+  // InvoiceSnapshot rows (if any ever land — normally there shouldn't be any)
+  // must not inflate the daily invoiced fact table. See
+  // sql/migrate_consignment_customers.sql for the full rationale; this feeds
+  // every KPI/Dashboard card built on top of DailyPerformance.InvoicedValue.
   const { recordset } = await pool.request().query(`
     SELECT
-      CAST(CONVERT(VARCHAR(8), InvoiceDate, 112) AS DATETIME) AS MetricDate,
-      ValueStream AS ValueStream,
-      SUM(LocalAmount) AS InvoicedValue
-    FROM dbo.InvoiceSnapshot
-    WHERE InvoiceType <> 'F5'
-    GROUP BY CONVERT(VARCHAR(8), InvoiceDate, 112), ValueStream
+      CAST(CONVERT(VARCHAR(8), i.InvoiceDate, 112) AS DATETIME) AS MetricDate,
+      i.ValueStream AS ValueStream,
+      SUM(i.LocalAmount) AS InvoicedValue
+    FROM dbo.InvoiceSnapshot i
+    LEFT JOIN dbo.ConsignmentCustomer cc ON cc.Customer = i.Customer
+    WHERE i.InvoiceType <> 'F5'
+      AND cc.Customer IS NULL
+    GROUP BY CONVERT(VARCHAR(8), i.InvoiceDate, 112), i.ValueStream
   `);
 
   for (const row of recordset) {
@@ -730,45 +738,52 @@ export async function upsertTodayStockAndPicked(totalsByValueStream) {
 export async function getOrderBookSummary() {
   const pool = await getPool();
 
+  // LEFT JOIN .. IS NULL excludes consignment customers — see
+  // recomputeDailyInvoiced() above / sql/migrate_consignment_customers.sql.
+  // Same exclusion as getOrderBookBreakdown() below, kept consistent so this
+  // summary and the Month End export's Data tab never disagree about which
+  // customers' order value counts.
   const { recordset } = await pool.request().query(`
     SELECT
-      DATEPART(YEAR, RequestDate)  AS [Year],
-      DATEPART(MONTH, RequestDate) AS [Month],
-      ValueStream,
+      DATEPART(YEAR, a.RequestDate)  AS [Year],
+      DATEPART(MONTH, a.RequestDate) AS [Month],
+      a.ValueStream,
 
-      SUM(Amount) AS OrdersValue,
+      SUM(a.Amount) AS OrdersValue,
 
       SUM(
         CASE
-          WHEN OrderQty > 0
-          THEN DockStockAllocated * (Amount / OrderQty)
+          WHEN a.OrderQty > 0
+          THEN a.DockStockAllocated * (a.Amount / a.OrderQty)
           ELSE 0
         END
       ) AS StockValue,
 
       SUM(
         CASE
-          WHEN OrderQty > 0
-          THEN PickedStockAllocated * (Amount / OrderQty)
+          WHEN a.OrderQty > 0
+          THEN a.PickedStockAllocated * (a.Amount / a.OrderQty)
           ELSE 0
         END
       ) AS PickedValue
 
-    FROM dbo.AgreementSnapshot
+    FROM dbo.AgreementSnapshot a
+    LEFT JOIN dbo.ConsignmentCustomer cc ON cc.Customer = a.Customer
 
     WHERE
-      RequestDate IS NOT NULL
-      AND ValueStream IN ('PTFE','PV')
+      a.RequestDate IS NOT NULL
+      AND a.ValueStream IN ('PTFE','PV')
+      AND cc.Customer IS NULL
 
     GROUP BY
-      YEAR(RequestDate),
-      MONTH(RequestDate),
-      ValueStream
+      YEAR(a.RequestDate),
+      MONTH(a.RequestDate),
+      a.ValueStream
 
     ORDER BY
-      YEAR(RequestDate),
-      MONTH(RequestDate),
-      ValueStream
+      YEAR(a.RequestDate),
+      MONTH(a.RequestDate),
+      a.ValueStream
   `);
 
   return recordset;
@@ -791,49 +806,59 @@ export async function getOrderBookSummary() {
 export async function getOrderBookBreakdown() {
   const pool = await getPool();
 
+  // LEFT JOIN .. IS NULL excludes consignment customers — see
+  // recomputeDailyInvoiced() above / sql/migrate_consignment_customers.sql.
+  // Feeds both the JSON /orderbook-breakdown route and the Month End Excel
+  // export's Data + Next Month tabs, so excluding here is enough to keep a
+  // consignment customer's never-invoiced stock out of every Dashboard card
+  // built on top of it (Invoiced + Potential Stock, Invoiced + Expected to
+  // Invoice, the new Value at Risk — Shortfall card, etc.) as well as the
+  // raw order-book figures themselves.
   const { recordset } = await pool.request().query(`
     SELECT
-      ValueStream,
-      Customer,
-      CustomerName,
-      ReferenceDocument,
-      Material,
-      MaterialText,
-      CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
+      a.ValueStream,
+      a.Customer,
+      a.CustomerName,
+      a.ReferenceDocument,
+      a.Material,
+      a.MaterialText,
+      CAST(CONVERT(VARCHAR(8), a.RequestDate, 112) AS DATETIME) AS RequestDate,
 
-      SUM(OrderQty) AS OrderQty,
-      SUM(Amount)   AS OrderValue,
+      SUM(a.OrderQty) AS OrderQty,
+      SUM(a.Amount)   AS OrderValue,
 
-      SUM(DockStockAllocated) AS StockQty,
+      SUM(a.DockStockAllocated) AS StockQty,
       SUM(
         CASE
-          WHEN OrderQty > 0
-          THEN DockStockAllocated * (Amount / OrderQty)
+          WHEN a.OrderQty > 0
+          THEN a.DockStockAllocated * (a.Amount / a.OrderQty)
           ELSE 0
         END
       ) AS StockValue,
 
-      SUM(PickedStockAllocated) AS PickedQty,
+      SUM(a.PickedStockAllocated) AS PickedQty,
       SUM(
         CASE
-          WHEN OrderQty > 0
-          THEN PickedStockAllocated * (Amount / OrderQty)
+          WHEN a.OrderQty > 0
+          THEN a.PickedStockAllocated * (a.Amount / a.OrderQty)
           ELSE 0
         END
       ) AS PickedValue
 
-    FROM dbo.AgreementSnapshot
+    FROM dbo.AgreementSnapshot a
+    LEFT JOIN dbo.ConsignmentCustomer cc ON cc.Customer = a.Customer
 
     WHERE
-      RequestDate IS NOT NULL
-      AND ValueStream IN ('PTFE','PV')
+      a.RequestDate IS NOT NULL
+      AND a.ValueStream IN ('PTFE','PV')
+      AND cc.Customer IS NULL
 
     GROUP BY
-      ValueStream, Customer, CustomerName, ReferenceDocument, Material, MaterialText,
-      CONVERT(VARCHAR(8), RequestDate, 112)
+      a.ValueStream, a.Customer, a.CustomerName, a.ReferenceDocument, a.Material, a.MaterialText,
+      CONVERT(VARCHAR(8), a.RequestDate, 112)
 
     ORDER BY
-      CONVERT(VARCHAR(8), RequestDate, 112), CustomerName, ReferenceDocument, MaterialText
+      CONVERT(VARCHAR(8), a.RequestDate, 112), a.CustomerName, a.ReferenceDocument, a.MaterialText
   `);
 
   return recordset;
@@ -938,6 +963,57 @@ export async function upsertOrderBookLineNotes(rows, username) {
     ['PlannedProductionQty', 'plannedProductionQty', sql.Decimal(15, 3)],
     ['UpdatedByUsername',    'updatedByUsername',    sql.NVarChar(80)],
   ], shaped);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Consignment customers — dbo.ConsignmentCustomer
+// ══════════════════════════════════════════════════════════════════════════
+// Customers on a consignment stock agreement: we ship to them but don't
+// invoice until they consume it. Flagging a customer here excludes them from
+// recomputeDailyInvoiced() / getOrderBookSummary() / getOrderBookBreakdown()
+// above, so they stop inflating the Month End Order Book export and the
+// Management page's KPI cards. See sql/migrate_consignment_customers.sql for
+// the table design and why this is a different concept from the existing
+// SOBKZ=K "consignment stock" MRP feature.
+
+export async function listConsignmentCustomers() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername
+    FROM dbo.ConsignmentCustomer
+    ORDER BY Customer
+  `);
+  return recordset;
+}
+
+export async function upsertConsignmentCustomer(customer, customerName, username) {
+  const pool = await getPool();
+  const exists = await pool.request()
+    .input('cust', sql.NVarChar(10), customer)
+    .query(`SELECT 1 FROM dbo.ConsignmentCustomer WHERE Customer = @cust`);
+
+  const r = pool.request()
+    .input('cust', sql.NVarChar(10), customer)
+    .input('name', sql.NVarChar(35), customerName || null)
+    .input('who',  sql.NVarChar(80), username || null);
+
+  if (exists.recordset.length) {
+    await r.query(`
+      UPDATE dbo.ConsignmentCustomer
+      SET CustomerName = @name, LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @who
+      WHERE Customer = @cust`);
+  } else {
+    await r.query(`
+      INSERT INTO dbo.ConsignmentCustomer (Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername)
+      VALUES (@cust, @name, GETUTCDATE(), @who)`);
+  }
+}
+
+export async function deleteConsignmentCustomer(customer) {
+  const pool = await getPool();
+  await pool.request()
+    .input('cust', sql.NVarChar(10), customer)
+    .query(`DELETE FROM dbo.ConsignmentCustomer WHERE Customer = @cust`);
 }
 
 // ══════════════════════════════════════════════════════════════════════════

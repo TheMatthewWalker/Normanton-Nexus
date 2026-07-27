@@ -1273,10 +1273,95 @@ function renderDashboard() {
   renderOtifCumulativeChart('pvOtifCumulativeChart', pvOtifCum, '#16A34A');
 }
 
+// ── Consignment Customers ────────────────────────────────────────────────
+// Simple always-visible list + add row, no modal — mutations use LOG_ADMIN
+// server-side (routes/performance.js), so a user without that permission
+// will see the list (read is open to any logged-in user) but get a
+// rejected fetch on Add/Remove, surfaced via ccStatus.
+async function loadConsignmentCustomers() {
+  const body = document.getElementById('consignmentCustomersBody');
+  const status = document.getElementById('ccStatus');
+  try {
+    const res = await fetch(BASE + '/consignment-customers');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load');
+
+    const rows = json.data || [];
+    body.innerHTML = rows.length
+      ? rows.map(r => `
+        <tr>
+          <td>${escapeHtml(r.Customer)}</td>
+          <td>${escapeHtml(r.CustomerName || '')}</td>
+          <td><button class="mgmt-consignment-remove-btn" data-customer="${escapeHtml(r.Customer)}" title="Remove">&times;</button></td>
+        </tr>`).join('')
+      : `<tr><td colspan="3">No consignment customers flagged.</td></tr>`;
+
+    body.querySelectorAll('.mgmt-consignment-remove-btn').forEach(btn => {
+      btn.onclick = () => removeConsignmentCustomer(btn.dataset.customer);
+    });
+    status.textContent = '';
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="3">Failed to load: ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function addConsignmentCustomer() {
+  const customerInput = document.getElementById('ccAddCustomer');
+  const nameInput = document.getElementById('ccAddCustomerName');
+  const status = document.getElementById('ccStatus');
+
+  const customer = customerInput.value.trim();
+  if (!customer) {
+    status.textContent = 'Enter a customer number first.';
+    return;
+  }
+
+  status.textContent = 'Saving…';
+  try {
+    const res = await fetch(BASE + `/consignment-customers/${encodeURIComponent(customer)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customerName: nameInput.value.trim() })
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to save');
+
+    customerInput.value = '';
+    nameInput.value = '';
+    status.textContent = '';
+    await loadConsignmentCustomers();
+  } catch (err) {
+    status.textContent = `Failed to save: ${err.message}`;
+  }
+}
+
+async function removeConsignmentCustomer(customer) {
+  const status = document.getElementById('ccStatus');
+  status.textContent = 'Removing…';
+  try {
+    const res = await fetch(BASE + `/consignment-customers/${encodeURIComponent(customer)}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to remove');
+    status.textContent = '';
+    await loadConsignmentCustomers();
+  } catch (err) {
+    status.textContent = `Failed to remove: ${err.message}`;
+  }
+}
+
 // ✅ INIT
 document.addEventListener('DOMContentLoaded', async () => {
   setDefaultDates();
   await loadData();
+  await loadConsignmentCustomers();
+});
+
+document.getElementById('ccAddBtn').onclick = addConsignmentCustomer;
+document.getElementById('ccAddCustomer').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addConsignmentCustomer();
+});
+document.getElementById('ccAddCustomerName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addConsignmentCustomer();
 });
 
 document.getElementById('refreshBtn').onclick = refreshData;
