@@ -100,6 +100,123 @@ async function resolveTraceabilityMaterials(pool, parentBatches) {
   return [...materials];
 }
 
+// Braiding never posts its own SAP backflush — the braiding work centre's
+// own raw-material BOM data is unreliable, so that step is deliberately
+// skipped (see the BR special-case in the "complete open run" route
+// below). That means a braided semi-finished material never actually
+// lands in SAP stock, so when Drumming later consumes one as a
+// traceability parent, there's nothing there for the drum's own
+// BOM-driven backflush to automatically consume. This backflushes the
+// braided component itself first, for exactly the quantity the DRUMMED
+// product's own BOM calls for (the same ratio SAP's automatic backflush
+// would use, from ZBOM_INFO/MENGE, if the stock existed) — effectively
+// performing braiding's missing backflush on demand, scoped to only what
+// this drum is consuming right now rather than the batch's full length,
+// so several drums can each draw down their own share of one braid batch.
+//
+// No check yet for a braid batch being drawn down past what it actually
+// produced — deliberately deferred (per the brief) until this basic
+// version is proven out; prod.ProductionTrace.QuantityConsumed (see
+// migrate_production_v10.sql) already carries what's needed to add that
+// later: SUM(QuantityConsumed) WHERE ParentProcessCode='BR' AND
+// ParentRecordID=<id>, compared against prod.Braiding.LengthMetres.
+//
+// Returns [] with no SAP calls at all when there are no BR parents — the
+// common case, most drums don't consume a braided product. Throws on a
+// real SAP posting failure, deliberately: a raw-material consumption
+// failure here should fail the whole drum submission the same way the
+// drum's own backflush failing does (see the catch block in
+// submitDrumming), not pass silently and leave SAP stock wrong. A braid
+// material simply not being a component of this drummed product's BOM is
+// NOT treated as an error here — the existing BOM-vs-traceability
+// mismatch check on the main drumming backflush already flags that
+// combination to PROD_SUPERVISOR, so this just logs and moves on rather
+// than raising a second, redundant warning.
+async function backflushBraidedComponents(pool, uid, material, totalLength, parentBatches) {
+  const braidParents = (parentBatches || []).filter(
+    pb => pb.processCode && pb.recordID && pb.processCode.toUpperCase() === 'BR'
+  );
+  if (!braidParents.length) return [];
+
+  const results = [];
+  const bomCache = new Map(); // braid material -> BomRow | null, avoids a repeat SAP call when the same braid material appears via multiple parent links
+
+  for (const pb of braidParents) {
+    const braidingID = Number(pb.recordID);
+
+    const braidRow = await pool.request()
+      .input('id', sql.Int, braidingID)
+      .query(`SELECT BraidRef, Material, IsReversed FROM prod.Braiding WHERE BraidingID = @id`);
+    const braid = braidRow.recordset[0];
+    if (!braid) continue; // unresolvable parent — nothing to backflush or log against
+
+    if (braid.IsReversed) {
+      await writeEvent(pool, 'BR', braidingID, 'NOTE',
+        `Drum for ${material} traced to this braid batch after it was reversed — skipped, no braid backflush posted.`, 2, uid).catch(() => {});
+      continue;
+    }
+
+    const braidMaterial = braid.Material;
+
+    if (!bomCache.has(braidMaterial)) {
+      try {
+        const bomRaw = await sapGet('/api/production/bom', { Material: material, Component: braidMaterial });
+        const rows = bomRaw?.data ?? bomRaw ?? [];
+        bomCache.set(braidMaterial, (Array.isArray(rows) ? rows[0] : null) || null);
+      } catch {
+        bomCache.set(braidMaterial, null);
+      }
+    }
+    const bomRow = bomCache.get(braidMaterial);
+
+    if (!bomRow || !(Number(bomRow.componentQty) > 0)) {
+      await writeEvent(pool, 'BR', braidingID, 'NOTE',
+        `Drum for ${material} traces to this braid batch, but ${braidMaterial} isn't a BOM component of ${material} (or has a zero quantity) — no braid backflush posted.`, 1, uid).catch(() => {});
+      continue;
+    }
+
+    const qty = Math.round(Number(bomRow.componentQty) * totalLength * 1000) / 1000;
+    if (qty <= 0) continue;
+
+    let sapRaw;
+    try {
+      sapRaw = await sapPost('/api/production/backflush', {
+        Material:  braidMaterial,
+        Quantity:  qty,
+        Header:    braid.BraidRef,
+        Packaging: '',
+        Charge:    '',
+        Customer:  '',
+      });
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message;
+      throw new Error(`Braid consumption backflush failed for ${braidMaterial} (batch ${braid.BraidRef}, ${qty.toFixed(3)} M): ${msg}`);
+    }
+
+    let sapMatDoc;
+    try {
+      ({ documentNumber: sapMatDoc } = parseSapBackflush(sapRaw));
+    } catch (err) {
+      throw new Error(`Braid consumption backflush rejected for ${braidMaterial} (batch ${braid.BraidRef}, ${qty.toFixed(3)} M): ${err.message}`);
+    }
+
+    await pool.request()
+      .input('pc',   sql.NVarChar(5),   'BR').input('rid', sql.Int, braidingID)
+      .input('type', sql.NVarChar(20),  'BACKFLUSH')
+      .input('qty',  sql.Decimal(12,3), qty)
+      .input('doc',  sql.NVarChar(10),  sapMatDoc)
+      .input('uid',  sql.Int,           uid)
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+    await writeEvent(pool, 'BR', braidingID, 'SAP_POST',
+      `Backflushed ${qty.toFixed(3)} M against ${braid.BraidRef} — consumed by a drum of ${material} (BOM ratio ${bomRow.componentQty} ${bomRow.componentUnit || 'M'} per unit). MatDoc: ${sapMatDoc}.`, 0, uid);
+
+    results.push({ braidingID, braidRef: braid.BraidRef, material: braidMaterial, qty, documentNumber: sapMatDoc });
+  }
+
+  return results;
+}
+
 // Metre-based linear processes that share a common entry/data pattern
 const METRE_PROCESSES = new Set(['EX','CO','BR','CL','TW']);
 
@@ -2458,14 +2575,15 @@ async function submitDrumming(req, res, entryType) {
     .input('pkg',   sql.NVarChar(10),      packagingID)
     .input('cust',  sql.NVarChar(50),      customerNumber || null)
     .input('so',    sql.NVarChar(20),      orderNumber    || null)
+    .input('item',  sql.NVarChar(6),       orderItem      || null)
     .input('etype', sql.NVarChar(10),      entryType)
     .input('uid',   sql.Int,               uid)
     .input('notes', sql.NVarChar(sql.MAX), comments || null)
     .query(`INSERT INTO prod.Drumming
-              (ShiftID,Material,LengthMetres,WeightKG,PackagingType,CustomerID,SalesOrderSAP,
+              (ShiftID,Material,LengthMetres,WeightKG,PackagingType,CustomerID,SalesOrderSAP,OrderItem,
                EntryType,Status,StartedAt,CompletedAt,CreatedByUserID,Notes)
             OUTPUT INSERTED.DrummingID
-            VALUES (@shift,@mat,@len,@wt,@pkg,@cust,@so,@etype,4,GETDATE(),GETDATE(),@uid,@notes)`);
+            VALUES (@shift,@mat,@len,@wt,@pkg,@cust,@so,@item,@etype,4,GETDATE(),GETDATE(),@uid,@notes)`);
 
   const drummingID = ins.recordset[0].DrummingID;
 
@@ -2515,6 +2633,31 @@ async function submitDrumming(req, res, entryType) {
     // the real materials to check against this drum's BOM, not the portal
     // process-code/record-id references stored in prod.ProductionTrace.
     const traceMaterials = await resolveTraceabilityMaterials(pool, parentBatches);
+
+    // Backflush any braided (BR) traceability parents FIRST — braiding
+    // never posts its own SAP backflush, so this drum's own backflush
+    // below can't rely on that stock already existing (see
+    // backflushBraidedComponents above). A failure here throws, which is
+    // caught by the same catch block below as a drumming-backflush
+    // failure — deliberately: don't post the drum's own backflush if the
+    // raw material it consumed couldn't be accounted for in SAP.
+    const braidConsumption = await backflushBraidedComponents(pool, uid, material, totalLength, parentBatches);
+    if (braidConsumption.length) {
+      const summary = braidConsumption.map(b => `${b.braidRef} (${b.qty.toFixed(3)} M, MatDoc ${b.documentNumber})`).join(', ');
+      await writeEvent(pool, 'DR', drummingID, 'NOTE', `Backflushed braided component(s) before drum backflush: ${summary}.`, 0, uid);
+
+      // The ProductionTrace link rows for all parents were already inserted
+      // unconditionally above; fill in the consumed quantity for just the
+      // BR ones now that it's known.
+      for (const b of braidConsumption) {
+        await pool.request()
+          .input('cc',  sql.NVarChar(5),   'DR').input('cr', sql.Int, drummingID)
+          .input('pc',  sql.NVarChar(5),   'BR').input('pr', sql.Int, b.braidingID)
+          .input('qty', sql.Decimal(12,3), b.qty)
+          .query(`UPDATE prod.ProductionTrace SET QuantityConsumed=@qty, UnitOfMeasure='M'
+                  WHERE ChildProcessCode=@cc AND ChildRecordID=@cr AND ParentProcessCode=@pc AND ParentRecordID=@pr`);
+      }
+    }
 
     const sapRaw = await sapPost('/api/production/drumming-backflush', {
       Material:              material,
