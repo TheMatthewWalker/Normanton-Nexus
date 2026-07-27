@@ -7521,18 +7521,22 @@ function osRenderTrackedList(tracked) {
 
   const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
 
-  // Three-level hierarchy: bucket (Needs Shipment / Assigned to Shipment /
-  // Cancelled) -> supplier -> order rows. Cancelled status takes priority
-  // over ShipmentId when bucketing, since a cancelled order can still be
-  // sat on a (now-orphaned or reused) ShipmentId value in edge cases and the
-  // user wants it out of the way regardless. Every level starts collapsed —
-  // the point is to let the user open exactly one supplier at a time rather
-  // than face the whole list, reusing the ps-section pattern from Open
-  // Deliveries, nested this time.
+  // Four-level hierarchy: bucket (Needs Booking / Needs Shipment / Assigned
+  // to Shipment / Cancelled) -> supplier -> order rows. Needs Booking comes
+  // first and takes priority over everything except Cancelled — an order
+  // that's just been accepted (Status still 'Accepted') hasn't actually
+  // been sent to the supplier yet, and previously fell straight into Needs
+  // Shipment alongside orders that were already placed, making it easy to
+  // forget the "tell the supplier" step entirely. It gets the red/priority
+  // dot since a forgotten order is the costliest mistake here. Every level
+  // starts collapsed — the point is to let the user open exactly one
+  // supplier at a time rather than face the whole list, reusing the
+  // ps-section pattern from Open Deliveries, nested this time.
   const BUCKET_DEFS = [
-    { key: 'needs',     label: 'Needs Shipment',        dot: 'backlog', match: t => t.Status !== 'Cancelled' && !t.ShipmentId },
-    { key: 'assigned',  label: 'Assigned to Shipment',   dot: 'today',   match: t => t.Status !== 'Cancelled' && !!t.ShipmentId },
-    { key: 'cancelled', label: 'Cancelled',              dot: 'other',   match: t => t.Status === 'Cancelled' },
+    { key: 'needsBooking', label: 'Needs Booking',        dot: 'priority', match: t => t.Status === 'Accepted' },
+    { key: 'needs',        label: 'Needs Shipment',       dot: 'backlog',  match: t => t.Status !== 'Cancelled' && t.Status !== 'Accepted' && !t.ShipmentId },
+    { key: 'assigned',     label: 'Assigned to Shipment', dot: 'today',    match: t => t.Status !== 'Cancelled' && t.Status !== 'Accepted' && !!t.ShipmentId },
+    { key: 'cancelled',    label: 'Cancelled',            dot: 'other',    match: t => t.Status === 'Cancelled' },
   ];
 
   // data-group-key on both levels lets osCaptureExpandedGroups/
