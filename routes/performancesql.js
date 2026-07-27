@@ -1349,7 +1349,12 @@ export async function listOrderSuggestionsTracked() {
 // delivered quantity can land a few kg either side of what was ordered
 // (product-dependent), so this is a correction to match reality, not a new
 // proposed order that needs to clear the vendor's constraints again.
-export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes, supplierReference, orderQty }) {
+// deliveryDate/readyToCollectDate are the same COALESCE-optional shape —
+// Tracked Orders' Due Date field edits whichever of the two is actually
+// shown/actionable for that row (ReadyToCollectDate for a spot PO,
+// DeliveryDate otherwise — see osEffectiveDueDate's comment in
+// logistics.js), so only one of the pair is ever sent per save.
+export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes, supplierReference, orderQty, deliveryDate, readyToCollectDate }) {
   const pool = await getPool();
   await pool.request()
     .input('suggestionId',      sql.Int, suggestionId)
@@ -1358,11 +1363,15 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
     .input('notes',             sql.NVarChar(500), notes || null)
     .input('supplierReference', sql.NVarChar(50),  supplierReference || null)
     .input('orderQty',          sql.Decimal(15, 3), orderQty != null ? orderQty : null)
+    .input('deliveryDate',       sql.DateTime, deliveryDate ? new Date(deliveryDate) : null)
+    .input('readyToCollectDate', sql.DateTime, readyToCollectDate ? new Date(readyToCollectDate) : null)
     .query(`
       UPDATE dbo.PurchaseOrderSuggestion SET
         Status = @status, PoNumber = @poNumber, Notes = @notes,
         SupplierReference = @supplierReference,
         OrderQty = COALESCE(@orderQty, OrderQty),
+        DeliveryDate = COALESCE(@deliveryDate, DeliveryDate),
+        ReadyToCollectDate = COALESCE(@readyToCollectDate, ReadyToCollectDate),
         UpdatedAtUtc = GETUTCDATE(),
         ReceivedAtUtc = CASE WHEN @status = 'Received' THEN GETUTCDATE() ELSE ReceivedAtUtc END
       WHERE SuggestionId = @suggestionId

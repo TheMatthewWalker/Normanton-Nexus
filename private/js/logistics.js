@@ -7488,9 +7488,14 @@ function osRenderTrackedList(tracked) {
   document.getElementById('result-row-badge').classList.remove('hidden');
 
   const renderTrackedRow = (t) => {
-    const dueLabel = t.IsSpotPo && t.ReadyToCollectDate
-      ? `${formatDisplayDate(t.ReadyToCollectDate)} (ready to collect)`
-      : formatDisplayDate(t.DeliveryDate);
+    // Whichever date is actually actionable/shown gets edited — same
+    // ReadyToCollectDate-for-spot-PO-else-DeliveryDate split as
+    // osEffectiveDueDate below and the dueLabel this replaced. osSaveOneTracked
+    // sends the edited value back under whichever of the two fields it came
+    // from, so a spot PO's full DeliveryDate (informational only) is left
+    // alone.
+    const isSpotDue = t.IsSpotPo && t.ReadyToCollectDate;
+    const dueValue  = daDateInputValue(isSpotDue ? t.ReadyToCollectDate : t.DeliveryDate);
     return `
     <tr class="admin-row">
       <td class="lg-check-cell"><input type="checkbox" class="lg-check os-check" data-id="${t.SuggestionId}"></td>
@@ -7498,7 +7503,10 @@ function osRenderTrackedList(tracked) {
       <td>${esc(t.VendorName)}</td>
       <td><input class="tf-input os-qty-input" data-id="${t.SuggestionId}" type="number" step="0.001" min="0.001" value="${Number(t.OrderQty)}" style="padding:3px 6px;font-size:12px;width:90px"></td>
       <td>${formatDisplayDate(t.OrderDate)}</td>
-      <td>${dueLabel}</td>
+      <td>
+        <input class="tf-input os-due-date-input" data-id="${t.SuggestionId}" data-spot-due="${isSpotDue ? '1' : ''}" type="date" value="${dueValue}" style="padding:3px 6px;font-size:12px;width:120px">
+        ${isSpotDue ? '<div style="font-size:10px;color:var(--text-secondary,#666)">ready to collect</div>' : ''}
+      </td>
       <td>
         <select class="tf-input os-status-select" data-id="${t.SuggestionId}" style="padding:3px 6px;font-size:12px">
           ${OS_STATUS_OPTIONS.map(opt => `<option value="${opt}" ${t.Status === opt ? 'selected' : ''}>${opt}</option>`).join('')}
@@ -7727,7 +7735,8 @@ async function osSaveOneTracked(t) {
   const poInput = document.querySelector(`.os-po-input[data-id="${t.SuggestionId}"]`);
   const supplierRefInput = document.querySelector(`.os-supplier-ref-input[data-id="${t.SuggestionId}"]`);
   const qtyInput = document.querySelector(`.os-qty-input[data-id="${t.SuggestionId}"]`);
-  if (!statusSelect || !poInput || !supplierRefInput || !qtyInput) {
+  const dueDateInput = document.querySelector(`.os-due-date-input[data-id="${t.SuggestionId}"]`);
+  if (!statusSelect || !poInput || !supplierRefInput || !qtyInput || !dueDateInput) {
     return { success: false, error: 'Row is not on screen (try expanding its group).' };
   }
   const qtyValue = Number(qtyInput.value);
@@ -7741,6 +7750,14 @@ async function osSaveOneTracked(t) {
     notes: t.Notes || null,
     orderQty: qtyValue,
   };
+  // Whichever of the two due-date columns this row was actually rendered
+  // against (see renderTrackedRow's isSpotDue) is the one that gets updated —
+  // data-spot-due carries that choice through since t itself doesn't change
+  // between render and save.
+  if (dueDateInput.value) {
+    if (dueDateInput.dataset.spotDue) body.readyToCollectDate = dueDateInput.value;
+    else body.deliveryDate = dueDateInput.value;
+  }
   try {
     const res = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}`, {
       method: 'PUT',

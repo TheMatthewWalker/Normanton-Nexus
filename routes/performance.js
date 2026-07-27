@@ -2805,7 +2805,7 @@ router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (re
 
 router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const { status, orderQty } = req.body;
+    const { status, orderQty, deliveryDate, readyToCollectDate } = req.body;
     if (!status || !['Accepted', 'Ordered', 'Booked', 'Received', 'Cancelled'].includes(status)) {
       return res.status(400).json({
         success: false,
@@ -2818,6 +2818,16 @@ router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), asy
     // either side of what was placed) rather than proposing a new one.
     if (orderQty != null && (!Number(orderQty) || Number(orderQty) <= 0)) {
       return res.status(400).json({ success: false, error: { message: 'orderQty must be greater than 0.' } });
+    }
+    // Same optional shape — only present when the Tracked Orders Due Date
+    // field was edited. Whichever of the two comes through, catch an
+    // unparseable value here rather than letting it reach the DB as an
+    // invalid-date error.
+    if (deliveryDate != null && isNaN(new Date(deliveryDate).getTime())) {
+      return res.status(400).json({ success: false, error: { message: 'deliveryDate is not a valid date.' } });
+    }
+    if (readyToCollectDate != null && isNaN(new Date(readyToCollectDate).getTime())) {
+      return res.status(400).json({ success: false, error: { message: 'readyToCollectDate is not a valid date.' } });
     }
     await db.updateOrderSuggestionStatus(req.params.suggestionId, req.body);
     res.json({ success: true });
