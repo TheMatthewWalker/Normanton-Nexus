@@ -6,6 +6,7 @@ import fs      from 'fs';
 import sql     from 'mssql';
 import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
+import { requirePermission } from '../middleware/auth.js';
 
 // Use a pinned certificate when connecting over HTTPS; fall back to no custom agent for HTTP (dev).
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
@@ -432,6 +433,64 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/batch-cleanup-transfer  (mounted at /api/sap in server.js)
+//
+// Gated wrapper around the same transfer-order / consignment-mb1b endpoints
+// the normal Stock Management transfer panel already calls unauthenticated
+// beyond requireLogin — used ONLY by the Stock Management "Batch
+// Discrepancies" tool (zero-sum clean-up + multi-bin consolidation), which
+// moves stock across many batches automatically rather than one row at a
+// time a person explicitly picked. requirePermission('LOG_SUPER') keeps that
+// bulk/automated path supervisor-only without touching the existing
+// unrestricted /warehouse/transfer-order and /warehouse/consignment-mb1b
+// proxies used by manual single/mass transfers elsewhere in Stock
+// Management and the standalone Transfer Orders tile.
+//
+// Body: { kind: 'transfer' | 'consignment', payload: {...} } — payload shape
+// matches CreateTransferOrderRequest or ConsignmentMb1bRequest respectively,
+// same as the two proxies above.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { kind, payload } = req.body;
+
+    if (kind !== 'transfer' && kind !== 'consignment') {
+        return res.status(400).json({ success: false, error: "kind must be 'transfer' or 'consignment'" });
+    }
+
+    const sapPath = kind === 'consignment' ? '/api/warehouse/consignment-mb1b' : '/api/warehouse/transfer-order';
+
+    try {
+        const response = await axios.post(`${sapConfig.url}${sapPath}`, payload, {
+            timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+        });
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} succeeded for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`), req);
+
+        const redrum = kind === 'transfer' ? await maybeReverseBatchManagedReturn({
+            batch: payload.Batch || null,
+            destinationStorageType: payload.DestinationType,
+            destinationBin: payload.DestinationBin,
+            storageLocation: payload.StorageLocation,
+            audit, actorUsername: getActorUsername(req), req,
+        }) : null;
+
+        res.json({ success: true, data: body.data, ...(redrum ? { redrum } : {}) });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} failed for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`, message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
 // GET /api/sap/warehouse/stock  (mounted at /api/sap in server.js)
 //
 // Proxies to SapServer's GET /api/warehouse/stock endpoint (LQUA via
@@ -446,11 +505,11 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 // because the Stock Management UI does).
 // ---------------------------------------------------------------------------
 router.get('/warehouse/stock', async (req, res) => {
-    const { material, storageType, bin, batch } = req.query;
+    const { material, storageType, bin, batch, storageLocation, stockCategory } = req.query;
 
     try {
         const response = await axios.get(`${sapConfig.url}/api/warehouse/stock`, {
-            params: { material, storageType, bin, batch, rowCount: 9999 },
+            params: { material, storageType, bin, batch, storageLocation, stockCategory, rowCount: 9999 },
             timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
         });
 
