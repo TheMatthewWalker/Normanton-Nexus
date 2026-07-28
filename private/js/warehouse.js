@@ -1361,7 +1361,7 @@ function siRenderInvestigationCard() {
       <div id="si-action-result"></div>
       <button type="button" class="btn-secondary" id="si-refresh-btn">Refresh</button>
       <button type="button" class="btn-secondary" id="si-transfer-btn" ${siInvestigation.selected.size ? '' : 'disabled'}>Create Transfer Order</button>
-      <button type="button" class="btn-submit" id="si-adjust-btn" ${siInvestigation.selected.size ? '' : 'disabled'}>Create Stock Adjustment (711/712)</button>
+      <button type="button" class="btn-submit" id="si-adjust-btn" ${siInvestigation.selected.size ? '' : 'disabled'}>Create Stock Adjustment</button>
     </div>
     <div id="si-action-panel"></div>`;
 
@@ -1485,11 +1485,25 @@ function siShowTransferPanel() {
 }
 
 // "Create Stock Adjustment" — writes off/corrects selected holding-bin rows
-// via BAPI_GOODSMVT_CREATE (movement 711/712). Per the user's own rule: a
-// negative quantity gets a 712 to bring it up to zero, a positive quantity
-// gets a 711 to bring it down to zero — each row corrected by exactly the
-// amount it's currently off by. Unit is asked per row (not carried on the
-// LQUA stock row SapServer returns) rather than guessed at.
+// via BAPI_GOODSMVT_CREATE (movement 711/712, or 717/718 for category 'S').
+// Per the user's own rule: a negative quantity needs topping up, a positive
+// quantity needs writing down — each row corrected by exactly the amount
+// it's currently off by. Unit is asked per row (not carried on the LQUA
+// stock row SapServer returns) rather than guessed at. StorageType/StorageBin
+// (WM storage type/bin — this stock lives inside warehouse management, not
+// just an IM storage location) are also sent, since SAP needs both to post
+// against a specific bin.
+// Movement type depends on both direction (does the bin need topping up or
+// writing down?) and stock category — plain unrestricted stock goes through
+// 711/712, but SAP won't post 711/712 against category 'S' (blocked) stock;
+// that needs 717 (reduce) / 718 (add back in) instead. Shared by the table
+// preview below and the actual submit loop so they can't disagree.
+function siMovementTypeFor(row) {
+  const isBlocked = row.stockCategory === 'S';
+  if (row.availableQty < 0) return isBlocked ? '718' : '712'; // negative — top the bin back up
+  return isBlocked ? '717' : '711';                            // positive — write the excess down
+}
+
 function siShowAdjustmentPanel() {
   const rows  = siSelectedRows();
   const panel = document.getElementById('si-action-panel');
@@ -1497,7 +1511,7 @@ function siShowAdjustmentPanel() {
 
   const rowsHtml = rows.map(row => {
     const id = wsmRowId(row);
-    const movementType = row.availableQty < 0 ? '712' : '711';
+    const movementType = siMovementTypeFor(row);
     return `<tr data-id="${esc(id)}">
       <td>${esc(row.material)}</td>
       <td class="wsm-mono">${esc(row.storageLocation)}${row.batch ? ` · ${esc(row.batch)}` : ''}</td>
@@ -1511,7 +1525,7 @@ function siShowAdjustmentPanel() {
   panel.innerHTML = `
     <div class="wsm-resolve-box">
       <div class="wsm-panel-title">Create Stock Adjustment — ${rows.length} row(s)</div>
-      <div class="wsm-panel-sub">Negative quantities post a 712 to bring the bin up to zero; positive quantities post a 711 to bring it down to zero. Each row is corrected by exactly the amount it's currently off by — nothing else is adjusted.</div>
+      <div class="wsm-panel-sub">Negative quantities post a 712 to bring the bin up to zero; positive quantities post a 711 to bring it down to zero — except stock category 'S' (blocked), which uses 718/717 instead, since 711/712 aren't valid against blocked stock. Each row is corrected by exactly the amount it's currently off by — nothing else is adjusted.</div>
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Reference / Reason <span class="tf-req">*</span></label>
@@ -1551,7 +1565,7 @@ function siShowAdjustmentPanel() {
 
     if (!await wConfirm({
       title: 'Post Stock Adjustment',
-      message: `Post ${rows.length} stock adjustment(s) (711/712) to zero out the selected holding-bin stock? This posts directly to SAP and can't be undone from here.`,
+      message: `Post ${rows.length} stock adjustment(s) to zero out the selected holding-bin stock? This posts directly to SAP and can't be undone from here.`,
       confirmText: 'Post',
       variant: 'danger',
     })) return;
@@ -1567,11 +1581,19 @@ function siShowAdjustmentPanel() {
       const resultCell  = document.getElementById(`si-adjust-result-${id}`);
       const unitInput   = document.querySelector(`.si-adjust-unit[data-id="${CSS.escape(id)}"]`);
       const unit        = (unitInput?.value || '').trim();
-      const movementType = row.availableQty < 0 ? '712' : '711';
+      const movementType = siMovementTypeFor(row);
 
       const result = await siCreateStockAdjustment({
         Material: row.material, StorageLocation: row.storageLocation, Batch: row.batch || '',
         MovementType: movementType, Quantity: Math.abs(row.availableQty), Unit: unit, Reference: reference,
+        // Stock sits inside warehouse management, so SAP needs the actual WM
+        // storage type/bin, not just the IM storage location — these rows
+        // are always the holding bin (999/TEMP) since that's what this card
+        // queries, but read off the row rather than hardcoding in case that
+        // ever changes.
+        StorageType: row.storageType, StorageBin: row.bin,
+        StockCategory: row.stockCategory || '',
+        SpecialStockIndicator: row.specialStockInd || '', SpecialStockNumber: row.specialStockNum || '',
       });
 
       if (result.success) { ok++; if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ Doc ${esc(result.materialDocument || '')}</span>`; }
