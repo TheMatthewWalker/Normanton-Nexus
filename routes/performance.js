@@ -1494,7 +1494,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const plannedCellAddr = placeCard(1, 0, {
       label: 'INVOICED + EXPECTED TO INVOICE (PTFE)',
       value: {
-        formula: `$${invoicedCellAddr}+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x",${dataRiskValueRange},"<=0")`,
+        formula: `$${invoicedCellAddr}+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x")`,
         result: invoicedToDate + ptfeRows.filter(r => String(r.lastDay || '').toLowerCase() !== 'x').reduce((sum, r) => sum + Number(r.StockValue || 0), 0)
       },
       numFmt: '#,##0.00',
