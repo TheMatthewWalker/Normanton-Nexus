@@ -1417,7 +1417,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // auto-size row height for wrapped merged cells, so this has to be set
     // explicitly.
     const colGroups = [['A', 'D'], ['E', 'H'], ['I', 'L'], ['M', 'P']];
-    const gridRowStarts = [4, 8, 12]; // label row of each of the 3 card rows
+    // Only 2 card rows now — the old 3rd row held just Bring Forward, which
+    // has moved up into row 2's slot (see below), so there's nothing left
+    // to anchor a 3rd row start at.
+    const gridRowStarts = [4, 8];
 
     function placeCard(rowIdx, colIdx, { label, value, numFmt, desc, risk }) {
       const [c1, c2] = colGroups[colIdx];
@@ -1434,6 +1437,15 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       setMergedCell(`${c1}${descRow}:${c2}${descRow}`, desc, cardDescFont, null, descAlign);
 
       return `${c1}${valueRow}`; // this card's value-cell address, for cross-referencing
+    }
+
+    // Needed by the Bring Forward card (row 2) below — computed here, ahead
+    // of the card grid, since it now sits earlier in the grid than the
+    // Next Month tab itself is built further up the file.
+    let nextMonthBringForwardRange = null;
+    if (nextMonthWs) {
+      const nextMonthBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
+      nextMonthBringForwardRange = `'Next Month'!$${nextMonthBringForwardCol}:$${nextMonthBringForwardCol}`;
     }
 
     // Row 1 of the grid — running totals building up from Invoiced to date.
@@ -1467,10 +1479,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Confirmed Not Getting — top of the risk section (M:P), aligned with
     // row 1 of the main grid. Deliberately kept apart from the value cards:
     // this is a confirmed miss, not a maybe, so it's tracked on its own so
-    // it never gets conflated with the shortfall card below it.
+    // it never gets conflated with the shortfall card below it. Pulls from
+    // Expected to Invoice Value (column U) rather than Stock Value — this
+    // needs to show what we're actually failing to deliver against the
+    // order, not just whatever happens to be sat in stock for that line.
     placeCard(0, 3, {
       label: 'CONFIRMED NOT GETTING (PTFE)',
-      value: { formula: `SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataWontGetRange},"x")`, result: 0 },
+      value: { formula: `SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataWontGetRange},"x")`, result: 0 },
       numFmt: '#,##0.00',
       desc: {
         formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataWontGetRange},"x")&" line(s) confirmed not getting. Excluded from Invoiced + Potential Stock, Invoiced + Expected to Invoice and Final Day Total. Filter the Won't Get column on the Data tab for detail."`,
@@ -1506,14 +1521,22 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       desc: 'Invoiced + Expected to Invoice (left) plus the Expected to Invoice Value of everything flagged Last Day but NOT Won\'t Get.'
     });
 
+    // Value Available to Bring Forward (Next Month) — moved up into this
+    // slot, replacing the old Value Due (PTFE) — Last Day card (removed
+    // per request). Next Month tab's Bring Forward Value column is itself
+    // a straight pull-through of Stock Value — see where it's built above.
     placeCard(1, 2, {
-      label: 'VALUE DUE (PTFE) — LAST DAY',
-      value: { formula: `SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"x")`, result: 0 },
+      label: 'VALUE AVAILABLE TO BRING FORWARD (NEXT MONTH)',
+      value: nextMonthBringForwardRange
+        ? { formula: `SUM(${nextMonthBringForwardRange})`, result: 0 }
+        : 0,
       numFmt: '#,##0.00',
-      desc: {
-        formula: `COUNTIFS(${dataStreamRange},"PTFE",${dataLastDayRange},"x")&" item(s) due. What product, value and time is coming through on the last day of the month — filter the Data tab by Last Day for detail."`,
-        result: '0 item(s) due.'
-      }
+      desc: nextMonthBringForwardRange
+        ? {
+            formula: `COUNTIF(${nextMonthBringForwardRange},">0")&" line(s) with stock. Stock Value of Next Month tab rows — what's already on hand and could be pulled into this month if it's falling short of target."`,
+            result: '0 line(s) with stock.'
+          }
+        : '0 line(s) with stock (no Next Month tab on a Full Breakdown export).'
     });
 
     // Value at Risk — Shortfall — bottom of the risk section (M:P), aligned
@@ -1536,31 +1559,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       risk: true
     });
 
-    // Row 3 of the main grid — just Bring Forward now that Confirmed Not
-    // Getting and Value at Risk — Shortfall have moved to the risk section.
-    // Bring Forward Value is a calculated column (= Stock Value, not a
-    // manual "x" flag — see the Next Month tab), so this totals the whole
-    // column rather than SUMIF-ing a flag, and counts rows with any stock
-    // instead of counting flagged rows. Only meaningful for a Month End
-    // export; a Full Breakdown export has no Next Month tab to sum.
-    let nextMonthBringForwardRange = null;
-    if (nextMonthWs) {
-      const nextMonthBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
-      nextMonthBringForwardRange = `'Next Month'!$${nextMonthBringForwardCol}:$${nextMonthBringForwardCol}`;
-    }
-    placeCard(2, 0, {
-      label: 'VALUE AVAILABLE TO BRING FORWARD (NEXT MONTH)',
-      value: nextMonthBringForwardRange
-        ? { formula: `SUM(${nextMonthBringForwardRange})`, result: 0 }
-        : 0,
-      numFmt: '#,##0.00',
-      desc: nextMonthBringForwardRange
-        ? {
-            formula: `COUNTIF(${nextMonthBringForwardRange},">0")&" line(s) with stock. Stock Value of Next Month tab rows — what's already on hand and could be pulled into this month if it's falling short of target."`,
-            result: '0 line(s) with stock.'
-          }
-        : '0 line(s) with stock (no Next Month tab on a Full Breakdown export).'
-    });
+    // Row 3 of the grid is gone — Bring Forward moved up into row 2 (see
+    // above), and Confirmed Not Getting / Value at Risk — Shortfall already
+    // live in the risk section (M:P), so there's nothing left to place here.
+    // Grid is now 2 rows tall (gridRowStarts = [4, 8]); the At-Risk Lines
+    // section below starts right after it rather than leaving a dead row.
 
     // ── At-risk lines detail — full width, below the card grid ─────────────
     // Excel has no true "hover tooltip" that can show live, formula-driven
@@ -1573,16 +1576,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Risk Value (the calculated shortfall), rounded to the nearest whole
     // pound so the figure reads cleanly at a glance — not Stock Value,
     // consistent with the Value at Risk — Shortfall card above.
-    setMergedCell('A16:P16', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
+    setMergedCell('A12:P12', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
     setMergedCell(
-      'A17:P17',
+      'A13:P13',
       { text: 'Open the Data tab and use the Risk column filter arrow to show every flagged row', hyperlink: "#'Data'!A1" },
       { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
       null,
       { horizontal: 'left', vertical: 'middle' }
     );
 
-    const atRiskListStartRow = 18;
+    const atRiskListStartRow = 14;
     const atRiskListCount = 10;
     for (let idx = 0; idx < atRiskListCount; idx++) {
       const r = atRiskListStartRow + idx;
