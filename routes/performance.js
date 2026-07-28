@@ -936,17 +936,19 @@ function excelColumnLetter(n) {
 //
 // Two sheets:
 //   Dashboard — summary cards (Invoiced to date, Invoiced+Picked, Invoiced+
-//   Potential Stock, and a Risk card). Every total except "Invoiced to date"
-//   is a live SUMIFS/COUNTIFS formula against the Data sheet, scoped to
-//   ValueStream = PTFE, so it recalculates as planners edit Stock Qty /
-//   Picked Qty / Risk there. "Invoiced to date" comes from real SAP billing
-//   documents (dbo.InvoiceSnapshot via dbo.DailyPerformance) — there's
-//   nothing on the Data sheet to compute it from, so it's written as a plain
-//   value, accurate as of the moment this file was generated.
-//   Data — the row-level export (as before), plus two new blank columns:
-//   Risk and Reason. Flagging a row "x" in Risk excludes its Stock Value
-//   from the Invoiced + Potential Stock card and rolls it into the Risk
-//   card instead ("we may or may not get it").
+//   Potential Stock, and a risk section). Every total except "Invoiced to
+//   date" is a live SUMIFS/COUNTIFS formula against the Data sheet, scoped
+//   to ValueStream = PTFE, so it recalculates as planners edit Stock Qty /
+//   Won't Get / Expected to Invoice Qty there. "Invoiced to date" comes from
+//   real SAP billing documents (dbo.InvoiceSnapshot via dbo.DailyPerformance)
+//   — there's nothing on the Data sheet to compute it from, so it's written
+//   as a plain value, accurate as of the moment this file was generated.
+//   Data — the row-level export (as before), plus Won't Get and Reason.
+//   Risk Value is no longer a manual flag: it's calculated automatically as
+//   MAX(Order Qty - Expected to Invoice Qty, 0), priced — see Risk Qty/Risk
+//   Value further down. Flagging a row "x" in Won't Get excludes its Stock
+//   Value from the Invoiced + Potential Stock card and rolls it into the
+//   Confirmed Not Getting card instead ("this definitely isn't coming").
 router.get('/orderbook-breakdown/export', async (req, res) => {
   try {
     const mode = req.query.mode === 'monthEnd' ? 'monthEnd' : 'full';
@@ -1008,18 +1010,17 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       { header: 'Stock Value',   key: 'stockValue',        width: 14 },
       { header: 'Picked Qty',    key: 'pickedQty',         width: 14 },
       { header: 'Picked Value',  key: 'pickedValue',       width: 14 },
-      { header: 'Risk',          key: 'risk',              width: 8 },
       { header: 'Won\'t Get',    key: 'wontGet',           width: 10 },
       { header: 'Reason',        key: 'reason',            width: 34 },
       { header: 'Last Day',                key: 'lastDay',               width: 10 },
       { header: 'Last Day Time',           key: 'lastDayTime',           width: 14 },
       { header: 'Expected to Invoice Qty',  key: 'plannedProductionQty',  width: 18 },
       { header: 'Expected to Invoice Value',key: 'plannedProductionValue',width: 20 },
-      // Calculated, not manual — the shortfall between what was ordered and
-      // what we now expect to invoice (Expected to Invoice Qty above), and
-      // its £ value. See the formulas further down for exactly how these are
-      // derived; this is "the risk" per the Month End dashboard card built
-      // from Risk Value below.
+      // Calculated, not manual — no more Risk "x" flag column. This is the
+      // shortfall between what was ordered and what we now expect to invoice
+      // (Expected to Invoice Qty above), and its £ value. See the formulas
+      // further down for exactly how these are derived; this is "the risk"
+      // per the Month End dashboard card built from Risk Value below.
       { header: 'Risk Qty',                key: 'riskQty',               width: 14 },
       { header: 'Risk Value',              key: 'riskValue',             width: 14 },
       { header: 'At Risk Seq',             key: 'atRiskSeq',             width: 10 }
@@ -1031,7 +1032,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const cellBorder  = { top: border, bottom: border, left: border, right: border };
     const oddFill     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
     const evenFill    = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9EEF4' } };
-    // Pale yellow — flags Risk/Reason as the two columns planners type into.
+    // Pale yellow — flags the manual-entry columns planners type into.
     const inputFill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9DB' } };
 
     const headerRow = dataWs.getRow(1);
@@ -1059,7 +1060,6 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const pickedQtyCol   = excelColumnLetter(dataWs.getColumn('pickedQty').number);
     const pickedValueCol = excelColumnLetter(dataWs.getColumn('pickedValue').number);
     const valueStreamCol = excelColumnLetter(dataWs.getColumn('valueStream').number);
-    const riskCol        = excelColumnLetter(dataWs.getColumn('risk').number);
     const wontGetCol     = excelColumnLetter(dataWs.getColumn('wontGet').number);
     const lastDayCol              = excelColumnLetter(dataWs.getColumn('lastDay').number);
     const lastDayTimeCol          = excelColumnLetter(dataWs.getColumn('lastDayTime').number);
@@ -1070,11 +1070,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const materialCol            = excelColumnLetter(dataWs.getColumn('material').number);
     const referenceDocumentCol   = excelColumnLetter(dataWs.getColumn('referenceDocument').number);
     const atRiskSeqCol           = excelColumnLetter(dataWs.getColumn('atRiskSeq').number);
-    // Hidden running-count helper: numbers PTFE rows flagged Risk = "x" in the
-    // order they appear (1, 2, 3…), so the Dashboard's At-Risk Lines list can
-    // pull them out with plain INDEX/MATCH — no TEXTJOIN, no dynamic arrays,
-    // no CSE. Works identically on every Excel version, unlike the old
-    // array-formula approach.
+    // Hidden running-count helper: numbers PTFE rows with a Risk Value > 0 in
+    // the order they appear (1, 2, 3…), so the Dashboard's At-Risk Lines list
+    // can pull them out with plain INDEX/MATCH — no TEXTJOIN, no dynamic
+    // arrays, no CSE. Works identically on every Excel version, unlike the
+    // old array-formula approach.
     dataWs.getColumn('atRiskSeq').hidden = true;
 
     rows.forEach((r, i) => {
@@ -1098,7 +1098,6 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         orderValue: Number(r.OrderValue || 0),
         stockQty: Number(r.StockQty || 0),
         pickedQty: Number(r.PickedQty || 0),
-        risk: notes.risk || '',
         wontGet: notes.wontGet || '',
         reason: notes.reason || '',
         lastDay: notes.lastDay || '',
@@ -1165,30 +1164,21 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         formula: `IF(${orderQtyCol}${excelRow}>0,${riskQtyCol}${excelRow}*(${orderValueCol}${excelRow}/${orderQtyCol}${excelRow}),0)`,
         result: 0
       };
-      // Running count of PTFE rows flagged Risk = "x", in row order — the
+      // Running count of PTFE rows with a Risk Value > 0, in row order — the
       // Dashboard's At-Risk Lines list uses this with INDEX/MATCH to pull out
       // the 1st, 2nd, 3rd… flagged line. Blank ("") when this row isn't a
-      // flagged PTFE row, so MATCH skips straight past it.
+      // flagged PTFE row, so MATCH skips straight past it. Risk Value is
+      // fully automatic now (no manual Risk "x" column any more), so this
+      // just keys off whatever the calculated shortfall already is.
       row.getCell('atRiskSeq').value = {
-        formula: `IF(AND(${valueStreamCol}${excelRow}="PTFE",${riskCol}${excelRow}="x"),COUNTIFS($${riskCol}$2:$${riskCol}${excelRow},"x",$${valueStreamCol}$2:$${valueStreamCol}${excelRow},"PTFE"),"")`,
+        formula: `IF(AND(${valueStreamCol}${excelRow}="PTFE",${riskValueCol}${excelRow}>0),COUNTIFS($${riskValueCol}$2:$${riskValueCol}${excelRow},">0",$${valueStreamCol}$2:$${valueStreamCol}${excelRow},"PTFE"),"")`,
         result: ''
       };
 
-      // Risk is a manual flag ("x" = we may not actually get this stock) —
-      // a dropdown keeps entries consistent, though SUMIFS/COUNTIFS on the
-      // Dashboard match "x" case-insensitively regardless.
-      row.getCell('risk').dataValidation = {
-        type: 'list',
-        allowBlank: true,
-        formulae: ['"x"']
-      };
-      row.getCell('risk').alignment   = { horizontal: 'center' };
-
-      // Won't Get is a separate, stronger flag than Risk — "x" here means
-      // confirmed, not maybe. Kept as its own column (rather than a second
-      // value in the Risk dropdown) so the two can never be confused when
-      // filtering, and so a row can't accidentally be both at once without
-      // it being obvious on the sheet.
+      // Won't Get — "x" here means confirmed, not maybe. Distinct from Risk
+      // Value (which is a calculated, partial shortfall): a row can have a
+      // Risk Value shortfall and still be expected in some quantity, whereas
+      // Won't Get means none of it is coming.
       row.getCell('wontGet').dataValidation = {
         type: 'list',
         allowBlank: true,
@@ -1198,10 +1188,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
       row.getCell('reason').alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
 
-      // Last Day — same "x" flag pattern as Risk: marks a line as due on the
-      // last day of the month, with a free-text time next to it (kept as plain
-      // text rather than an Excel time value so planners can write "TBC",
-      // "AM", etc. as well as a clock time).
+      // Last Day — same "x" flag pattern as Won't Get: marks a line as due on
+      // the last day of the month, with a free-text time next to it (kept as
+      // plain text rather than an Excel time value so planners can write
+      // "TBC", "AM", etc. as well as a clock time).
       row.getCell('lastDay').dataValidation = {
         type: 'list',
         allowBlank: true,
@@ -1219,7 +1209,6 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
       // Override the alternating fill on every manual-entry column so they
       // stand out from the SAP-sourced / formula columns.
-      row.getCell('risk').fill                  = inputFill;
       row.getCell('wontGet').fill                = inputFill;
       row.getCell('reason').fill                 = inputFill;
       row.getCell('lastDay').fill                = inputFill;
@@ -1325,7 +1314,6 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const dataStockRange  = `'Data'!$${stockValueCol}:$${stockValueCol}`;
     const dataPickedRange = `'Data'!$${pickedValueCol}:$${pickedValueCol}`;
     const dataStreamRange = `'Data'!$${valueStreamCol}:$${valueStreamCol}`;
-    const dataRiskRange   = `'Data'!$${riskCol}:$${riskCol}`;
     const dataWontGetRange = `'Data'!$${wontGetCol}:$${wontGetCol}`;
     const dataLastDayRange              = `'Data'!$${lastDayCol}:$${lastDayCol}`;
     const dataPlannedQtyRange           = `'Data'!$${plannedProductionQtyCol}:$${plannedProductionQtyCol}`;
@@ -1341,7 +1329,6 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const maxDataRow = Math.max(2000, rows.length + 500);
     const b = (col) => `'Data'!$${col}$2:$${col}$${maxDataRow}`;
     const dataStreamRangeB      = b(valueStreamCol);
-    const dataRiskRangeB        = b(riskCol);
     const dataLastDayRangeB     = b(lastDayCol);
     const dataLastDayTimeRangeB = b(lastDayTimeCol);
     const dataStockRangeB       = b(stockValueCol);
@@ -1349,9 +1336,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const dataReferenceDocumentRangeB = b(referenceDocumentCol);
 
     // Cached display values (Excel recalculates the live formulas on open) —
-    // computed the same way the formulas will: no rows are flagged Risk yet
-    // at export time, so the "potential stock" total starts out equal to the
-    // full stock total and the Risk card starts at zero.
+    // computed the same way the formulas will: Expected to Invoice Qty
+    // defaults to Order Qty at export time, so Risk Value is 0 for every
+    // row, so the "potential stock" total starts out equal to the full
+    // stock total and the risk cards start at zero.
     const ptfeRows = rows.filter(r => r.ValueStream === 'PTFE');
     const pickedTotalPtfe    = ptfeRows.reduce((sum, r) => sum + Number(r.PickedValue || 0), 0);
     const stockTotalPtfe     = ptfeRows.reduce((sum, r) => sum + Number(r.StockValue  || 0), 0);
@@ -1401,26 +1389,27 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
     dashboardWs.getRow(1).height = 30;
     setMergedCell('A1:P1', 'PTFE Order Book Dashboard', titleFont, titleFill);
-    dashboardWs.getRow(2).height = 20;
-    setMergedCell('A2:P2', `${modeLabel} — generated ${generatedAt}`, subFont, null);
+    // Row 2 (the mode/generated-at subtitle line) removed per request — the
+    // card grid now starts right after the title, one row higher than
+    // before. generatedAt is still computed above in case it's needed again
+    // elsewhere on the sheet.
 
-    // ── Card grid — 3 rows x 3 value cards (A:L) plus a risk section to the
+    // ── Card grid — 2 rows x 3 value cards (A:L) plus a risk section to the
     // right (M:P) ────────────────────────────────────────────────────────
     // Column groups: A:D, E:H, I:L for the main value cards, M:P for the two
     // risk-styled cards (Confirmed Not Getting, Value at Risk — Shortfall),
     // kept visually and structurally separate from the "good news" totals.
     // Row groups: label / value / description / spacer, 4 rows per card row.
-    // Card 1's value cell is deliberately kept at A5 (unchanged from the old
-    // layout) since a good number of other formulas below reference it as an
-    // absolute anchor ($A$5). Description rows are 60px tall (vs. the old
-    // ~15px default) so wrapped 3-4 line text isn't clipped — Excel doesn't
-    // auto-size row height for wrapped merged cells, so this has to be set
-    // explicitly.
+    // The value-cell address for card 1 (and every other card) is read back
+    // dynamically from placeCard()'s return value rather than hardcoded
+    // anywhere, so shifting the grid up when row 2 was removed didn't
+    // require touching any formula. Description rows default to 60px tall
+    // (vs. the old ~15px default) so wrapped 3-4 line text isn't clipped —
+    // Excel doesn't auto-size row height for wrapped merged cells, so this
+    // has to be set explicitly. Per request, the two card rows' description
+    // rows are then overridden to 40px and 50px respectively — see below.
     const colGroups = [['A', 'D'], ['E', 'H'], ['I', 'L'], ['M', 'P']];
-    // Only 2 card rows now — the old 3rd row held just Bring Forward, which
-    // has moved up into row 2's slot (see below), so there's nothing left
-    // to anchor a 3rd row start at.
-    const gridRowStarts = [4, 8];
+    const gridRowStarts = [3, 7];
 
     function placeCard(rowIdx, colIdx, { label, value, numFmt, desc, risk }) {
       const [c1, c2] = colGroups[colIdx];
@@ -1469,11 +1458,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     placeCard(0, 2, {
       label: 'INVOICED + POTENTIAL STOCK (PTFE)',
       value: {
-        formula: `$${invoicedCellAddr}+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskRange},"<>x",${dataWontGetRange},"<>x")`,
+        formula: `$${invoicedCellAddr}+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskValueRange},"<=0",${dataWontGetRange},"<>x")`,
         result: invoicedToDate + stockTotalPtfe
       },
       numFmt: '#,##0.00',
-      desc: 'Full month-end prediction: invoiced + stock not flagged at risk or Won\'t Get on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.'
+      desc: 'Full month-end prediction: invoiced + stock for lines with no Risk Value shortfall and not flagged Won\'t Get on the Data tab. Stock Value already includes anything picked, so Picked Value isn\'t added again here.'
     });
 
     // Confirmed Not Getting — top of the risk section (M:P), aligned with
@@ -1498,17 +1487,18 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Value Due (Last Day) — swapped in from its old row-3 slot so the risk
     // shortfall card below can move out to the risk section on the right.
     // Excludes rows flagged Last Day = "x" (tracked separately in Final Day
-    // Total) and Risk = "x" (belt-and-braces alongside Expected to Invoice
-    // Qty/Value themselves, which should already be reduced to reflect a
-    // known shortfall).
+    // Total) and rows with a Risk Value shortfall (belt-and-braces alongside
+    // Expected to Invoice Qty/Value themselves, which should already be
+    // reduced to reflect a known shortfall — Risk Value is now fully
+    // automatic, so this is just checking the same shortfall two ways).
     const plannedCellAddr = placeCard(1, 0, {
       label: 'INVOICED + EXPECTED TO INVOICE (PTFE)',
       value: {
-        formula: `$${invoicedCellAddr}+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x",${dataRiskRange},"<>x")`,
+        formula: `$${invoicedCellAddr}+SUMIFS(${dataPlannedValueRange},${dataStreamRange},"PTFE",${dataLastDayRange},"<>x",${dataWontGetRange},"<>x",${dataRiskValueRange},"<=0")`,
         result: invoicedToDate + ptfeRows.filter(r => String(r.lastDay || '').toLowerCase() !== 'x').reduce((sum, r) => sum + Number(r.StockValue || 0), 0)
       },
       numFmt: '#,##0.00',
-      desc: 'Invoiced plus Expected to Invoice Value for everything NOT flagged Last Day, Won\'t Get or Risk (Last Day items are in Final Day Total below instead; Won\'t Get and Risk items are excluded so this stays a conservative minimum).'
+      desc: 'Invoiced plus Expected to Invoice Value for everything NOT flagged Last Day or Won\'t Get, and with no Risk Value shortfall (Last Day items are in Final Day Total below instead; Won\'t Get and at-risk items are excluded so this stays a conservative minimum).'
     });
 
     placeCard(1, 1, {
@@ -1562,8 +1552,14 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Row 3 of the grid is gone — Bring Forward moved up into row 2 (see
     // above), and Confirmed Not Getting / Value at Risk — Shortfall already
     // live in the risk section (M:P), so there's nothing left to place here.
-    // Grid is now 2 rows tall (gridRowStarts = [4, 8]); the At-Risk Lines
+    // Grid is now 2 rows tall (gridRowStarts = [3, 7]); the At-Risk Lines
     // section below starts right after it rather than leaving a dead row.
+
+    // Per request: the two card rows' description rows (60px by default,
+    // set inside placeCard above) are overridden here to different, smaller
+    // heights now that row 2 is gone and the grid sits higher on the sheet.
+    dashboardWs.getRow(5).height = 40;
+    dashboardWs.getRow(9).height = 50;
 
     // ── At-risk lines detail — full width, below the card grid ─────────────
     // Excel has no true "hover tooltip" that can show live, formula-driven
@@ -1576,16 +1572,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // Risk Value (the calculated shortfall), rounded to the nearest whole
     // pound so the figure reads cleanly at a glance — not Stock Value,
     // consistent with the Value at Risk — Shortfall card above.
-    setMergedCell('A12:P12', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
+    setMergedCell('A11:P11', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
     setMergedCell(
-      'A13:P13',
-      { text: 'Open the Data tab and use the Risk column filter arrow to show every flagged row', hyperlink: "#'Data'!A1" },
+      'A12:P12',
+      { text: 'Open the Data tab and sort/filter by Risk Value to show every flagged row', hyperlink: "#'Data'!A1" },
       { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
       null,
       { horizontal: 'left', vertical: 'middle' }
     );
 
-    const atRiskListStartRow = 14;
+    const atRiskListStartRow = 13;
     const atRiskListCount = 10;
     for (let idx = 0; idx < atRiskListCount; idx++) {
       const r = atRiskListStartRow + idx;
@@ -1637,8 +1633,8 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 // not-multipart pattern as the supplier invoice upload further down this
 // file (see /order-suggestions/shipments/:shipmentId/documents/upload).
 // Reads the Data sheet back out with ExcelJS and upserts whatever a planner
-// typed into Risk/Won't Get/Reason/Last Day/Last Day Time/Expected to
-// Invoice Qty into dbo.OrderBookLineNotes, so the next person to download
+// typed into Won't Get/Reason/Last Day/Last Day Time/Expected to Invoice
+// Qty into dbo.OrderBookLineNotes, so the next person to download
 // the sheet sees it prefilled instead of starting blank. The Next Month
 // tab is read-only now (Stock Qty/Value and Bring Forward Value are all
 // live formulas, not manual input), so nothing on it round-trips back.
@@ -1712,7 +1708,8 @@ router.post('/orderbook-breakdown/upload-notes',
         notesByKey.set(`${referenceDocument}||${material}`, {
           referenceDocument,
           material,
-          risk:                 readCellText(row, dataHeaderMap['Risk']),
+          // No Risk column any more — it's calculated on the Data sheet now
+          // (Risk Value), not round-tripped from an uploaded flag.
           reason:                readCellText(row, dataHeaderMap['Reason']),
           wontGet:               readCellText(row, dataHeaderMap["Won't Get"]),
           lastDay:               readCellText(row, dataHeaderMap['Last Day']),
