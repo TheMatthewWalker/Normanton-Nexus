@@ -1023,7 +1023,12 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       // per the Month End dashboard card built from Risk Value below.
       { header: 'Risk Qty',                key: 'riskQty',               width: 14 },
       { header: 'Risk Value',              key: 'riskValue',             width: 14 },
-      { header: 'At Risk Seq',             key: 'atRiskSeq',             width: 10 }
+      { header: 'At Risk Seq',             key: 'atRiskSeq',             width: 10 },
+      // Hidden helper, same pattern as At Risk Seq — numbers PTFE rows
+      // flagged Won't Get="x" in row order so the Dashboard's Confirmed Not
+      // Getting list can pull them out with INDEX/MATCH, mirroring the
+      // At-Risk Lines list alongside it.
+      { header: 'Not Getting Seq',         key: 'notGettingSeq',         width: 10 }
     ];
 
     const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
@@ -1070,12 +1075,16 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     const materialCol            = excelColumnLetter(dataWs.getColumn('material').number);
     const referenceDocumentCol   = excelColumnLetter(dataWs.getColumn('referenceDocument').number);
     const atRiskSeqCol           = excelColumnLetter(dataWs.getColumn('atRiskSeq').number);
+    const notGettingSeqCol       = excelColumnLetter(dataWs.getColumn('notGettingSeq').number);
     // Hidden running-count helper: numbers PTFE rows with a Risk Value > 0 in
     // the order they appear (1, 2, 3…), so the Dashboard's At-Risk Lines list
     // can pull them out with plain INDEX/MATCH — no TEXTJOIN, no dynamic
     // arrays, no CSE. Works identically on every Excel version, unlike the
     // old array-formula approach.
     dataWs.getColumn('atRiskSeq').hidden = true;
+    // Same helper pattern, keyed on Won't Get="x" instead of Risk Value>0 —
+    // feeds the Dashboard's Confirmed Not Getting list.
+    dataWs.getColumn('notGettingSeq').hidden = true;
 
     rows.forEach((r, i) => {
       const excelRow = i + 2; // header occupies row 1
@@ -1172,6 +1181,13 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       // just keys off whatever the calculated shortfall already is.
       row.getCell('atRiskSeq').value = {
         formula: `IF(AND(${valueStreamCol}${excelRow}="PTFE",${riskValueCol}${excelRow}>0),COUNTIFS($${riskValueCol}$2:$${riskValueCol}${excelRow},">0",$${valueStreamCol}$2:$${valueStreamCol}${excelRow},"PTFE"),"")`,
+        result: ''
+      };
+      // Same running-count pattern as At Risk Seq, keyed on Won't Get="x"
+      // instead of Risk Value>0 — feeds the Dashboard's Confirmed Not
+      // Getting list, mirroring the At-Risk Lines list alongside it.
+      row.getCell('notGettingSeq').value = {
+        formula: `IF(AND(${valueStreamCol}${excelRow}="PTFE",${wontGetCol}${excelRow}="x"),COUNTIFS($${wontGetCol}$2:$${wontGetCol}${excelRow},"x",$${valueStreamCol}$2:$${valueStreamCol}${excelRow},"PTFE"),"")`,
         result: ''
       };
 
@@ -1590,46 +1606,73 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     dashboardWs.getRow(5).height = 40;
     dashboardWs.getRow(9).height = 50;
 
-    // ── At-risk lines detail — full width, below the card grid ─────────────
+    // ── Risk / Not-Getting lines detail — half width each, below the card
+    // grid ───────────────────────────────────────────────────────────────
     // Excel has no true "hover tooltip" that can show live, formula-driven
-    // content (native cell comments only hold static text), so this pairs a
-    // hyperlink to the filtered Data tab (works on every Excel version) with
-    // a short static list of the flagged lines themselves — built with plain
-    // INDEX/MATCH against the hidden "At Risk Seq" helper column on the Data
-    // tab, not TEXTJOIN/dynamic arrays, so it evaluates correctly on any
-    // Excel version (2007 and up), not just 365/2021+. Shows each line's
-    // Risk Value (the calculated shortfall), rounded to the nearest whole
-    // pound so the figure reads cleanly at a glance — not Stock Value,
-    // consistent with the Value at Risk — Shortfall card above.
-    setMergedCell('A11:P11', 'AT-RISK LINES (PTFE)', cardLabelFont, cardLabelFill);
-    setMergedCell(
-      'A12:P12',
-      { text: 'Open the Data tab and sort/filter by Risk Value to show every flagged row', hyperlink: "#'Data'!A1" },
-      { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
-      null,
-      { horizontal: 'left', vertical: 'middle' }
-    );
+    // content (native cell comments only hold static text), so each list
+    // pairs a hyperlink to the filtered Data tab (works on every Excel
+    // version) with a short static list of the flagged lines themselves —
+    // built with plain INDEX/MATCH against a hidden helper column on the
+    // Data tab, not TEXTJOIN/dynamic arrays, so it evaluates correctly on
+    // any Excel version (2007 and up), not just 365/2021+. At-Risk Lines
+    // (left half, A:H) and Confirmed Not Getting (right half, I:P) sit side
+    // by side in exactly the same layout/style so they read as a matched
+    // pair — same header fill, same hyperlink style, same list row count
+    // and formatting, same footer wording.
+    function buildFlaggedLinesList({ startCol, endCol, title, hyperlinkText, seqCol, valueCol, unitLabel }) {
+      setMergedCell(`${startCol}11:${endCol}11`, title, cardLabelFont, cardLabelFill);
+      setMergedCell(
+        `${startCol}12:${endCol}12`,
+        { text: hyperlinkText, hyperlink: "#'Data'!A1" },
+        { name: 'Arial', size: 10, color: { argb: 'FF1F3864' }, underline: true },
+        null,
+        { horizontal: 'left', vertical: 'middle' }
+      );
 
-    const atRiskListStartRow = 13;
-    const atRiskListCount = 10;
-    for (let idx = 0; idx < atRiskListCount; idx++) {
-      const r = atRiskListStartRow + idx;
-      const n = idx + 1;
-      dashboardWs.getRow(r).height = 16;
-      dashboardWs.mergeCells(`A${r}:P${r}`);
-      const cell = dashboardWs.getCell(`A${r}`);
-      cell.value = {
-        formula: `IFERROR(INDEX(Data!$${materialCol}:$${materialCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | Order "&INDEX(Data!$${referenceDocumentCol}:$${referenceDocumentCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | £"&TEXT(INDEX(Data!$${riskValueCol}:$${riskValueCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0)),"#")&" at risk","")`,
-        result: ''
-      };
-      cell.font = { name: 'Arial', size: 9, color: { argb: 'FF444444' } };
-      cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+      const listStartRow = 13;
+      const listCount = 10;
+      for (let idx = 0; idx < listCount; idx++) {
+        const r = listStartRow + idx;
+        const n = idx + 1;
+        dashboardWs.getRow(r).height = 16;
+        dashboardWs.mergeCells(`${startCol}${r}:${endCol}${r}`);
+        const cell = dashboardWs.getCell(`${startCol}${r}`);
+        cell.value = {
+          formula: `IFERROR(INDEX(Data!$${materialCol}:$${materialCol},MATCH(${n},Data!$${seqCol}:$${seqCol},0))&" | Order "&INDEX(Data!$${referenceDocumentCol}:$${referenceDocumentCol},MATCH(${n},Data!$${seqCol}:$${seqCol},0))&" | £"&TEXT(INDEX(Data!$${valueCol}:$${valueCol},MATCH(${n},Data!$${seqCol}:$${seqCol},0)),"#")&" ${unitLabel}","")`,
+          result: ''
+        };
+        cell.font = { name: 'Arial', size: 9, color: { argb: 'FF444444' } };
+        cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+      }
+      setMergedCell(
+        `${startCol}${listStartRow + listCount}:${endCol}${listStartRow + listCount}`,
+        `Shows the first ${listCount} flagged lines, in the order they appear on the Data tab — works on every Excel version. More than ${listCount}? Use the link above for the full list. Blank rows above just mean fewer than ${listCount} are flagged.`,
+        cardDescFont, null
+      );
     }
-    setMergedCell(
-      `A${atRiskListStartRow + atRiskListCount}:P${atRiskListStartRow + atRiskListCount}`,
-      `Shows the first ${atRiskListCount} flagged lines, in the order they appear on the Data tab — works on every Excel version. More than ${atRiskListCount}? Use the link above for the full list. Blank rows above just mean fewer than ${atRiskListCount} are flagged.`,
-      cardDescFont, null
-    );
+
+    // Left half — Risk Value (the calculated shortfall), rounded to the
+    // nearest whole pound so the figure reads cleanly at a glance — not
+    // Stock Value, consistent with the Value at Risk — Shortfall card above.
+    buildFlaggedLinesList({
+      startCol: 'A', endCol: 'H',
+      title: 'AT-RISK LINES (PTFE)',
+      hyperlinkText: 'Open the Data tab and sort/filter by Risk Value to show every flagged row',
+      seqCol: atRiskSeqCol,
+      valueCol: riskValueCol,
+      unitLabel: 'at risk'
+    });
+
+    // Right half — Expected to Invoice Value for rows flagged Won't Get="x",
+    // matching the £ figure the Confirmed Not Getting card above sums.
+    buildFlaggedLinesList({
+      startCol: 'I', endCol: 'P',
+      title: 'CONFIRMED NOT GETTING (PTFE)',
+      hyperlinkText: "Open the Data tab and sort/filter by Won't Get to show every flagged row",
+      seqCol: notGettingSeqCol,
+      valueCol: plannedProductionValueCol,
+      unitLabel: 'not getting'
+    });
 
     // Value-by-hour table removed per request (wasn't working reliably).
     // Value Due (PTFE) — Last Day, in the main grid above, still surfaces
