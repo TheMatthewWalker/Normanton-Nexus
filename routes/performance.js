@@ -1590,7 +1590,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       dashboardWs.mergeCells(`A${r}:P${r}`);
       const cell = dashboardWs.getCell(`A${r}`);
       cell.value = {
-        formula: `IFERROR(INDEX(Data!$${materialCol}:$${materialCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | Order "&INDEX(Data!$${referenceDocumentCol}:$${referenceDocumentCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | £"&TEXT(INDEX(Data!$${riskValueCol}:$${riskValueCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0)),"#,##0")&" at risk","")`,
+        formula: `IFERROR(INDEX(Data!$${materialCol}:$${materialCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | Order "&INDEX(Data!$${referenceDocumentCol}:$${referenceDocumentCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0))&" | £"&TEXT(INDEX(Data!$${riskValueCol}:$${riskValueCol},MATCH(${n},Data!$${atRiskSeqCol}:$${atRiskSeqCol},0)),"#")&" at risk","")`,
         result: ''
       };
       cell.font = { name: 'Arial', size: 9, color: { argb: 'FF444444' } };
