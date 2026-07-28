@@ -494,19 +494,24 @@ router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'),
 // POST /api/sap/warehouse/stock-adjustment  (mounted at /api/sap in server.js)
 //
 // Proxies to SapServer's POST /api/warehouse/stock-adjustment endpoint
-// (BAPI_GOODSMVT_CREATE, movement types 711/712) — the write-off/correction
-// half of the Stock Investigations tool: once stock parked in the holding
-// bin (999/TEMP) via Batch Discrepancies' "Move to Holding" has actually been
-// investigated and understood, this posts the 711/712 needed to zero it out
-// rather than leaving it sitting there indefinitely. Gated the same way as
+// (BAPI_GOODSMVT_CREATE, movement types 711/712 for ordinary unrestricted
+// stock, or 717/718 for stock category 'S'/blocked stock, since 711/712
+// aren't valid postings against it) — the write-off/correction half of the
+// Stock Investigations tool: once stock parked in the holding bin (999/TEMP)
+// via Batch Discrepancies' "Move to Holding" has actually been investigated
+// and understood, this posts the movement needed to zero it out rather than
+// leaving it sitting there indefinitely. Gated the same way as
 // /warehouse/batch-cleanup-transfer — a supervisor-only correction path, not
 // a manual single-row move a person explicitly picked off a live count.
 //
 // Query: dryRun ('true' to echo the built RFC request without calling SAP,
 // passed straight through to SapServer).
 // Body matches SapServer's StockAdjustmentRequest: Material, StorageLocation,
-// MovementType ('711'|'712'), Quantity, Unit, and optional Batch,
-// ValuationType, Reference, PostingDate, DocumentDate, TestRun, Plant.
+// StorageType, StorageBin (stock sits inside warehouse management, so both
+// the WM bin and the IM storage location are required), MovementType
+// ('711'|'712'|'717'|'718'), Quantity, Unit, and optional Batch,
+// StockCategory, SpecialStockIndicator, SpecialStockNumber, ValuationType,
+// Reference, PostingDate, DocumentDate, TestRun, Plant.
 // ---------------------------------------------------------------------------
 router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async (req, res) => {
     const params = req.body;
