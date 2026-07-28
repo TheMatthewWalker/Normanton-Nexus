@@ -1229,12 +1229,17 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // ── Next Month sheet (Month End export only) ────────────────────────────
     // PTFE orders due the calendar month after this one — a candidate pool
     // to pull forward if the Data tab shows this month falling short.
-    // Bring Forward Value used to be a manual "x" flag; it's now a live
-    // formula equal to Stock Value — what's already physically in stock for
-    // that order is what could realistically be brought forward, so the
-    // figure is calculated straight off Stock Qty rather than typed in.
-    // getOrderBookBreakdown() carries StockQty/StockValue for every row
-    // regardless of month, so this needs no extra query.
+    // "Bring Forward" is a manual "x" flag a planner types in to confirm an
+    // order actually will be pulled forward (same dropdown pattern as Won't
+    // Get / Last Day on the Data tab). Bring Forward Value is a live formula
+    // that reads that flag: Stock Value when flagged "x", 0 otherwise — so
+    // the figure only reflects what's actually been confirmed, not just
+    // whatever happens to be sat in stock. getOrderBookBreakdown() carries
+    // StockQty/StockValue for every row regardless of month, so this needs
+    // no extra query. The flag round-trips via dbo.OrderBookLineNotes.
+    // BringForward (see listOrderBookLineNotes/upsertOrderBookLineNotes in
+    // performancesql.js and the upload-notes route further down) so it
+    // survives a re-download instead of resetting every export.
     let nextMonthWs = null;
     if (mode === 'monthEnd') {
       nextMonthWs = wb.addWorksheet('Next Month');
@@ -1248,6 +1253,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         { header: 'Order Value',   key: 'orderValue',        width: 14 },
         { header: 'Stock Qty',     key: 'stockQty',          width: 14 },
         { header: 'Stock Value',   key: 'stockValue',        width: 14 },
+        { header: 'Bring Forward', key: 'bringForwardConfirm', width: 12 },
         { header: 'Bring Forward Value', key: 'bringForward', width: 18 },
       ];
 
@@ -1264,10 +1270,17 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       const nmOrderValueCol = excelColumnLetter(nextMonthWs.getColumn('orderValue').number);
       const nmStockQtyCol   = excelColumnLetter(nextMonthWs.getColumn('stockQty').number);
       const nmStockValueCol = excelColumnLetter(nextMonthWs.getColumn('stockValue').number);
-      const nmBringForwardCol = excelColumnLetter(nextMonthWs.getColumn('bringForward').number);
+      const nmBringForwardConfirmCol = excelColumnLetter(nextMonthWs.getColumn('bringForwardConfirm').number);
 
       nextMonthRows.forEach((r, i) => {
         const excelRow = i + 2;
+
+        // Prefill the confirm flag from whatever a previous planner already
+        // uploaded for this exact order/material — see
+        // dbo.OrderBookLineNotes.BringForward / listOrderBookLineNotes — so
+        // downloading fresh never resets a decision already made.
+        const nmNotes = lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {};
+        const bringForwardFlag = nmNotes.bringForward === 'x' ? 'x' : '';
 
         const row = nextMonthWs.addRow({
           customer: r.Customer,
@@ -1278,6 +1291,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
           orderQty: Number(r.OrderQty || 0),
           orderValue: Number(r.OrderValue || 0),
           stockQty: Number(r.StockQty || 0),
+          bringForwardConfirm: bringForwardFlag,
           // stockValue / bringForward set as formulas below.
         });
 
@@ -1285,12 +1299,22 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
           formula: `IF(${nmOrderQtyCol}${excelRow}>0,${nmStockQtyCol}${excelRow}*(${nmOrderValueCol}${excelRow}/${nmOrderQtyCol}${excelRow}),0)`,
           result: Number(r.StockValue || 0)
         };
-        // Bring Forward Value — straight pull-through of Stock Value, not a
-        // separate calculation: what could be brought forward is exactly
-        // what's already in stock for this next-month order.
+        // Bring Forward — "x" here means a planner has confirmed this order
+        // will actually be brought forward, same dropdown pattern as Won't
+        // Get / Last Day on the Data tab.
+        row.getCell('bringForwardConfirm').dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: ['"x"']
+        };
+        row.getCell('bringForwardConfirm').alignment = { horizontal: 'center' };
+        // Bring Forward Value — 0 unless the Bring Forward flag is "x", in
+        // which case it's Stock Value: what's already in stock for this
+        // next-month order is what actually gets pulled forward once
+        // confirmed, not just whatever's available.
         row.getCell('bringForward').value = {
-          formula: `${nmStockValueCol}${excelRow}`,
-          result: Number(r.StockValue || 0)
+          formula: `IF(${nmBringForwardConfirmCol}${excelRow}="x",${nmStockValueCol}${excelRow},0)`,
+          result: bringForwardFlag === 'x' ? Number(r.StockValue || 0) : 0
         };
 
         const fill = i % 2 === 0 ? oddFill : evenFill;
@@ -1299,6 +1323,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
           cell.font   = { name: 'Arial', size: 10, color: { argb: 'FF000000' } };
           cell.border = cellBorder;
         });
+        // Override the alternating fill so the manual-entry flag stands out
+        // from the SAP-sourced / formula columns, same as Won't Get / Last
+        // Day on the Data tab.
+        row.getCell('bringForwardConfirm').fill = inputFill;
       });
 
       nextMonthWs.getColumn('orderQty').numFmt   = '#,##0';
@@ -1511,22 +1539,23 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
       desc: 'Invoiced + Expected to Invoice (left) plus the Expected to Invoice Value of everything flagged Last Day but NOT Won\'t Get.'
     });
 
-    // Value Available to Bring Forward (Next Month) — moved up into this
+    // Value Confirmed to Bring Forward (Next Month) — moved up into this
     // slot, replacing the old Value Due (PTFE) — Last Day card (removed
-    // per request). Next Month tab's Bring Forward Value column is itself
-    // a straight pull-through of Stock Value — see where it's built above.
+    // per request). Next Month tab's Bring Forward Value column is 0 unless
+    // a planner has flagged the Bring Forward column "x" on that row, so
+    // this SUM only ever totals confirmed lines, not everything with stock.
     placeCard(1, 2, {
-      label: 'VALUE AVAILABLE TO BRING FORWARD (NEXT MONTH)',
+      label: 'VALUE CONFIRMED TO BRING FORWARD (NEXT MONTH)',
       value: nextMonthBringForwardRange
         ? { formula: `SUM(${nextMonthBringForwardRange})`, result: 0 }
         : 0,
       numFmt: '#,##0.00',
       desc: nextMonthBringForwardRange
         ? {
-            formula: `COUNTIF(${nextMonthBringForwardRange},">0")&" line(s) with stock. Stock Value of Next Month tab rows — what's already on hand and could be pulled into this month if it's falling short of target."`,
-            result: '0 line(s) with stock.'
+            formula: `COUNTIF(${nextMonthBringForwardRange},">0")&" line(s) confirmed. Stock Value of Next Month tab rows flagged ""x"" in the Bring Forward column — use that column to confirm which orders will actually be pulled into this month."`,
+            result: '0 line(s) confirmed.'
           }
-        : '0 line(s) with stock (no Next Month tab on a Full Breakdown export).'
+        : '0 line(s) confirmed (no Next Month tab on a Full Breakdown export).'
     });
 
     // Value at Risk — Shortfall — bottom of the risk section (M:P), aligned
@@ -1636,8 +1665,10 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 // typed into Won't Get/Reason/Last Day/Last Day Time/Expected to Invoice
 // Qty into dbo.OrderBookLineNotes, so the next person to download
 // the sheet sees it prefilled instead of starting blank. The Next Month
-// tab is read-only now (Stock Qty/Value and Bring Forward Value are all
-// live formulas, not manual input), so nothing on it round-trips back.
+// tab's Stock Qty/Value and Bring Forward Value are still live formulas,
+// not manual input, but its Bring Forward column (the "x" confirm flag) IS
+// read back here too — same dbo.OrderBookLineNotes.BringForward field,
+// keyed the same way — so a planner's confirmation survives a re-download.
 //
 // Column positions are read from the header row rather than assumed fixed
 // — ExcelJS doesn't preserve the `key` metadata used when the file was
@@ -1714,10 +1745,52 @@ router.post('/orderbook-breakdown/upload-notes',
           wontGet:               readCellText(row, dataHeaderMap["Won't Get"]),
           lastDay:               readCellText(row, dataHeaderMap['Last Day']),
           lastDayTime:           readCellText(row, dataHeaderMap['Last Day Time']),
+          // Set from the Next Month sheet below, if present — a
+          // referenceDocument/material combo may not appear on the Data tab
+          // at all (Data is scoped to this month or earlier; Next Month is
+          // scoped to next month), so this defaults blank here.
           bringForward:          '',
           plannedProductionQty:  readCellText(row, dataHeaderMap['Expected to Invoice Qty']),
         });
       });
+
+      // Next Month sheet — only the Bring Forward confirm flag round-trips
+      // from here (Stock Qty/Value and Bring Forward Value are live
+      // formulas, not planner input). A row here may not have a matching
+      // Data-sheet row (Next Month orders fall outside this-month-or-earlier
+      // scope), so a new notesByKey entry is created when needed rather than
+      // requiring one to already exist.
+      const nextMonthWs = wb.getWorksheet('Next Month');
+      if (nextMonthWs) {
+        const nextMonthHeaderMap = buildHeaderMap(nextMonthWs.getRow(1));
+        const confirmCol = nextMonthHeaderMap['Bring Forward'];
+
+        nextMonthWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+          if (rowNumber === 1) return; // header
+
+          const referenceDocument = readCellText(row, nextMonthHeaderMap['Order']);
+          const material          = readCellText(row, nextMonthHeaderMap['Material']);
+          if (!referenceDocument || !material) return;
+
+          const bringForwardFlag = readCellText(row, confirmCol);
+          const key = `${referenceDocument}||${material}`;
+          const existing = notesByKey.get(key);
+          if (existing) {
+            existing.bringForward = bringForwardFlag;
+          } else {
+            notesByKey.set(key, {
+              referenceDocument,
+              material,
+              reason: '',
+              wontGet: '',
+              lastDay: '',
+              lastDayTime: '',
+              bringForward: bringForwardFlag,
+              plannedProductionQty: '',
+            });
+          }
+        });
+      }
 
       const noteRows = Array.from(notesByKey.values());
       await db.upsertOrderBookLineNotes(noteRows, req.uploadUser?.username);
