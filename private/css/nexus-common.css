@@ -238,3 +238,26 @@
   box-shadow: 0 0 0 0 rgba(5,150,105,0.6);
   animation: nexusPulse 2.5s infinite;
 }
+
+/* ── Shared table library (nexus-table.js) ─────────────────────────────────
+   .nx-table-wrap is applied automatically by nexus-table.js's auto-wrap
+   observer to every plain <table> on the page that isn't already inside a
+   scrollable ancestor, and is what nxTable()'s output wraps itself in too.
+   Purely structural — no width/padding/font rules here, so it never fights
+   with a page's own table styling (logistics.css, warehouse.css, etc.); it
+   only ever adds the ability to scroll instead of overflowing off-screen.
+   overflow-y is pinned to hidden (not left to its 'visible' default) so
+   this never accidentally becomes a second vertical scroll box nested
+   inside a taller ancestor that's already handling that axis — see the
+   equivalent .table-wrap comment in admin.css for the full reasoning. */
+.nx-table-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+}
+.nx-table-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted, #64748B);
+}
