@@ -35,7 +35,7 @@ function backToTiles() {
 
 const TITLES = {
   massUpdate:         ['Mass Packaging Update', 'Bulk-update the default (plant-level) packaging instruction assignment for a list of part numbers'],
-  newPackaging:       ['New Packaging Creation', 'Create the material masters & BOMs needed for a part’s packaging set-up'],
+  newPackaging:       ['New Customer Packaging Creation', 'Create the material masters & BOMs needed for a customer\'s packaging set-up'],
   instructionDetail:  ['Packaging Instruction Detail', 'Detailed changes to a material’s packaging instruction'],
 };
 
@@ -101,7 +101,7 @@ function renderMassUpdate() {
       <div style="margin:14px 0;font-size:12px;color:var(--text-muted)"><span id="mu-selected-count">0</span> material(s) selected</div>
       <div style="margin-bottom:12px">
         <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">New Packaging Material</label>
-        <input id="mu-packmat" placeholder="e.g. IB_TSHV3-4B01/S_C2"
+        <input id="mu-packmat" placeholder="e.g. IB_DRUMMED_NMT"
           style="width:280px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace">
       </div>
       <div style="display:flex;gap:8px;align-items:center">
@@ -228,14 +228,14 @@ function renderNewPackaging() {
   body.innerHTML = `
     <div style="padding:20px;max-width:720px">
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
-        Enter a part number, then choose which packaging types to create. Each selected
-        code creates material <code>IB_&lt;part&gt;_&lt;code&gt;</code> (copied from the standard
+        Enter a customer number, then choose which packaging types to create. Each selected
+        code creates material <code>IB_&lt;customer&gt;_&lt;code&gt;</code> (copied from the standard
         <code>IB_363800_&lt;code&gt;</code> reference material) plus its BOM (the physical drum/box/carton
         component). Codes whose material already exists are skipped, not overwritten.
       </div>
       <div style="margin-bottom:12px">
-        <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Part Number</label>
-        <input id="np-part" placeholder="e.g. TSHV3-4B01/S"
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Customer Number</label>
+        <input id="np-part" placeholder="e.g. 363660"
           style="width:280px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace">
       </div>
       <div style="margin-bottom:14px">
