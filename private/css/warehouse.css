@@ -1385,3 +1385,144 @@ body::before {
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
+
+/* ── STOCK MANAGEMENT (search + select + transfer, split-screen) ───────────
+   Same split-screen grid idea as the Pallet Builder's .pb-merged (300px
+   sidebar + 1fr main, sticky), but roles reversed and never a modal: here the
+   list is the wide primary surface that must stay visible while the operator
+   works, and the Transfer Order panel is the sticky side column. ─────────── */
+.wsm-layout {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 20px;
+  align-items: start;
+}
+
+.wsm-list-panel { min-width: 0; }
+
+.wsm-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.wsm-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 130px;
+}
+.wsm-clear-btn { padding: 8px 16px; }
+
+.wsm-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.wsm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+.wsm-table th, .wsm-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+.wsm-table th {
+  background: var(--surface2);
+  color: var(--text-dim);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  position: sticky; top: 0;
+}
+.wsm-table tbody tr { cursor: pointer; transition: background 0.1s; }
+.wsm-table tbody tr:hover { background: var(--accent-dim); }
+.wsm-table tbody tr:last-child td { border-bottom: none; }
+.wsm-td-check { width: 32px; text-align: center !important; }
+
+.wsm-row--negative td { color: var(--error); font-weight: 700; }
+
+.wsm-empty {
+  padding: 40px;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-muted);
+}
+
+.wsm-transfer-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  position: sticky; top: 0;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.wsm-panel-empty {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-muted);
+  text-align: center;
+  padding: 24px 8px;
+}
+.wsm-panel-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.wsm-panel-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+/* Mass movement */
+.wsm-mass-mode {
+  display: flex;
+  gap: 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+.wsm-mass-mode label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.wsm-mass-shared { margin-bottom: 14px; }
+
+.wsm-mass-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 14px;
+}
+.wsm-mass-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+.wsm-mass-table th, .wsm-mass-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.wsm-mass-table th {
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 9px; font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.wsm-mass-table .tf-input { padding: 5px 7px; font-size: 11px; min-width: 60px; }
+.wsm-mono { color: var(--text-dim); }
+.wsm-mass-dest-cell { display: flex; gap: 6px; }
+.wsm-mass-dest-cell .tf-input { width: 70px; }
+.wsm-mass-result { font-size: 10px; white-space: nowrap; }
+.wsm-mass-ok   { color: var(--success); }
+.wsm-mass-fail { color: var(--error); }

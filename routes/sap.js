@@ -432,6 +432,46 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/sap/warehouse/stock  (mounted at /api/sap in server.js)
+//
+// Proxies to SapServer's GET /api/warehouse/stock endpoint (LQUA via
+// ZRFC_READ_TABLES — see WarehouseHelpers.BuildStockRequest, which returns
+// every quant for warehouse 312 when no query filters are supplied). No
+// filters are sent by default — the Stock Management screen in
+// private/js/warehouse.js pulls the whole warehouse once and does all
+// searching/filtering client-side, same "fetch once" approach
+// routes/staging.js's fetchLquaStock already relies on for Staging Post
+// (that one calls SapServer directly rather than through this proxy since
+// it never needs to be reachable from the browser — this route exists
+// because the Stock Management UI does).
+// ---------------------------------------------------------------------------
+router.get('/warehouse/stock', async (req, res) => {
+    const { material, storageType, bin, batch } = req.query;
+
+    try {
+        const response = await axios.get(`${sapConfig.url}/api/warehouse/stock`, {
+            params: { material, storageType, bin, batch, rowCount: 9999 },
+            timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+        });
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'Warehouse stock query'), req);
+        res.json({ success: true, data: body.data });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Warehouse stock query failed', message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
 // POST /api/sap/lips
 // Delivery line items: material number, item number, quantity per delivery.
 // ---------------------------------------------------------------------------

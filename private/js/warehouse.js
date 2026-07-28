@@ -81,7 +81,7 @@ function setupTiles() {
   document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {
     tile.addEventListener('click', () => {
       const fn = tile.dataset.fn;
-      if (fn === 'displayStock')   runDisplayStock();
+      if (fn === 'displayStock')   runStockManagement();
       if (fn === 'transferOrders') showTransferForm();
       if (fn === 'openPicksheets') runOpenPicksheets();
       if (fn === 'packagingHolding') runPackagingHolding();
@@ -102,73 +102,512 @@ function setupTiles() {
   });
 }
 
-// ── Display Stock ─────────────────────────────────────────────────────────────
-async function runDisplayStock() {
+// ── Stock Management (search + select + transfer, split-screen) ──────────────
+//
+// Replaces the old Display Stock tile. Pulls the whole warehouse's LQUA stock
+// once via the new GET /api/sap/warehouse/stock proxy (mirrors
+// routes/staging.js's fetchLquaStock, which already talks straight to
+// SapServer's GET /api/warehouse/stock — WarehouseHelpers.BuildStockRequest
+// returns everything for warehouse 312 when no query filters are supplied).
+// All searching/filtering happens client-side against the cached rows, so the
+// list stays instant across any number of materials/batches/bins typed in.
+// One or more selected rows feed a Transfer Order panel that stays visible
+// alongside the list (no modal, split-screen like the pallet builder's
+// .pb-merged/.pb-stock-panel layout) — either a single row, or a mass
+// movement with a shared or per-row destination. Confirming refreshes the
+// list from SAP while keeping whatever filters were active.
+let wsm = null; // { allRows, filteredRows, selected: Set<rowId> }
+
+function wsmRowId(row) {
+  return [row.storageLocation, row.storageType, row.bin, row.material, row.batch, row.stockCategory, row.specialStockInd, row.specialStockNum].join('¦');
+}
+
+async function wsmFetchStock() {
+  const res  = await fetch('/api/sap/warehouse/stock');
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'SAP call failed');
+  return (json.data || []).map(r => ({ ...r, availableQty: Number(r.availableQty) || 0 }));
+}
+
+async function runStockManagement() {
   if (!await checkSession()) return;
-  showResultPanel('Display Stock', 'Fetching warehouse stock from SAP LQUA…');
+  wsm = { allRows: [], filteredRows: [], selected: new Set() };
+
+  if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
+  document.getElementById('tile-section').classList.add('hidden');
+  document.getElementById('result-section').classList.remove('hidden');
+  document.getElementById('result-title').textContent = 'Stock Management';
+  document.getElementById('result-hint').textContent  = 'Fetching warehouse stock from SAP LQUA…';
+  document.getElementById('result-row-badge').classList.add('hidden');
+  document.getElementById('btn-export-csv').classList.add('hidden');
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-loading"><div class="spinner"></div>Connecting to SAP…</div>';
 
   try {
-    const res = await fetch('/api/sap/execute-rfc', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        functionName:     'ZRFC_READ_TABLES',
-        importParameters: { DELIMITER: '|', ROWCOUNT: '9999', NO_DATA: ' ' },
-        inputTables:      { QUERY_TABLES: [{ TABNAME: 'LQUA' }] },
-        inputTablesItems: {
-          query_FIELDS: [
-            { TABNAME: 'LQUA', FIELDNAME: 'LGORT' },
-            { TABNAME: 'LQUA', FIELDNAME: 'LGTYP' },
-            { TABNAME: 'LQUA', FIELDNAME: 'LGPLA' },
-            { TABNAME: 'LQUA', FIELDNAME: 'MATNR' },
-            { TABNAME: 'LQUA', FIELDNAME: 'VERME' },
-            { TABNAME: 'LQUA', FIELDNAME: 'CHARG' },
-            { TABNAME: 'LQUA', FIELDNAME: 'BESTQ' },
-            { TABNAME: 'LQUA', FIELDNAME: 'SOBKZ' },
-            { TABNAME: 'LQUA', FIELDNAME: 'SONUM' },
-          ],
-          where_clause: [
-            { TEXT: 'LQUA~LGNUM EQ 312' },
-          ],
-        },
-        exportParameters: [],
-        outputTables:     { data_display: ['WA'] },
-      }),
-    });
-
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'SAP call failed');
-
-    // Response: { success, data: { success, data: { tables: { data_display: [...] } } } }
-    // First row is the SAP field-name header — skip it
-    const waRows  = (json.data?.data?.tables?.data_display || []).slice(1);
-    const columns = ['Storage Location', 'Storage Type', 'Storage Bin', 'Material', 'Available Qty', 'Batch', 'Stock Category', 'Special Stock', 'Special Stock No.'];
-
-    currentResult = waRows
-      .map(r => {
-        const parts = r.WA.split('|').map(s => s.trim());
-        return {
-          'Storage Location': parts[0] || '',
-          'Storage Type':     parts[1] || '',
-          'Storage Bin':      parts[2] || '',
-          'Material':         parts[3] || '',
-          'Available Qty':    parts[4] || '',
-          'Batch':            parts[5] || '',
-          'Stock Category':   parts[6] || '',
-          'Special Stock':    parts[7] || '',
-          'Special Stock No.':parts[8] || '',
-        };
-      })
-      .filter(r => r.Material);
-
-    renderResultTable(currentResult, columns);
-    document.getElementById('result-hint').textContent =
-      `LQUA · WH 312 · ${currentResult.length} rows`;
-
+    wsm.allRows = await wsmFetchStock();
+    wsmRenderLayout();
+    wsmApplyFilters();
+    document.getElementById('result-hint').textContent = `LQUA · WH 312 · ${wsm.allRows.length} rows`;
   } catch (err) {
     document.getElementById('result-body').innerHTML =
       `<div class="sap-error">✕ ${esc(err.message)}</div>`;
   }
+}
+
+const WSM_FILTER_FIELDS = [
+  { key: 'material',        label: 'Material'     },
+  { key: 'batch',           label: 'Batch'        },
+  { key: 'storageType',     label: 'Storage Type' },
+  { key: 'bin',             label: 'Bin'          },
+  { key: 'storageLocation', label: 'Storage Loc.' },
+  { key: 'stockCategory',   label: 'Stock Cat.'   },
+];
+
+function wsmRenderLayout() {
+  document.getElementById('result-body').innerHTML = `
+    <div class="wsm-layout">
+      <div class="wsm-list-panel">
+        <div class="wsm-filters">
+          ${WSM_FILTER_FIELDS.map(f => `
+            <div class="wsm-filter-field">
+              <label class="tf-label">${esc(f.label)}</label>
+              <input class="tf-input wsm-filter-input" type="text" data-key="${f.key}"
+                placeholder="one or more, comma-separated">
+            </div>`).join('')}
+          <button type="button" class="btn-secondary wsm-clear-btn" id="wsm-clear-filters">Clear</button>
+        </div>
+        <div class="wsm-table-wrap" id="wsm-table-wrap"></div>
+      </div>
+      <div class="wsm-transfer-panel" id="wsm-transfer-panel">
+        ${wsmEmptyPanelHtml()}
+      </div>
+    </div>`;
+
+  document.querySelectorAll('.wsm-filter-input').forEach(input => {
+    input.addEventListener('input', () => wsmApplyFilters());
+  });
+  document.getElementById('wsm-clear-filters').addEventListener('click', () => {
+    document.querySelectorAll('.wsm-filter-input').forEach(i => { i.value = ''; });
+    wsmApplyFilters();
+  });
+}
+
+function wsmEmptyPanelHtml() {
+  return `<div class="wsm-panel-empty">Select one or more rows from the list to create a Transfer Order.</div>`;
+}
+
+// Multi-value substring match, comma/space separated, OR'd within a field,
+// AND'd across fields — e.g. "100023, 100045" in Material matches either.
+function wsmMatchesFilter(value, filterText) {
+  const tokens = filterText.split(/[,\s]+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  if (!tokens.length) return true;
+  const hay = String(value ?? '').toLowerCase();
+  return tokens.some(t => hay.includes(t));
+}
+
+function wsmApplyFilters() {
+  const filters = {};
+  document.querySelectorAll('.wsm-filter-input').forEach(input => {
+    if (input.value.trim()) filters[input.dataset.key] = input.value.trim();
+  });
+
+  wsm.filteredRows = wsm.allRows.filter(row =>
+    Object.entries(filters).every(([key, val]) => wsmMatchesFilter(row[key], val))
+  );
+
+  wsmRenderTable();
+}
+
+function wsmRenderTable() {
+  const wrap = document.getElementById('wsm-table-wrap');
+  if (!wrap) return;
+
+  const badge = document.getElementById('result-row-badge');
+
+  if (!wsm.filteredRows.length) {
+    wrap.innerHTML = '<div class="wsm-empty">No stock matches these filters.</div>';
+    badge.textContent = '0 rows';
+    badge.classList.remove('hidden');
+    return;
+  }
+
+  const allChecked = wsm.filteredRows.every(r => wsm.selected.has(wsmRowId(r)));
+
+  const rowsHtml = wsm.filteredRows.map(row => {
+    const id  = wsmRowId(row);
+    const neg = row.availableQty < 0;
+    const checked = wsm.selected.has(id) ? ' checked' : '';
+    return `<tr class="wsm-row${neg ? ' wsm-row--negative' : ''}" data-id="${esc(id)}">
+      <td class="wsm-td-check"><input type="checkbox" class="wsm-row-check" data-id="${esc(id)}"${checked}></td>
+      <td>${esc(row.storageLocation)}</td>
+      <td>${esc(row.storageType)}</td>
+      <td>${esc(row.bin)}</td>
+      <td>${esc(row.material)}</td>
+      <td>${row.availableQty}</td>
+      <td>${esc(row.batch || '—')}</td>
+      <td>${esc(row.stockCategory || '—')}</td>
+      <td>${esc(row.specialStockInd || '—')}</td>
+      <td>${esc(row.specialStockNum || '—')}</td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <table class="wsm-table">
+      <thead>
+        <tr>
+          <th class="wsm-td-check"><input type="checkbox" id="wsm-select-all"${allChecked ? ' checked' : ''}></th>
+          <th>Storage Loc.</th><th>Storage Type</th><th>Bin</th><th>Material</th>
+          <th>Available Qty</th><th>Batch</th><th>Stock Cat.</th><th>Special Stock</th><th>Special Stock No.</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>`;
+
+  document.getElementById('wsm-select-all').addEventListener('change', e => {
+    if (e.target.checked) wsm.filteredRows.forEach(r => wsm.selected.add(wsmRowId(r)));
+    else wsm.filteredRows.forEach(r => wsm.selected.delete(wsmRowId(r)));
+    wsmRenderTable();
+    wsmRenderTransferPanel();
+  });
+
+  wrap.querySelectorAll('.wsm-row-check').forEach(cb => {
+    cb.addEventListener('change', e => {
+      e.stopPropagation();
+      const id = cb.dataset.id;
+      if (cb.checked) wsm.selected.add(id); else wsm.selected.delete(id);
+      wsmRenderTable();
+      wsmRenderTransferPanel();
+    });
+  });
+
+  wrap.querySelectorAll('.wsm-row').forEach(tr => {
+    tr.addEventListener('click', e => {
+      if (e.target.closest('.wsm-row-check')) return;
+      const id = tr.dataset.id;
+      if (wsm.selected.has(id)) wsm.selected.delete(id); else wsm.selected.add(id);
+      wsmRenderTable();
+      wsmRenderTransferPanel();
+    });
+  });
+
+  badge.textContent = `${wsm.filteredRows.length} rows${wsm.selected.size ? ` · ${wsm.selected.size} selected` : ''}`;
+  badge.classList.remove('hidden');
+}
+
+function wsmSelectedRows() {
+  return wsm.allRows.filter(r => wsm.selected.has(wsmRowId(r)));
+}
+
+function wsmRenderTransferPanel() {
+  const panel = document.getElementById('wsm-transfer-panel');
+  if (!panel) return;
+  const rows = wsmSelectedRows();
+
+  if (!rows.length) { panel.innerHTML = wsmEmptyPanelHtml(); return; }
+  if (rows.length === 1) { panel.innerHTML = wsmSingleTransferHtml(rows[0]); wsmWireSingleTransfer(rows[0]); return; }
+  panel.innerHTML = wsmMassTransferHtml(rows);
+  wsmWireMassTransfer(rows);
+}
+
+// ── Single-row transfer ────────────────────────────────────────────────────
+function wsmSingleTransferHtml(row) {
+  return `
+    <div class="wsm-panel-title">Create Transfer Order</div>
+    <div class="wsm-panel-sub">${esc(row.material)} · ${esc(row.storageType)}/${esc(row.bin)}</div>
+    <form class="transfer-form" id="wsm-single-form">
+      <div class="tf-prefill-grid">
+        ${wsmPrefillItem('Storage Location', row.storageLocation)}
+        ${wsmPrefillItem('Storage Type',     row.storageType)}
+        ${wsmPrefillItem('Bin',              row.bin)}
+        ${wsmPrefillItem('Material',         row.material)}
+        ${wsmPrefillItem('Batch',            row.batch || '—')}
+        ${wsmPrefillItem('Stock Category',   row.stockCategory || '—')}
+        ${wsmPrefillItem('Special Stock',    row.specialStockInd || '—')}
+        ${wsmPrefillItem('Special Stock No.',row.specialStockNum || '—')}
+      </div>
+
+      <div class="tf-section-label">Quantity</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Quantity <span class="tf-req">*</span></label>
+          <input class="tf-input" id="wsm-qty" type="number" step="any" value="${esc(Math.abs(row.availableQty))}" required>
+        </div>
+      </div>
+
+      <div class="tf-section-label">Destination Bin</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
+          <input class="tf-input" id="wsm-desttype" type="text" placeholder="e.g. 001" required>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" id="wsm-destbin" type="text" placeholder="e.g. B-02-03" required>
+        </div>
+      </div>
+
+      <div class="tf-actions">
+        <div id="wsm-single-result"></div>
+        <button type="submit" class="btn-submit" id="wsm-single-submit">Create Transfer Order</button>
+      </div>
+    </form>`;
+}
+
+function wsmPrefillItem(label, value) {
+  return `<div class="tf-field"><label class="tf-label">${esc(label)}</label><div class="tf-prefill-value">${esc(value)}</div></div>`;
+}
+
+function wsmWireSingleTransfer(row) {
+  const form = document.getElementById('wsm-single-form');
+  if (!form) return;
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const submitBtn = document.getElementById('wsm-single-submit');
+    const resultEl  = document.getElementById('wsm-single-result');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Sending to SAP…';
+    resultEl.innerHTML = '';
+
+    const params = {
+      StorageLocation:       row.storageLocation,
+      Material:              row.material,
+      Batch:                 row.batch || '',
+      Quantity:              parseFloat(document.getElementById('wsm-qty').value.replace(',', '.')),
+      SourceType:            row.storageType,
+      SourceBin:             row.bin,
+      DestinationType:       document.getElementById('wsm-desttype').value.trim(),
+      DestinationBin:        document.getElementById('wsm-destbin').value.trim(),
+      StockCategory:         row.stockCategory || '',
+      SpecialStockIndicator: row.specialStockInd || '',
+      SpecialStockNumber:    row.specialStockNum || '',
+    };
+
+    const result = await wsmCreateTransferOrder(params);
+    resultEl.innerHTML = wsmResultHtml(result);
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Create Transfer Order';
+
+    if (result.success) await wsmRefreshAfterTransfer();
+  });
+}
+
+// ── Mass movement — supports both a shared destination for every selected
+// row, and a per-row destination, per the user's requirement that both modes
+// be available rather than picking just one. ────────────────────────────────
+function wsmMassTransferHtml(rows) {
+  const rowsHtml = rows.map(row => {
+    const id = wsmRowId(row);
+    return `
+      <tr data-id="${esc(id)}">
+        <td>${esc(row.material)}</td>
+        <td class="wsm-mono">${esc(row.storageType)}/${esc(row.bin)}${row.batch ? ` · ${esc(row.batch)}` : ''}</td>
+        <td><input class="tf-input wsm-mass-qty" type="number" step="any" value="${esc(Math.abs(row.availableQty))}" data-id="${esc(id)}"></td>
+        <td class="wsm-mass-dest-cell" data-id="${esc(id)}">
+          <input class="tf-input wsm-mass-desttype" type="text" placeholder="Type" data-id="${esc(id)}">
+          <input class="tf-input wsm-mass-destbin"  type="text" placeholder="Bin"  data-id="${esc(id)}">
+        </td>
+        <td class="wsm-mass-result" id="wsm-mass-result-${esc(id)}"></td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <div class="wsm-panel-title">Mass Movement</div>
+    <div class="wsm-panel-sub">${rows.length} rows selected</div>
+
+    <div class="wsm-mass-mode">
+      <label><input type="radio" name="wsm-mass-mode" value="shared" checked> Shared destination</label>
+      <label><input type="radio" name="wsm-mass-mode" value="perrow"> Per-row destination</label>
+    </div>
+
+    <div class="wsm-mass-shared" id="wsm-mass-shared">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
+          <input class="tf-input" id="wsm-mass-shared-type" type="text" placeholder="e.g. 001">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" id="wsm-mass-shared-bin" type="text" placeholder="e.g. B-02-03">
+        </div>
+      </div>
+    </div>
+
+    <div class="wsm-mass-table-wrap">
+      <table class="wsm-mass-table">
+        <thead><tr><th>Material</th><th>From</th><th>Qty</th><th>Destination</th><th></th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+
+    <div class="tf-actions">
+      <div id="wsm-mass-summary"></div>
+      <button type="button" class="btn-submit" id="wsm-mass-submit">Create ${rows.length} Transfer Orders</button>
+    </div>`;
+}
+
+function wsmWireMassTransfer(rows) {
+  const modeRadios  = document.querySelectorAll('input[name="wsm-mass-mode"]');
+  const sharedFields = document.getElementById('wsm-mass-shared');
+  const destCells    = document.querySelectorAll('.wsm-mass-dest-cell');
+
+  function applyMode() {
+    const mode = document.querySelector('input[name="wsm-mass-mode"]:checked').value;
+    sharedFields.style.display = mode === 'shared' ? '' : 'none';
+    destCells.forEach(td => { td.style.display = mode === 'perrow' ? '' : 'none'; });
+  }
+  modeRadios.forEach(r => r.addEventListener('change', applyMode));
+  applyMode();
+
+  document.getElementById('wsm-mass-submit').addEventListener('click', async () => {
+    const mode       = document.querySelector('input[name="wsm-mass-mode"]:checked').value;
+    const submitBtn  = document.getElementById('wsm-mass-submit');
+    const summaryEl  = document.getElementById('wsm-mass-summary');
+    submitBtn.disabled = true;
+    summaryEl.innerHTML = '';
+
+    let sharedType = '', sharedBin = '';
+    if (mode === 'shared') {
+      sharedType = document.getElementById('wsm-mass-shared-type').value.trim();
+      sharedBin  = document.getElementById('wsm-mass-shared-bin').value.trim();
+      if (!sharedType || !sharedBin) {
+        summaryEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Destination bin type and bin are required.</div>`;
+        submitBtn.disabled = false;
+        return;
+      }
+    }
+
+    let successCount = 0, failCount = 0;
+
+    for (const row of rows) {
+      const id          = wsmRowId(row);
+      const qtyInput    = document.querySelector(`.wsm-mass-qty[data-id="${CSS.escape(id)}"]`);
+      const resultCell  = document.getElementById(`wsm-mass-result-${id}`);
+      const quantity    = parseFloat((qtyInput?.value || '').replace(',', '.'));
+
+      let destType = sharedType, destBin = sharedBin;
+      if (mode === 'perrow') {
+        destType = document.querySelector(`.wsm-mass-desttype[data-id="${CSS.escape(id)}"]`)?.value.trim() || '';
+        destBin  = document.querySelector(`.wsm-mass-destbin[data-id="${CSS.escape(id)}"]`)?.value.trim()  || '';
+      }
+
+      if (!quantity || quantity <= 0 || !destType || !destBin) {
+        failCount++;
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing qty/destination</span>`;
+        continue;
+      }
+
+      const result = await wsmCreateTransferOrder({
+        StorageLocation:       row.storageLocation,
+        Material:              row.material,
+        Batch:                 row.batch || '',
+        Quantity:              quantity,
+        SourceType:            row.storageType,
+        SourceBin:             row.bin,
+        DestinationType:       destType,
+        DestinationBin:        destBin,
+        StockCategory:         row.stockCategory || '',
+        SpecialStockIndicator: row.specialStockInd || '',
+        SpecialStockNumber:    row.specialStockNum || '',
+      });
+
+      if (result.success) {
+        successCount++;
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.transferOrderNumber || 'Done')}</span>`;
+      } else {
+        failCount++;
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`;
+      }
+    }
+
+    summaryEl.innerHTML = `<div class="${failCount ? 'sap-error' : 'tf-success'} tf-inline-error">
+      ${successCount} succeeded${failCount ? `, ${failCount} failed` : ''}.
+    </div>`;
+    submitBtn.disabled    = false;
+    submitBtn.textContent = `Create ${rows.length} Transfer Orders`;
+
+    if (successCount) await wsmRefreshAfterTransfer();
+  });
+}
+
+function wsmResultHtml(result) {
+  if (result.success) {
+    return `<div class="tf-success">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+      <div><div class="tf-success-title">Transfer Order Created</div><div class="tf-success-to">${result.message}</div></div>
+    </div>`;
+  }
+  return `<div class="sap-error tf-inline-error">✕ ${esc(result.message)}</div>`;
+}
+
+// Shared low-level SAP call — same branching runStockTransfer uses between
+// the normal transfer-order proxy and the consignment MB1B+LT01 pair, but
+// returns a result object instead of writing to a fixed #tf-result element,
+// so it can be reused both for the single-row form and looped for mass
+// movement without the two treading on each other's DOM.
+async function wsmCreateTransferOrder(params) {
+  const isConsignment = params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA';
+  try {
+    let res;
+    if (isConsignment) {
+      res = await fetch('/api/sap/warehouse/consignment-mb1b', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          DeliveryNote: '', Header: 'Consignment Usage',
+          StorageLocation: params.StorageLocation, SpecialStockNumber: params.SpecialStockNumber,
+          Material: params.Material, Quantity: params.Quantity,
+          DestinationType: params.DestinationType, DestinationBin: params.DestinationBin,
+          SourceType: params.SourceType, SourceBin: params.SourceBin,
+        }),
+      });
+    } else {
+      res = await fetch('/api/sap/warehouse/transfer-order', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+    }
+
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+
+    if (isConsignment) {
+      const parts = [json.data?.mb1bMessage, json.data?.toNonConsignMessage, json.data?.toConsignMessage].filter(Boolean);
+      return { success: true, message: parts.map(esc).join('<br>') || 'Consignment processed', transferOrderNumber: null };
+    }
+
+    const transferOrder = json.data?.transferOrderNumber || '';
+    const messages       = json.data?.messages || [];
+    const ok = json.data?.success && !json.error;
+    if (!ok) return { success: false, message: json.error || messages.map(m => m.message || m).join('; ') || 'SAP rejected the transfer order.' };
+
+    const lines = [];
+    if (transferOrder) lines.push(`Transfer Order: ${esc(transferOrder)}`);
+    if (messages.length) lines.push(...messages.map(m => esc(m.message || m)));
+    return { success: true, message: lines.join('<br>') || 'SAP returned no message', transferOrderNumber: transferOrder };
+
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+}
+
+// Re-fetches fresh stock and re-renders, preserving whatever text is
+// currently in each filter box — per the user's requirement that confirming
+// a transfer order refreshes the list while keeping the same filters, so the
+// result of the transaction is visible immediately.
+async function wsmRefreshAfterTransfer() {
+  const filterValues = {};
+  document.querySelectorAll('.wsm-filter-input').forEach(i => { filterValues[i.dataset.key] = i.value; });
+
+  try {
+    wsm.allRows = await wsmFetchStock();
+  } catch (err) {
+    return; // keep showing the stale list + the just-shown result message rather than blowing away the panel
+  }
+
+  wsm.selected = new Set();
+  wsmRenderLayout();
+  document.querySelectorAll('.wsm-filter-input').forEach(i => { i.value = filterValues[i.dataset.key] || ''; });
+  wsmApplyFilters();
+  document.getElementById('result-hint').textContent = `LQUA · WH 312 · ${wsm.allRows.length} rows`;
 }
 
 
@@ -409,179 +848,6 @@ function backToTiles() {
   currentResult = [];
   document.getElementById('result-section').classList.add('hidden');
   document.getElementById('tile-section').classList.remove('hidden');
-}
-
-// ── Render DataTable with per-column filters ──────────────────────────────────
-function renderResultTable(records, columns) {
-  const filterRow = columns.map(c =>
-    `<th><input class="col-filter-input" type="text" placeholder="${esc(c)}…" data-col="${esc(c)}"></th>`
-  ).join('');
-
-  const tbody = records.map(row =>
-    `<tr>${columns.map(c => `<td>${esc(row[c] ?? '')}</td>`).join('')}</tr>`
-  ).join('');
-
-  document.getElementById('result-body').innerHTML = `
-    <table id="sap-dt" style="width:100%">
-      <thead>
-        <tr>${columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
-        <tr class="col-filter-row">${filterRow}</tr>
-      </thead>
-      <tbody>${tbody}</tbody>
-    </table>`;
-
-  activeDT = new DataTable('#sap-dt', {
-    pageLength:    20,
-    scrollX:       true,
-    orderCellsTop: true,
-    layout:        { padding: { bottom: 12 } },
-    initComplete:  function () {
-      const api = this.api();
-      api.table().header().querySelectorAll('.col-filter-input').forEach(input => {
-        const colIdx = columns.indexOf(input.dataset.col);
-        if (colIdx === -1) return;
-        input.addEventListener('input', function () {
-          api.column(colIdx).search(this.value).draw();
-        });
-      });
-    },
-  });
-
-  // ── Stock Right-click context menu ────────────────────────────────────────────────
-  const ctxMenu     = document.getElementById('ctx-menu');
-  const ctxTransfer = document.getElementById('ctx-transfer');
-  let ctxRowData    = null;
-
-  document.getElementById('sap-dt').addEventListener('contextmenu', e => {
-    const tr = e.target.closest('tbody tr');
-    if (!tr) return;
-    e.preventDefault();
-
-    // Build row object directly from DOM cells — works correctly after any sort/filter
-    const cells = Array.from(tr.querySelectorAll('td'));
-    ctxRowData = {};
-    columns.forEach((col, i) => { ctxRowData[col] = cells[i]?.textContent?.trim() || ''; });
-
-    ctxMenu.style.left = `${Math.min(e.pageX, window.innerWidth  - 200)}px`;
-    ctxMenu.style.top  = `${Math.min(e.pageY, window.innerHeight - 60)}px`;
-    ctxMenu.classList.remove('hidden');
-  });
-
-  ctxTransfer.onclick = () => {
-    ctxMenu.classList.add('hidden');
-    if (ctxRowData)
-        showTransferFormFromRow(ctxRowData);
-  };
-
-  document.addEventListener('click',       () => ctxMenu.classList.add('hidden'), { once: false });
-  document.addEventListener('contextmenu', e => { if (!e.target.closest('#ctx-menu') && !e.target.closest('#sap-dt tbody')) ctxMenu.classList.add('hidden'); });
-
-  const badge = document.getElementById('result-row-badge');
-  badge.textContent = `${records.length} rows`;
-  badge.classList.remove('hidden');
-  document.getElementById('btn-export-csv').classList.remove('hidden');
-}
-
-// ── Transfer form pre-filled from a stock row ─────────────────────────────────
-function showTransferFormFromRow(row) {
-  const hasBatch = !!row['Batch'];
-
-  if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
-  document.getElementById('result-title').textContent = 'Create Transfer Order';
-  document.getElementById('result-hint').textContent  = `From ${row['Storage Bin']} · ${row['Material']}`;
-  document.getElementById('result-row-badge').classList.add('hidden');
-  document.getElementById('btn-export-csv').classList.add('hidden');
-
-  document.getElementById('result-body').innerHTML = `
-    <form class="transfer-form" id="transfer-form" onsubmit="submitTransferFormRow(event)">
-
-      <div class="tf-section-label">Source — from stock</div>
-      <div class="tf-prefill-grid">
-        ${prefillItem('Storage Location', row['Storage Location'])}
-        ${prefillItem('Storage Type',     row['Storage Type'])}
-        ${prefillItem('Storage Bin',      row['Storage Bin'])}
-        ${prefillItem('Material',         row['Material'])}
-        ${prefillItem('Stock Category',   row['Stock Category']   || '—')}
-        ${prefillItem('Special Stock',    row['Special Stock']    || '—')}
-        ${prefillItem('Special Stock No.',row['Special Stock No.']|| '—')}
-        ${hasBatch
-          ? prefillItem('Batch', row['Batch'])
-          : `<div class="tf-field">
-               <label class="tf-label">Batch</label>
-               <div class="tf-prefill-value tf-muted">None</div>
-             </div>`}
-      </div>
-
-      <div class="tf-section-label">Quantity</div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Quantity <span class="tf-req">*</span>${hasBatch ? ' <span class="tf-locked">locked to batch qty</span>' : ''}</label>
-          <input class="tf-input" id="tf-qty" type="number" step="any" min="0.001"
-            value="${esc(parseSapQty(row['Available Qty']))}"
-            ${hasBatch ? 'readonly' : ''} required>
-        </div>
-      </div>
-
-      <div class="tf-section-label">Destination Bin</div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
-          <input class="tf-input" id="tf-destbintype" type="text" placeholder="e.g. 001" required>
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
-          <input class="tf-input" id="tf-destbin" type="text" placeholder="e.g. B-02-03" required>
-        </div>
-      </div>
-
-      <div class="tf-actions">
-        <div id="tf-result"></div>
-        <button type="button" class="btn-secondary" onclick="runDisplayStock()">&larr; Back to Stock</button>
-        <button type="submit" class="btn-submit" id="tf-submit">Create Transfer Order</button>
-      </div>
-
-    </form>`;
-
-  // Store source data for submission
-  document.getElementById('transfer-form').dataset.source = JSON.stringify(row);
-}
-
-function prefillItem(label, value) {
-  return `
-    <div class="tf-field">
-      <label class="tf-label">${esc(label)}</label>
-      <div class="tf-prefill-value">${esc(value)}</div>
-    </div>`;
-}
-
-async function submitTransferFormRow(e) {
-  e.preventDefault();
-  const row = JSON.parse(e.target.dataset.source);
-
-  const params = {
-    StorageLocation:          row['Storage Location'],
-    Material:      row['Material'],
-    Batch:         row['Batch']            || '',
-    Quantity:      parseFloat(document.getElementById('tf-qty').value.replace(',', '.')),
-    SourceType:   row['Storage Type'],
-    SourceBin:    row['Storage Bin'],
-    DestinationType:   document.getElementById('tf-destbintype').value.trim(),
-    DestinationBin:       document.getElementById('tf-destbin').value.trim(),
-    StockCategory:      row['Stock Category']    || '',
-    SpecialStockIndicator:       row['Special Stock']     || '',
-    SpecialStockNumber: row['Special Stock No.'] || '',
-  };
-
-  const submitBtn = document.getElementById('tf-submit');
-  const resultEl  = document.getElementById('tf-result');
-  submitBtn.disabled = true;
-  submitBtn.textContent = 'Sending to SAP…';
-  resultEl.innerHTML = '';
-
-  await runStockTransfer(params);
-
-  submitBtn.disabled = false;
-  submitBtn.textContent = 'Create Transfer Order';
 }
 
 // ── Open Picksheets ───────────────────────────────────────────────────────────
