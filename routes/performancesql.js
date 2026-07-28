@@ -69,12 +69,12 @@ async function replaceTable(tableName, columns, rows) {
     const beforeCount = rows.length;
     rows = rows.filter(row => !!row.valueStream);
 
-    if (rows.length < beforeCount) {
+    /* if (rows.length < beforeCount) {
       console.warn(
         `[${tableName}] dropped ${beforeCount - rows.length} of ${beforeCount} row(s) ` +
         `with no ValueStream mapping (unmapped or missing profitCentre)`
       );
-    }
+    } */
   }
 
   for (let i = 0; i < rows.length; i += batchSize) {
