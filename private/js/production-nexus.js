@@ -2069,7 +2069,10 @@ async function openMixingTubsModal(mixingID, row) {
         <div class="ps-modal-title">${esc(row?.MixRef || `MX${String(mixingID).padStart(8,'0')}`)}</div>
         <div class="ps-modal-sub">${esc(row?.Material || '')} &nbsp;·&nbsp; ${row ? Number(row.TotalWeightKG).toFixed(3) + ' KG total' : ''}</div>
       </div>
-      <button class="ps-modal-close" onclick="closeModal()">×</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn-secondary" onclick="labelPrint('MX',${mixingID},this)" style="font-size:12px;padding:4px 10px">🖨 Reprint Label</button>
+        <button class="ps-modal-close" onclick="closeModal()">×</button>
+      </div>
     </div>
     <div class="ps-modal-body" id="mxd-tubs-body">
       <div class="pn-loading"><div class="spinner"></div>Loading tubs…</div>
@@ -2282,7 +2285,10 @@ async function openDrummingDetailModal(drummingID, row) {
         <div class="ps-modal-title">${esc(row?.DrumRef || `DR${String(drummingID).padStart(8,'0')}`)}</div>
         <div class="ps-modal-sub">${esc(row?.Material || '')} &nbsp;·&nbsp; ${row ? Number(row.LengthMetres).toFixed(3) + ' M' : ''} &nbsp;·&nbsp; ${esc(row?.PackagingType||'')}</div>
       </div>
-      <button class="ps-modal-close" onclick="closeModal()">×</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn-secondary" onclick="labelPrint('DR',${drummingID},this)" style="font-size:12px;padding:4px 10px">🖨 Reprint Label</button>
+        <button class="ps-modal-close" onclick="closeModal()">×</button>
+      </div>
     </div>
     <div class="ps-modal-body" id="drd-detail-body">
       <div class="pn-loading"><div class="spinner"></div>Loading…</div>

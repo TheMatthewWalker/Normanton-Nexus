@@ -8,7 +8,7 @@ import { getProductionPool, printersConfig, sqlConfig } from '../config.js';
 const router = express.Router();
 
 // ── Process config ────────────────────────────────────────────────────────────
-const SUPPORTED = new Set(['MX', 'EX', 'CO', 'BR', 'CL', 'TW']);
+const SUPPORTED = new Set(['MX', 'EX', 'CO', 'BR', 'CL', 'TW', 'DR']);
 
 const PROC = {
   MX: { table: 'prod.Mixing',      pk: 'MixingID',      uom: 'KG', qtyCol: 'TotalWeightKG', name: 'Mixing'      },
@@ -17,6 +17,7 @@ const PROC = {
   BR: { table: 'prod.Braiding',    pk: 'BraidingID',    uom: 'M',  qtyCol: 'LengthMetres',  name: 'Braiding'    },
   CL: { table: 'prod.Coverline',   pk: 'CoverlineID',   uom: 'M',  qtyCol: 'LengthMetres',  name: 'Coverline'   },
   TW: { table: 'prod.TapeWrap',    pk: 'TapeWrapID',    uom: 'M',  qtyCol: 'LengthMetres',  name: 'Tape Wrap'   },
+  DR: { table: 'prod.Drumming',    pk: 'DrummingID',    uom: 'M',  qtyCol: 'LengthMetres',  name: 'Drumming'    },
 };
 
 const STATUS_BADGE = {
@@ -160,11 +161,31 @@ async function fetchLabelData(processCode, recordID) {
 }
 
 // ── PDF builder (used for server-side printing) ───────────────────────────────
-async function buildPDF(data) {
+//
+// The label artwork itself is always laid out at A5-landscape dimensions
+// (595 x 420pt) — that never changes. What changes per printer is the
+// physical PAGE the PDF declares, driven by `paperSize` (from the matching
+// entry in config.json's "printers" array, default 'A5' if unset/unknown):
+//   - 'A5': page = A5 landscape (595 x 420pt) — the label fills the whole
+//     sheet, since that's the paper actually loaded.
+//   - 'A4': page = A4 portrait (595 x 842pt) — note A4-portrait width and
+//     A5-landscape width are both exactly 595pt (A5 is precisely half an
+//     A4 sheet), so every x-coordinate below is unaffected either way. Only
+//     the page's usable HEIGHT differs, and the fixed content height (420pt)
+//     is deliberately kept separate from the page height so the label draws
+//     into the top half of the A4 sheet, leaving the bottom half blank,
+//     rather than being stretched/scaled to fill the whole page (the bug
+//     being fixed here — sending an A5-sized PDF to a printer loaded with
+//     A4 stock was leaving it to the printer's own fit-to-page/RIP scaling
+//     to decide how to fill the sheet, which is what produced the
+//     landscape-and-fills-the-whole-page symptom).
+// Any other/unrecognised paperSize value falls back to 'A5' behaviour.
+async function buildPDF(data, paperSize = 'A5') {
   return new Promise(async (resolve, reject) => {
     try {
+      const isA4 = String(paperSize).toUpperCase() === 'A4';
       const doc = new PDFDocument({
-        size: 'A5', layout: 'landscape', margin: 0,
+        size: isA4 ? 'A4' : 'A5', layout: isA4 ? 'portrait' : 'landscape', margin: 0,
         info: { Title: `${data.processName} Label — ${data.batchRef}`, Author: 'Kongsberg Automotive' },
       });
       const chunks = [];
@@ -172,8 +193,8 @@ async function buildPDF(data) {
       doc.on('end',   () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      const W  = doc.page.width;   // ≈595
-      const H  = doc.page.height;  // ≈420
+      const W  = doc.page.width;   // ≈595 either way (A5 landscape width == A4 portrait width)
+      const H  = 420;              // fixed content height (A5-equivalent) — NOT doc.page.height, so on A4 the label sits in the top half rather than stretching to fill the sheet
       const M  = 12;
       const CW = W - 2 * M;
       const isComplete = data.status === 4;
@@ -570,7 +591,7 @@ router.post('/process/:processCode/:recordID/print', async (req, res) => {
 
   try {
     const data = await fetchLabelData(code, recordID);
-    const pdf  = await buildPDF(data);
+    const pdf  = await buildPDF(data, printer.paperSize);
     await tcpPrint(pdf, printer.host, printer.port ?? 9100);
     res.json({ success: true, message: `Sent to ${printer.name || printer.host}` });
   } catch (err) {
