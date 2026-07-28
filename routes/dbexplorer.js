@@ -193,18 +193,26 @@ router.get('/:database/:schema/:table/constraints', async (req, res) => {
     const keysReq = pool.request()
       .input('schema', sql.NVarChar(128), tbl.SchemaName)
       .input('table',  sql.NVarChar(128), tbl.TableName);
+    // No STRING_AGG — this app targets SQL Server 2005 (STRING_AGG is
+    // 2017+), so column lists are built with the STUFF(...FOR XML PATH(''))
+    // concatenation trick instead, same pattern used everywhere else in
+    // this codebase (see performancesql.js listOrderShipments()).
     const keys = await keysReq.query(`
       SELECT
         kc.name        AS ConstraintName,
         kc.type_desc   AS ConstraintType,
-        STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS Columns
+        STUFF((
+          SELECT ', ' + c2.name
+          FROM ${db}.sys.index_columns ic2
+          JOIN ${db}.sys.columns c2 ON c2.object_id = ic2.object_id AND c2.column_id = ic2.column_id
+          WHERE ic2.object_id = kc.parent_object_id AND ic2.index_id = kc.unique_index_id
+          ORDER BY ic2.key_ordinal
+          FOR XML PATH('')
+        ), 1, 2, '') AS Columns
       FROM ${db}.sys.key_constraints kc
       JOIN ${db}.sys.tables  t  ON t.object_id = kc.parent_object_id
       JOIN ${db}.sys.schemas s  ON s.schema_id = t.schema_id
-      JOIN ${db}.sys.index_columns ic ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id
-      JOIN ${db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
       WHERE s.name = @schema AND t.name = @table
-      GROUP BY kc.name, kc.type_desc
     `);
 
     const fkOutReq = pool.request()
@@ -273,14 +281,18 @@ router.get('/:database/:schema/:table/constraints', async (req, res) => {
         i.type_desc    AS IndexType,
         i.is_unique    AS IsUnique,
         i.is_primary_key AS IsPrimaryKey,
-        STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS Columns
+        STUFF((
+          SELECT ', ' + c2.name
+          FROM ${db}.sys.index_columns ic2
+          JOIN ${db}.sys.columns c2 ON c2.object_id = ic2.object_id AND c2.column_id = ic2.column_id
+          WHERE ic2.object_id = i.object_id AND ic2.index_id = i.index_id AND ic2.is_included_column = 0
+          ORDER BY ic2.key_ordinal
+          FOR XML PATH('')
+        ), 1, 2, '') AS Columns
       FROM ${db}.sys.indexes i
       JOIN ${db}.sys.tables  t ON t.object_id = i.object_id
       JOIN ${db}.sys.schemas s ON s.schema_id = t.schema_id
-      JOIN ${db}.sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
-      JOIN ${db}.sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
       WHERE s.name = @schema AND t.name = @table AND i.name IS NOT NULL
-      GROUP BY i.name, i.type_desc, i.is_unique, i.is_primary_key
       ORDER BY i.name
     `);
 

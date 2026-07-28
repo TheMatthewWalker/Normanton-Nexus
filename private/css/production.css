@@ -213,7 +213,12 @@
   }
   
   /* ─── CONTENT ────────────────────────────────────────────────────────────── */
-  .content { display: flex; flex-direction: column; overflow: hidden; }
+  /* min-width: 0 — .app-body is a grid with a 215px + 1fr layout; without
+     this, this grid item's default min-width:auto lets a wide table's
+     content push the 1fr track — and the whole page — wider than the
+     viewport instead of respecting it (same fix as admin.css's
+     .main-content, for the same reason). */
+  .content { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
   
   /* ─── TOOLBAR ────────────────────────────────────────────────────────────── */
   .content-toolbar {

@@ -152,7 +152,12 @@ body {
 .nav-badge.zero { background: rgba(148,168,194,0.1); color: var(--sidebar-txt); }
 
 /* ── MAIN CONTENT ────────────────────────────────────────────────────────── */
-.main-content { flex: 1; overflow: auto; padding: 24px 28px; }
+/* min-width: 0 — .app-body is a grid with a 210px + 1fr layout; without
+   this, this grid item's default min-width:auto lets a wide table's
+   content (e.g. DB Explorer's Databases/Tables/Columns lists) push the
+   1fr track — and the whole page — wider than the viewport, instead of
+   letting .table-wrap's own overflow-x:auto (below) take over. */
+.main-content { flex: 1; overflow: auto; padding: 24px 28px; min-width: 0; }
 
 /* ── SECTIONS ────────────────────────────────────────────────────────────── */
 .section { display: none; }
@@ -225,11 +230,21 @@ body {
 .empty-icon { font-size: 36px; margin-bottom: 12px; opacity: 0.3; }
 
 /* ── USERS TABLE ─────────────────────────────────────────────────────────── */
+/* overflow-x: auto (was overflow: hidden) — a table with enough columns
+   (e.g. DB Explorer's Databases/Tables/Columns lists) was being clipped
+   silently instead of getting a horizontal scrollbar, since "hidden"
+   discards the overflow rather than making it reachable. overflow-y stays
+   hidden — this wrap doesn't do its own vertical scrolling anywhere it's
+   used, and leaving it "visible" would make the browser force this axis
+   to auto too (per the CSS overflow-pairing rule), turning this into an
+   unwanted second scroll container. See the .dbx-preview-wrap override
+   just below for the one place this needs to be switched back off. */
 .table-wrap {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   box-shadow: 0 1px 4px rgba(30,45,69,0.07);
 }
 table {
@@ -610,6 +625,17 @@ tbody tr.dbx-row-clickable:hover td { background: var(--accent-dim); }
 }
 .dbx-preview-controls { display: flex; align-items: center; gap: 8px; }
 .dbx-preview-wrap { max-height: 480px; overflow: auto; }
+/* buildSqlTable() (reused here from the SQL Console) wraps its own output
+   in a .table-wrap, nested one level inside this already-scrollable div.
+   Left at .table-wrap's default overflow-x:auto, that inner div would
+   become its own scroll container sitting between the sticky thead th
+   below and this wrap — hijacking the sticky positioning reference (a
+   sticky element sticks to its nearest non-visible-overflow ancestor) so
+   the header would stop sticking during scroll. Switching it back to
+   overflow: visible here removes it as a scroll container entirely, so
+   .dbx-preview-wrap remains the one true scrolling ancestor for both the
+   sticky header and the horizontal scrollbar. */
+.dbx-preview-wrap .table-wrap { overflow: visible; }
 .dbx-preview-wrap thead th { position: sticky; top: 0; z-index: 1; }
 .dbx-preview-null { color: var(--text-muted); font-style: italic; }
 
