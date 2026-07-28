@@ -92,6 +92,7 @@ function setupTiles() {
       if (fn === 'stagingCompleted') runStagingCompleted();
       if (fn === 'stagingBinRestrictions') runStagingBinRestrictions();
       if (fn === 'zdelflagWarnings') runZdelflagWarnings();
+      if (fn === 'stockInvestigations') runStockInvestigations();
     });
   });
 
@@ -173,9 +174,6 @@ function wsmRenderLayout() {
             </div>`).join('')}
           <button type="button" class="btn-submit wsm-search-btn" id="wsm-search-btn">Search</button>
           <button type="button" class="btn-secondary wsm-clear-btn" id="wsm-clear-filters">Clear</button>
-          ${sessionPermissions.includes('LOG_SUPER')
-            ? '<button type="button" class="btn-secondary wsm-disc-btn" id="wsm-disc-open-btn">Batch Discrepancies</button>'
-            : ''}
         </div>
         <div class="wsm-table-wrap" id="wsm-table-wrap">
           <div class="wsm-empty">Enter search criteria above and press Search — nothing is pulled from SAP until you do.</div>
@@ -200,9 +198,6 @@ function wsmRenderLayout() {
   document.getElementById('wsm-clear-filters').addEventListener('click', () => {
     document.querySelectorAll('.wsm-filter-input').forEach(i => { i.value = ''; });
   });
-  const discBtn = document.getElementById('wsm-disc-open-btn');
-  if (discBtn) discBtn.addEventListener('click', () => wsmRunDiscrepancyScan());
-
   if (wsm.rows.length) wsmRenderTable(); // re-render the last fetched result rather than re-querying SAP
   wsmRenderTransferPanel(); // keep the panel in sync with wsm.selected even when the table itself isn't re-rendered
 }
@@ -694,23 +689,29 @@ async function wsmRefreshAfterTransfer() {
 }
 
 
-// ── Batch Discrepancies (LOG_SUPER only) ──────────────────────────────────────
+// ── Stock Investigations (LOG_SUPER only) ─────────────────────────────────────
 //
-// A supervisor tool layered on top of Stock Management: pulls the FULL
-// warehouse (independent of whatever search is active above), finds every
-// batch that has a negative-quantity row or sits in more than one bin, and
-// groups/subtotals them. Two follow-on actions:
+// A supervisor-only tile: Batch Discrepancies (find/clean up negative or
+// multi-bin batches) plus a Stock in Investigation card showing whatever's
+// currently parked in the holding bin (999/TEMP), with actions to move it
+// back out (Transfer Order) or write it off/correct it (Stock Adjustment,
+// 711/712 via BAPI_GOODSMVT_CREATE).
+//
+// Batch Discrepancies: pulls the FULL warehouse (independent of whatever
+// search is active in Stock Management), finds every batch that has a
+// negative-quantity row or sits in more than one bin, and groups/subtotals
+// them. Two follow-on actions:
 //   - Card 1 (nets to zero): the batch's rows across every bin — including
 //     any already-parked holding-bin (999/TEMP) row — sum to zero. Preview
 //     the exact transfer orders needed to zero every bin out, then execute
 //     them all in one confirmed batch.
 //   - Card 2 (multiple bins, doesn't net to zero): resolve one batch at a
 //     time — either consolidate every other bin's positive stock into one
-//     chosen bin, or park one instance in the holding bin awaiting a future
-//     Stock Investigation function. A holding-bin row is hidden from this
-//     card's bin list/count (it's there on purpose) unless it happens to be
-//     part of a batch that nets to zero, in which case Card 1 already claims
-//     it instead.
+//     chosen bin, or park one instance in the holding bin awaiting
+//     investigation (picked up by the Stock in Investigation card below). A
+//     holding-bin row is hidden from this card's bin list/count (it's there
+//     on purpose) unless it happens to be part of a batch that nets to zero,
+//     in which case Card 1 already claims it instead.
 // Both action paths call the LOG_SUPER-gated /api/sap/warehouse/batch-cleanup-transfer
 // route rather than the ungated single/mass transfer proxy used elsewhere in
 // Stock Management, since this tool can move stock across many batches
@@ -854,11 +855,40 @@ async function wsmCreateBatchCleanupTransfer(params) {
   }
 }
 
+// ── Stock Investigations — home view ──────────────────────────────────────────
+async function runStockInvestigations() {
+  if (!await checkSession()) return;
+  if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
+  document.getElementById('tile-section').classList.add('hidden');
+  document.getElementById('result-section').classList.remove('hidden');
+  document.getElementById('result-title').textContent = 'Stock Investigations';
+  document.getElementById('result-hint').textContent  = 'Supervisor tools — batch discrepancies and holding-bin corrections';
+  document.getElementById('result-row-badge').classList.add('hidden');
+  document.getElementById('btn-export-csv').classList.add('hidden');
+  wsmRenderStockInvestigationsHome();
+}
+
+function wsmRenderStockInvestigationsHome() {
+  document.getElementById('result-title').textContent = 'Stock Investigations';
+  document.getElementById('result-hint').textContent  = 'Supervisor tools — batch discrepancies and holding-bin corrections';
+  document.getElementById('result-body').innerHTML = `
+    <div class="wsm-panel-title">Batch Discrepancies</div>
+    <div class="wsm-panel-sub">Scans the full warehouse for any batch with a negative-quantity line, or sitting in more than one bin, and helps clean it up.</div>
+    <div class="tf-actions" style="margin-bottom:24px">
+      <button type="button" class="btn-submit" id="si-disc-open-btn">Open Batch Discrepancies</button>
+    </div>
+    <div id="si-investigation-card">
+      <div class="sap-loading"><div class="spinner"></div>Loading holding-bin stock…</div>
+    </div>`;
+
+  document.getElementById('si-disc-open-btn').addEventListener('click', () => wsmRunDiscrepancyScan());
+  siRefreshInvestigationCard();
+}
+
 async function wsmRunDiscrepancyScan() {
   if (!await checkSession()) return;
   if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
-  wsm.selected = new Set(); // leaving the search view — any prior row selection no longer applies
-  document.getElementById('result-title').textContent = 'Stock Management · Batch Discrepancies';
+  document.getElementById('result-title').textContent = 'Stock Investigations · Batch Discrepancies';
   document.getElementById('result-hint').textContent  = 'Downloading full warehouse stock for analysis…';
   document.getElementById('result-row-badge').classList.add('hidden');
   document.getElementById('btn-export-csv').classList.add('hidden');
@@ -866,7 +896,7 @@ async function wsmRunDiscrepancyScan() {
     '<div class="sap-loading"><div class="spinner"></div>Connecting to SAP…</div>';
 
   try {
-    const rows     = await wsmFetchStock({}); // full, unfiltered pull — independent of the search above
+    const rows     = await wsmFetchStock({}); // full, unfiltered pull — independent of the Stock Management search
     const analysis = wsmAnalyzeBatches(rows);
     document.getElementById('result-hint').textContent = `LQUA · WH 312 · full pull · ${rows.length} rows analysed`;
     wsmRenderDiscrepancyDashboard(analysis);
@@ -891,7 +921,7 @@ function wsmRenderDiscrepancyDashboard(analysis) {
 
   document.getElementById('result-body').innerHTML = `
     <div class="wsm-disc-toolbar">
-      <button type="button" class="btn-secondary" id="wsm-disc-back">&larr; Back to Search</button>
+      <button type="button" class="btn-secondary" id="wsm-disc-back">&larr; Back to Stock Investigations</button>
       <button type="button" class="btn-secondary" id="wsm-disc-rescan">Rescan</button>
     </div>
 
@@ -922,11 +952,7 @@ function wsmRenderDiscrepancyDashboard(analysis) {
   `;
 
   document.getElementById('wsm-disc-back').addEventListener('click', () => {
-    wsmRenderLayout();
-    document.getElementById('result-title').textContent = 'Stock Management';
-    document.getElementById('result-hint').textContent = wsm.rows.length
-      ? `LQUA · WH 312 · ${Object.keys(wsm.lastParams || {}).length ? 'filtered search' : 'all stock'} · ${wsm.rows.length} rows`
-      : 'Enter search criteria and press Search';
+    wsmRenderStockInvestigationsHome();
   });
   document.getElementById('wsm-disc-rescan').addEventListener('click', () => wsmRunDiscrepancyScan());
   const card1Btn = document.getElementById('wsm-disc-card1-btn');
@@ -1039,28 +1065,39 @@ function wsmRenderCard2List(card2) {
   });
 }
 
+function wsmResolveSubText(group, holdingRows) {
+  return `Subtotal ${Math.round(group.subtotal * 1000) / 1000} across ${group.nonHolding.length} active bin(s)${holdingRows.length ? ` · ${holdingRows.length} already in holding (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), excluded here` : ''}`;
+}
+
 function wsmRenderResolvePanel(group) {
   const panel = document.getElementById('wsm-disc-resolve-panel');
   if (!panel || !group) return;
 
   const holdingRows = group.rows.filter(wsmIsHolding);
-  const rowsHtml = group.nonHolding.map((r, i) => `<tr>
-    <td><input type="radio" name="wsm-resolve-target" value="${i}"></td>
-    <td class="wsm-mono">${esc(r.storageType)}/${esc(r.bin)}</td>
-    <td>${r.availableQty}</td>
-    <td><button type="button" class="btn-secondary wsm-resolve-holding-btn" data-idx="${i}" ${r.availableQty > 0 ? '' : 'disabled'}>Move to Holding</button></td>
-  </tr>`).join('');
+  // Rows are keyed by wsmRowId rather than array index so that removing one
+  // row in place (see wsmMoveToHolding) never shifts what an already-checked
+  // radio or a data attribute refers to.
+  const rowsHtml = group.nonHolding.map(r => {
+    const id = wsmRowId(r);
+    return `<tr data-row-id="${esc(id)}">
+      <td><input type="radio" name="wsm-resolve-target" value="${esc(id)}"></td>
+      <td class="wsm-mono">${esc(r.storageType)}/${esc(r.bin)}</td>
+      <td>${r.availableQty}</td>
+      <td><button type="button" class="btn-secondary wsm-resolve-holding-btn" data-row-id="${esc(id)}" ${r.availableQty > 0 ? '' : 'disabled'}>Move to Holding</button></td>
+    </tr>`;
+  }).join('');
 
   panel.innerHTML = `
     <div class="wsm-resolve-box">
       <div class="wsm-panel-title">Resolve Batch ${esc(group.batch)}</div>
-      <div class="wsm-panel-sub">Subtotal ${Math.round(group.subtotal * 1000) / 1000} across ${group.nonHolding.length} active bin(s)${holdingRows.length ? ` · ${holdingRows.length} already in holding (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), excluded here` : ''}</div>
+      <div class="wsm-panel-sub" id="wsm-resolve-sub">${wsmResolveSubText(group, holdingRows)}</div>
       <div class="wsm-mass-table-wrap">
-        <table class="wsm-mass-table">
+        <table class="wsm-mass-table" id="wsm-resolve-table">
           <thead><tr><th>Keep</th><th>Bin</th><th>Qty</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
+      <div id="wsm-resolve-precheck"></div>
       <div class="tf-actions">
         <div id="wsm-resolve-result"></div>
         <button type="button" class="btn-submit" id="wsm-resolve-consolidate-btn">Consolidate Into Selected Bin</button>
@@ -1068,9 +1105,73 @@ function wsmRenderResolvePanel(group) {
     </div>`;
 
   document.getElementById('wsm-resolve-consolidate-btn').addEventListener('click', () => wsmConsolidateGroup(group));
-  panel.querySelectorAll('.wsm-resolve-holding-btn').forEach(btn => {
-    btn.addEventListener('click', () => wsmMoveToHolding(group, group.nonHolding[Number(btn.dataset.idx)]));
+  panel.querySelectorAll('input[name="wsm-resolve-target"]').forEach(radio => {
+    radio.addEventListener('change', () => wsmRenderConsolidatePrecheck(group));
   });
+  panel.querySelectorAll('.wsm-resolve-holding-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = group.nonHolding.find(r => wsmRowId(r) === btn.dataset.rowId);
+      wsmMoveToHolding(group, row);
+    });
+  });
+}
+
+// Shared by the live pre-consolidate check and the actual Consolidate action,
+// so the warning shown before you press the button and what the button
+// actually does can never drift apart. Returns which of the batch's other
+// active bins would move into `target` (same material/batch/storage
+// location/stock category/special stock, positive qty) and which would be
+// left behind, with a human-readable reason per skipped row.
+function wsmComputeConsolidatePlan(group, target) {
+  const targetKey = wsmCategoryKey(target);
+  const others    = group.nonHolding.filter(r => wsmRowId(r) !== wsmRowId(target));
+
+  const movable = [], skipped = [];
+  others.forEach(r => {
+    if (r.availableQty > 0 && wsmCategoryKey(r) === targetKey) { movable.push(r); return; }
+
+    const reasons = [];
+    if (!(r.availableQty > 0)) reasons.push('negative/zero quantity');
+    if (wsmCategoryKey(r) !== targetKey) {
+      if (r.material !== target.material) reasons.push('different material');
+      else if (r.stockCategory !== target.stockCategory) reasons.push('different stock category');
+      else if (r.specialStockInd !== target.specialStockInd || r.specialStockNum !== target.specialStockNum) reasons.push('different special stock');
+      else reasons.push('different storage location/batch');
+    }
+    skipped.push({ row: r, reason: reasons.join(' & ') || 'category mismatch' });
+  });
+
+  return { target, movable, skipped };
+}
+
+// Shows, before Consolidate is pressed, exactly which other bin(s) would be
+// left behind and why (material/stock category/special stock mismatch, or
+// negative quantity) — so a mismatch that would stop the consolidation isn't
+// a surprise found out only after execution.
+function wsmRenderConsolidatePrecheck(group) {
+  const container = document.getElementById('wsm-resolve-precheck');
+  if (!container) return;
+
+  const radio = document.querySelector('input[name="wsm-resolve-target"]:checked');
+  if (!radio) { container.innerHTML = ''; return; }
+
+  const target = group.nonHolding.find(r => wsmRowId(r) === radio.value);
+  if (!target) { container.innerHTML = ''; return; }
+
+  const { movable, skipped } = wsmComputeConsolidatePlan(group, target);
+
+  if (!skipped.length) {
+    container.innerHTML = movable.length
+      ? `<div class="wsm-disc-note">All ${movable.length} other active bin(s) match ${esc(target.storageType)}/${esc(target.bin)} and would be moved in.</div>`
+      : '';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="wsm-disc-warn">
+      ${skipped.length} bin(s) would NOT be moved into ${esc(target.storageType)}/${esc(target.bin)} if you consolidate now:
+      <ul>${skipped.map(s => `<li>${esc(s.row.storageType)}/${esc(s.row.bin)} (qty ${s.row.availableQty}) — ${esc(s.reason)}</li>`).join('')}</ul>
+    </div>`;
 }
 
 async function wsmConsolidateGroup(group) {
@@ -1078,13 +1179,10 @@ async function wsmConsolidateGroup(group) {
   const resultEl = document.getElementById('wsm-resolve-result');
   if (!radio) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Pick a bin to keep first.</div>`; return; }
 
-  const targetIdx = Number(radio.value);
-  const target    = group.nonHolding[targetIdx];
-  const targetKey = wsmCategoryKey(target);
-  const others    = group.nonHolding.filter((r, i) => i !== targetIdx);
+  const target = group.nonHolding.find(r => wsmRowId(r) === radio.value);
+  if (!target) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ That bin is no longer active — pick another.</div>`; return; }
 
-  const movable = others.filter(r => r.availableQty > 0 && wsmCategoryKey(r) === targetKey);
-  const skipped = others.filter(r => !(r.availableQty > 0 && wsmCategoryKey(r) === targetKey));
+  const { movable, skipped } = wsmComputeConsolidatePlan(group, target);
 
   if (!movable.length) {
     resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Nothing movable into that bin — other rows are either negative or a different stock category/special stock, which need manual handling.</div>`;
@@ -1135,6 +1233,10 @@ async function wsmMoveToHolding(group, row) {
     variant: 'danger',
   })) return;
 
+  const rowId = wsmRowId(row);
+  const btn = document.querySelector(`.wsm-resolve-holding-btn[data-row-id="${CSS.escape(rowId)}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+
   const result = await wsmCreateBatchCleanupTransfer({
     StorageLocation: row.storageLocation, Material: row.material, Batch: group.batch,
     Quantity: row.availableQty, SourceType: row.storageType, SourceBin: row.bin,
@@ -1142,10 +1244,365 @@ async function wsmMoveToHolding(group, row) {
     StockCategory: row.stockCategory || '', SpecialStockIndicator: row.specialStockInd || '', SpecialStockNumber: row.specialStockNum || '',
   });
 
-  if (resultEl) resultEl.innerHTML = result.success
-    ? `<div class="tf-success tf-inline-error">Moved to holding. Press Rescan above to refresh.</div>`
-    : `<div class="sap-error tf-inline-error">✕ ${esc(result.message)}</div>`;
-  // Not auto-rescanning — see wsmExecuteZeroSumPlan/wsmConsolidateGroup for why.
+  if (!result.success) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(result.message)}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Move to Holding'; }
+    return;
+  }
+
+  // Success — remove just this row, in place: splice it out of the group's
+  // in-memory data and drop only its <tr> from the resolve table, rather than
+  // re-rendering the whole panel/dashboard. Keeps the page exactly where it
+  // was scrolled to, and the row that moved is simply gone rather than the
+  // whole screen resetting.
+  const idx = group.nonHolding.findIndex(r => wsmRowId(r) === rowId);
+  if (idx !== -1) group.nonHolding.splice(idx, 1);
+
+  const tr = document.querySelector(`#wsm-resolve-table tr[data-row-id="${CSS.escape(rowId)}"]`);
+  if (tr) tr.remove();
+
+  const subEl = document.getElementById('wsm-resolve-sub');
+  if (subEl) subEl.textContent = wsmResolveSubText(group, group.rows.filter(wsmIsHolding));
+
+  if (resultEl) resultEl.innerHTML = `<div class="tf-success tf-inline-error">Moved ${row.availableQty} from ${esc(row.storageType)}/${esc(row.bin)} to holding.</div>`;
+
+  const consolidateBtn = document.getElementById('wsm-resolve-consolidate-btn');
+  if (group.nonHolding.length < 2) {
+    // Nothing left to consolidate between — disable rather than leave a
+    // one-row radio list that can't do anything useful.
+    if (consolidateBtn) { consolidateBtn.disabled = true; consolidateBtn.textContent = 'Nothing left to consolidate'; }
+    const precheck = document.getElementById('wsm-resolve-precheck');
+    if (precheck) precheck.innerHTML = '';
+  } else {
+    wsmRenderConsolidatePrecheck(group); // re-check against whatever's still selected — if the row just removed WAS the selected target, no radio is checked any more and this clears down to empty
+  }
+
+  // The Stock in Investigation card lives in a different view (the Stock
+  // Investigations home, not this discrepancy dashboard) — refresh it in the
+  // background if it happens to be mounted, and it'll be fetched fresh next
+  // time the user navigates back regardless (see siRefreshInvestigationCard).
+  siRefreshInvestigationCard();
+}
+
+// ── Stock in Investigation card (holding bin 999/TEMP) ────────────────────────
+//
+// Part of the Stock Investigations home view — lists whatever's currently
+// sitting in the holding bin (populated by Batch Discrepancies' "Move to
+// Holding" above), with multi-select actions to either move it back out via
+// a normal Transfer Order, or write it off/correct it via a Stock Adjustment
+// (711/712, BAPI_GOODSMVT_CREATE). Deliberately re-fetches from scratch every
+// time it's (re)rendered rather than caching — the simplest way to satisfy
+// "this card should update whenever Move to Holding is pressed": there's no
+// stale in-memory copy to go out of sync, so returning to this view (or
+// calling siRefreshInvestigationCard() directly, which Move to Holding does
+// in the background) always reflects what's actually in SAP right now.
+let siInvestigation = null; // { rows, selected: Set<rowId> }
+
+async function siRefreshInvestigationCard() {
+  const container = document.getElementById('si-investigation-card');
+  if (!container) return; // not currently mounted (e.g. inside the Batch Discrepancies sub-view) — the next Home render fetches fresh anyway
+  container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading holding-bin stock…</div>';
+  try {
+    const rows = await wsmFetchStock({ storageType: WSM_HOLDING_TYPE, bin: WSM_HOLDING_BIN });
+    siInvestigation = { rows, selected: new Set() };
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+    siInvestigation = null;
+    return;
+  }
+  siRenderInvestigationCard();
+}
+
+function siRenderInvestigationCard() {
+  const container = document.getElementById('si-investigation-card');
+  if (!container || !siInvestigation) return;
+  const { rows } = siInvestigation;
+
+  if (!rows.length) {
+    container.innerHTML = `
+      <div class="wsm-panel-title">Stock in Investigation</div>
+      <div class="wsm-panel-sub">Stock currently parked in the holding bin (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), awaiting write-off/correction.</div>
+      <div class="wsm-empty">Nothing currently in holding.</div>`;
+    return;
+  }
+
+  const allChecked = rows.every(r => siInvestigation.selected.has(wsmRowId(r)));
+  const rowsHtml = rows.map(row => {
+    const id = wsmRowId(row);
+    const neg = row.availableQty < 0;
+    const checked = siInvestigation.selected.has(id) ? ' checked' : '';
+    return `<tr class="wsm-row${neg ? ' wsm-row--negative' : ''}" data-id="${esc(id)}">
+      <td class="wsm-td-check"><input type="checkbox" class="si-row-check" data-id="${esc(id)}"${checked}></td>
+      <td>${esc(row.storageLocation)}</td>
+      <td>${esc(row.material)}</td>
+      <td>${row.availableQty}</td>
+      <td>${esc(row.batch || '—')}</td>
+      <td>${esc(row.stockCategory || '—')}</td>
+      <td>${esc(row.specialStockInd || '—')}</td>
+      <td>${esc(row.specialStockNum || '—')}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="wsm-panel-title">Stock in Investigation</div>
+    <div class="wsm-panel-sub">Stock currently parked in the holding bin (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), awaiting write-off/correction — select one or more rows.</div>
+    <div class="wsm-mass-table-wrap">
+      <table class="wsm-mass-table">
+        <thead>
+          <tr>
+            <th class="wsm-td-check"><input type="checkbox" id="si-select-all"${allChecked ? ' checked' : ''}></th>
+            <th>Storage Loc.</th><th>Material</th><th>Qty</th><th>Batch</th><th>Stock Cat.</th><th>Special Stock</th><th>Special Stock No.</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    <div class="tf-actions">
+      <div id="si-action-result"></div>
+      <button type="button" class="btn-secondary" id="si-refresh-btn">Refresh</button>
+      <button type="button" class="btn-secondary" id="si-transfer-btn" ${siInvestigation.selected.size ? '' : 'disabled'}>Create Transfer Order</button>
+      <button type="button" class="btn-submit" id="si-adjust-btn" ${siInvestigation.selected.size ? '' : 'disabled'}>Create Stock Adjustment (711/712)</button>
+    </div>
+    <div id="si-action-panel"></div>`;
+
+  document.getElementById('si-select-all').addEventListener('change', e => {
+    if (e.target.checked) rows.forEach(r => siInvestigation.selected.add(wsmRowId(r)));
+    else rows.forEach(r => siInvestigation.selected.delete(wsmRowId(r)));
+    siRenderInvestigationCard();
+  });
+  container.querySelectorAll('.si-row-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) siInvestigation.selected.add(cb.dataset.id); else siInvestigation.selected.delete(cb.dataset.id);
+      siRenderInvestigationCard();
+    });
+  });
+  document.getElementById('si-refresh-btn').addEventListener('click', () => siRefreshInvestigationCard());
+  const transferBtn = document.getElementById('si-transfer-btn');
+  if (transferBtn) transferBtn.addEventListener('click', () => siShowTransferPanel());
+  const adjustBtn = document.getElementById('si-adjust-btn');
+  if (adjustBtn) adjustBtn.addEventListener('click', () => siShowAdjustmentPanel());
+}
+
+function siSelectedRows() {
+  if (!siInvestigation) return [];
+  return siInvestigation.rows.filter(r => siInvestigation.selected.has(wsmRowId(r)));
+}
+
+// "Create Transfer Order" — moves selected holding-bin rows out to a chosen
+// destination. Routed through the same LOG_SUPER-gated batch-cleanup proxy
+// as the rest of this tile (consistent with it being a supervisor bulk
+// action rather than the one-row-at-a-time transfers in Stock Management).
+function siShowTransferPanel() {
+  const rows  = siSelectedRows();
+  const panel = document.getElementById('si-action-panel');
+  if (!panel || !rows.length) return;
+
+  const rowsHtml = rows.map(row => {
+    const id = wsmRowId(row);
+    return `<tr data-id="${esc(id)}">
+      <td>${esc(row.material)}</td>
+      <td class="wsm-mono">${esc(row.storageLocation)}${row.batch ? ` · ${esc(row.batch)}` : ''}</td>
+      <td><input class="tf-input si-transfer-qty" type="number" step="any" value="${esc(Math.abs(row.availableQty))}" data-id="${esc(id)}"></td>
+      <td class="wsm-mass-result" id="si-transfer-result-${esc(id)}"></td>
+    </tr>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="wsm-resolve-box">
+      <div class="wsm-panel-title">Create Transfer Order — ${rows.length} row(s) out of holding</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
+          <input class="tf-input" id="si-transfer-desttype" type="text" placeholder="e.g. 001">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" id="si-transfer-destbin" type="text" placeholder="e.g. B-02-03">
+        </div>
+      </div>
+      <div class="wsm-mass-table-wrap">
+        <table class="wsm-mass-table">
+          <thead><tr><th>Material</th><th>Loc./Batch</th><th>Qty</th><th></th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <div class="tf-actions">
+        <div id="si-transfer-summary"></div>
+        <button type="button" class="btn-secondary" id="si-transfer-cancel">Cancel</button>
+        <button type="button" class="btn-submit" id="si-transfer-submit">Create ${rows.length} Transfer Order(s)</button>
+      </div>
+    </div>`;
+
+  document.getElementById('si-transfer-cancel').addEventListener('click', () => { panel.innerHTML = ''; });
+  document.getElementById('si-transfer-submit').addEventListener('click', async () => {
+    const destType  = document.getElementById('si-transfer-desttype').value.trim();
+    const destBin   = document.getElementById('si-transfer-destbin').value.trim();
+    const summaryEl = document.getElementById('si-transfer-summary');
+    if (!destType || !destBin) {
+      summaryEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Destination bin type and bin are required.</div>`;
+      return;
+    }
+
+    const submitBtn = document.getElementById('si-transfer-submit');
+    submitBtn.disabled = true;
+    const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Creating transfer orders');
+    let done = 0, ok = 0, fail = 0;
+    const failures = [];
+
+    for (const row of rows) {
+      const id         = wsmRowId(row);
+      const qtyInput   = document.querySelector(`.si-transfer-qty[data-id="${CSS.escape(id)}"]`);
+      const resultCell = document.getElementById(`si-transfer-result-${id}`);
+      const quantity   = parseFloat((qtyInput?.value || '').replace(',', '.'));
+
+      if (!quantity || quantity <= 0) {
+        fail++; failures.push('Missing/invalid qty');
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing/invalid qty</span>`;
+        progress.update(++done);
+        continue;
+      }
+
+      const result = await wsmCreateBatchCleanupTransfer({
+        StorageLocation: row.storageLocation, Material: row.material, Batch: row.batch || '',
+        Quantity: quantity, SourceType: row.storageType, SourceBin: row.bin,
+        DestinationType: destType, DestinationBin: destBin,
+        StockCategory: row.stockCategory || '', SpecialStockIndicator: row.specialStockInd || '', SpecialStockNumber: row.specialStockNum || '',
+      });
+
+      if (result.success) { ok++; if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.message)}</span>`; }
+      else { fail++; failures.push(result.message); if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`; }
+      progress.update(++done);
+    }
+
+    progress.finish(ok, fail, failures);
+    if (ok) {
+      submitBtn.textContent = 'Done — refreshing…';
+      await siRefreshInvestigationCard(); // rows that moved out of holding drop off the list
+    } else {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+// "Create Stock Adjustment" — writes off/corrects selected holding-bin rows
+// via BAPI_GOODSMVT_CREATE (movement 711/712). Per the user's own rule: a
+// negative quantity gets a 712 to bring it up to zero, a positive quantity
+// gets a 711 to bring it down to zero — each row corrected by exactly the
+// amount it's currently off by. Unit is asked per row (not carried on the
+// LQUA stock row SapServer returns) rather than guessed at.
+function siShowAdjustmentPanel() {
+  const rows  = siSelectedRows();
+  const panel = document.getElementById('si-action-panel');
+  if (!panel || !rows.length) return;
+
+  const rowsHtml = rows.map(row => {
+    const id = wsmRowId(row);
+    const movementType = row.availableQty < 0 ? '712' : '711';
+    return `<tr data-id="${esc(id)}">
+      <td>${esc(row.material)}</td>
+      <td class="wsm-mono">${esc(row.storageLocation)}${row.batch ? ` · ${esc(row.batch)}` : ''}</td>
+      <td>${row.availableQty}</td>
+      <td class="wsm-mono">${movementType}</td>
+      <td><input class="tf-input si-adjust-unit" type="text" placeholder="e.g. KG" data-id="${esc(id)}"></td>
+      <td class="wsm-mass-result" id="si-adjust-result-${esc(id)}"></td>
+    </tr>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="wsm-resolve-box">
+      <div class="wsm-panel-title">Create Stock Adjustment — ${rows.length} row(s)</div>
+      <div class="wsm-panel-sub">Negative quantities post a 712 to bring the bin up to zero; positive quantities post a 711 to bring it down to zero. Each row is corrected by exactly the amount it's currently off by — nothing else is adjusted.</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Reference / Reason <span class="tf-req">*</span></label>
+          <input class="tf-input" id="si-adjust-reference" type="text" placeholder="e.g. stocktake corr.">
+        </div>
+      </div>
+      <div class="wsm-mass-table-wrap">
+        <table class="wsm-mass-table">
+          <thead><tr><th>Material</th><th>Loc./Batch</th><th>Qty</th><th>Movement</th><th>Unit</th><th></th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <div class="tf-actions">
+        <div id="si-adjust-summary"></div>
+        <button type="button" class="btn-secondary" id="si-adjust-cancel">Cancel</button>
+        <button type="button" class="btn-submit" id="si-adjust-submit">Post ${rows.length} Adjustment(s)</button>
+      </div>
+    </div>`;
+
+  document.getElementById('si-adjust-cancel').addEventListener('click', () => { panel.innerHTML = ''; });
+  document.getElementById('si-adjust-submit').addEventListener('click', async () => {
+    const reference = document.getElementById('si-adjust-reference').value.trim();
+    const summaryEl = document.getElementById('si-adjust-summary');
+    if (!reference) {
+      summaryEl.innerHTML = `<div class="sap-error tf-inline-error">✕ A reference/reason is required.</div>`;
+      return;
+    }
+
+    const missingUnit = rows.some(row => {
+      const unitInput = document.querySelector(`.si-adjust-unit[data-id="${CSS.escape(wsmRowId(row))}"]`);
+      return !(unitInput?.value || '').trim();
+    });
+    if (missingUnit) {
+      summaryEl.innerHTML = `<div class="sap-error tf-inline-error">✕ A unit is required for every row.</div>`;
+      return;
+    }
+
+    if (!await wConfirm({
+      title: 'Post Stock Adjustment',
+      message: `Post ${rows.length} stock adjustment(s) (711/712) to zero out the selected holding-bin stock? This posts directly to SAP and can't be undone from here.`,
+      confirmText: 'Post',
+      variant: 'danger',
+    })) return;
+
+    const submitBtn = document.getElementById('si-adjust-submit');
+    submitBtn.disabled = true;
+    const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Posting stock adjustments');
+    let done = 0, ok = 0, fail = 0;
+    const failures = [];
+
+    for (const row of rows) {
+      const id          = wsmRowId(row);
+      const resultCell  = document.getElementById(`si-adjust-result-${id}`);
+      const unitInput   = document.querySelector(`.si-adjust-unit[data-id="${CSS.escape(id)}"]`);
+      const unit        = (unitInput?.value || '').trim();
+      const movementType = row.availableQty < 0 ? '712' : '711';
+
+      const result = await siCreateStockAdjustment({
+        Material: row.material, StorageLocation: row.storageLocation, Batch: row.batch || '',
+        MovementType: movementType, Quantity: Math.abs(row.availableQty), Unit: unit, Reference: reference,
+      });
+
+      if (result.success) { ok++; if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ Doc ${esc(result.materialDocument || '')}</span>`; }
+      else { fail++; failures.push(result.message); if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`; }
+      progress.update(++done);
+    }
+
+    progress.finish(ok, fail, failures);
+    if (ok) {
+      submitBtn.textContent = 'Done — refreshing…';
+      await siRefreshInvestigationCard(); // rows successfully zeroed out drop off the list
+    } else {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+async function siCreateStockAdjustment(params) {
+  try {
+    const res = await fetch('/api/sap/warehouse/stock-adjustment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    const data = json.data || {};
+    if (!data.success) return { success: false, message: (data.messages || []).map(m => m.message || m).join('; ') || 'SAP rejected the adjustment.' };
+    return { success: true, materialDocument: data.materialDocument, message: 'Posted' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
 }
 
 // ── Transfer Orders — form ────────────────────────────────────────────────────

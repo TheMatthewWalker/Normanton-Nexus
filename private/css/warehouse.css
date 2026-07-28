@@ -1583,6 +1583,17 @@ body::before {
 }
 .wsm-disc-warn ul { margin: 6px 0 0 18px; padding: 0; }
 
+.wsm-disc-note {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--success);
+  background: rgba(22,163,74,0.06);
+  border: 1px solid rgba(22,163,74,0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
 .wsm-resolve-box {
   background: var(--surface2);
   border: 1px solid var(--border);
