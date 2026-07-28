@@ -319,9 +319,11 @@ function wsmRenderTransferPanel() {
 
 // ── Single-row transfer ────────────────────────────────────────────────────
 function wsmSingleTransferHtml(row) {
+  const isNegative = row.availableQty < 0;
   return `
     <div class="wsm-panel-title">Create Transfer Order</div>
     <div class="wsm-panel-sub">${esc(row.material)} · ${esc(row.storageType)}/${esc(row.bin)}</div>
+    ${isNegative ? `<div class="wsm-disc-note">This bin is negative (${esc(row.availableQty)}). Stock can't be moved out of a bin that's already short, so this posts in reverse — the quantity below is pulled IN from the bin you choose below, moving the negative there instead of out of it.</div>` : ''}
     <form class="transfer-form" id="wsm-single-form">
       <div class="tf-prefill-grid">
         ${wsmPrefillItem('Storage Location', row.storageLocation)}
@@ -342,14 +344,14 @@ function wsmSingleTransferHtml(row) {
         </div>
       </div>
 
-      <div class="tf-section-label">Destination Bin</div>
+      <div class="tf-section-label">${isNegative ? 'Bin to Pull Stock From' : 'Destination Bin'}</div>
       <div class="tf-row">
         <div class="tf-field">
-          <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
+          <label class="tf-label">${isNegative ? 'Type' : 'Dest. Bin Type'} <span class="tf-req">*</span></label>
           <input class="tf-input" id="wsm-desttype" type="text" placeholder="e.g. 001" required>
         </div>
         <div class="tf-field">
-          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
+          <label class="tf-label">${isNegative ? 'Bin' : 'Dest. Bin'} <span class="tf-req">*</span></label>
           <input class="tf-input" id="wsm-destbin" type="text" placeholder="e.g. B-02-03" required>
         </div>
       </div>
@@ -388,6 +390,10 @@ function wsmWireSingleTransfer(row) {
       StockCategory:         row.stockCategory || '',
       SpecialStockIndicator: row.specialStockInd || '',
       SpecialStockNumber:    row.specialStockNum || '',
+      // Negative available qty means Source is already short — wsmCreateTransferOrder
+      // swaps Source/Destination for these so the move actually pulls stock IN
+      // rather than trying to move stock out of a bin that doesn't have it.
+      NegativeStock:         row.availableQty < 0,
     };
 
     const result = await wsmCreateTransferOrder(params);
@@ -403,11 +409,13 @@ function wsmWireSingleTransfer(row) {
 // row, and a per-row destination, per the user's requirement that both modes
 // be available rather than picking just one. ────────────────────────────────
 function wsmMassTransferHtml(rows) {
+  const anyNegative = rows.some(r => r.availableQty < 0);
   const rowsHtml = rows.map(row => {
     const id = wsmRowId(row);
+    const isNegative = row.availableQty < 0;
     return `
-      <tr data-id="${esc(id)}">
-        <td>${esc(row.material)}</td>
+      <tr data-id="${esc(id)}" class="${isNegative ? 'wsm-row--negative' : ''}">
+        <td>${esc(row.material)}${isNegative ? ' <span class="wsm-neg-tag" title="Negative stock — will pull IN from the bin below instead of moving out">reversed</span>' : ''}</td>
         <td class="wsm-mono">${esc(row.storageType)}/${esc(row.bin)}${row.batch ? ` · ${esc(row.batch)}` : ''}</td>
         <td><input class="tf-input wsm-mass-qty" type="number" step="any" value="${esc(Math.abs(row.availableQty))}" data-id="${esc(id)}"></td>
         <td class="wsm-mass-dest-cell" data-id="${esc(id)}">
@@ -421,6 +429,7 @@ function wsmMassTransferHtml(rows) {
   return `
     <div class="wsm-panel-title">Mass Movement</div>
     <div class="wsm-panel-sub">${rows.length} rows selected</div>
+    ${anyNegative ? `<div class="wsm-disc-note">Rows marked "reversed" are negative stock — since you can't move stock out of a bin that's already short, those are posted in reverse: the quantity is pulled IN from the bin you enter, moving the negative there instead.</div>` : ''}
 
     <div class="wsm-mass-mode">
       <label><input type="radio" name="wsm-mass-mode" value="shared" checked> Shared destination</label>
@@ -580,6 +589,7 @@ function wsmWireMassTransfer(rows) {
         StockCategory:         row.stockCategory || '',
         SpecialStockIndicator: row.specialStockInd || '',
         SpecialStockNumber:    row.specialStockNum || '',
+        NegativeStock:         row.availableQty < 0,
       });
 
       if (result.success) {
@@ -626,6 +636,20 @@ function wsmResultHtml(result) {
 // so it can be reused both for the single-row form and looped for mass
 // movement without the two treading on each other's DOM.
 async function wsmCreateTransferOrder(params) {
+  // Negative available qty means the "Source" bin is already short — SAP
+  // can't post a transfer order moving stock OUT of a bin that doesn't have
+  // it. Per the user's rule, this is handled by reversing the move instead:
+  // pull the (positive) quantity IN from whatever bin was picked as the
+  // "destination", so that bin absorbs the negative and the original bin
+  // gets topped back up towards zero. Swap Source/Destination before doing
+  // anything else with `params` (including the consignment branch below,
+  // which keys off DestinationType) so every downstream use sees the real
+  // direction the movement will actually post in.
+  if (params.NegativeStock) {
+    const { SourceType, SourceBin, DestinationType, DestinationBin } = params;
+    params = { ...params, SourceType: DestinationType, SourceBin: DestinationBin, DestinationType: SourceType, DestinationBin: SourceBin };
+  }
+
   const isConsignment = params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA';
   try {
     let res;
@@ -661,6 +685,7 @@ async function wsmCreateTransferOrder(params) {
     if (!ok) return { success: false, message: json.error || messages.map(m => m.message || m).join('; ') || 'SAP rejected the transfer order.' };
 
     const lines = [];
+    if (params.NegativeStock) lines.push(`Negative stock — moved ${params.Quantity} from ${esc(params.SourceType)}/${esc(params.SourceBin)} into ${esc(params.DestinationType)}/${esc(params.DestinationBin)} instead.`);
     if (transferOrder) lines.push(`Transfer Order: ${esc(transferOrder)}`);
     if (messages.length) lines.push(...messages.map(m => esc(m.message || m)));
     return { success: true, message: lines.join('<br>') || 'SAP returned no message', transferOrderNumber: transferOrder };
@@ -743,7 +768,7 @@ function wsmAnalyzeBatches(rows) {
     groups.get(r.batch).push(r);
   });
 
-  const allFlagged = [], card1 = [], card2 = [];
+  const allFlagged = [], card1 = [], card2 = [], card3 = [];
 
   groups.forEach((groupRows, batch) => {
     const hasNegative = groupRows.some(r => r.availableQty < 0);
@@ -755,12 +780,26 @@ function wsmAnalyzeBatches(rows) {
 
     allFlagged.push({ batch, rows: groupRows, subtotal, hasNegative, isZeroSum });
 
-    if (isZeroSum) card1.push({ batch, rows: groupRows, subtotal });
-    else if (nonHolding.length > 1) card2.push({ batch, rows: groupRows, nonHolding, subtotal });
+    // A batch with just one *active* (non-holding) line, and that line is
+    // negative, has nothing else to net (card1) or consolidate against
+    // (card2 needs >1 active bin) — it needs its own resolution: pull the
+    // shortfall in from the holding bin instead. Deliberately keyed off
+    // nonHolding.length rather than groupRows.length, so this also catches a
+    // batch that already has an (unrelated-amount) holding-bin row sitting
+    // alongside the single negative active line — the resolution is the same
+    // either way, and gating on groupRows.length alone let that combination
+    // fall through every card with no action available.
+    if (isZeroSum) {
+      card1.push({ batch, rows: groupRows, subtotal });
+    } else if (nonHolding.length === 1 && nonHolding[0].availableQty < 0) {
+      card3.push({ batch, row: nonHolding[0] });
+    } else if (nonHolding.length > 1) {
+      card2.push({ batch, rows: groupRows, nonHolding, subtotal });
+    }
   });
 
   allFlagged.sort((a, b) => a.batch.localeCompare(b.batch));
-  return { allFlagged, card1, card2 };
+  return { allFlagged, card1, card2, card3 };
 }
 
 function wsmNetSubgroup(batch, subRows) {
@@ -906,7 +945,7 @@ async function wsmRunDiscrepancyScan() {
 }
 
 function wsmRenderDiscrepancyDashboard(analysis) {
-  const { allFlagged, card1, card2 } = analysis;
+  const { allFlagged, card1, card2, card3 } = analysis;
 
   const flaggedRows = allFlagged.map(g => {
     const status = g.isZeroSum ? 'Zero-sum' : (g.rows.filter(r => !wsmIsHolding(r)).length > 1 ? 'Multi-bin conflict' : '—');
@@ -945,10 +984,15 @@ function wsmRenderDiscrepancyDashboard(analysis) {
         <div class="wsm-disc-card-num">${card2.length}</div>
         <div class="wsm-disc-card-label">batch(es) have stock in multiple bins that doesn't net to zero</div>
       </div>
+      <div class="wsm-disc-card">
+        <div class="wsm-disc-card-num">${card3.length}</div>
+        <div class="wsm-disc-card-label">batch(es) are a single negative line — nothing to net against, resolve from holding</div>
+      </div>
     </div>
 
     <div id="wsm-disc-card1-area"></div>
     <div id="wsm-disc-card2-area"></div>
+    <div id="wsm-disc-card3-area"></div>
   `;
 
   document.getElementById('wsm-disc-back').addEventListener('click', () => {
@@ -959,6 +1003,7 @@ function wsmRenderDiscrepancyDashboard(analysis) {
   if (card1Btn) card1Btn.addEventListener('click', () => wsmShowZeroSumPreview(card1));
 
   wsmRenderCard2List(card2);
+  wsmRenderCard3List(card3);
 }
 
 function wsmShowZeroSumPreview(card1) {
@@ -1281,6 +1326,93 @@ async function wsmMoveToHolding(group, row) {
   // Investigations home, not this discrepancy dashboard) — refresh it in the
   // background if it happens to be mounted, and it'll be fetched fresh next
   // time the user navigates back regardless (see siRefreshInvestigationCard).
+  siRefreshInvestigationCard();
+}
+
+// ── Card 3 — single-line negative batches ─────────────────────────────────
+//
+// A batch that's genuinely just one line, and that line is negative, has
+// nothing else in the batch to net (card1) or consolidate against (card2 —
+// needs more than one active bin). Per the user: resolve it by moving the
+// quantity IN from the holding bin (999/TEMP) into the negative bin, zeroing
+// it out — which leaves the holding bin negative by the same amount instead,
+// exactly mirroring the "park a discrepancy in holding" idea Move to Holding
+// already uses, just run in reverse since there's no positive line here to
+// park. Same underlying batch-cleanup transfer call as everything else on
+// this dashboard, just with holding as the SOURCE instead of the destination.
+function wsmRenderCard3List(card3) {
+  const container = document.getElementById('wsm-disc-card3-area');
+  if (!container) return;
+  if (!card3.length) { container.innerHTML = ''; return; }
+
+  const rowsHtml = card3.map(entry => {
+    const { batch, row } = entry;
+    const id = wsmRowId(row);
+    return `<tr data-row-id="${esc(id)}">
+      <td>${esc(batch)}</td>
+      <td>${esc(row.material)}</td>
+      <td class="wsm-mono">${esc(row.storageType)}/${esc(row.bin)}</td>
+      <td>${row.availableQty}</td>
+      <td id="wsm-card3-result-${esc(id)}"><button type="button" class="btn-secondary wsm-card3-resolve-btn" data-row-id="${esc(id)}">Pull From Holding</button></td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="wsm-panel-title" style="margin-top:8px">Single-Line Negative</div>
+    <div class="wsm-panel-sub">Just one bin for the whole batch, and it's negative — nothing else in the batch to net or consolidate against. Resolved by pulling the shortfall in from the holding bin (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), which leaves the holding bin negative by the same amount instead.</div>
+    <div class="wsm-mass-table-wrap">
+      <table class="wsm-mass-table" id="wsm-disc-card3-table">
+        <thead><tr><th>Batch</th><th>Material</th><th>Bin</th><th>Qty</th><th></th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`;
+
+  container.querySelectorAll('.wsm-card3-resolve-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const entry = card3.find(e => wsmRowId(e.row) === btn.dataset.rowId);
+      wsmResolveNegativeLine(entry);
+    });
+  });
+}
+
+async function wsmResolveNegativeLine(entry) {
+  if (!entry) return;
+  const { batch, row } = entry;
+  const qty = Math.abs(row.availableQty);
+  const id = wsmRowId(row);
+  const resultCell = document.getElementById(`wsm-card3-result-${id}`);
+
+  if (!await wConfirm({
+    title: 'Resolve Single-Line Negative',
+    message: `Batch ${batch} has only one line, ${row.storageType}/${row.bin}, currently showing ${row.availableQty}. Pull ${qty} in from the holding bin (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}) to bring this bin to zero? This leaves the holding bin negative by ${qty} instead.`,
+    confirmText: 'Pull From Holding',
+    variant: 'danger',
+  })) return;
+
+  const btn = document.querySelector(`.wsm-card3-resolve-btn[data-row-id="${CSS.escape(id)}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+
+  const result = await wsmCreateBatchCleanupTransfer({
+    StorageLocation: row.storageLocation, Material: row.material, Batch: batch,
+    Quantity: qty, SourceType: WSM_HOLDING_TYPE, SourceBin: WSM_HOLDING_BIN,
+    DestinationType: row.storageType, DestinationBin: row.bin,
+    StockCategory: row.stockCategory || '', SpecialStockIndicator: row.specialStockInd || '', SpecialStockNumber: row.specialStockNum || '',
+  });
+
+  if (!result.success) {
+    if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Pull From Holding'; }
+    return;
+  }
+
+  // Success — drop just this row's <tr> in place, same reasoning as
+  // wsmMoveToHolding: the screen stays exactly where it was, the resolved
+  // line simply disappears rather than the whole dashboard re-rendering.
+  const tr = document.querySelector(`#wsm-disc-card3-table tr[data-row-id="${CSS.escape(id)}"]`);
+  if (tr) tr.remove();
+
+  // The holding bin's balance just moved — refresh the Stock in Investigation
+  // card in the background if it's mounted, same as Move to Holding does.
   siRefreshInvestigationCard();
 }
 

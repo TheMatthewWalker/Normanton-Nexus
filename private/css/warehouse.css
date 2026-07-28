@@ -1461,6 +1461,23 @@ body::before {
 
 .wsm-row--negative td { color: var(--error); font-weight: 700; }
 
+/* Mass-transfer row tag: flags a negative-stock row that will be posted in
+   reverse (source/destination swapped) rather than moved out normally. */
+.wsm-neg-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--error);
+  background: rgba(220,38,38,0.08);
+  border: 1px solid rgba(220,38,38,0.3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 .wsm-empty {
   padding: 40px;
   text-align: center;
@@ -1546,7 +1563,7 @@ body::before {
 
 .wsm-disc-cards {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 16px;
   margin: 4px 0 20px;
 }
