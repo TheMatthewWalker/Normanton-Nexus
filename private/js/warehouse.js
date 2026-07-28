@@ -458,6 +458,65 @@ function wsmMassTransferHtml(rows) {
     </div>`;
 }
 
+// ── Shared progress banner ─────────────────────────────────────────────────
+//
+// Mass movement, zero-sum clean-up and multi-bin consolidation all send one
+// POST per line rather than a single bulk call, so — same idea as
+// production-nexus's bulk backflush-reversal progress banner — show a bar +
+// live counter while it runs, then a final message naming how many
+// succeeded/failed with a breakdown of the distinct error messages (not just
+// a raw count), so a batch of identical rejections reads as one line instead
+// of a wall of repeats.
+function wsmGroupErrors(messages) {
+  const counts = new Map();
+  messages.forEach(msg => counts.set(msg, (counts.get(msg) || 0) + 1));
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function wsmShowProgressBanner(containerEl, total, label) {
+  const banner = document.createElement('div');
+  banner.className = 'wsm-progress-banner';
+  banner.innerHTML = `
+    <div class="wsm-progress-head">
+      <span class="wsm-progress-label">${esc(label)}</span>
+      <span class="wsm-progress-count-wrap">
+        <span class="wsm-progress-count">0 / ${total}</span>
+        <span class="wsm-progress-pct">0%</span>
+      </span>
+    </div>
+    <div class="wsm-progress-track"><div class="wsm-progress-bar"></div></div>
+    <div class="wsm-progress-summary">Sending to SAP…</div>`;
+  containerEl.insertBefore(banner, containerEl.firstChild);
+  banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  return {
+    update(done) {
+      const pct = total ? Math.round((done / total) * 100) : 100;
+      banner.querySelector('.wsm-progress-bar').style.width = `${pct}%`;
+      banner.querySelector('.wsm-progress-count').textContent = `${done} / ${total}`;
+      banner.querySelector('.wsm-progress-pct').textContent = `${pct}%`;
+    },
+    // failureMessages: plain (unescaped) strings — assigned via textContent
+    // below, which escapes on its own, so double-escaping would show literal
+    // "&amp;"-style entities rather than the real characters.
+    finish(ok, fail, failureMessages) {
+      const bar     = banner.querySelector('.wsm-progress-bar');
+      const summary = banner.querySelector('.wsm-progress-summary');
+      bar.style.width = '100%';
+      bar.classList.toggle('wsm-progress-bar--warn', fail > 0);
+      if (fail) {
+        const breakdown = wsmGroupErrors(failureMessages)
+          .map(([msg, count]) => `${count}× ${msg}`).join('; ');
+        summary.classList.add('wsm-progress-summary--warn');
+        summary.textContent = `${ok} succeeded, ${fail} failed — ${breakdown}`;
+      } else {
+        summary.classList.add('wsm-progress-summary--ok');
+        summary.textContent = `✓ All ${ok} succeeded.`;
+      }
+    },
+  };
+}
+
 function wsmWireMassTransfer(rows) {
   const modeRadios  = document.querySelectorAll('input[name="wsm-mass-mode"]');
   const sharedFields = document.getElementById('wsm-mass-shared');
@@ -490,6 +549,9 @@ function wsmWireMassTransfer(rows) {
     }
 
     let successCount = 0, failCount = 0;
+    const failMessages = [];
+    const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Creating transfer orders');
+    let done = 0;
 
     for (const row of rows) {
       const id          = wsmRowId(row);
@@ -505,7 +567,9 @@ function wsmWireMassTransfer(rows) {
 
       if (!quantity || quantity <= 0 || !destType || !destBin) {
         failCount++;
+        failMessages.push('Missing qty/destination');
         if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing qty/destination</span>`;
+        progress.update(++done);
         continue;
       }
 
@@ -528,15 +592,24 @@ function wsmWireMassTransfer(rows) {
         if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.transferOrderNumber || 'Done')}</span>`;
       } else {
         failCount++;
+        failMessages.push(result.message);
         if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`;
       }
+      progress.update(++done);
     }
 
-    summaryEl.innerHTML = `<div class="${failCount ? 'sap-error' : 'tf-success'} tf-inline-error">
-      ${successCount} succeeded${failCount ? `, ${failCount} failed` : ''}.
-    </div>`;
-    submitBtn.disabled    = false;
-    submitBtn.textContent = `Create ${rows.length} Transfer Orders`;
+    progress.finish(successCount, failCount, failMessages);
+    // Leave the button disabled once anything succeeded — the rows/qty this
+    // form was built from are now stale, so re-clicking would replay old
+    // quantities. Re-select from the refreshed table to run it again. Fully
+    // failed runs re-enable so a genuine mistake (bad bin typo etc.) can be
+    // fixed and retried without re-picking rows.
+    if (successCount) {
+      submitBtn.textContent = 'Done — reselect rows to run again';
+    } else {
+      submitBtn.disabled    = false;
+      submitBtn.textContent = `Create ${rows.length} Transfer Orders`;
+    }
 
     if (successCount) await wsmRefreshAfterTransfer();
   });
@@ -602,19 +675,20 @@ async function wsmCreateTransferOrder(params) {
   }
 }
 
-// Re-runs the same search that's currently active and re-renders, so
-// confirming a transfer order refreshes the list while keeping the same
-// filters — the result of the transaction is visible immediately, without
-// falling back to a full unfiltered warehouse pull.
+// Re-runs the same search that's currently active and refreshes the table,
+// so confirming a transfer order updates the stock list while keeping the
+// same filters. Deliberately does NOT clear wsm.selected or re-render the
+// transfer panel — doing so would immediately blow away the progress banner
+// / success-or-error breakdown the panel is still showing, before the user
+// has had a chance to read it. The panel catches up to the fresh row data
+// next time the user touches a checkbox or searches again.
 async function wsmRefreshAfterTransfer() {
-  wsm.selected = new Set();
   try {
     wsm.rows = await wsmFetchStock(wsm.lastParams || {});
   } catch (err) {
-    return; // keep showing the stale list + the just-shown result message rather than blowing away the panel
+    return; // keep showing the stale list + the just-shown result message
   }
   wsmRenderTable();
-  wsmRenderTransferPanel();
   document.getElementById('result-hint').textContent =
     `LQUA · WH 312 · ${Object.keys(wsm.lastParams || {}).length ? 'filtered search' : 'all stock'} · ${wsm.rows.length} rows`;
 }
@@ -912,7 +986,9 @@ async function wsmExecuteZeroSumPlan(plan) {
   confirmBtn.disabled = true;
   confirmBtn.textContent = 'Executing…';
 
-  let ok = 0, fail = 0;
+  const totalMoves = plan.reduce((s, p) => s + p.moves.length, 0);
+  const progress   = wsmShowProgressBanner(resultEl, totalMoves, 'Executing zero-sum clean-up');
+  let done = 0, ok = 0, fail = 0;
   const failures = [];
 
   for (const { batch, moves } of plan) {
@@ -924,15 +1000,15 @@ async function wsmExecuteZeroSumPlan(plan) {
         StockCategory: m.stockCategory || '', SpecialStockIndicator: m.specialStockInd || '', SpecialStockNumber: m.specialStockNum || '',
       });
       if (result.success) ok++; else { fail++; failures.push(`${batch} ${m.sourceType}/${m.sourceBin} → ${m.destType}/${m.destBin}: ${result.message}`); }
+      progress.update(++done);
     }
   }
 
-  if (resultEl) resultEl.innerHTML = `<div class="${fail ? 'sap-error' : 'tf-success'} tf-inline-error">
-    ${ok} move(s) succeeded${fail ? `, ${fail} failed` : ''}.
-    ${failures.length ? `<br>${failures.map(esc).join('<br>')}` : ''}
-  </div>`;
-
-  await wsmRunDiscrepancyScan();
+  progress.finish(ok, fail, failures);
+  confirmBtn.textContent = 'Done — press Rescan above to refresh';
+  // Deliberately not auto-rescanning: wsmRunDiscrepancyScan() replaces the
+  // whole dashboard (including this very message) — the existing Rescan
+  // button lets the user refresh once they've read the breakdown.
 }
 
 function wsmRenderCard2List(card2) {
@@ -1016,7 +1092,12 @@ async function wsmConsolidateGroup(group) {
   }
 
   resultEl.innerHTML = '';
-  let ok = 0, fail = 0;
+  const consolidateBtn = document.getElementById('wsm-resolve-consolidate-btn');
+  if (consolidateBtn) consolidateBtn.disabled = true;
+
+  const progress = wsmShowProgressBanner(resultEl, movable.length, 'Consolidating into selected bin');
+  let done = 0, ok = 0, fail = 0;
+  const failures = [];
   for (const r of movable) {
     const result = await wsmCreateBatchCleanupTransfer({
       StorageLocation: r.storageLocation, Material: r.material, Batch: group.batch,
@@ -1024,13 +1105,20 @@ async function wsmConsolidateGroup(group) {
       DestinationType: target.storageType, DestinationBin: target.bin,
       StockCategory: r.stockCategory || '', SpecialStockIndicator: r.specialStockInd || '', SpecialStockNumber: r.specialStockNum || '',
     });
-    if (result.success) ok++; else fail++;
+    if (result.success) ok++; else { fail++; failures.push(`${r.storageType}/${r.bin}: ${result.message}`); }
+    progress.update(++done);
   }
 
-  const skipNote = skipped.length ? ` ${skipped.length} row(s) left untouched (negative qty or different stock category/special stock).` : '';
-  resultEl.innerHTML = `<div class="${fail ? 'sap-error' : 'tf-success'} tf-inline-error">${ok} move(s) succeeded${fail ? `, ${fail} failed` : ''}.${skipNote}</div>`;
-
-  await wsmRunDiscrepancyScan();
+  progress.finish(ok, fail, failures);
+  if (skipped.length) {
+    const note = document.createElement('div');
+    note.className = 'wsm-progress-summary';
+    note.textContent = `${skipped.length} row(s) left untouched (negative qty or different stock category/special stock).`;
+    resultEl.appendChild(note);
+  }
+  if (consolidateBtn) consolidateBtn.textContent = 'Done — press Rescan above to refresh';
+  // Not auto-rescanning here either — wsmRunDiscrepancyScan() would replace
+  // this whole panel (and the message above) before it can be read.
 }
 
 async function wsmMoveToHolding(group, row) {
@@ -1055,10 +1143,9 @@ async function wsmMoveToHolding(group, row) {
   });
 
   if (resultEl) resultEl.innerHTML = result.success
-    ? `<div class="tf-success tf-inline-error">Moved to holding.</div>`
+    ? `<div class="tf-success tf-inline-error">Moved to holding. Press Rescan above to refresh.</div>`
     : `<div class="sap-error tf-inline-error">✕ ${esc(result.message)}</div>`;
-
-  await wsmRunDiscrepancyScan();
+  // Not auto-rescanning — see wsmExecuteZeroSumPlan/wsmConsolidateGroup for why.
 }
 
 // ── Transfer Orders — form ────────────────────────────────────────────────────

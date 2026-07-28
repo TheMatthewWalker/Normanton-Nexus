@@ -1590,3 +1590,56 @@ body::before {
   padding: 16px;
   margin-bottom: 20px;
 }
+
+/* ── Progress banner ──────────────────────────────────────────────────────
+   Shared by mass transfer, zero-sum clean-up and consolidate — anywhere a
+   loop of one-POST-per-line runs client-side and needs a live counter plus
+   a final success/fail breakdown that isn't wiped out by an immediate
+   auto-refresh. */
+.wsm-progress-banner {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.wsm-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px; font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.wsm-progress-label { color: var(--text-dim); }
+.wsm-progress-count-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.wsm-progress-count { font-size: 12px; font-weight: 700; color: var(--text); }
+.wsm-progress-pct   { font-size: 11px; color: var(--text-muted); }
+.wsm-progress-track {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.wsm-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+.wsm-progress-bar--warn { background: var(--error); }
+.wsm-progress-summary {
+  margin-top: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.wsm-progress-summary--ok   { color: var(--success); }
+.wsm-progress-summary--warn { color: var(--error); }
