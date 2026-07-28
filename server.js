@@ -68,6 +68,7 @@ import debugRoutes             from './routes/debugsap.js';
 
 import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
+import dbExplorerRoutes        from './routes/dbexplorer.js';
 import deployRoutes            from './routes/deploy.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
 import { SqlSessionStore }     from './lib/sqlSessionStore.js';
@@ -253,6 +254,13 @@ app.use('/', authRoutes);
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, pid: process.pid, bootId: BOOT_ID, startedAt: SERVER_STARTED_AT });
 });
+
+// ── DB Explorer — SSMS-lite schema/data browser, superadmin only. Mounted
+// ahead of the admin-minimum '/api/admin' catch-all below so it's matched
+// first rather than relying on useradmin.js's router falling through (it
+// would, since it has no matching routes, but this way is explicit). Own
+// requireSuperadmin gate lives inside routes/dbexplorer.js.
+app.use('/api/admin/dbexplorer', requireLogin, dbExplorerRoutes);
 
 // ── Admin routes (requires admin role minimum) ────────────────────────────────
 app.use('/api/admin', requireLogin, requireRole('admin'), adminRoutes);

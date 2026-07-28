@@ -569,6 +569,59 @@ tbody td:last-child { border-right: none; }
   color: var(--error);
 }
 
+/* ── DB EXPLORER ─────────────────────────────────────────────────────────── */
+.dbx-breadcrumb {
+  display: flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-muted);
+  margin-bottom: 16px;
+}
+.dbx-crumb {
+  cursor: pointer;
+  padding: 3px 8px; border-radius: 5px;
+  transition: background 0.15s, color 0.15s;
+}
+.dbx-crumb:hover { background: var(--accent-dim); color: var(--accent); }
+.dbx-crumb--active {
+  color: var(--text); font-weight: 700;
+  cursor: default;
+}
+.dbx-crumb--active:hover { background: none; }
+.dbx-crumb-sep { color: var(--border); }
+
+.dbx-panel + .dbx-panel { margin-top: 0; }
+
+tbody tr.dbx-row-clickable { cursor: pointer; }
+tbody tr.dbx-row-clickable:hover td { background: var(--accent-dim); }
+
+.dbx-subsection { margin-bottom: 28px; }
+.dbx-subsection-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase; color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.dbx-subsection-title--row {
+  display: flex; align-items: center; justify-content: space-between;
+  text-transform: none; letter-spacing: normal;
+}
+.dbx-subsection-title--row span {
+  font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.dbx-preview-controls { display: flex; align-items: center; gap: 8px; }
+.dbx-preview-wrap { max-height: 480px; overflow: auto; }
+.dbx-preview-wrap thead th { position: sticky; top: 0; z-index: 1; }
+.dbx-preview-null { color: var(--text-muted); font-style: italic; }
+
+.dbx-constraint-group { margin-bottom: 16px; }
+.dbx-constraint-group:last-child { margin-bottom: 0; }
+.dbx-constraint-group-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
+  text-transform: uppercase; color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
 /* ── ROLE BADGE (3-role system) ──────────────────────────────────────────── */
 .badge--operator   { background: rgba(148,168,194,0.15); color: var(--text-muted); }
 

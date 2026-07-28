@@ -114,6 +114,16 @@
           SQL Console
         </div>
 
+        <!-- DB Explorer — shown only for superadmin -->
+        <div class="nav-item" data-section="dbexplorer" id="nav-dbexplorer" style="display:none">
+          <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
+            <ellipse cx="7" cy="3.2" rx="5.5" ry="1.8" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M1.5 3.2v3.6c0 1 2.5 1.8 5.5 1.8s5.5-.8 5.5-1.8V3.2" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M1.5 6.8v3.6c0 1 2.5 1.8 5.5 1.8s5.5-.8 5.5-1.8V6.8" stroke="currentColor" stroke-width="1.2"/>
+          </svg>
+          DB Explorer
+        </div>
+
       </div>
     </aside>
 
@@ -273,6 +283,110 @@
         <div id="sql-result" class="sql-result">
           <div class="empty-state">No query executed yet.</div>
         </div>
+      </section>
+
+      <!-- ── DB EXPLORER ──────────────────────────────────────────────────── -->
+      <section class="section" id="section-dbexplorer">
+        <div class="section-header">
+          <div>
+            <div class="section-title">DB Explorer</div>
+            <div class="section-sub">Browse databases, tables, columns &amp; constraints on this SQL Server instance &middot; superadmin only</div>
+          </div>
+          <div class="section-actions">
+            <button type="button" class="btn-secondary" id="dbx-refresh-databases">Refresh</button>
+          </div>
+        </div>
+
+        <div class="dbx-breadcrumb" id="dbx-breadcrumb">
+          <span class="dbx-crumb dbx-crumb--active" data-dbx-crumb="databases">Databases</span>
+        </div>
+
+        <!-- Step 1: databases -->
+        <div class="dbx-panel" id="dbx-panel-databases">
+          <div class="table-wrap">
+            <table id="dbx-databases-table">
+              <thead>
+                <tr>
+                  <th>Database</th>
+                  <th>State</th>
+                  <th>Recovery Model</th>
+                  <th>Compat Level</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody id="dbx-databases-body">
+                <tr><td colspan="5" class="loading-cell"><div class="spinner"></div>Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Step 2: tables in selected database -->
+        <div class="dbx-panel" id="dbx-panel-tables" style="display:none">
+          <div class="section-actions" style="margin-bottom:12px">
+            <input type="text" id="dbx-table-search" class="search-input" placeholder="Filter tables…">
+          </div>
+          <div class="table-wrap">
+            <table id="dbx-tables-table">
+              <thead>
+                <tr>
+                  <th>Schema</th>
+                  <th>Table</th>
+                  <th>Approx Rows</th>
+                </tr>
+              </thead>
+              <tbody id="dbx-tables-body">
+                <tr><td colspan="3" class="loading-cell"><div class="spinner"></div>Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Step 3: table detail — columns, keys & constraints, data preview -->
+        <div class="dbx-panel" id="dbx-panel-detail" style="display:none">
+
+          <div class="dbx-subsection">
+            <div class="dbx-subsection-title">Columns</div>
+            <div class="table-wrap">
+              <table id="dbx-columns-table">
+                <thead>
+                  <tr>
+                    <th>#</th><th>Column</th><th>Type</th><th>Nullable</th><th>Identity</th><th>PK</th><th>Default</th>
+                  </tr>
+                </thead>
+                <tbody id="dbx-columns-body">
+                  <tr><td colspan="7" class="loading-cell"><div class="spinner"></div>Loading…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="dbx-subsection">
+            <div class="dbx-subsection-title">Keys &amp; Constraints</div>
+            <div id="dbx-constraints-body">
+              <div class="loading-wrap"><div class="spinner"></div>Loading…</div>
+            </div>
+          </div>
+
+          <div class="dbx-subsection">
+            <div class="dbx-subsection-title dbx-subsection-title--row">
+              <span>Preview Data</span>
+              <div class="dbx-preview-controls">
+                <select id="dbx-preview-top" class="filter-select">
+                  <option value="50">Top 50</option>
+                  <option value="100" selected>Top 100</option>
+                  <option value="250">Top 250</option>
+                  <option value="500">Top 500</option>
+                </select>
+                <button type="button" class="btn-secondary" id="dbx-preview-btn">Preview</button>
+              </div>
+            </div>
+            <div class="dbx-preview-wrap" id="dbx-preview-wrap" style="display:none"></div>
+            <div class="empty-state" id="dbx-preview-empty">Click Preview to load the first rows of this table.</div>
+          </div>
+
+        </div>
+
       </section>
 
       <!-- ── SCHEDULED DEPLOYMENTS ─────────────────────────────────────────── -->

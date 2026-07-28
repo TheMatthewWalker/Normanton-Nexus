@@ -56,6 +56,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (deployNav) {
     deployNav.addEventListener('click', () => { setupDeploySection(); }, { once: true });
   }
+
+  // Load DB Explorer when that section is first opened (superadmin only)
+  const dbxNav = document.getElementById('nav-dbexplorer');
+  if (dbxNav) {
+    dbxNav.addEventListener('click', () => { setupDbExplorer(); }, { once: true });
+  }
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -79,6 +85,13 @@ function applyRoleVisibility() {
   // Show deployments nav only for superadmin
   const deployNav = document.getElementById('nav-deployments');
   if (deployNav) deployNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
+
+  // Show DB Explorer nav only for superadmin — this is a client-side
+  // convenience only; the real gate is server-side (routes/dbexplorer.js's
+  // own requireSuperadmin), same as every other superadmin-only nav item
+  // here.
+  const dbxNav = document.getElementById('nav-dbexplorer');
+  if (dbxNav) dbxNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -1065,4 +1078,264 @@ function fmtDate(dt) {
 
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── DB Explorer ────────────────────────────────────────────────────────────
+// SSMS-lite schema/data browser: Databases -> Tables -> Columns / Keys &
+// Constraints / Preview Data. All calls go to routes/dbexplorer.js, which is
+// gated superadmin-only server-side regardless of what's shown here.
+let dbxSectionSetup  = false;
+let dbxTablesCache   = [];   // last-loaded table list, for the client-side filter
+let dbxCurrentDb     = null;
+let dbxCurrentSchema = null;
+let dbxCurrentTable  = null;
+
+function setupDbExplorer() {
+  if (dbxSectionSetup) return;
+  dbxSectionSetup = true;
+
+  document.getElementById('dbx-refresh-databases').addEventListener('click', loadDbxDatabases);
+  document.getElementById('dbx-table-search').addEventListener('input', filterDbxTables);
+  document.getElementById('dbx-preview-btn').addEventListener('click', loadDbxPreview);
+  document.getElementById('dbx-breadcrumb').addEventListener('click', (e) => {
+    const crumb = e.target.closest('[data-dbx-crumb]');
+    if (!crumb || crumb.classList.contains('dbx-crumb--active')) return;
+    const step = crumb.dataset.dbxCrumb;
+    if (step === 'databases') showDbxPanel('databases');
+    else if (step === 'tables') showDbxPanel('tables');
+  });
+
+  loadDbxDatabases();
+}
+
+function showDbxPanel(step) {
+  document.getElementById('dbx-panel-databases').style.display = step === 'databases' ? '' : 'none';
+  document.getElementById('dbx-panel-tables').style.display    = step === 'tables'    ? '' : 'none';
+  document.getElementById('dbx-panel-detail').style.display    = step === 'detail'    ? '' : 'none';
+  renderDbxBreadcrumb(step);
+}
+
+function renderDbxBreadcrumb(step) {
+  const parts = [{ key: 'databases', label: 'Databases' }];
+  if (dbxCurrentDb) parts.push({ key: 'tables', label: dbxCurrentDb });
+  if (dbxCurrentDb && dbxCurrentSchema && dbxCurrentTable) {
+    parts.push({ key: 'detail', label: `${dbxCurrentSchema}.${dbxCurrentTable}` });
+  }
+  const html = parts.map((p, i) => {
+    const isActive = p.key === step;
+    const crumb = `<span class="dbx-crumb${isActive ? ' dbx-crumb--active' : ''}" data-dbx-crumb="${p.key}">${esc(p.label)}</span>`;
+    return i === 0 ? crumb : `<span class="dbx-crumb-sep">/</span>${crumb}`;
+  }).join('');
+  document.getElementById('dbx-breadcrumb').innerHTML = html;
+}
+
+// ── Step 1: databases ────────────────────────────────────────────────────
+async function loadDbxDatabases() {
+  const body = document.getElementById('dbx-databases-body');
+  body.innerHTML = '<tr><td colspan="5" class="loading-cell"><div class="spinner"></div>Loading…</td></tr>';
+  try {
+    const { data } = await api('/api/admin/dbexplorer/databases');
+    renderDbxDatabases(data);
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="5" class="loading-cell">Failed to load databases: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function renderDbxDatabases(rows) {
+  const body = document.getElementById('dbx-databases-body');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="loading-cell">No databases visible to this login.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr class="dbx-row-clickable" data-db="${esc(r.name)}">
+      <td><strong>${esc(r.name)}</strong></td>
+      <td>${esc(r.state_desc)}</td>
+      <td>${esc(r.recovery_model_desc)}</td>
+      <td>${esc(r.compatibility_level)}</td>
+      <td>${formatDate(r.create_date)}</td>
+    </tr>
+  `).join('');
+  body.querySelectorAll('tr[data-db]').forEach(row => {
+    row.addEventListener('click', () => selectDbxDatabase(row.dataset.db));
+  });
+}
+
+// ── Step 2: tables in selected database ─────────────────────────────────
+function selectDbxDatabase(dbName) {
+  dbxCurrentDb     = dbName;
+  dbxCurrentSchema = null;
+  dbxCurrentTable  = null;
+  document.getElementById('dbx-table-search').value = '';
+  showDbxPanel('tables');
+  loadDbxTables(dbName);
+}
+
+async function loadDbxTables(dbName) {
+  const body = document.getElementById('dbx-tables-body');
+  body.innerHTML = '<tr><td colspan="3" class="loading-cell"><div class="spinner"></div>Loading…</td></tr>';
+  try {
+    const { data } = await api(`/api/admin/dbexplorer/${encodeURIComponent(dbName)}/tables`);
+    dbxTablesCache = data;
+    renderDbxTables(data);
+  } catch (err) {
+    dbxTablesCache = [];
+    body.innerHTML = `<tr><td colspan="3" class="loading-cell">Failed to load tables: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function renderDbxTables(rows) {
+  const body = document.getElementById('dbx-tables-body');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="3" class="loading-cell">No tables found.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr class="dbx-row-clickable" data-schema="${esc(r.SchemaName)}" data-table="${esc(r.TableName)}">
+      <td>${esc(r.SchemaName)}</td>
+      <td><strong>${esc(r.TableName)}</strong></td>
+      <td>${r.ApproxRowCount != null ? Number(r.ApproxRowCount).toLocaleString('en-GB') : '—'}</td>
+    </tr>
+  `).join('');
+  body.querySelectorAll('tr[data-table]').forEach(row => {
+    row.addEventListener('click', () => selectDbxTable(row.dataset.schema, row.dataset.table));
+  });
+}
+
+function filterDbxTables() {
+  const q = document.getElementById('dbx-table-search').value.trim().toLowerCase();
+  if (!q) { renderDbxTables(dbxTablesCache); return; }
+  renderDbxTables(dbxTablesCache.filter(r =>
+    r.SchemaName.toLowerCase().includes(q) || r.TableName.toLowerCase().includes(q)
+  ));
+}
+
+// ── Step 3: table detail — columns, keys & constraints, preview ─────────
+function selectDbxTable(schema, table) {
+  dbxCurrentSchema = schema;
+  dbxCurrentTable  = table;
+  showDbxPanel('detail');
+
+  document.getElementById('dbx-preview-wrap').style.display = 'none';
+  document.getElementById('dbx-preview-wrap').innerHTML = '';
+  document.getElementById('dbx-preview-empty').style.display = '';
+  document.getElementById('dbx-preview-empty').textContent = 'Click Preview to load the first rows of this table.';
+
+  loadDbxColumns();
+  loadDbxConstraints();
+}
+
+function dbxTablePath() {
+  return `/api/admin/dbexplorer/${encodeURIComponent(dbxCurrentDb)}/${encodeURIComponent(dbxCurrentSchema)}/${encodeURIComponent(dbxCurrentTable)}`;
+}
+
+async function loadDbxColumns() {
+  const body = document.getElementById('dbx-columns-body');
+  body.innerHTML = '<tr><td colspan="7" class="loading-cell"><div class="spinner"></div>Loading…</td></tr>';
+  try {
+    const { data } = await api(`${dbxTablePath()}/columns`);
+    if (!data.length) {
+      body.innerHTML = '<tr><td colspan="7" class="loading-cell">No columns found.</td></tr>';
+      return;
+    }
+    body.innerHTML = data.map(c => `
+      <tr>
+        <td>${c.ColumnID}</td>
+        <td><strong>${esc(c.ColumnName)}</strong></td>
+        <td>${esc(dbxFormatType(c))}</td>
+        <td>${c.IsNullable ? 'YES' : 'no'}</td>
+        <td>${c.IsIdentity ? 'YES' : ''}</td>
+        <td>${c.IsPrimaryKey ? 'PK' : ''}</td>
+        <td>${c.DefaultValue ? esc(c.DefaultValue) : ''}</td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="7" class="loading-cell">Failed to load columns: ${esc(err.message)}</td></tr>`;
+  }
+}
+
+function dbxFormatType(c) {
+  const t = c.DataType;
+  if (['nvarchar', 'nchar'].includes(t) && c.MaxLength !== -1) return `${t}(${c.MaxLength / 2})`;
+  if (['varchar', 'char', 'varbinary', 'binary'].includes(t) && c.MaxLength !== -1) return `${t}(${c.MaxLength})`;
+  if (['nvarchar', 'varchar', 'varbinary'].includes(t) && c.MaxLength === -1) return `${t}(max)`;
+  if (['decimal', 'numeric'].includes(t)) return `${t}(${c.Precision},${c.Scale})`;
+  return t;
+}
+
+async function loadDbxConstraints() {
+  const wrap = document.getElementById('dbx-constraints-body');
+  wrap.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Loading…</div>';
+  try {
+    const { data } = await api(`${dbxTablePath()}/constraints`);
+    wrap.innerHTML = renderDbxConstraints(data);
+  } catch (err) {
+    wrap.innerHTML = `<div class="empty-state">Failed to load constraints: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderDbxConstraints(data) {
+  const groups = [];
+
+  if (data.keys.length) {
+    groups.push(dbxConstraintGroup('Primary / Unique Keys', data.keys.map(k =>
+      `${esc(k.ConstraintName)} (${k.ConstraintType === 'PRIMARY_KEY_CONSTRAINT' ? 'PRIMARY KEY' : 'UNIQUE'}) — ${esc(k.Columns)}`
+    )));
+  }
+  if (data.foreignKeysOut.length) {
+    groups.push(dbxConstraintGroup('Foreign Keys (from this table)', data.foreignKeysOut.map(fk =>
+      `${esc(fk.ConstraintName)}: ${esc(fk.ColumnName)} &rarr; ${esc(fk.ReferencedSchema)}.${esc(fk.ReferencedTable)}.${esc(fk.ReferencedColumn)} ` +
+      `<span class="dbx-preview-null">(ON DELETE ${esc(fk.OnDelete)}, ON UPDATE ${esc(fk.OnUpdate)})</span>`
+    )));
+  }
+  if (data.foreignKeysIn.length) {
+    groups.push(dbxConstraintGroup('Referenced by (foreign keys pointing here)', data.foreignKeysIn.map(fk =>
+      `${esc(fk.ConstraintName)}: ${esc(fk.SourceSchema)}.${esc(fk.SourceTable)}.${esc(fk.SourceColumn)} &rarr; this.${esc(fk.ColumnName)}`
+    )));
+  }
+  if (data.checkConstraints.length) {
+    groups.push(dbxConstraintGroup('Check Constraints', data.checkConstraints.map(cc =>
+      `${esc(cc.ConstraintName)}: ${esc(cc.Definition)}${cc.IsDisabled ? ' <span class="dbx-preview-null">(disabled)</span>' : ''}`
+    )));
+  }
+  if (data.indexes.length) {
+    groups.push(dbxConstraintGroup('Indexes', data.indexes.map(ix =>
+      `${esc(ix.IndexName)} (${esc(ix.IndexType)}${ix.IsUnique ? ', unique' : ''}${ix.IsPrimaryKey ? ', primary key' : ''}) — ${esc(ix.Columns)}`
+    )));
+  }
+
+  if (!groups.length) return '<div class="empty-state">No keys, constraints or indexes on this table.</div>';
+  return groups.join('');
+}
+
+function dbxConstraintGroup(title, lines) {
+  return `
+    <div class="dbx-constraint-group">
+      <div class="dbx-constraint-group-title">${esc(title)}</div>
+      ${lines.map(l => `<div>${l}</div>`).join('')}
+    </div>
+  `;
+}
+
+async function loadDbxPreview() {
+  const wrap  = document.getElementById('dbx-preview-wrap');
+  const empty = document.getElementById('dbx-preview-empty');
+  const top   = document.getElementById('dbx-preview-top').value;
+
+  empty.style.display = '';
+  empty.textContent = 'Loading…';
+  wrap.style.display = 'none';
+
+  try {
+    const { data } = await api(`${dbxTablePath()}/preview?top=${encodeURIComponent(top)}`);
+    if (!data.length) {
+      empty.textContent = 'This table has no rows.';
+      return;
+    }
+    wrap.innerHTML = buildSqlTable(data);
+    wrap.style.display = '';
+    empty.style.display = 'none';
+  } catch (err) {
+    empty.textContent = `Failed to load preview: ${err.message}`;
+  }
 }
