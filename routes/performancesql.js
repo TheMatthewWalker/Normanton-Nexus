@@ -966,6 +966,80 @@ export async function upsertOrderBookLineNotes(rows, username) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Delivery → order link cache — dbo.DeliveryOrderLink
+// ══════════════════════════════════════════════════════════════════════════
+// Z_STOCK_REQ_LIST's ReferenceDocument (SRC03) holds the sales order number
+// while an order is open, but flips to the delivery number the instant SAP
+// creates a delivery against it — silently breaking the (ReferenceDocument,
+// Material) key dbo.OrderBookLineNotes uses to remember Risk/Won't
+// Get/comments for that line, so a genuinely at-risk line looks "fine"
+// again the moment it's picked. resolveDeliveryReferenceDocuments()
+// (routes/performanceorderlink.js) detects a delivery-shaped
+// ReferenceDocument and rewrites it back to the real sales order via SAP
+// table VBFA before AgreementSnapshot is ever written, using this table as
+// a permanent cache — see sql/migrate_delivery_order_link.sql. A delivery
+// item's originating order never changes once SAP creates it, so this is a
+// write-once cache: no update path, just "insert if not already known".
+
+export async function getCachedDeliveryOrderLinks(deliveryNumbers) {
+  if (!deliveryNumbers.length) return new Map();
+
+  const pool = await getPool();
+  const request = pool.request();
+  const inClause = deliveryNumbers.map((d, i) => {
+    request.input(`d${i}`, sql.VarChar(10), d);
+    return `@d${i}`;
+  }).join(', ');
+
+  const { recordset } = await request.query(`
+    SELECT DeliveryNumber, DeliveryItem, OrderNumber, OrderItem
+    FROM dbo.DeliveryOrderLink
+    WHERE DeliveryNumber IN (${inClause})
+  `);
+
+  const map = new Map();
+  recordset.forEach(r => {
+    map.set(`${r.DeliveryNumber}||${r.DeliveryItem}`, { orderNumber: r.OrderNumber, orderItem: r.OrderItem });
+  });
+  return map;
+}
+
+// Insert-only — see header comment above for why this isn't the generic
+// upsertBatch() (that helper assumes a mutable "last upload wins" grain and
+// stamps a LastUpdatedUtc column this table doesn't have). Same
+// parameterised UNION ALL SELECT staging idiom as replaceTable()/upsertBatch
+// above, just with the UPDATE half dropped.
+export async function insertDeliveryOrderLinksIfMissing(rows) {
+  if (!rows.length) return;
+
+  const pool = await getPool();
+  const batchSize = 500; // 4 columns/row, well under the 2100-parameter limit
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const request = pool.request();
+
+    const selectClauses = batch.map((row, idx) => {
+      request.input(`dn${idx}`, sql.VarChar(10), row.deliveryNumber);
+      request.input(`di${idx}`, sql.VarChar(6),  row.deliveryItem);
+      request.input(`on${idx}`, sql.VarChar(10), row.orderNumber);
+      request.input(`oi${idx}`, sql.VarChar(6),  row.orderItem);
+      return `SELECT @dn${idx} AS DeliveryNumber, @di${idx} AS DeliveryItem, @on${idx} AS OrderNumber, @oi${idx} AS OrderItem`;
+    });
+
+    await request.query(`
+      WITH staging AS (${selectClauses.join('\nUNION ALL\n')})
+      INSERT INTO dbo.DeliveryOrderLink (DeliveryNumber, DeliveryItem, OrderNumber, OrderItem)
+      SELECT s.DeliveryNumber, s.DeliveryItem, s.OrderNumber, s.OrderItem
+      FROM staging s
+      LEFT JOIN dbo.DeliveryOrderLink t
+        ON t.DeliveryNumber = s.DeliveryNumber AND t.DeliveryItem = s.DeliveryItem
+      WHERE t.DeliveryNumber IS NULL
+    `);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Consignment customers — dbo.ConsignmentCustomer
 // ══════════════════════════════════════════════════════════════════════════
 // Customers on a consignment stock agreement: we ship to them but don't

@@ -2,18 +2,33 @@ import * as sap from './performancesap.js';
 import * as db from '../routes/performancesql.js';
 
 import { allocateStock } from './performanceallocation.js';
+import { resolveDeliveryReferenceDocuments } from './performanceorderlink.js';
 import {
   enrichWithValueStream,
   computeTodayStockAndPickedTotals
 } from './performancevaluestream.js';
 import { computePredictedUsage } from './performanceforecast.js';
 
-async function syncStockAndAgreements(stockRows, agreementRows) {
+async function syncStockAndAgreements(stockRows, agreementRows, req) {
   const stockRunId = await db.startRefresh('Stock');
   const agreementsRunId = await db.startRefresh('Agreements');
 
   try {
     const allocated = allocateStock(agreementRows, stockRows);
+
+    // Must run after allocateStock() (which needs the raw delivery number
+    // for its picked-stock staging-bin match) and before
+    // replaceAgreementSnapshot() (everything downstream of that table needs
+    // the real sales order number) — see performanceorderlink.js's header
+    // comment for the full reasoning.
+    try {
+      await resolveDeliveryReferenceDocuments(allocated, req);
+    } catch (err) {
+      // Best-effort: a VBFA lookup failure shouldn't block the sync — worst
+      // case a handful of freshly-picked lines keep the delivery number
+      // (and their notes/risk flags) until the next successful sync.
+      console.error('[syncStockAndAgreements] resolveDeliveryReferenceDocuments failed:', err.message);
+    }
 
     enrichWithValueStream(stockRows);
     enrichWithValueStream(allocated);
@@ -199,7 +214,8 @@ fromDate365.setDate(now.getDate() - 365);
     results.push(
       ...(await syncStockAndAgreements(
         stockResult.value,
-        agreementsResult.value
+        agreementsResult.value,
+        req
       ))
     );
   } else {

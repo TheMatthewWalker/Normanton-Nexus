@@ -80,6 +80,18 @@ export const getAgreements = (req, horizonDays = 365) =>
       throw err;
     });
 
+// Resolves a delivery number back to the sales order(s)/item(s) it came from
+// via SAP table VBFA — see routes/performanceorderlink.js for why (Order
+// Book Risk/Won't Get notes need to stay keyed on the sales order, not
+// whichever document Z_STOCK_REQ_LIST currently returns for that line).
+export const getVbfaOrderLink = (req, delivery) =>
+  client.get(`/api/performance/vbfa-order-link/${encodeURIComponent(delivery)}`, auth(req))
+    .then(unwrap)
+    .catch(err => {
+      console.error(`SAP ERROR (VbfaOrderLink ${delivery}):`, err.response?.data);
+      throw err;
+    });
+
 export const getInvoicing = (req, from, to) =>
   client.get('/api/performance/invoicing', {
     ...auth(req), params: { from, to } })
