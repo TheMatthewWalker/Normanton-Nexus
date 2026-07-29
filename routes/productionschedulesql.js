@@ -14,6 +14,20 @@
  * Kept separate from routes/performancesql.js (which is already very large)
  * — same modularisation this project already uses for other self-contained
  * features (routes/stagingsql.js, routes/performanceallocation.js, etc.).
+ *
+ * ReferenceDocument/Item below are always sourced from AgreementSnapshot's
+ * OriginalDoc/OriginalDocItem columns (aliased AS ReferenceDocument/Item in
+ * every query here), not the raw ReferenceDocument/Item columns — those flip
+ * from the sales order number to the delivery number the instant SAP creates
+ * a delivery against the line (see performanceorderlink.js's header comment).
+ * Without this alias, a line picked between visits would silently vanish
+ * from dbo.ProductionScheduleComments' key and dbo.OrderFulfillmentTracking's
+ * openKeys set below — losing its planner comment/ETA, and (worse) the OTIF
+ * tracker would misread the key-change as the order having shipped, logging
+ * a false COMPLETED days or weeks before it actually ships. Aliasing at the
+ * source means every function in this file — and every column persisted
+ * into ProductionScheduleComments/OrderFulfillmentTracking — automatically
+ * keys on the stable sales order number without needing its own fix.
  */
 
 import sql from 'mssql';
@@ -74,7 +88,7 @@ export async function getProductionSchedule() {
     .input('end',   sql.DateTime, windowEnd)
     .query(`
       SELECT
-        Customer, CustomerName, ReferenceDocument, Item, Material, MaterialText,
+        Customer, CustomerName, OriginalDoc AS ReferenceDocument, OriginalDocItem AS Item, Material, MaterialText,
         CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
         OrderQty, Uom,
         DockStockAllocated   AS StockQty,
@@ -110,7 +124,7 @@ export async function getProductionArrears() {
     .input('today', sql.DateTime, today)
     .query(`
       SELECT
-        Customer, CustomerName, ReferenceDocument, Item, Material, MaterialText,
+        Customer, CustomerName, OriginalDoc AS ReferenceDocument, OriginalDocItem AS Item, Material, MaterialText,
         CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
         OrderQty, Uom,
         DockStockAllocated   AS StockQty,
@@ -189,7 +203,7 @@ export async function diffProductionScheduleOtif() {
 
   const { recordset: openRows } = await pool.request().query(`
     SELECT
-      ReferenceDocument, Item, Customer, CustomerName, Material, MaterialText,
+      OriginalDoc AS ReferenceDocument, OriginalDocItem AS Item, Customer, CustomerName, Material, MaterialText,
       ValueStream, OrderQty, Uom,
       CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate
     FROM dbo.AgreementSnapshot

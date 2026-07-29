@@ -160,6 +160,96 @@ async function fetchLabelData(processCode, recordID) {
   };
 }
 
+// ── Mixing — one ticket per tub ────────────────────────────────────────────
+// A Mixing entry backflushes each tub to SAP separately (see
+// prod.MixingTubs — TubWeightKG/MaterialDocumentSAP/SAPSuccess are all
+// per-tub), but fetchLabelData's MX branch above pulls the record's
+// combined TotalWeightKG and a "TOP 1 ... ORDER BY PostedAt" SAPPostings
+// row — so a 3-tub batch printed one ticket showing the whole batch's
+// weight and only the first tub's SAP material document number, silently
+// dropping the other tubs' documents entirely. This builds one ticket data
+// object per tub instead, each carrying that tub's own weight, SAP
+// document, and supplier tub number.
+
+async function fetchMixingHeader(recordID) {
+  const pool = await getProductionPool();
+  const r = await pool.request()
+    .input('id', sql.Int, recordID)
+    .query(`SELECT m.MixingID AS RecordID, m.MixRef AS BatchRef,
+                   m.Material, m.Status, m.CreatedAt, m.CompletedAt, m.Notes,
+                   m.SupplierBatchNo, s.ShiftName,
+                   pu.Username,
+                   COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
+            FROM   prod.Mixing m
+            LEFT JOIN prod.Shifts              s  ON s.ShiftID  = m.ShiftID
+            LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = m.CreatedByUserID
+            WHERE  m.MixingID = @id`);
+  const rec = r.recordset[0];
+  if (!rec) throw Object.assign(new Error('Record not found.'), { statusCode: 404 });
+
+  const opsR = await pool.request()
+    .input('pc',  sql.NVarChar(5), 'MX')
+    .input('rid', sql.Int,         recordID)
+    .query(`SELECT bo.IsPrimary, pu.Username,
+                   COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
+            FROM   prod.BatchOperators bo
+            JOIN   kongsberg.dbo.PortalUsers pu ON pu.UserID = bo.UserID
+            WHERE  bo.ProcessCode = @pc AND bo.ProcessRecordID = @rid
+              AND  bo.RemovedAt IS NULL
+            ORDER  BY bo.IsPrimary DESC, bo.AssignedAt`);
+
+  const tubsR = await pool.request()
+    .input('id', sql.Int, recordID)
+    .query(`SELECT TubID, TubSeq, SupplierTubNo, TubWeightKG, MaterialDocumentSAP, SAPSuccess
+            FROM   prod.MixingTubs
+            WHERE  MixingID = @id
+            ORDER  BY TubSeq`);
+
+  return { rec, operators: opsR.recordset, tubs: tubsR.recordset };
+}
+
+async function fetchMixingTicketsData(recordID) {
+  const { rec, operators, tubs } = await fetchMixingHeader(recordID);
+  const baseBatchRef = rec.BatchRef || `MX${String(recordID).padStart(8, '0')}`;
+  const isComplete   = rec.Status === 4;
+
+  const shared = {
+    processCode:     'MX',
+    processName:     PROC.MX.name,
+    status:          rec.Status,
+    material:        rec.Material || '—',
+    machine:         null,
+    operators,
+    createdAt:       rec.CreatedAt,
+    completedAt:     rec.CompletedAt,
+    uom:             PROC.MX.uom,
+    parentBatches:   [],
+    notes:           rec.Notes || null,
+    supplierBatchNo: rec.SupplierBatchNo || null,
+  };
+
+  if (!tubs.length) {
+    // No tub rows yet (legacy record, or printed before any tub was
+    // weighed) — one ticket for the whole batch so printing never
+    // silently produces nothing.
+    return [{
+      ...shared,
+      batchRef:      baseBatchRef,
+      quantity:      null,
+      sapMatDoc:     null,
+      supplierTubNo: null,
+    }];
+  }
+
+  return tubs.map(t => ({
+    ...shared,
+    batchRef:      `${baseBatchRef}-T${t.TubSeq}`,
+    quantity:      t.TubWeightKG,
+    sapMatDoc:     isComplete && t.SAPSuccess && t.MaterialDocumentSAP ? t.MaterialDocumentSAP : null,
+    supplierTubNo: t.SupplierTubNo || null,
+  }));
+}
+
 // ── PDF builder (used for server-side printing) ───────────────────────────────
 //
 // The label artwork itself is always laid out at A5-landscape dimensions
@@ -181,18 +271,14 @@ async function fetchLabelData(processCode, recordID) {
 //     landscape-and-fills-the-whole-page symptom).
 // Any other/unrecognised paperSize value falls back to 'A5' behaviour.
 async function buildPDF(data, paperSize = 'A5') {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const isA4 = String(paperSize).toUpperCase() === 'A4';
-      const doc = new PDFDocument({
-        size: isA4 ? 'A4' : 'A5', layout: isA4 ? 'portrait' : 'landscape', margin: 0,
-        info: { Title: `${data.processName} Label — ${data.batchRef}`, Author: 'Kongsberg Automotive' },
-      });
-      const chunks = [];
-      doc.on('data',  c  => chunks.push(c));
-      doc.on('end',   () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
+  return buildLabelsPDF([data], paperSize);
+}
 
+// Draws one label onto the PDFDocument's current page. Split out of
+// buildPDF so a Mixing ticket run (multiple tubs) can call this once per
+// page of a single PDFDocument/tcpPrint job instead of reconnecting to the
+// printer per tub — see buildLabelsPDF below.
+async function drawLabelPage(doc, data, isA4) {
       // Real A4 printers (standard laser/MFP trays, unlike the A5 label
       // stock this was originally designed for) have a hardware minimum
       // margin — commonly ~4-5mm on every edge — that the print engine
@@ -355,6 +441,36 @@ async function buildPDF(data, paperSize = 'A5') {
       doc.font('Helvetica').fontSize(6).fillColor('#9ca3af')
          .text(`Printed ${fmtLabel(new Date())}  ·  ${data.batchRef}`, M, H - 10,
                { width: CW, lineBreak: false });
+}
+
+// One PDFDocument, one page per label — used directly for a Mixing print
+// run (one tub per page) and by buildPDF above for the single-label case.
+// Sending the whole run as one PDF/one tcpPrint call means all of a batch's
+// tub tickets come out of the printer together in one job, rather than
+// reconnecting to the printer once per tub.
+async function buildLabelsPDF(dataArray, paperSize = 'A5') {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const isA4 = String(paperSize).toUpperCase() === 'A4';
+      const pageOpts = { size: isA4 ? 'A4' : 'A5', layout: isA4 ? 'portrait' : 'landscape', margin: 0 };
+      const doc = new PDFDocument({
+        ...pageOpts,
+        info: {
+          Title: dataArray.length > 1
+            ? `${dataArray[0].processName} Labels — ${dataArray[0].batchRef.split('-T')[0]}`
+            : `${dataArray[0].processName} Label — ${dataArray[0].batchRef}`,
+          Author: 'Kongsberg Automotive',
+        },
+      });
+      const chunks = [];
+      doc.on('data',  c  => chunks.push(c));
+      doc.on('end',   () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      for (let i = 0; i < dataArray.length; i++) {
+        if (i > 0) doc.addPage(pageOpts);
+        await drawLabelPage(doc, dataArray[i], isA4);
+      }
 
       doc.end();
     } catch (err) {
@@ -370,6 +486,13 @@ function bcImg(src, heightMm) {
 }
 
 async function buildHTML(data) {
+  return buildLabelsHTML([data]);
+}
+
+// Renders one label's <div class="label">...</div> block. Split out of
+// buildHTML so a Mixing ticket run (multiple tubs) can render N of these
+// into one preview page — see buildLabelsHTML below.
+async function renderLabelDiv(data) {
   const isComplete = data.status === 4;
   const badge      = STATUS_BADGE[data.status] || { text: `STATUS ${data.status}`, bg: '#6b7280' };
 
@@ -408,52 +531,7 @@ async function buildHTML(data) {
     <div class="notes">${esc(data.notes)}</div>` : ''}
   ` : '';
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>${esc(data.batchRef)} — ${esc(data.processName)} Label</title>
-<style>
-  @page { size: 210mm 148mm; margin: 0; }
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body {
-    width: 210mm; height: 148mm; overflow: hidden;
-    font-family: Helvetica Neue, Helvetica, Arial, sans-serif;
-    background: #fff;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-  .label { width: 210mm; height: 148mm; display: flex; flex-direction: column; }
-  .header {
-    background: #0d4c45; color: #fff;
-    padding: 6px 12px;
-    display: flex; justify-content: space-between; align-items: center;
-    flex-shrink: 0;
-  }
-  .co-name { font-size: 11pt; font-weight: 700; letter-spacing: 0.02em; }
-  .co-proc { font-size: 7.5pt; opacity: 0.75; margin-top: 2px; }
-  .badge   { font-size: 7pt; font-weight: 700; color: #fff; padding: 3px 9px; border-radius: 4px; white-space: nowrap; }
-  .body    { flex: 1; overflow: hidden; padding: 6px 12px 2px; display: flex; flex-direction: column; gap: 4px; }
-  .lbl     { font-size: 5.5pt; font-weight: 700; color: #6b7280; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 2px; }
-  .divider { border: none; border-top: 0.5px solid #d1d5db; margin: 2px 0; flex-shrink: 0; }
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
-  .batch-id { font-size: 11pt; font-weight: 700; letter-spacing: 0.08em; margin-top: 1px; }
-  .mat-val  { font-size: 9pt;  font-weight: 700; }
-  .mat-bc img { height: 9mm; width: auto; max-width: 100%; margin-top: 2px; }
-  .mach-val { font-size: 9pt; font-weight: 700; }
-  .op-val   { font-size: 8pt; }
-  .date-val { font-size: 8pt; }
-  .trace-val { font-size: 8pt; }
-  .qty      { font-size: 12pt; font-weight: 700; color: #0d4c45; margin-top: 1px; }
-  .notes    { font-size: 7.5pt; }
-  .footer   { border-top: 2px solid #0d4c45; padding: 2px 12px; font-size: 6pt; color: #9ca3af; flex-shrink: 0; }
-  @media screen {
-    html, body { display: flex; justify-content: center; align-items: flex-start; background: #e5e7eb; }
-    .label { margin: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-  }
-</style>
-</head>
-<body>
+  return `
 <div class="label">
   <div class="header">
     <div>
@@ -506,7 +584,71 @@ async function buildHTML(data) {
     ${completionSection}
   </div>
   <div class="footer">Printed ${esc(fmtLabel(new Date()))} &nbsp;·&nbsp; ${esc(data.batchRef)}</div>
-</div>
+</div>`;
+}
+
+// Wraps N label divs (one per prod.MixingTubs row for an MX run, or just
+// one for every other process) in a single preview page — shared head/
+// style/print-trigger, one .label per printed page via the @media print
+// page-break rule below.
+async function buildLabelsHTML(dataArray) {
+  const divs  = (await Promise.all(dataArray.map(renderLabelDiv))).join('\n');
+  const first = dataArray[0];
+  const title = dataArray.length > 1
+    ? `${first.batchRef.split('-T')[0]} — ${first.processName} Labels (${dataArray.length})`
+    : `${first.batchRef} — ${first.processName} Label`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>${esc(title)}</title>
+<style>
+  @page { size: 210mm 148mm; margin: 0; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 210mm; overflow: visible;
+    font-family: Helvetica Neue, Helvetica, Arial, sans-serif;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .label { width: 210mm; height: 148mm; display: flex; flex-direction: column; overflow: hidden; }
+  .header {
+    background: #0d4c45; color: #fff;
+    padding: 6px 12px;
+    display: flex; justify-content: space-between; align-items: center;
+    flex-shrink: 0;
+  }
+  .co-name { font-size: 11pt; font-weight: 700; letter-spacing: 0.02em; }
+  .co-proc { font-size: 7.5pt; opacity: 0.75; margin-top: 2px; }
+  .badge   { font-size: 7pt; font-weight: 700; color: #fff; padding: 3px 9px; border-radius: 4px; white-space: nowrap; }
+  .body    { flex: 1; overflow: hidden; padding: 6px 12px 2px; display: flex; flex-direction: column; gap: 4px; }
+  .lbl     { font-size: 5.5pt; font-weight: 700; color: #6b7280; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 2px; }
+  .divider { border: none; border-top: 0.5px solid #d1d5db; margin: 2px 0; flex-shrink: 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .batch-id { font-size: 11pt; font-weight: 700; letter-spacing: 0.08em; margin-top: 1px; }
+  .mat-val  { font-size: 9pt;  font-weight: 700; }
+  .mat-bc img { height: 9mm; width: auto; max-width: 100%; margin-top: 2px; }
+  .mach-val { font-size: 9pt; font-weight: 700; }
+  .op-val   { font-size: 8pt; }
+  .date-val { font-size: 8pt; }
+  .trace-val { font-size: 8pt; }
+  .qty      { font-size: 12pt; font-weight: 700; color: #0d4c45; margin-top: 1px; }
+  .notes    { font-size: 7.5pt; }
+  .footer   { border-top: 2px solid #0d4c45; padding: 2px 12px; font-size: 6pt; color: #9ca3af; flex-shrink: 0; }
+  @media screen {
+    html, body { display: flex; flex-direction: column; align-items: center; background: #e5e7eb; }
+    .label { margin: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+  }
+  @media print {
+    .label { page-break-after: always; }
+    .label:last-child { page-break-after: auto; }
+  }
+</style>
+</head>
+<body>
+${divs}
 <script>window.addEventListener('load', () => setTimeout(() => window.print(), 300));</script>
 </body>
 </html>`;
@@ -577,8 +719,12 @@ router.get('/process/:processCode/:recordID', async (req, res) => {
   if (!SUPPORTED.has(code)) return res.status(400).json({ error: `Label not supported for ${code}.` });
   if (!recordID)            return res.status(400).json({ error: 'Invalid record ID.' });
   try {
-    const data = await fetchLabelData(code, recordID);
-    const html = await buildHTML(data);
+    // MX prints one ticket per tub (each with its own weight/SAP material
+    // document) instead of one combined-batch ticket — see
+    // fetchMixingTicketsData's header comment.
+    const html = code === 'MX'
+      ? await buildLabelsHTML(await fetchMixingTicketsData(recordID))
+      : await buildHTML(await fetchLabelData(code, recordID));
     res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.send(html);
   } catch (err) {
@@ -604,8 +750,11 @@ router.post('/process/:processCode/:recordID/print', async (req, res) => {
       : `Printer "${printerId}" not found.` });
 
   try {
-    const data = await fetchLabelData(code, recordID);
-    const pdf  = await buildPDF(data, printer.paperSize);
+    // Same MX fan-out as the preview route above — one PDF page (one
+    // tcpPrint job) per tub rather than a single combined-batch label.
+    const pdf = code === 'MX'
+      ? await buildLabelsPDF(await fetchMixingTicketsData(recordID), printer.paperSize)
+      : await buildPDF(await fetchLabelData(code, recordID), printer.paperSize);
     await tcpPrint(pdf, printer.host, printer.port ?? 9100);
     res.json({ success: true, message: `Sent to ${printer.name || printer.host}` });
   } catch (err) {

@@ -61,6 +61,65 @@ function esc2(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// Minimal RFC4180-style parser: handles quoted fields (embedded delimiters,
+// embedded newlines, "" for an escaped quote) and both CRLF and LF row
+// endings — same approach as logistics.js's parseCsvText, but tab-delimited
+// (pasting straight from Excel/a spreadsheet produces TSV on the clipboard,
+// not comma/semicolon CSV) and duplicated here rather than shared since
+// there's no cross-file JS module loading in this app (see sales.html's
+// plain <script> tags).
+function parseTsvText(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  const pushField = () => { row.push(field); field = ''; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; } }
+      else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === '\t') {
+      pushField();
+    } else if (c === '\n') {
+      pushRow();
+    } else if (c === '\r') {
+      // skip — the following \n (or EOF) ends the row
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) pushRow();
+  return rows.filter(r => r.some(v => String(v).trim() !== ''));
+}
+
+// Parses a pasted Account Code / Company Name / Special Instructions list
+// into { customer, customerName, instructions } rows, ready to post to
+// /customer-instructions/bulk-import. A header row is auto-detected (rather
+// than requiring the user to strip it) by checking whether the first row's
+// first cell looks like an account code — SAP customer numbers are always
+// numeric, so a non-numeric first cell ("ACCOUNT CODE") means it's a header.
+function parseCustomerInstructionsImport(text) {
+  const rawRows = parseTsvText(text);
+  if (!rawRows.length) return { rows: [], duplicates: [] };
+
+  const first = (rawRows[0][0] || '').trim();
+  const dataRows = /^\d+$/.test(first) ? rawRows : rawRows.slice(1);
+
+  const seen = new Map(); // customer -> count, to flag duplicate account codes in the pasted list
+  const rows = dataRows.map(cols => {
+    const customer     = (cols[0] || '').trim();
+    const customerName = (cols[1] || '').trim();
+    const instructions = (cols[2] || '').trim();
+    if (customer) seen.set(customer, (seen.get(customer) || 0) + 1);
+    return { customer, customerName, instructions };
+  }).filter(r => r.customer || r.instructions);
+
+  const duplicates = [...seen.entries()].filter(([, n]) => n > 1).map(([c]) => c);
+  return { rows, duplicates };
+}
+
 async function renderCustomerInstructions() {
   const body = document.getElementById('result-body');
   body.innerHTML = '<div style="padding:40px 20px;color:var(--text-muted);font-size:13px">Loading…</div>';
@@ -85,7 +144,10 @@ async function renderCustomerInstructions() {
   function renderList(rows) {
     body.innerHTML = `
       <div style="padding:20px">
-        ${canEdit ? `<button class="btn-back" id="ci-add" style="margin-bottom:14px;border:none;cursor:pointer">+ Add Customer</button>` : ''}
+        ${canEdit ? `
+          <button class="btn-back" id="ci-add" style="margin-bottom:14px;border:none;cursor:pointer">+ Add Customer</button>
+          <button class="btn-back" id="ci-import" style="margin-bottom:14px;margin-left:8px;border:none;cursor:pointer">Mass Import</button>
+        ` : ''}
         ${rows.length ? `
           <table style="width:100%;border-collapse:collapse;font-size:13px;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden">
             <thead><tr style="text-align:left;background:var(--surface2);font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em">
@@ -108,6 +170,7 @@ async function renderCustomerInstructions() {
       </div>`;
 
     document.getElementById('ci-add')?.addEventListener('click', () => openModal(null, rows));
+    document.getElementById('ci-import')?.addEventListener('click', () => openBulkImportModal());
     document.querySelectorAll('.ci-edit').forEach(btn => {
       btn.addEventListener('click', () => {
         const row = rows.find(r => r.Customer === btn.dataset.cust);
@@ -171,6 +234,120 @@ async function renderCustomerInstructions() {
         overlay.remove();
         load();
       } catch (err) { msgEl.textContent = err.message; }
+    });
+  }
+
+  // Paste-import modal: textarea -> parse/preview -> confirm -> bulk-import.
+  // Kept as its own three-stage flow (paste, preview, result) rather than a
+  // single "paste and go" button so a bad paste (wrong columns, empty rows)
+  // is caught before anything is written — same reasoning as the manual
+  // order CSV upload modal on the Logistics page.
+  function openBulkImportModal() {
+    document.getElementById('ci-modal-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'ci-modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+    overlay.innerHTML = `
+      <div style="background:var(--surface);border-radius:12px;padding:24px;width:640px;max-width:92vw;max-height:86vh;overflow-y:auto;box-shadow:0 10px 40px rgba(0,0,0,0.2)">
+        <div style="font-size:16px;font-weight:700;margin-bottom:6px">Mass Import Customer Standard Instructions</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
+          Paste directly from Excel — three columns: Account Code, Company Name, Special Instructions.
+          A header row is fine, it's detected automatically. Matching rows (by Account Code) update
+          the existing instructions; new Account Codes are added.
+        </div>
+        <textarea id="ci-import-paste" rows="10" placeholder="Paste rows here…"
+          style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:12px;resize:vertical"></textarea>
+        <div id="ci-import-preview" style="margin-top:14px"></div>
+        <div id="ci-import-msg" style="font-size:12px;color:var(--error);margin:10px 0"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="ci-import-cancel" style="cursor:pointer;background:none;border:1px solid var(--border);border-radius:6px;padding:8px 16px;font-size:13px">Cancel</button>
+          <button id="ci-import-parse" style="cursor:pointer;background:none;border:1px solid var(--border);border-radius:6px;padding:8px 16px;font-size:13px">Preview</button>
+          <button id="ci-import-go" style="cursor:pointer;background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600" disabled>Import</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    let parsedRows = [];
+
+    document.getElementById('ci-import-cancel').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    document.getElementById('ci-import-parse').addEventListener('click', () => {
+      const text = document.getElementById('ci-import-paste').value;
+      const previewEl = document.getElementById('ci-import-preview');
+      const msgEl = document.getElementById('ci-import-msg');
+      const goBtn = document.getElementById('ci-import-go');
+      msgEl.textContent = '';
+
+      const { rows, duplicates } = parseCustomerInstructionsImport(text);
+      if (!rows.length) {
+        previewEl.innerHTML = '';
+        goBtn.disabled = true;
+        msgEl.textContent = 'No rows found — paste Account Code / Company Name / Special Instructions, one row per line.';
+        return;
+      }
+
+      const valid = rows.filter(r => r.customer && r.instructions);
+      const invalid = rows.filter(r => !r.customer || !r.instructions);
+      parsedRows = valid;
+
+      previewEl.innerHTML = `
+        <div style="font-size:12px;margin-bottom:8px">
+          <strong>${valid.length}</strong> row${valid.length === 1 ? '' : 's'} ready to import
+          ${invalid.length ? `, <span style="color:var(--error)">${invalid.length} skipped (missing account code or instructions)</span>` : ''}
+          ${duplicates.length ? `, <span style="color:var(--text-muted)">${duplicates.length} account code${duplicates.length === 1 ? '' : 's'} appear more than once in the paste — last occurrence wins: ${esc2(duplicates.slice(0, 10).join(', '))}${duplicates.length > 10 ? '…' : ''}</span>` : ''}
+        </div>
+        <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="text-align:left;background:var(--surface2);position:sticky;top:0">
+              <th style="padding:6px 10px">Account Code</th><th style="padding:6px 10px">Company</th><th style="padding:6px 10px">Instructions</th>
+            </tr></thead>
+            <tbody>
+              ${valid.slice(0, 200).map(r => `
+                <tr style="border-top:1px solid var(--border)">
+                  <td style="padding:6px 10px;font-family:'JetBrains Mono',monospace">${esc2(r.customer)}</td>
+                  <td style="padding:6px 10px">${esc2(r.customerName)}</td>
+                  <td style="padding:6px 10px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc2(r.instructions)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+          ${valid.length > 200 ? `<div style="padding:6px 10px;font-size:11px;color:var(--text-muted)">…and ${valid.length - 200} more</div>` : ''}
+        </div>`;
+
+      goBtn.disabled = valid.length === 0;
+    });
+
+    document.getElementById('ci-import-go').addEventListener('click', async () => {
+      const msgEl = document.getElementById('ci-import-msg');
+      const goBtn = document.getElementById('ci-import-go');
+      if (!parsedRows.length) return;
+      goBtn.disabled = true;
+      goBtn.textContent = 'Importing…';
+      msgEl.style.color = 'var(--text-muted)';
+      msgEl.textContent = `Importing ${parsedRows.length} rows…`;
+      try {
+        const res = await salesApi('/customer-instructions/bulk-import', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: parsedRows }),
+        });
+        const { created, updated, failed } = res.data;
+        if (failed?.length) {
+          msgEl.style.color = 'var(--error)';
+          msgEl.innerHTML = `Imported ${created} new, updated ${updated}. ${failed.length} row(s) failed:<br>` +
+            failed.slice(0, 15).map(f => `${esc2(f.customer)}: ${esc2(f.error)}`).join('<br>') +
+            (failed.length > 15 ? `<br>…and ${failed.length - 15} more` : '');
+          goBtn.textContent = 'Import';
+          goBtn.disabled = false;
+        } else {
+          overlay.remove();
+          load();
+        }
+      } catch (err) {
+        msgEl.style.color = 'var(--error)';
+        msgEl.textContent = err.message;
+        goBtn.textContent = 'Import';
+        goBtn.disabled = false;
+      }
     });
   }
 

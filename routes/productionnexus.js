@@ -2739,6 +2739,13 @@ async function submitDrumming(req, res, entryType) {
     // for the next 30-min sync. Targeted UPDATE, not a separate overlay
     // table — self-healing regardless of outcome, since the next sync
     // overwrites this row with fresh SAP truth either way.
+    //
+    // orderNumber/orderItem here are whatever the operator picked from
+    // /order-lookup — now OriginalDoc/OriginalDocItem-sourced (see
+    // AGREEMENT_LOOKUP_COLUMNS above), so match on those same columns
+    // rather than the raw ReferenceDocument/Item, which may already have
+    // flipped to a delivery number for this line by the time the drum is
+    // posted.
     let stockSyncWarning;
     if (entryType === 'customer' && orderNumber && orderItem) {
       try {
@@ -2750,7 +2757,7 @@ async function submitDrumming(req, res, entryType) {
           .query(`
             UPDATE dbo.AgreementSnapshot
             SET DockStockAllocated = ISNULL(DockStockAllocated,0) + @qty
-            WHERE ReferenceDocument = @ref AND Item = @item`);
+            WHERE OriginalDoc = @ref AND OriginalDocItem = @item`);
       } catch (err) {
         console.error('[drumming] local AgreementSnapshot stock patch failed', err.message);
         stockSyncWarning = 'Drum posted successfully, but the live order-schedule figure could not be refreshed immediately (it will catch up on the next sync).';
@@ -2860,8 +2867,17 @@ router.get('/drumming/:drummingId/reversal-status', async (req, res) => {
 // report bucket it'd otherwise fall into.
 // ══════════════════════════════════════════════════════════════════════════
 
+// ReferenceDocument/Item here are OriginalDoc/OriginalDocItem, not the raw
+// AgreementSnapshot columns — see performanceorderlink.js's header comment.
+// Without this, an operator searching by order number (or reprinting a
+// ticket) for a line that's just been picked would get "no open items
+// found", because SAP has already flipped that line's raw ReferenceDocument
+// to the delivery number — and the drum they produce would get logged
+// against the delivery number instead of the sales order in prod.Drumming
+// (see submitDrumming's stock-patch UPDATE below, which now matches on the
+// same aliased columns for the same reason).
 const AGREEMENT_LOOKUP_COLUMNS = `
-        Customer, CustomerName, ReferenceDocument, Item, Material, MaterialText,
+        Customer, CustomerName, OriginalDoc AS ReferenceDocument, OriginalDocItem AS Item, Material, MaterialText,
         CustomerMaterial, ValueStream,
         CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate,
         OrderQty, Uom,
@@ -2906,7 +2922,7 @@ router.get('/order-lookup/by-order/:orderNumber', async (req, res) => {
       .query(`
         SELECT ${AGREEMENT_LOOKUP_COLUMNS}
         FROM dbo.AgreementSnapshot
-        WHERE ReferenceDocument = @ref
+        WHERE OriginalDoc = @ref
         ORDER BY Item`);
 
     if (!result.recordset.length)
@@ -2935,7 +2951,7 @@ async function loadDrummingTicketData(referenceDocument, item) {
     .query(`
       SELECT ${AGREEMENT_LOOKUP_COLUMNS}
       FROM dbo.AgreementSnapshot
-      WHERE ReferenceDocument = @ref AND Item = @item`);
+      WHERE OriginalDoc = @ref AND OriginalDocItem = @item`);
 
   const line = lineRes.recordset[0];
   if (!line) return { line: null };

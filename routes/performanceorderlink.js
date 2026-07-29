@@ -17,23 +17,39 @@ const linkKey = (doc, item) => `${doc}||${item}`;
 
 // Resolves any row whose referenceDocument is actually a delivery number
 // back to the real sales order number/item, via SAP's document flow table
-// VBFA — so Order Book notes/risk flags (dbo.OrderBookLineNotes, keyed on
-// ReferenceDocument+Material) stay attached to the same line whether SAP is
+// VBFA, and stores the result in row.originalDoc/row.originalDocItem — a
+// new pair of columns, separate from referenceDocument/item. So Order Book
+// notes/risk flags (dbo.OrderBookLineNotes, keyed on OriginalDoc+Material —
+// see getOrderBookBreakdown) stay attached to the same line whether SAP is
 // currently calling it an order or a delivery. Without this, a genuinely
 // at-risk line's Risk/Won't Get flag silently stops matching the moment
 // it's picked, making the line look "fine" again and inflating Expected to
 // Invoice on the Month End Dashboard by that line's value.
 //
-// Mutates `rows` in place. Must run AFTER allocateStock() and BEFORE
-// db.replaceAgreementSnapshot() — allocateStock()'s stagingBin() match for
+// Deliberately does NOT touch row.referenceDocument/row.item — those are
+// left exactly as SAP returned them (order while open, delivery once
+// picked), because allocateStock()'s stagingBin() match for
 // PickedStockAllocated keys off the *raw* delivery number Z_STOCK_REQ_LIST
-// returned (that IS the real staging bin name for a picked line), so
-// resolving before that would break picked-stock matching for exactly the
-// lines that just became deliveries. Once AgreementSnapshot is written,
-// though, ReferenceDocument should always be the stable sales order number
-// — every downstream consumer (getOrderBookBreakdown, getOrderBookSummary,
-// the notes join, the Month End Excel export) keys off it as-is.
+// returned (that IS the real staging bin name for a picked line), and other
+// features (e.g. the Drumming Order Lookup) still expect the raw value too.
+// originalDoc/originalDocItem are purely additive — every row gets them
+// set (pass-through for non-delivery-shaped rows, VBFA-resolved for
+// deliveries), so getOrderBookBreakdown and everything built on it
+// (Month End Excel Data/Next Month tabs, the notes join, the at-risk list)
+// can key off the stable sales order number without losing the raw
+// delivery number anywhere else.
+//
+// Mutates `rows` in place. Must run AFTER allocateStock() (for the same
+// staging-bin reason above) and BEFORE db.replaceAgreementSnapshot() (so
+// OriginalDoc/OriginalDocItem are populated before the snapshot write).
 export async function resolveDeliveryReferenceDocuments(rows, req) {
+  // Pass-through default for every row — candidates below overwrite this
+  // with the VBFA-resolved order number/item where one was found.
+  rows.forEach(r => {
+    r.originalDoc = r.referenceDocument;
+    r.originalDocItem = r.item;
+  });
+
   const candidates = rows.filter(r => isDeliveryShaped(r.referenceDocument));
   if (!candidates.length) return;
 
@@ -91,13 +107,14 @@ export async function resolveDeliveryReferenceDocuments(rows, req) {
     const link = linkMap.get(linkKey(delivery, item));
 
     if (link) {
-      row.referenceDocument = link.orderNumber;
-      row.item = link.orderItem;
+      row.originalDoc = link.orderNumber;
+      row.originalDocItem = link.orderItem;
     } else {
-      // No VBFA link found for this exact item — leave the raw delivery
-      // number in place. Notes/risk flags for this line key off the
-      // delivery number until SAP creates the VBFA record, same behaviour
-      // as before this fix existed.
+      // No VBFA link found for this exact item — originalDoc/originalDocItem
+      // stay at the pass-through default set above (the raw delivery
+      // number/item). Notes/risk flags for this line key off the delivery
+      // number until SAP creates the VBFA record, same behaviour as before
+      // this fix existed.
       unresolvedCount++;
     }
   }

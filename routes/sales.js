@@ -81,6 +81,77 @@ router.put('/customer-instructions/:customer', canEdit, async (req, res) => {
   }
 });
 
+// POST /customer-instructions/bulk-import — mass upsert from a pasted
+// spreadsheet list (Account Code / Company Name / Special Instructions —
+// parsed client-side in sales.js, see parseCustomerInstructionsImport).
+// Same per-row exists-then-INSERT/UPDATE logic as the single-row PUT above,
+// just looped: SQL Server 2005 has no MERGE, and this table is one row per
+// SAP customer (low hundreds), so a sequential loop is fine for an admin
+// action rather than a hot path. Rows that fail validation (or hit a SQL
+// error, e.g. a genuinely bad account code) are skipped and reported back
+// individually rather than failing the whole import.
+router.post('/customer-instructions/bulk-import', canEdit, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) return res.status(400).json({ success: false, error: 'No rows provided.' });
+
+    const pool = await sql.connect(sqlConfig);
+    const who = actor(req);
+    let created = 0, updated = 0;
+    const failed = [];
+
+    for (const row of rows) {
+      const customer     = String(row.customer ?? '').trim();
+      // CustomerName is denormalised/display-only (see migration comment) —
+      // truncate rather than fail the row over a long company name.
+      const customerName = row.customerName ? String(row.customerName).trim().slice(0, 35) : null;
+      const instructions = String(row.instructions ?? '').trim();
+
+      if (!customer)             { failed.push({ customer: row.customer ?? '(blank)', error: 'Missing account code.' }); continue; }
+      if (customer.length > 10)  { failed.push({ customer, error: 'Account code is longer than 10 characters.' }); continue; }
+      if (!instructions)         { failed.push({ customer, error: 'Missing instructions text.' }); continue; }
+      if (instructions.length > 1000) {
+        failed.push({ customer, error: `Instructions text too long (${instructions.length} of max 1000 characters).` });
+        continue;
+      }
+
+      try {
+        const exists = await pool.request()
+          .input('cust', sql.NVarChar(10), customer)
+          .query(`SELECT 1 FROM dbo.CustomerStandardInstructions WHERE Customer = @cust`);
+
+        const r = pool.request()
+          .input('cust',  sql.NVarChar(10),   customer)
+          .input('name',  sql.NVarChar(35),   customerName)
+          .input('instr', sql.NVarChar(1000), instructions)
+          .input('who',   sql.NVarChar(80),   who);
+
+        if (exists.recordset.length) {
+          await r.query(`
+            UPDATE dbo.CustomerStandardInstructions
+            SET CustomerName = @name, Instructions = @instr,
+                LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @who
+            WHERE Customer = @cust`);
+          updated++;
+        } else {
+          await r.query(`
+            INSERT INTO dbo.CustomerStandardInstructions
+              (Customer, CustomerName, Instructions, LastUpdatedUtc, UpdatedByUsername)
+            VALUES (@cust, @name, @instr, GETUTCDATE(), @who)`);
+          created++;
+        }
+      } catch (rowErr) {
+        failed.push({ customer, error: rowErr.message });
+      }
+    }
+
+    res.json({ success: true, data: { created, updated, failed } });
+  } catch (err) {
+    console.error('[sales] POST /customer-instructions/bulk-import failed', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // DELETE /:customer
 router.delete('/customer-instructions/:customer', canEdit, async (req, res) => {
   try {

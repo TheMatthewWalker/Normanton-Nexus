@@ -18,9 +18,9 @@ async function syncStockAndAgreements(stockRows, agreementRows, req) {
 
     // Must run after allocateStock() (which needs the raw delivery number
     // for its picked-stock staging-bin match) and before
-    // replaceAgreementSnapshot() (everything downstream of that table needs
-    // the real sales order number) — see performanceorderlink.js's header
-    // comment for the full reasoning.
+    // replaceAgreementSnapshot() (so OriginalDoc/OriginalDocItem are
+    // populated before the snapshot write) — see performanceorderlink.js's
+    // header comment for the full reasoning.
     try {
       await resolveDeliveryReferenceDocuments(allocated, req);
     } catch (err) {

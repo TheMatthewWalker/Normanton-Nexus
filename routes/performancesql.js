@@ -240,6 +240,16 @@ export function replaceAgreementSnapshot(rows) {
     ['OrderType',            'orderType',          sql.VarChar(4), null, 4],
     ['ReferenceDocument',    'referenceDocument',  sql.VarChar(10), null, 10],
     ['Item',                 'item',               sql.VarChar(6), null, 6],
+    // OriginalDoc/OriginalDocItem — the stable sales order number/item,
+    // resolved via SAP table VBFA when ReferenceDocument is actually a
+    // delivery number (see performanceorderlink.js). Unlike ReferenceDocument
+    // (left exactly as SAP returns it — order while open, delivery once
+    // picked), these two always identify the order, so the Month End
+    // dashboard/Data sheet and its notes/risk flags can key off them without
+    // losing track of a line the moment it's picked. See
+    // sql/migrate_delivery_order_link.sql.
+    ['OriginalDoc',          'originalDoc',        sql.VarChar(10), null, 10],
+    ['OriginalDocItem',      'originalDocItem',    sql.VarChar(6), null, 6],
     ['CustomerPo',           'customerPo',         sql.VarChar(20), null, 20],
     ['CustomerMaterial',     'customerMaterial',   sql.VarChar(35), null, 35],
     ['CustomerReference',    'customerReference',  sql.VarChar(30), null, 30],
@@ -814,12 +824,21 @@ export async function getOrderBookBreakdown() {
   // built on top of it (Invoiced + Potential Stock, Invoiced + Expected to
   // Invoice, the new Value at Risk — Shortfall card, etc.) as well as the
   // raw order-book figures themselves.
+  //
+  // Selects a.OriginalDoc AS ReferenceDocument, not the raw a.ReferenceDocument
+  // column — OriginalDoc is the stable sales order number (resolved via VBFA
+  // when SAP is currently reporting a delivery number instead — see
+  // performanceorderlink.js / sql/migrate_delivery_order_link.sql), so every
+  // consumer of this function (the "Order" column here, in the Excel export,
+  // and the OrderBookLineNotes Risk/Won't Get join keyed on it) keeps working
+  // even after a line is picked. Aliased to the same "ReferenceDocument"
+  // name deliberately, so nothing downstream needed to change.
   const { recordset } = await pool.request().query(`
     SELECT
       a.ValueStream,
       a.Customer,
       a.CustomerName,
-      a.ReferenceDocument,
+      a.OriginalDoc AS ReferenceDocument,
       a.Material,
       a.MaterialText,
       CAST(CONVERT(VARCHAR(8), a.RequestDate, 112) AS DATETIME) AS RequestDate,
@@ -854,11 +873,11 @@ export async function getOrderBookBreakdown() {
       AND cc.Customer IS NULL
 
     GROUP BY
-      a.ValueStream, a.Customer, a.CustomerName, a.ReferenceDocument, a.Material, a.MaterialText,
+      a.ValueStream, a.Customer, a.CustomerName, a.OriginalDoc, a.Material, a.MaterialText,
       CONVERT(VARCHAR(8), a.RequestDate, 112)
 
     ORDER BY
-      CONVERT(VARCHAR(8), a.RequestDate, 112), a.CustomerName, a.ReferenceDocument, a.MaterialText
+      CONVERT(VARCHAR(8), a.RequestDate, 112), a.CustomerName, a.OriginalDoc, a.MaterialText
   `);
 
   return recordset;
