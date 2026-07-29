@@ -1606,7 +1606,7 @@ export async function getOrderShipmentWithOrders(shipmentId) {
   const { recordset: orders } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
-      SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.Status, p.SupplierReference
+      SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.Status, p.SupplierReference, p.PoNumber
       FROM dbo.PurchaseOrderSuggestion p
       JOIN dbo.Vendor v ON v.VendorId = p.VendorId
       LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material

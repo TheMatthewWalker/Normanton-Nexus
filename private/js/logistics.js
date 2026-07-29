@@ -9054,6 +9054,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <td>${esc(o.VendorName)}</td>
         <td>${Number(o.OrderQty).toLocaleString()}</td>
         <td>${esc(o.Status)}</td>
+        <td>${esc(o.PoNumber || '-')}</td>
         <td>${esc(o.SupplierReference || '-')}</td>
       </tr>`).join('');
 
@@ -9111,15 +9112,48 @@ async function refreshInboundShipmentDetail(shipmentId) {
       <div class="tf-section-label">Order Lines</div>
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Status</th><th>Supplier Ref</th></tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th></tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
       </div>` : ''}
+      <div class="tf-section-label">Documents</div>
+      <div class="toolbar-hint">Purchase orders assigned to this shipment are filed here automatically. Upload shipping documents or the supplier invoice too — everything lands in the same folder.</div>
+      <div id="isd-documents"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
+      <input type="file" id="isd-doc-file-input" accept="application/pdf,image/jpeg,image/png" style="display:none">
+      <div class="tf-row" style="margin-top:8px">
+        <button type="button" class="btn-secondary" id="isd-doc-upload-btn">Upload Document</button>
+      </div>
       <div class="tf-section-label">Associated Costs</div>
       <div id="isd-costs"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>`;
 
     loadForwarderOptionsInto('isd-haulier', s.ForwarderID);
     renderAssociatedCosts(shipmentId, s);
+    renderShipmentDocuments(shipmentId);
+
+    document.getElementById('isd-doc-upload-btn').addEventListener('click', () => document.getElementById('isd-doc-file-input').click());
+    document.getElementById('isd-doc-file-input').addEventListener('change', async () => {
+      const fileInput = document.getElementById('isd-doc-file-input');
+      const file = fileInput.files[0];
+      if (!file) return;
+      const uploadBtn = document.getElementById('isd-doc-upload-btn');
+      uploadBtn.disabled = true; uploadBtn.textContent = 'Uploading…';
+      try {
+        const res2 = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'application/pdf', 'X-File-Name': encodeURIComponent(file.name) },
+          body: file,
+        });
+        const json2 = await res2.json();
+        if (!json2.success) throw new Error(json2.error?.message || 'Upload failed.');
+        await renderShipmentDocuments(shipmentId);
+      } catch (err) {
+        const docBody = document.getElementById('isd-documents');
+        if (docBody) docBody.insertAdjacentHTML('afterbegin', `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`);
+      } finally {
+        uploadBtn.disabled = false; uploadBtn.textContent = 'Upload Document';
+        fileInput.value = '';
+      }
+    });
 
     // Cancelling is allowed any time up until the shipment is itself
     // cancelled — including after it's been marked received (see
@@ -9144,6 +9178,41 @@ async function refreshInboundShipmentDetail(shipmentId) {
     }
   } catch (err) {
     body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Documents (Inbound Log detail) ──────────────────────────────────────────
+// Same folder/upload endpoints the Tracked Orders "Invoice" button already
+// used (openShipmentInvoiceModal/osiLoadFolder) — surfaced here too, inline
+// on the Inbound Log shipment detail rather than only reachable via a
+// per-row button that only appears once a tracked order has a ShipmentId,
+// which is easy to never notice if you work from the Inbound Log rather
+// than Tracked Orders. Auto-generated PO PDFs (see
+// autoFileShipmentPoDocuments in performance.js) show up in this same list
+// with no extra step — they're just files that were already sitting in the
+// folder before the modal ever loaded.
+async function renderShipmentDocuments(shipmentId) {
+  const container = document.getElementById('isd-documents');
+  if (!container) return;
+  container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/folder`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load documents.');
+    const files = json.data.files || [];
+    container.innerHTML = !files.length
+      ? '<div class="sap-empty">No documents yet.</div>'
+      : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table">
+          <thead><tr><th>File</th><th>Size</th><th>Uploaded</th><th></th></tr></thead>
+          <tbody>${files.map(f => `<tr class="admin-row">
+            <td>${esc(f.fileName)}</td>
+            <td>${(Number(f.sizeBytes || 0) / 1024).toFixed(1)} KB</td>
+            <td>${formatDisplayDate(f.modifiedAtUtc)}</td>
+            <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
+          </tr>`).join('')}</tbody>
+        </table></div>`;
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }
 

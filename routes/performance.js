@@ -14,6 +14,7 @@ import { sqlConfig, auditQuery, sapConfig, sapServerSecret } from '../config.js'
 import { requirePermission, requireAnyPermission, requireSessionOrApiToken } from '../middleware/auth.js';
 import { insertInboundCostLine } from './inboundcosts.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
+import { buildPoPdf } from '../lib/poPdf.js';
 
 // Same TLS-pinned Node->SapServer setup used by routes/shipmentcost.js's
 // post-migo (create-po-and-receipt) — reused here for the MRP "Create PO in
@@ -705,6 +706,70 @@ async function loadShipmentForImportDocs(shipmentId) {
   if (!record) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   const supplierName = record.orders?.[0]?.VendorName || '';
   return { record, supplierName };
+}
+
+// ── Purchase Order PDFs (auto-generated on "Create PO in SAP") ─────────────
+// Files land at LOGISTICS_PO_ROOT\{VendorName}\{PoNumber}.pdf — flat,
+// vendor-then-PO-number, unlike the import side above (no year/month split):
+// a PO number is unique and permanent once SAP assigns it, and buyers look
+// these up by vendor + PO number, not by date. sanitizeImportFolderSegment/
+// sanitizeImportFileSegment/mkdirImportRecursiveSafe above are generic
+// filesystem helpers despite the "Import" in their names — reused here
+// rather than duplicated.
+function assertValidPoRoot(poRoot) {
+  const value = String(poRoot || '').trim();
+  const looksValid = /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^?\\]/.test(value);
+  if (!looksValid) {
+    const err = new Error(
+      `Purchase order folder path is misconfigured (LOGISTICS_PO_ROOT resolved to "${value}"). ` +
+      `Check the .env value and that no stray Machine-scope environment variable of the same name is ` +
+      `shadowing it, then restart the service.`
+    );
+    err.statusCode = 500;
+    throw err;
+  }
+  return value;
+}
+
+function getPoPdfPath(vendorName, poNumber) {
+  const poRoot = assertValidPoRoot(process.env.LOGISTICS_PO_ROOT);
+  const vendorFolder = sanitizeImportFolderSegment(vendorName);
+  const fileName = `${sanitizeImportFileSegment(poNumber)}.pdf`;
+  return path.join(poRoot, vendorFolder, fileName);
+}
+
+async function savePoPdf(vendorName, poNumber, pdfBuffer) {
+  const filePath = getPoPdfPath(vendorName, poNumber);
+  await mkdirImportRecursiveSafe(path.dirname(filePath));
+  await fsp.writeFile(filePath, pdfBuffer);
+  return filePath;
+}
+
+// Auto-files each linked order's PO PDF (already generated and saved above
+// by POST /order-suggestions/create-po) into a shipment's own import folder
+// the moment the shipment exists — so by the time anyone opens the Inbound
+// Log or uploads a supplier invoice, the relevant PO(s) are already sitting
+// right there alongside it. Best-effort: a PO PDF that doesn't exist on disk
+// (never run through "Create PO in SAP", or the file's been moved/deleted
+// since) is skipped rather than failing shipment creation, which must
+// succeed regardless of filesystem state.
+async function autoFileShipmentPoDocuments(shipmentId) {
+  const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);
+  const folder = await ensureShipmentImportFolder(record, supplierName);
+
+  const poNumbers = [...new Set((record.orders || []).map(o => o.PoNumber).filter(Boolean))];
+  for (const poNumber of poNumbers) {
+    try {
+      const src = getPoPdfPath(supplierName, poNumber);
+      await fsp.access(src, fs.constants.F_OK);
+      const destName = `${sanitizeImportFileSegment(poNumber)}.pdf`;
+      await fsp.copyFile(src, path.join(folder.shipmentPath, destName));
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.error(`[autoFileShipmentPoDocuments] Failed to copy PO ${poNumber} for shipment ${shipmentId}:`, err.message);
+      }
+    }
+  }
 }
 
 const router = express.Router();
@@ -3226,12 +3291,49 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
       });
     }
 
+    // Auto-generate and file a sendable PO PDF — LOGISTICS_PO_ROOT\
+    // {VendorName}\{PoNumber}.pdf — so a buyer can go straight from "Create
+    // PO in SAP" to emailing the supplier a confirmation copy, no manual
+    // document-building step. Deliberately non-blocking: the PO already
+    // exists for real in SAP at this point, so a PDF/filesystem failure
+    // here must not make the request look like it failed — it's surfaced
+    // in the response as poPdfError instead, and logged server-side.
+    let poPdfPath = null;
+    let poPdfError = null;
+    try {
+      const pdfBuffer = await buildPoPdf({
+        poNumber,
+        poDate: docDate || today,
+        vendorName: rows[0].VendorName,
+        sapVendorNumber: rows[0].SapVendorNumber,
+        currency,
+        items: rows.map((r, i) => {
+          const override = overridesById.get(Number(r.SuggestionId));
+          return {
+            poItemNumber: String((i + 1) * 10).padStart(5, '0'),
+            material: r.Material,
+            materialText: r.MaterialText,
+            quantity: r.OrderQty,
+            uom: r.Uom || 'KG',
+            deliveryDate: r.DeliveryDate,
+            netPrice: (override !== undefined && override !== null && override !== '') ? Number(override) : null,
+          };
+        }),
+      });
+      poPdfPath = await savePoPdf(rows[0].VendorName, poNumber, pdfBuffer);
+    } catch (pdfErr) {
+      poPdfError = pdfErr.message;
+      console.error(`[create-po] Failed to save PO PDF for ${poNumber}:`, pdfErr.message);
+    }
+
     res.json({
       success: true,
       data: {
         purchaseOrder: poNumber,
         suggestionIds: rows.map(r => r.SuggestionId),
         messages: sapBody.data.messages || [],
+        poPdfSaved: !!poPdfPath,
+        poPdfError,
       },
     });
   } catch (err) {
@@ -3307,6 +3409,13 @@ router.get('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (
 router.post('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const data = await db.createOrderShipment(req.body);
+    // Best-effort, non-blocking — the shipment already exists in the DB at
+    // this point regardless of whether the filesystem side succeeds.
+    try {
+      await autoFileShipmentPoDocuments(data.shipmentId);
+    } catch (docErr) {
+      console.error(`[shipments] Failed to auto-file PO documents for shipment ${data.shipmentId}:`, docErr.message);
+    }
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -3346,6 +3455,15 @@ router.post('/order-suggestions/shipments/manual', requirePermission('LOG_MRP'),
         amount: Number(price),
         information: `Manual inbound shipment — ${data.shipmentReference}`,
       });
+    }
+
+    // Manual shipments have no linked tracked orders/POs to copy in, but
+    // eagerly creating the folder here (rather than waiting for a first
+    // upload) means it's ready the moment someone opens this shipment.
+    try {
+      await autoFileShipmentPoDocuments(data.shipmentId);
+    } catch (docErr) {
+      console.error(`[shipments/manual] Failed to create import folder for shipment ${data.shipmentId}:`, docErr.message);
     }
 
     res.json({ success: true, data: { ...data, cost } });
