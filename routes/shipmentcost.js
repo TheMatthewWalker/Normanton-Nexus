@@ -161,6 +161,12 @@ router.get('/costtype/:costType', async (req, res) => {
 // ── Create new record ──
 // costID is an IDENTITY column — SQL Server assigns it automatically.
 // Do not include it in the INSERT; use SCOPE_IDENTITY() to read it back.
+//
+// Validation added for the outbound "+ Add Cost" flow on the Search
+// Shipment modal (renderShipmentAssociatedCosts in logistics.js), the first
+// caller to hit this with hand-entered form data rather than values the
+// server itself computed — shipmentID/costElement/costCenter/expectedCost
+// previously went straight into the INSERT with no checks at all.
 router.post('/', async (req, res) => {
     try {
         const {
@@ -169,6 +175,20 @@ router.post('/', async (req, res) => {
             poShipmentID, modeOfTransport
         } = req.body;
 
+        if (!shipmentID && !poShipmentID) {
+            return res.status(400).json({ error: 'shipmentID or poShipmentID is required.' });
+        }
+        if (!costElement || !String(costElement).trim()) {
+            return res.status(400).json({ error: 'costElement is required.' });
+        }
+        if (!costCenter || !String(costCenter).trim()) {
+            return res.status(400).json({ error: 'costCenter is required.' });
+        }
+        const expectedCostNum = Number(expectedCost);
+        if (!Number.isFinite(expectedCostNum) || expectedCostNum <= 0) {
+            return res.status(400).json({ error: 'expectedCost must be a positive number.' });
+        }
+
         const pool = await getPool();
         const result = await pool.request()
             .input('shipmentID', sql.BigInt, shipmentID ?? null)
@@ -176,7 +196,7 @@ router.post('/', async (req, res) => {
             .input('costType', sql.NVarChar, costType)
             .input('costElement', sql.NVarChar, costElement)
             .input('costCenter', sql.NVarChar, costCenter)
-            .input('expectedCost', sql.Decimal, expectedCost)
+            .input('expectedCost', sql.Decimal, expectedCostNum)
             .input('actualCost', sql.Decimal, actualCost)
             .input('migoStatus', sql.Bit, migoStatus ?? 0)
             .input('materialDocument', sql.NVarChar, materialDocument)

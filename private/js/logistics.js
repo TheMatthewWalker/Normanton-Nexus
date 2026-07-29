@@ -2983,11 +2983,18 @@ function renderShipmentDetailModal(shipment, deliveries) {
 // ── Associated Costs (Search Shipment / Shipment Details modal, outbound) ──
 // Mirrors renderAssociatedCosts (Inbound Log detail) — list, edit/remove
 // while unprocessed, and show the material document + a Reverse option once
-// posted. Unlike inbound, there's no add-line form here: outbound cost
-// lines are created automatically at booking time (freight + customs, see
-// routes/shipmentmain.js), so ad-hoc adding isn't wired up on this side yet.
-// Edit only covers the amount (PATCH /api/shipmentcost/:costId) — GL
-// element/cost centre are set at booking time and not editable here.
+// posted. Edit only covers the amount (PATCH /api/shipmentcost/:costId) —
+// GL element/cost centre are set at booking time (or on the add form below)
+// and not editable afterwards.
+//
+// "+ Add Cost" (GL Account / Cost Type / Cost Centre / Amount, POST to
+// generic POST /api/shipmentcost) covers the ad-hoc case booking-time
+// freight/customs creation doesn't: an extra cost incurred after booking —
+// e.g. actual customs duties charged on the shipment (GL 603100, distinct
+// from 603120 "Customs Clearance", the forwarder's own handling fee that's
+// already estimated automatically for KN shipments). GL Account options are
+// restricted to direction='outbound' CostElements, same restriction the
+// GET /shipment/:id join already applies when displaying existing lines.
 async function renderShipmentAssociatedCosts(shipmentId) {
   const container = document.getElementById('sd-costs');
   if (!container) return;
@@ -3017,7 +3024,102 @@ async function renderShipmentAssociatedCosts(shipmentId) {
           <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
         </table>
       </div>
+      <div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
+        <div class="tf-field">
+          <label class="tf-label">GL Account</label>
+          <select class="tf-input" id="sd-cost-element" style="min-width:220px"></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Cost Type</label>
+          <select class="tf-input" id="sd-cost-type" style="min-width:140px"></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Cost Centre</label>
+          <select class="tf-input" id="sd-cost-center" style="min-width:180px"></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Amount (£)</label>
+          <input class="tf-input" type="number" step="0.01" min="0.01" id="sd-cost-amount" style="width:110px">
+        </div>
+        <div class="tf-field">
+          <button type="button" class="btn-secondary" id="sd-cost-add-btn">+ Add Cost</button>
+        </div>
+      </div>
       <div id="sd-cost-result" style="margin-top:8px"></div>`;
+
+    // GL Account options — outbound CostElements only, same restriction the
+    // display join above already applies. Reuses Material Group Mapping's
+    // cached loader (mgmLoadCostElements) rather than a separate fetch —
+    // that list already covers every direction, just filtered here.
+    mgmLoadCostElements().then(elements => {
+      const sel = document.getElementById('sd-cost-element');
+      if (!sel) return;
+      const outboundElements = elements.filter(e => e.direction === 'outbound');
+      sel.innerHTML = outboundElements.map(e =>
+        `<option value="${esc(e.elementCode)}">${esc(e.elementCode)} — ${esc(e.elementDescription || '')}</option>`
+      ).join('');
+      // Default to Customs Duties (603100) when present — the case this
+      // form was built for — otherwise leave the first option selected.
+      const customsDuties = outboundElements.find(e => e.elementCode === '603100');
+      if (customsDuties) sel.value = '603100';
+    });
+
+    // Cost Type options — Logistics.dbo.CostTypes (1 General Freight, 2
+    // Customs). Defaults to Customs to match the GL Account default above.
+    fetch('/api/costtypes').then(r => r.json()).then(types => {
+      const sel = document.getElementById('sd-cost-type');
+      if (!sel || !Array.isArray(types)) return;
+      sel.innerHTML = types.map(t =>
+        `<option value="${esc(String(t.typeID))}">${esc(t.typeDescription || '')}</option>`
+      ).join('');
+      const customs = types.find(t => String(t.typeID) === '2');
+      if (customs) sel.value = '2';
+    }).catch(() => {});
+
+    // Cost Centre options — same default (PTFE, 0000002004) as the booking
+    // modal's cost-centre dropdown.
+    fetch('/api/costcenters').then(r => r.json()).then(data => {
+      const sel = document.getElementById('sd-cost-center');
+      if (!sel) return;
+      const centres = Array.isArray(data) ? data : (data.data || []);
+      sel.innerHTML = centres.map(c =>
+        `<option value="${esc(c.centerCode || '')}">${esc(c.centerCode || '')} — ${esc(c.centerDescription || '')}</option>`
+      ).join('');
+      const def = centres.find(c => c.centerCode === '0000002004');
+      if (def) sel.value = '0000002004';
+    }).catch(() => {});
+
+    document.getElementById('sd-cost-add-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('sd-cost-add-btn');
+      const result = document.getElementById('sd-cost-result');
+      const costElement = document.getElementById('sd-cost-element').value;
+      const costType = document.getElementById('sd-cost-type').value;
+      const costCenter = document.getElementById('sd-cost-center').value;
+      const amount = document.getElementById('sd-cost-amount').value;
+
+      if (!costElement) { result.innerHTML = '<div class="sap-error">Select a GL Account.</div>'; return; }
+      if (!costCenter) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
+      const amountNum = Number(amount);
+      if (!amountNum || amountNum <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
+
+      btn.disabled = true; btn.textContent = 'Adding…';
+      try {
+        // POST /api/shipmentcost is the generic create endpoint (no
+        // {success:true} wrapper — see routes/shipmentcost.js) — check the
+        // HTTP status / costID rather than a success flag.
+        const res2 = await fetch('/api/shipmentcost', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shipmentID: shipmentId, costType, costElement, costCenter, expectedCost: amountNum }),
+        });
+        const json2 = await res2.json();
+        if (!res2.ok || !json2.costID) throw new Error(json2.error || 'Failed to add cost');
+        renderShipmentAssociatedCosts(shipmentId);
+      } catch (err) {
+        result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = '+ Add Cost';
+      }
+    });
 
     document.querySelectorAll('.sd-cost-edit').forEach(b => {
       b.addEventListener('click', () => {
