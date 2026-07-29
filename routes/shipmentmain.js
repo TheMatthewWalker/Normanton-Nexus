@@ -1630,24 +1630,39 @@ router.get('/queue/:mode', async (req, res) => {
 // CAST(x AS DATE) — SQL Server 2005 has no DATE type (added in 2008), same
 // constraint as everywhere else in this codebase (see performancesql.js's
 // note near line 785).
+// Same Forwarders fan-out fix as shipmentcost.js's COMBINED_COST_OUTBOUND/
+// INBOUND (see that file's comment for the full writeup) — Forwarders has
+// one row PER MODE per forwarderID, so a plain LEFT JOIN here was counting
+// every on-time/late shipment once per mode-row that forwarder happens to
+// have on file, inflating byHaulier's totals the same way. OUTER APPLY
+// TOP 1 pins it to one row, matching the pattern already used correctly
+// a little further up this file (the in-transit query's OUTER APPLY fa).
 const OTIF_OUTBOUND = `
-    SELECT f.forwarderName,
+    SELECT fa.forwarderName,
            sm.destinationCountry AS country,
            sm.destinationName    AS place,
            sm.actualDelivery     AS periodDate,
            CASE WHEN DATEADD(day, DATEDIFF(day, 0, sm.actualDelivery), 0) <= DATEADD(day, DATEDIFF(day, 0, sm.plannedDelivery), 0) THEN 1 ELSE 0 END AS isOnTime
     FROM Logistics.dbo.ShipmentMain sm
-    LEFT JOIN Logistics.dbo.Forwarders f ON f.forwarderID = sm.forwarderID
+    OUTER APPLY (
+        SELECT TOP 1 f.forwarderName
+        FROM Logistics.dbo.Forwarders f
+        WHERE f.forwarderID = sm.forwarderID
+    ) fa
     WHERE sm.actualDelivery IS NOT NULL AND sm.plannedDelivery IS NOT NULL
       AND ISNULL(sm.shipmentCancelled, 0) = 0`;
 const OTIF_INBOUND = `
-    SELECT f.forwarderName,
+    SELECT fa.forwarderName,
            d.destinationCountry AS country,
            d.destinationName    AS place,
            ps.ReceivedAtUtc     AS periodDate,
            CASE WHEN DATEADD(day, DATEDIFF(day, 0, ps.ReceivedAtUtc), 0) <= DATEADD(day, DATEDIFF(day, 0, ps.ExpectedEta), 0) THEN 1 ELSE 0 END AS isOnTime
     FROM dbo.PurchaseOrderShipment ps
-    LEFT JOIN Logistics.dbo.Forwarders   f ON f.forwarderID = ps.ForwarderID
+    OUTER APPLY (
+        SELECT TOP 1 f.forwarderName
+        FROM Logistics.dbo.Forwarders f
+        WHERE f.forwarderID = ps.ForwarderID
+    ) fa
     LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = ps.OriginDestinationID
     WHERE ps.ReceivedAtUtc IS NOT NULL AND ps.ExpectedEta IS NOT NULL
       AND ps.CancelledAtUtc IS NULL`;

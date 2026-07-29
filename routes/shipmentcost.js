@@ -398,27 +398,47 @@ router.get('/unprocessed', async (req, res) => {
 // dispatched) since PurchaseOrderShipment has no plannedCollection
 // equivalent; "country"/"customer" for inbound come from the origin
 // Destinations row (OriginDestinationID) rather than a UK destination.
+// Forwarders is NOT one row per forwarderID — a vendor with several
+// shipping modes (Road/Sea/Air) gets one row PER MODE, all sharing the same
+// forwarderID/forwarderName (see routes/forwarders.js's PUT comment, and
+// task #317's dedupeForwardersByName frontend workaround for the same
+// shape). A plain LEFT JOIN ... ON f.forwarderID = ... therefore fans out
+// every cost line by however many mode-rows that forwarder has — a
+// forwarder with 4 modes on file quietly quadrupled every SUM(expectedCost)
+// below (totals, byForwarder, byCountry, byMonth, byCostCenter, byCustomer,
+// byDirection, byService all inherit from these two subqueries). OUTER
+// APPLY ... TOP 1 pins it to exactly one row per cost line, matching the
+// already-correct pattern used for the same problem in shipmentmain.js's
+// in-transit query (OUTER APPLY (SELECT TOP 1 ...) fa).
 const COMBINED_COST_OUTBOUND = `
     SELECT sc.expectedCost, sc.migoStatus, sc.costCenter,
-           f.forwarderName, f.forwarderMode,
+           fa.forwarderName, fa.forwarderMode,
            sm.destinationCountry AS country,
            sm.destinationName    AS customerLabel,
            sm.plannedCollection  AS periodDate,
            'O:' + CONVERT(VARCHAR(20), sm.shipmentID) AS shipmentKey
     FROM Logistics.dbo.ShipmentCost sc
     INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = sm.forwarderID
+    OUTER APPLY (
+        SELECT TOP 1 f.forwarderName, f.forwarderMode
+        FROM Logistics.dbo.Forwarders f
+        WHERE f.forwarderID = sm.forwarderID
+    ) fa
     WHERE sc.shipmentID IS NOT NULL`;
 const COMBINED_COST_INBOUND = `
     SELECT sc.expectedCost, sc.migoStatus, sc.costCenter,
-           f.forwarderName, f.forwarderMode,
+           fa.forwarderName, fa.forwarderMode,
            d.destinationCountry AS country,
            d.destinationName    AS customerLabel,
            ISNULL(ps.DispatchDate, ps.CreatedAtUtc) AS periodDate,
            'I:' + CONVERT(VARCHAR(20), ps.ShipmentId) AS shipmentKey
     FROM Logistics.dbo.ShipmentCost sc
     INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
-    LEFT  JOIN Logistics.dbo.Forwarders   f  ON f.forwarderID  = ps.ForwarderID
+    OUTER APPLY (
+        SELECT TOP 1 f.forwarderName, f.forwarderMode
+        FROM Logistics.dbo.Forwarders f
+        WHERE f.forwarderID = ps.ForwarderID
+    ) fa
     LEFT  JOIN Logistics.dbo.Destinations d  ON d.destinationID = ps.OriginDestinationID
     WHERE sc.poShipmentID IS NOT NULL`;
 const COMBINED_COST = `(${COMBINED_COST_OUTBOUND} UNION ALL ${COMBINED_COST_INBOUND}) cc`;
