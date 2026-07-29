@@ -193,6 +193,20 @@ async function buildPDF(data, paperSize = 'A5') {
       doc.on('end',   () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
+      // Real A4 printers (standard laser/MFP trays, unlike the A5 label
+      // stock this was originally designed for) have a hardware minimum
+      // margin — commonly ~4-5mm on every edge — that the print engine
+      // physically cannot image into, regardless of what the PDF page
+      // declares. With `margin: 0` above and the header drawn starting at
+      // y=0, that band fell inside the unprintable zone and was silently
+      // clipped: the reported "top of the label is cut off, doesn't have
+      // the header" after switching printers from A5 to A4. Shifting the
+      // whole coordinate system down by a safe margin fixes this without
+      // touching the A5 branch, where labels print on die-cut/thermal
+      // stock that images edge-to-edge and this was never a problem.
+      const TOP_SAFE_MARGIN = 16; // ~5.6mm — comfortably covers common laser/MFP minimum margins
+      if (isA4) doc.translate(0, TOP_SAFE_MARGIN);
+
       const W  = doc.page.width;   // ≈595 either way (A5 landscape width == A4 portrait width)
       const H  = 420;              // fixed content height (A5-equivalent) — NOT doc.page.height, so on A4 the label sits in the top half rather than stretching to fill the sheet
       const M  = 12;
