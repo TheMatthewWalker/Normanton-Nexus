@@ -7640,7 +7640,10 @@ function osRenderTrackedList(tracked) {
           ${OS_STATUS_OPTIONS.map(opt => `<option value="${opt}" ${t.Status === opt ? 'selected' : ''}>${opt}</option>`).join('')}
         </select>
       </td>
-      <td><input class="tf-input os-po-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.PoNumber || '')}" placeholder="PO number" style="padding:3px 6px;font-size:12px;width:100px"></td>
+      <td>
+        <input class="tf-input os-po-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.PoNumber || '')}" placeholder="PO number" style="padding:3px 6px;font-size:12px;width:100px">
+        ${t.PoItemNumber ? `<div style="font-size:10px;color:var(--text-secondary,#666)">item ${esc(t.PoItemNumber)}</div>` : ''}
+      </td>
       <td><input class="tf-input os-supplier-ref-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.SupplierReference || '')}" placeholder="Supplier ref" style="padding:3px 6px;font-size:12px;width:100px"></td>
       <td>
         <button class="btn-secondary os-shipment-btn" data-id="${t.SuggestionId}" style="padding:3px 8px;font-size:11px;white-space:nowrap" title="${t.ShipmentId ? esc([t.Haulier, t.ModeOfTransport, t.ShipmentTrackingNumber].filter(Boolean).join(' · ')) : ''}">

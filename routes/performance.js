@@ -3204,10 +3204,22 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
     // from the fresh rows fetched above rather than left null, so this
     // doesn't silently wipe either field on the way to marking the order
     // Ordered.
-    for (const r of rows) {
+    //
+    // poItemNumber is computed here from each row's index in `rows` — the
+    // SAME array `items` was mapped from above, in the SAME order — because
+    // SapServer's BuildPoCreateRequest assigns POITEM numbers purely by
+    // array position ((i + 1).ToString("D5")) and BAPI_PO_CREATE1's response
+    // only hands back the overall PO number, not per-item numbers. As long
+    // as `items` and `rows` stay index-aligned (they do — both come straight
+    // from this same `rows` array, nothing reorders or filters between the
+    // two), rows[i] is guaranteed to be SAP PO item String(i + 1).padStart(5, '0').
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const poItemNumber = String(i + 1).padStart(5, '0');
       await db.updateOrderSuggestionStatus(r.SuggestionId, {
         status: 'Ordered',
         poNumber,
+        poItemNumber,
         notes: r.Notes || null,
         supplierReference: r.SupplierReference || null,
       });

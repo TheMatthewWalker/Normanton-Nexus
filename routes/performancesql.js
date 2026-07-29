@@ -1401,7 +1401,7 @@ export async function listOrderSuggestionsTracked() {
       p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, p.VendorMaterialId, p.Material,
       t.MaterialText, t.Uom, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
       p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
-      p.IsSpotPo, p.PoNumber, p.Notes, p.SupplierReference,
+      p.IsSpotPo, p.PoNumber, p.PoItemNumber, p.Notes, p.SupplierReference,
       p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc,
       p.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport,
       s.TrackingNumber AS ShipmentTrackingNumber, s.ExpectedEta, s.ReceivedAtUtc AS ShipmentReceivedAtUtc
@@ -1434,12 +1434,21 @@ export async function listOrderSuggestionsTracked() {
 // shown/actionable for that row (ReadyToCollectDate for a spot PO,
 // DeliveryDate otherwise — see osEffectiveDueDate's comment in
 // logistics.js), so only one of the pair is ever sent per save.
-export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, notes, supplierReference, orderQty, deliveryDate, readyToCollectDate }) {
+// poItemNumber is COALESCE-optional too, deliberately NOT part of the
+// direct-set "full state" group PoNumber/Notes/SupplierReference belong to —
+// there's no UI field for it (nobody types a PO item number by hand), it's
+// only ever known/set by the create-po route right after SAP hands back a
+// real PO, so every other caller (manual order entry, the Tracked Orders
+// Save button) simply never mentions it and this leaves whatever's already
+// stored untouched rather than needing every call site updated to carry it
+// through explicitly.
+export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, poItemNumber, notes, supplierReference, orderQty, deliveryDate, readyToCollectDate }) {
   const pool = await getPool();
   await pool.request()
     .input('suggestionId',      sql.Int, suggestionId)
     .input('status',            sql.NVarChar(20),  status)
     .input('poNumber',          sql.NVarChar(20),  poNumber || null)
+    .input('poItemNumber',      sql.NVarChar(5),   poItemNumber || null)
     .input('notes',             sql.NVarChar(500), notes || null)
     .input('supplierReference', sql.NVarChar(50),  supplierReference || null)
     .input('orderQty',          sql.Decimal(15, 3), orderQty != null ? orderQty : null)
@@ -1449,6 +1458,7 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
       UPDATE dbo.PurchaseOrderSuggestion SET
         Status = @status, PoNumber = @poNumber, Notes = @notes,
         SupplierReference = @supplierReference,
+        PoItemNumber = COALESCE(@poItemNumber, PoItemNumber),
         OrderQty = COALESCE(@orderQty, OrderQty),
         DeliveryDate = COALESCE(@deliveryDate, DeliveryDate),
         ReadyToCollectDate = COALESCE(@readyToCollectDate, ReadyToCollectDate),

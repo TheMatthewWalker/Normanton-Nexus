@@ -144,6 +144,26 @@ ELSE
   PRINT 'dbo.PurchaseOrderSuggestion already exists — skipped';
 
 
+/* ── 1b. PurchaseOrderSuggestion — add PoItemNumber column (existing installs) ──
+   Needed so multiple materials from the same vendor, ordered together as one
+   real SAP purchase order (Tracked Orders' "Create PO in SAP", one PO,
+   multiple POITEM lines), can each be traced back to their own SAP PO item —
+   not just which PO they're on, but which line of it. Stores the same
+   5-digit zero-padded item number SAP itself uses (e.g. "00001", "00002" —
+   see SapServer's PurchasingHelper.BuildPoCreateRequest, which assigns these
+   sequentially in the same order the items were sent). Node computes this
+   itself from each row's position in the request it built — SAP's
+   BAPI_PO_CREATE1 doesn't return per-item numbers, only the PO number, so
+   there's nothing to read back from the RFC response. NULL for anything
+   ordered before this column existed, or via the manual/CSV order-entry
+   paths, which don't track a specific PO item. Same guarded-ALTER pattern as
+   every other additive column in this codebase — safe to re-run. */
+IF COL_LENGTH('dbo.PurchaseOrderSuggestion', 'PoItemNumber') IS NULL
+  ALTER TABLE dbo.PurchaseOrderSuggestion ADD PoItemNumber NVARCHAR(5) NULL;
+
+PRINT 'dbo.PurchaseOrderSuggestion PoItemNumber column verified/added';
+
+
 /* ── Verify ───────────────────────────────────────────────────────────────────── */
 
 
