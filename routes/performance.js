@@ -3208,14 +3208,15 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
     // poItemNumber is computed here from each row's index in `rows` — the
     // SAME array `items` was mapped from above, in the SAME order — because
     // SapServer's BuildPoCreateRequest assigns POITEM numbers purely by
-    // array position ((i + 1).ToString("D5")) and BAPI_PO_CREATE1's response
-    // only hands back the overall PO number, not per-item numbers. As long
-    // as `items` and `rows` stay index-aligned (they do — both come straight
-    // from this same `rows` array, nothing reorders or filters between the
-    // two), rows[i] is guaranteed to be SAP PO item String(i + 1).padStart(5, '0').
+    // array position (standard SAP x10 numbering: ((i + 1) * 10).ToString("D5"))
+    // and BAPI_PO_CREATE1's response only hands back the overall PO number,
+    // not per-item numbers. As long as `items` and `rows` stay index-aligned
+    // (they do — both come straight from this same `rows` array, nothing
+    // reorders or filters between the two), rows[i] is guaranteed to be SAP
+    // PO item String((i + 1) * 10).padStart(5, '0') — i.e. 00010, 00020, ...
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      const poItemNumber = String(i + 1).padStart(5, '0');
+      const poItemNumber = String((i + 1) * 10).padStart(5, '0');
       await db.updateOrderSuggestionStatus(r.SuggestionId, {
         status: 'Ordered',
         poNumber,
