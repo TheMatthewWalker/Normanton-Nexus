@@ -1031,11 +1031,33 @@ export async function getCachedDeliveryOrderLinks(deliveryNumbers) {
 export async function insertDeliveryOrderLinksIfMissing(rows) {
   if (!rows.length) return;
 
+  // Defensive dedupe by (DeliveryNumber, DeliveryItem) — the target table's
+  // PK grain — before building the staging batch below. The anti-join in
+  // the query only guards against rows that already exist in
+  // dbo.DeliveryOrderLink; it can't see duplicates *within* this same
+  // batch, and VBFA (SapServer's BuildVbfaOrderLinkRequest) is a flat
+  // document-flow log that can — even with its VBTYP_V = 'C' order-only
+  // filter — occasionally surface more than one predecessor row for the
+  // same delivery item (e.g. a genuine multi-order-item consolidated
+  // delivery). Without this, a second row for the same key blows up the
+  // INSERT with a PRIMARY KEY violation and aborts VBFA resolution for
+  // every candidate in the sync, not just the offending one — which is
+  // exactly what silently leaves already-picked orders unresolved (raw
+  // delivery number, not the padded sales order number) until the next
+  // sync happens to avoid the clash.
+  const seen = new Set();
+  const deduped = rows.filter(r => {
+    const key = `${r.deliveryNumber}||${r.deliveryItem}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   const pool = await getPool();
   const batchSize = 500; // 4 columns/row, well under the 2100-parameter limit
 
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const batch = rows.slice(i, i + batchSize);
+  for (let i = 0; i < deduped.length; i += batchSize) {
+    const batch = deduped.slice(i, i + batchSize);
     const request = pool.request();
 
     const selectClauses = batch.map((row, idx) => {
