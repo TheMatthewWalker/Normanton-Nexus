@@ -2,14 +2,47 @@ import express from 'express';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
+import https from 'https';
+import jwt from 'jsonwebtoken';
+import axios from 'axios';
 import { runFullRefresh, runTurnsValClassRefresh } from '../routes/performancesync.js';
 import * as sap from './performancesap.js';
 import * as db  from './performancesql.js';
 import sql from 'mssql';
 import ExcelJS from 'exceljs';
-import { sqlConfig, auditQuery } from '../config.js';
+import { sqlConfig, auditQuery, sapConfig, sapServerSecret } from '../config.js';
 import { requirePermission, requireAnyPermission, requireSessionOrApiToken } from '../middleware/auth.js';
 import { insertInboundCostLine } from './inboundcosts.js';
+import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
+
+// Same TLS-pinned Node->SapServer setup used by routes/shipmentcost.js's
+// post-migo (create-po-and-receipt) — reused here for the MRP "Create PO in
+// SAP" flow, which needs the identical per-user-elevated call shape.
+const sapCertPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
+const sapAgent = fs.existsSync(sapCertPath)
+  ? new https.Agent({ ca: fs.readFileSync(sapCertPath), rejectUnauthorized: true })
+  : null;
+
+function makeSapToken(userId) {
+  return jwt.sign({ userId: userId ?? 0 }, sapServerSecret,
+    { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' });
+}
+
+// SapServer's ApiResponse.Fail() puts the generic error under
+// body.error.message and the real SAP RETURN-table diagnostic (e.g. "Vendor
+// 12345 does not exist") under body.data.messages — see
+// PurchasingController.CreatePurchaseOrderElevated / CreatePoElevatedResponse.
+// Mirrors shipmentcost.js's extractSapErrorMessage: the generic wrapper
+// alone never explains WHY SAP rejected the PO.
+function extractPoErrorMessage(body, fallback) {
+  const base = body?.error?.message || body?.error || fallback;
+  const messages = body?.data?.messages;
+  if (Array.isArray(messages) && messages.length > 0) {
+    const detail = messages.filter(m => m?.message).map(m => (m.type ? `[${m.type}] ${m.message}` : m.message)).join('; ');
+    if (detail) return `${base} ${detail}`;
+  }
+  return base;
+}
 
 async function getPool() {
   return await sql.connect(sqlConfig);
@@ -3040,6 +3073,154 @@ router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (re
   try {
     const data = await db.listOrderSuggestionsTracked();
     res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Raises a real purchase order in SAP (BAPI_PO_CREATE1 via SapServer's
+// elevated /api/purchasing/create-po-elevated) for one or more Accepted,
+// not-yet-ordered tracked orders, then writes the returned PO number back
+// onto every included row and flips their status to 'Ordered' — the same
+// PoNumber/Status fields the manual "I already raised this myself" flow
+// (insertManualOrderRow) fills in by hand, just populated automatically.
+//
+// One PO per vendor: every suggestionId in the request must belong to the
+// same VendorId, matching how Build Order already groups several materials
+// from one vendor into one order. Runs under the calling user's own SAP
+// credentials (My Account -> SAP Credentials), not the shared service
+// account — see SapServer's PurchasingController.CreatePurchaseOrderElevated
+// for why the shared account can't create POs at all.
+//
+// Body: { suggestionIds: number[], priceOverrides?: [{ suggestionId, netPrice }],
+// currency?: string, docDate?: string }. priceOverrides/currency/docDate are
+// all optional — price is deliberately left out per line unless explicitly
+// overridden here, so SAP's own purchasing info record / condition
+// determination (ME12) prices the line instead (nothing in Nexus's vendor/
+// material master data stores a price) — see PurchasingModels.cs's NetPrice
+// comment on the SapServer side. currency defaults to the vendor's own
+// Currency field; docDate defaults to today.
+router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { suggestionIds, priceOverrides, currency: currencyOverride, docDate } = req.body;
+    if (!Array.isArray(suggestionIds) || !suggestionIds.length) {
+      return res.status(400).json({ success: false, error: { message: 'suggestionIds must be a non-empty array.' } });
+    }
+
+    const callerUserId = req.session?.user?.userID;
+    const sapCreds = await getDecryptedSapCredentials(callerUserId);
+    if (!sapCreds) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'You need to save your SAP username and password in My Account before creating a PO in SAP.' },
+      });
+    }
+
+    // Fresh from the DB, not trusted from whatever the client had on screen —
+    // a row's status/PO could have changed since the page was last loaded.
+    const idSet = new Set(suggestionIds.map(Number));
+    const allTracked = await db.listOrderSuggestionsTracked();
+    const rows = allTracked.filter(r => idSet.has(Number(r.SuggestionId)));
+
+    if (rows.length !== suggestionIds.length) {
+      return res.status(404).json({ success: false, error: { message: 'One or more selected orders could not be found.' } });
+    }
+    const alreadyOrdered = rows.filter(r => r.PoNumber || r.Status !== 'Accepted');
+    if (alreadyOrdered.length) {
+      return res.status(400).json({
+        success: false,
+        error: { message: `${alreadyOrdered.length} of the selected line(s) already have a PO number or aren't in Accepted status — refresh and try again.` },
+      });
+    }
+    const vendorIds = new Set(rows.map(r => r.VendorId));
+    if (vendorIds.size > 1) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'All selected lines must be from the same vendor — one purchase order per vendor.' },
+      });
+    }
+
+    if (!rows[0].SapVendorNumber) {
+      return res.status(400).json({
+        success: false,
+        error: { message: `${rows[0].VendorName} has no SAP Vendor Number set — add one on the Vendor Master Data page before creating a PO in SAP.` },
+      });
+    }
+    const currency = currencyOverride || rows[0].Currency;
+    if (!currency) {
+      return res.status(400).json({
+        success: false,
+        error: { message: `${rows[0].VendorName} has no currency set — add one on the Vendor Master Data page, or supply one when creating the PO.` },
+      });
+    }
+
+    const overridesById = new Map((Array.isArray(priceOverrides) ? priceOverrides : [])
+      .map(o => [Number(o.suggestionId), o.netPrice]));
+
+    const items = rows.map(r => {
+      const override = overridesById.get(Number(r.SuggestionId));
+      return {
+        Material:     r.Material,
+        ShortText:    (r.MaterialText || r.Material || '').slice(0, 40),
+        Quantity:     Number(r.OrderQty),
+        Unit:         r.Uom || 'KG',
+        NetPrice:     (override !== undefined && override !== null && override !== '') ? Number(override) : null,
+        DeliveryDate: (r.DeliveryDate ? new Date(r.DeliveryDate) : new Date()).toISOString().slice(0, 10),
+      };
+    });
+
+    const today = new Date().toISOString().slice(0, 10);
+    let sapResp;
+    try {
+      sapResp = await axios.post(
+        `${sapConfig.url}/api/purchasing/create-po-elevated`,
+        {
+          SapUsername: sapCreds.sapUsername,
+          SapPassword: sapCreds.sapPassword,
+          Vendor:      rows[0].SapVendorNumber,
+          Currency:    currency,
+          DocDate:     docDate || today,
+          Items:       items,
+        },
+        { timeout: 90000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(callerUserId)}` } }
+      );
+    } catch (err) {
+      const message = extractPoErrorMessage(err.response?.data, err.message);
+      return res.status(err.response?.status || 500).json({ success: false, error: { message } });
+    }
+
+    const sapBody = sapResp.data;
+    if (!sapBody.success || !sapBody.data?.purchaseOrder) {
+      return res.status(400).json({
+        success: false,
+        error: { message: extractPoErrorMessage(sapBody, 'SAP did not return a purchase order number.') },
+      });
+    }
+
+    const poNumber = sapBody.data.purchaseOrder;
+
+    // updateOrderSuggestionStatus is a full-row update (see its own comment
+    // in performancesql.js) — Notes/SupplierReference are carried through
+    // from the fresh rows fetched above rather than left null, so this
+    // doesn't silently wipe either field on the way to marking the order
+    // Ordered.
+    for (const r of rows) {
+      await db.updateOrderSuggestionStatus(r.SuggestionId, {
+        status: 'Ordered',
+        poNumber,
+        notes: r.Notes || null,
+        supplierReference: r.SupplierReference || null,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        purchaseOrder: poNumber,
+        suggestionIds: rows.map(r => r.SuggestionId),
+        messages: sapBody.data.messages || [],
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }

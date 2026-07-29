@@ -6338,6 +6338,7 @@ function vmRenderVendorList(vendors) {
   const rows = vendors.map(v => `
     <tr class="admin-row vm-vendor-row" style="cursor:pointer" data-id="${esc(String(v.VendorId))}">
       <td><strong>${esc(v.VendorName)}</strong></td>
+      <td>${v.SapVendorNumber ? esc(v.SapVendorNumber) : '<span class="sap-error" title="Needed before Create PO in SAP can be used for this vendor">Not set</span>'}</td>
       <td>${esc(v.Incoterms || '—')}</td>
       <td>${vmOrderQtyLabel(v)}</td>
       <td>${v.DefaultLeadTimeDays != null ? esc(String(v.DefaultLeadTimeDays)) + ' days' : '—'}</td>
@@ -6355,7 +6356,7 @@ function vmRenderVendorList(vendors) {
     ${vendors.length ? `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Vendor</th><th>Incoterms</th><th>Order Qty</th><th>Default Lead Time</th><th>Materials</th><th></th></tr></thead>
+          <thead><tr><th>Vendor</th><th>SAP Vendor No.</th><th>Incoterms</th><th>Order Qty</th><th>Default Lead Time</th><th>Materials</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>` : '<div class="sap-empty">No vendors yet — add one to get started.</div>'}
@@ -6411,6 +6412,17 @@ function vmOpenVendorModal(vendor) {
       </div>
       <div class="tf-row">
         <div class="tf-field">
+          <label class="tf-label">SAP Vendor Number</label>
+          <input class="tf-input" type="text" id="vm-sap-vendor-number" maxlength="10" value="${esc(vendor?.SapVendorNumber || '')}" placeholder="e.g. 0000078712">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Currency</label>
+          <input class="tf-input" type="text" id="vm-currency" maxlength="3" value="${esc(vendor?.Currency || '')}" placeholder="GBP">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Both required before this vendor can be used for "Create PO in SAP" on Tracked Orders — SAP Vendor Number is the real LIFNR from SAP, not any Nexus id.</div>
+      <div class="tf-row">
+        <div class="tf-field">
           <label class="tf-label">Incoterms</label>
           <select class="tf-input" id="vm-incoterms">
             <option value="">—</option>
@@ -6463,6 +6475,8 @@ function vmOpenVendorModal(vendor) {
   document.getElementById('vm-vendor-save-btn').addEventListener('click', async () => {
     const body = {
       vendorName: document.getElementById('vm-name').value.trim(),
+      sapVendorNumber: document.getElementById('vm-sap-vendor-number').value.trim() || null,
+      currency: document.getElementById('vm-currency').value.trim().toUpperCase() || null,
       incoterms: document.getElementById('vm-incoterms').value || null,
       defaultLeadTimeDays: vmNumOrNull(document.getElementById('vm-lead-time').value),
       transitTimeDays: vmNumOrNull(document.getElementById('vm-transit-time').value),
@@ -7719,6 +7733,7 @@ function osRenderTrackedList(tracked) {
       <button type="button" class="btn-secondary" id="os-auto-shipment-btn" disabled>Auto-Shipment</button>
       <button type="button" class="btn-secondary" id="os-save-selected-btn" disabled>Save Selected</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
+      <button type="button" class="btn-submit" id="os-create-po-btn" disabled>Create PO in SAP</button>
     </div>
     ${rows.length ? `<div class="ps-sections">${bucketSections}</div>` : `<div class="sap-empty">${emptyMessage}</div>`}
   `;
@@ -7729,6 +7744,7 @@ function osRenderTrackedList(tracked) {
   document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
   document.getElementById('os-auto-shipment-btn').addEventListener('click', () => autoCreateShipments());
   document.getElementById('os-save-selected-btn').addEventListener('click', () => saveSelectedTrackedOrders());
+  document.getElementById('os-create-po-btn').addEventListener('click', () => openCreatePoModal());
   document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
@@ -7845,6 +7861,21 @@ function onTrackedCheckToggle(e) {
   if (autoBtn) autoBtn.disabled = selectedTrackedIds.size === 0;
   const saveSelBtn = document.getElementById('os-save-selected-btn');
   if (saveSelBtn) saveSelBtn.disabled = selectedTrackedIds.size === 0;
+  const poBtn = document.getElementById('os-create-po-btn');
+  if (poBtn) poBtn.disabled = !osCreatePoSelectionValid();
+}
+
+// One PO per vendor, and only for lines that genuinely haven't been ordered
+// yet — the same rules the create-po route re-checks server-side (fresh from
+// the DB, not trusted from this in-memory copy), but validated here too so
+// the button doesn't invite a click that's just going to bounce with an
+// error.
+function osCreatePoSelectionValid() {
+  if (!selectedTrackedIds.size) return false;
+  const rows = trackedRows.filter(t => selectedTrackedIds.has(Number(t.SuggestionId)));
+  if (rows.some(t => t.Status !== 'Accepted' || t.PoNumber)) return false;
+  const vendorIds = new Set(rows.map(t => t.VendorId));
+  return vendorIds.size === 1;
 }
 
 // Reads the on-screen inputs for one tracked row and PUTs them — shared by
@@ -8304,6 +8335,104 @@ function showAutoShipmentSummary(results) {
     </div>
   </div>`);
   document.getElementById('asm-view-inbound-btn').addEventListener('click', () => { closePickModal(); runInboundLog(); });
+}
+
+// "Create PO in SAP" — takes the current tracked-order selection (already
+// gated same-vendor/Accepted-only by osCreatePoSelectionValid, re-checked
+// again server-side since this posts a real document) and shows a review
+// step before actually raising the SAP purchase order: vendor, currency
+// (prefilled from the vendor's own Currency field, editable), and each
+// line's material/qty/unit/delivery date plus an optional price override.
+// Price is left blank by default on purpose — SAP fills it in itself from
+// the purchasing info record/condition records (ME12) when nothing is sent,
+// since nothing in Nexus's vendor/material master data stores a price (see
+// the create-po route's own comment in routes/performance.js).
+function openCreatePoModal() {
+  if (!osCreatePoSelectionValid()) return;
+  const ids = [...selectedTrackedIds];
+  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+  const vendorName = rows[0].VendorName;
+  const vendorCurrency = rows[0].Currency || '';
+
+  const linesHtml = rows.map(t => `
+    <tr data-id="${esc(String(t.SuggestionId))}">
+      <td>${esc(t.Material)}</td>
+      <td>${esc(t.MaterialText || '—')}</td>
+      <td>${esc(String(t.OrderQty))} ${esc(t.Uom || '')}</td>
+      <td>${formatDisplayDate(getOrderDueDateIso(t)) || '—'}</td>
+      <td><input class="tf-input cpo-price-input" type="number" step="0.01" min="0" placeholder="Auto (SAP)" data-id="${esc(String(t.SuggestionId))}" style="width:110px"></td>
+    </tr>`).join('');
+
+  openModal(`<div class="ps-modal lg-modal">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Create PO in SAP</div><div class="ps-modal-sub">${esc(vendorName)} · ${rows.length} line${rows.length === 1 ? '' : 's'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint">This creates a real purchase order in SAP under your own SAP login (My Account → SAP Credentials). Leave Price blank to let SAP price each line itself from the purchasing info record — only fill it in to override that.</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Currency</label>
+          <input class="tf-input" type="text" id="cpo-currency" maxlength="3" value="${esc(vendorCurrency)}" style="width:80px">
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Description</th><th>Qty</th><th>Delivery Date</th><th>Price (optional)</th></tr></thead>
+          <tbody>${linesHtml}</tbody>
+        </table>
+      </div>
+      <div id="cpo-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="cpo-confirm-btn">Create PO</button>
+    </div>
+  </div>`);
+
+  document.getElementById('cpo-confirm-btn').addEventListener('click', () => submitCreatePo(rows));
+}
+
+async function submitCreatePo(rows) {
+  const btn = document.getElementById('cpo-confirm-btn');
+  const resultEl = document.getElementById('cpo-result');
+  const currency = document.getElementById('cpo-currency').value.trim().toUpperCase();
+  if (!currency) {
+    resultEl.innerHTML = '<div class="sap-error">Currency is required.</div>';
+    return;
+  }
+  if (!confirm(`Post a real purchase order to SAP for ${rows.length} line(s) from ${rows[0].VendorName}? This cannot be undone from here.`)) return;
+
+  const priceOverrides = rows.map(t => {
+    const input = document.querySelector(`.cpo-price-input[data-id="${CSS.escape(String(t.SuggestionId))}"]`);
+    const val = input?.value?.trim();
+    return val ? { suggestionId: t.SuggestionId, netPrice: Number(val) } : null;
+  }).filter(Boolean);
+
+  btn.disabled = true; btn.textContent = 'Creating…';
+  resultEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Creating PO in SAP…</div>';
+
+  try {
+    const res = await fetch('/api/performance/order-suggestions/create-po', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        suggestionIds: rows.map(t => t.SuggestionId),
+        currency,
+        priceOverrides,
+      }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to create PO');
+
+    selectedTrackedIds = new Set();
+    resultEl.innerHTML = `<div style="color:var(--success,#16A34A);font-weight:600">Purchase Order <strong>${esc(json.data.purchaseOrder)}</strong> created and saved against ${json.data.suggestionIds.length} line(s).</div>`;
+    btn.textContent = 'Done';
+    setTimeout(() => { closePickModal(); runOrderSuggestionsTracked(); }, 1500);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    btn.disabled = false; btn.textContent = 'Create PO';
+  }
 }
 
 // Records an order that already exists outside the suggestion engine — the

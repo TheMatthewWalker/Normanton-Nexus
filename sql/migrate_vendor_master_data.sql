@@ -216,6 +216,26 @@ IF COL_LENGTH('dbo.VendorMaterial', 'MaterialMaxQty') IS NULL
 PRINT 'dbo.VendorMaterial MaterialMaxQty column verified/added';
 
 
+/* ── 1d. Vendor — add SapVendorNumber + Currency columns (existing installs) ──
+   Needed for the MRP "Create PO in SAP" feature (BAPI_PO_CREATE1 via
+   SapServer's /api/purchasing/create-po-elevated): the vendor's real SAP
+   vendor number (LIFNR) and the currency to raise the PO in. Same convention
+   already established for Forwarders.forwarderID — the SAP vendor code is
+   stored directly against the Nexus record it maps to, filled in by hand,
+   rather than assumed to match any existing Nexus id. Nullable: existing
+   vendors don't have this yet, and PO creation is blocked server-side with a
+   clear error for any vendor missing SapVendorNumber rather than silently
+   sending a blank one to SAP. Same guarded-ALTER pattern as TransitTimeDays
+   above — safe to re-run. */
+IF COL_LENGTH('dbo.Vendor', 'SapVendorNumber') IS NULL
+  ALTER TABLE dbo.Vendor ADD SapVendorNumber NVARCHAR(10) NULL;
+
+IF COL_LENGTH('dbo.Vendor', 'Currency') IS NULL
+  ALTER TABLE dbo.Vendor ADD Currency NVARCHAR(3) NULL;
+
+PRINT 'dbo.Vendor SapVendorNumber/Currency columns verified/added';
+
+
 /* ── Verify ──────────────────────────────────────────────────────────────── */
 
 

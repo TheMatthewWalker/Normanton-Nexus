@@ -1029,7 +1029,7 @@ export async function listVendors() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      v.VendorId, v.VendorName, v.Incoterms, v.OrderMoqQty, v.OrderMaxQty, v.OrderMoqUom,
+      v.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.Incoterms, v.OrderMoqQty, v.OrderMaxQty, v.OrderMoqUom,
       v.DefaultLeadTimeDays, v.TransitTimeDays, v.Notes, v.CreatedAtUtc, v.UpdatedAtUtc,
       (SELECT COUNT(*) FROM dbo.VendorMaterial vm WHERE vm.VendorId = v.VendorId) AS MaterialCount
     FROM dbo.Vendor v
@@ -1038,10 +1038,12 @@ export async function listVendors() {
   return recordset;
 }
 
-export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
+export async function createVendor({ vendorName, sapVendorNumber, currency, incoterms, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorName',          sql.NVarChar(80),  vendorName)
+    .input('sapVendorNumber',     sql.NVarChar(10),  sapVendorNumber || null)
+    .input('currency',            sql.NVarChar(3),   currency || null)
     .input('incoterms',           sql.NVarChar(3),   incoterms || null)
     .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
     .input('orderMaxQty',         sql.Decimal(15, 3), orderMaxQty ?? null)
@@ -1050,18 +1052,20 @@ export async function createVendor({ vendorName, incoterms, orderMoqQty, orderMa
     .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
-      INSERT INTO dbo.Vendor (VendorName, Incoterms, OrderMoqQty, OrderMaxQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
+      INSERT INTO dbo.Vendor (VendorName, SapVendorNumber, Currency, Incoterms, OrderMoqQty, OrderMaxQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
       OUTPUT INSERTED.VendorId
-      VALUES (@vendorName, @incoterms, @orderMoqQty, @orderMaxQty, @orderMoqUom, @defaultLeadTimeDays, @transitTimeDays, @notes)
+      VALUES (@vendorName, @sapVendorNumber, @currency, @incoterms, @orderMoqQty, @orderMaxQty, @orderMoqUom, @defaultLeadTimeDays, @transitTimeDays, @notes)
     `);
   return recordset[0].VendorId;
 }
 
-export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
+export async function updateVendor(vendorId, { vendorName, sapVendorNumber, currency, incoterms, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, transitTimeDays, notes }) {
   const pool = await getPool();
   await pool.request()
     .input('vendorId',            sql.Int,           vendorId)
     .input('vendorName',          sql.NVarChar(80),  vendorName)
+    .input('sapVendorNumber',     sql.NVarChar(10),  sapVendorNumber || null)
+    .input('currency',            sql.NVarChar(3),   currency || null)
     .input('incoterms',           sql.NVarChar(3),   incoterms || null)
     .input('orderMoqQty',         sql.Decimal(15, 3), orderMoqQty ?? null)
     .input('orderMaxQty',         sql.Decimal(15, 3), orderMaxQty ?? null)
@@ -1071,7 +1075,7 @@ export async function updateVendor(vendorId, { vendorName, incoterms, orderMoqQt
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
       UPDATE dbo.Vendor SET
-        VendorName = @vendorName, Incoterms = @incoterms,
+        VendorName = @vendorName, SapVendorNumber = @sapVendorNumber, Currency = @currency, Incoterms = @incoterms,
         OrderMoqQty = @orderMoqQty, OrderMaxQty = @orderMaxQty, OrderMoqUom = @orderMoqUom,
         DefaultLeadTimeDays = @defaultLeadTimeDays, TransitTimeDays = @transitTimeDays, Notes = @notes,
         UpdatedAtUtc = GETUTCDATE()
@@ -1394,8 +1398,8 @@ export async function listOrderSuggestionsTracked() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      p.SuggestionId, p.VendorId, v.VendorName, p.VendorMaterialId, p.Material,
-      t.MaterialText, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
+      p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, p.VendorMaterialId, p.Material,
+      t.MaterialText, t.Uom, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
       p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
       p.IsSpotPo, p.PoNumber, p.Notes, p.SupplierReference,
       p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc,
