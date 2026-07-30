@@ -582,6 +582,84 @@ router.get('/warehouse/stock', async (req, res) => {
 
 
 // ---------------------------------------------------------------------------
+// GET /api/sap/warehouse/open-transfer-requirements  (mounted at /api/sap in server.js)
+//
+// Proxies to SapServer's GET /api/warehouse/open-transfer-requirements
+// endpoint — lists open Transfer Requirements (LTBK/LTBP, auto-created from
+// a 131 goods movement) ready to be turned into a confirmed TO via LT04.
+// Backs the Transfer Requirements (LT04) tile in Stock Management. Optional
+// mrpController query param narrows the list, same as the source Excel
+// macro's operators already filter by. Unrestricted to any logged-in user,
+// same as /warehouse/stock and /warehouse/transfer-order above — this is
+// routine operator use, not a supervisor-only correction path.
+// ---------------------------------------------------------------------------
+router.get('/warehouse/open-transfer-requirements', async (req, res) => {
+    const { mrpController } = req.query;
+
+    try {
+        const response = await axios.get(`${sapConfig.url}/api/warehouse/open-transfer-requirements`, {
+            params: { mrpController },
+            timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+        });
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'Open transfer requirements query'), req);
+        res.json({ success: true, data: body.data });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Open transfer requirements query failed', message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/create-lt04  (mounted at /api/sap in server.js)
+//
+// Proxies to SapServer's POST /api/warehouse/create-lt04 endpoint —
+// replicates transaction LT04 (create + auto-confirm a TO from an open TR),
+// including create_LT04's own quality-block pre-check (fails with a 422 if
+// the batch hasn't been scanned out of firewall yet). Unrestricted to any
+// logged-in user, same as /warehouse/transfer-order — this replaces the
+// operator's routine manual LT04 entry, not a supervisor-only action.
+//
+// Body: { TrNumber, Material, Quantity, DestinationType, DestinationBin,
+// PalletOrBatch, Reference? } — matches SapServer's CreateLt04Request.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/create-lt04', async (req, res) => {
+    const params = req.body;
+
+    try {
+        const response = await axios.post(
+            `${sapConfig.url}/api/warehouse/create-lt04`,
+            params,
+            { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `LT04 succeeded for TR ${params.TrNumber || ''}`), req);
+        res.json({ success: true, data: body.data });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `LT04 failed for TR ${params.TrNumber || ''}`, message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
 // POST /api/sap/lips
 // Delivery line items: material number, item number, quantity per delivery.
 // ---------------------------------------------------------------------------

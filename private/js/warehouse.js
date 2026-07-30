@@ -83,6 +83,7 @@ function setupTiles() {
       const fn = tile.dataset.fn;
       if (fn === 'displayStock')   runStockManagement();
       if (fn === 'transferOrders') showTransferForm();
+      if (fn === 'transferRequirements') runTransferRequirements();
       if (fn === 'openPicksheets') runOpenPicksheets();
       if (fn === 'packagingHolding') runPackagingHolding();
       if (fn === 'addPicksheet')   showAddPicksheetForm();
@@ -1958,6 +1959,200 @@ async function runStockTransfer(params) {
   }
 }
 
+
+
+// ── Transfer Requirements (LT04) ──────────────────────────────────────────────
+//
+// Lists open TRs (auto-created from a 131 goods movement when production
+// posts stock) and lets the operator turn one into a confirmed TO via LT04 —
+// replacing the manual LT04 entry they do today. Row click opens a modal to
+// enter the destination storage type/bin (no automatic bin determination,
+// matching how this warehouse has always run LT04 — see the Copilot
+// transcript this feature was built from); quantity is prefilled from the
+// TR's open quantity but editable. See SapServer's WarehouseHelpers.
+// BuildCreateLt04Request for the exact screen recording this replicates,
+// including the quality-block (LQUA BESTQ='Q') pre-check.
+let trReqRows = [];
+
+async function runTransferRequirements() {
+  if (!await checkSession()) return;
+  if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
+  showResultPanel('Transfer Requirements (LT04)', 'Open TRs from production goods movements (LTBK/LTBP)');
+  await trReqLoad();
+}
+
+async function trReqLoad(mrpController) {
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-loading"><div class="spinner"></div>Loading open transfer requirements…</div>';
+  try {
+    const qs = mrpController ? `?mrpController=${encodeURIComponent(mrpController)}` : '';
+    const res  = await fetch(`/api/sap/warehouse/open-transfer-requirements${qs}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    trReqRows = json.data || [];
+    trReqRender(mrpController || '');
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function trReqRender(mrpFilter) {
+  const controllers = [...new Set(trReqRows.map(r => r.mrpController).filter(Boolean))].sort();
+
+  const rows = trReqRows.map((r, i) => `
+    <tr class="admin-row tr-req-row" data-idx="${i}" style="cursor:pointer">
+      <td><strong>${esc(r.trNumber)}</strong></td>
+      <td>${esc(r.material)}</td>
+      <td>${esc(r.storageLocation)}</td>
+      <td style="text-align:right">${Number(r.quantity).toLocaleString()} ${esc(r.uom)}</td>
+      <td>${esc(r.mrpController || '—')}</td>
+      <td>${esc(r.documentText || '—')}</td>
+      <td>${esc(r.materialDocument || '—')}</td>
+      <td>${esc(r.createdBy || '—')}</td>
+      <td>${esc(r.createdDate || '')} ${esc(r.createdTime || '')}</td>
+    </tr>`).join('');
+
+  document.getElementById('result-hint').textContent =
+    `LTBK/LTBP · WH 312 · ${trReqRows.length} open TR${trReqRows.length === 1 ? '' : 's'}`;
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-actions" style="margin-bottom:12px;justify-content:flex-start;gap:10px">
+      <label class="tf-label" style="margin:0">MRP Controller</label>
+      <select class="tf-input" id="tr-req-mrp-filter" style="max-width:220px">
+        <option value="">All</option>
+        ${controllers.map(c => `<option value="${esc(c)}" ${c === mrpFilter ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn-secondary" id="tr-req-refresh">Refresh</button>
+    </div>
+    ${trReqRows.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr>
+            <th>TR</th><th>Material</th><th>SLoc</th><th>Qty</th><th>MRP Ctrl</th>
+            <th>Doc Text</th><th>Material Doc</th><th>Created By</th><th>Created</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="toolbar-hint" style="margin-top:8px">Click a row to confirm it via LT04.</div>
+    ` : '<div class="sap-empty">No open transfer requirements right now.</div>'}
+  `;
+
+  document.getElementById('tr-req-refresh').addEventListener('click', () => {
+    const mrp = document.getElementById('tr-req-mrp-filter').value;
+    trReqLoad(mrp);
+  });
+  document.getElementById('tr-req-mrp-filter').addEventListener('change', (e) => trReqLoad(e.target.value));
+
+  document.querySelectorAll('.tr-req-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const row = trReqRows[Number(tr.dataset.idx)];
+      if (row) trReqOpenModal(row);
+    });
+  });
+}
+
+function trReqOpenModal(row) {
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:520px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Confirm TR ${esc(row.trNumber)} via LT04</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Material</label><div>${esc(row.material)}</div></div>
+        <div class="tf-field"><label class="tf-label">Storage Location</label><div>${esc(row.storageLocation)}</div></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Quantity <span class="tf-req">*</span></label>
+          <input class="tf-input" id="tr-req-qty" type="number" step="any" min="0.001" value="${row.quantity}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Pallet / Batch No. <span class="tf-req">*</span></label>
+          <input class="tf-input" id="tr-req-pnr" type="text" placeholder="Pallet or batch number" required>
+        </div>
+      </div>
+      <div class="tf-section-label">Destination Bin</div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Storage Type <span class="tf-req">*</span></label>
+          <input class="tf-input" id="tr-req-desttype" type="text" placeholder="e.g. 001" required>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" id="tr-req-destbin" type="text" placeholder="e.g. A-01-01" required>
+        </div>
+      </div>
+      <div class="tf-field tf-field--wide">
+        <label class="tf-label">Reference <span class="tf-optional">(optional — defaults to pallet/batch no.)</span></label>
+        <input class="tf-input" id="tr-req-reference" type="text" placeholder="Leave blank to use the pallet/batch number above">
+      </div>
+      <div class="tf-actions">
+        <div id="tr-req-modal-result"></div>
+        <button type="button" class="btn-submit" id="tr-req-confirm-btn">Confirm LT04</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('tr-req-confirm-btn').addEventListener('click', () => trReqSubmit(row));
+}
+
+async function trReqSubmit(row) {
+  const btn      = document.getElementById('tr-req-confirm-btn');
+  const resultEl = document.getElementById('tr-req-modal-result');
+
+  const quantity        = parseFloat(String(document.getElementById('tr-req-qty').value).replace(',', '.'));
+  const palletOrBatch    = document.getElementById('tr-req-pnr').value.trim();
+  const destinationType = document.getElementById('tr-req-desttype').value.trim();
+  const destinationBin  = document.getElementById('tr-req-destbin').value.trim();
+  const reference        = document.getElementById('tr-req-reference').value.trim();
+
+  if (!quantity || quantity <= 0) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter a valid quantity.</div>`; return; }
+  if (!palletOrBatch)               { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Pallet/batch number is required.</div>`; return; }
+  if (!destinationType || !destinationBin) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Destination storage type and bin are both required.</div>`; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Sending to SAP…';
+  resultEl.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/sap/warehouse/create-lt04', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        TrNumber:        row.trNumber,
+        Material:        row.material,
+        Quantity:        quantity,
+        DestinationType: destinationType,
+        DestinationBin:  destinationBin,
+        PalletOrBatch:   palletOrBatch,
+        Reference:       reference || undefined,
+      }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+
+    const msg = json.data?.message || 'LT04 confirmed';
+    resultEl.innerHTML = `
+      <div class="tf-success">
+        <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+        <div><div class="tf-success-title">TR Confirmed</div><div class="tf-success-to">${esc(msg)}</div></div>
+      </div>`;
+
+    setTimeout(() => {
+      closePickModal();
+      trReqLoad();
+    }, 1200);
+
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = 'Confirm LT04';
+  }
+}
 
 
 // ── Show result panel, hide tiles ─────────────────────────────────────────────
