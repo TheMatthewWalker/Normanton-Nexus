@@ -200,17 +200,22 @@ cron.schedule('10 6 * * *', () => {
     .catch(err => console.error('[cron] production schedule OTIF diff failed', err));
 });
 
-// Vendor Consignment Tracker GR sync — once a day at 06:20 (after the 05:45
-// turns-valclass job and 06:10 OTIF diff, clear of the 30-min refresh and
-// the warehouse sync at xx:55). Pulls fresh consignment goods-receipt lines
-// for every active vendor with a SapVendorNumber set — see
-// routes/consignment.js's runConsignmentSync and
-// sql/migrate_consignment_tracker.sql for the full feature writeup.
+// Vendor Consignment Tracker GR + stock sync — once a day at 06:20 (after
+// the 05:45 turns-valclass job and 06:10 OTIF diff, clear of the 30-min
+// refresh and the warehouse sync at xx:55, and deliberately NOT sharing the
+// 05:45 turns-valclass slot even though both jobs pull consignment stock —
+// keeping this on its own slot means a slow/failed turns-valclass run can't
+// hold up the balance dashboard's data, and vice versa). Pulls fresh
+// consignment goods-receipt lines for every active vendor with a
+// SapVendorNumber set, then refreshes dbo.ConsignmentStockSnapshot once —
+// see routes/consignment.js's runConsignmentSync and
+// sql/migrate_consignment_tracker.sql / migrate_consignment_stock_snapshot.sql
+// for the full feature writeup.
 cron.schedule('20 6 * * *', () => {
-  console.log('[cron] starting consignment GR sync');
+  console.log('[cron] starting consignment GR + stock sync');
   runConsignmentSync()
-    .then(results => console.log('[cron] consignment GR sync complete', results))
-    .catch(err => console.error('[cron] consignment GR sync failed', err));
+    .then(results => console.log('[cron] consignment GR + stock sync complete', results))
+    .catch(err => console.error('[cron] consignment GR + stock sync failed', err));
 });
 
 // Scheduled deployment checker — every minute. Looks for due, pending rows

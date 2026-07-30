@@ -91,6 +91,17 @@ export async function fetchSapConsignmentStock() {
   return body.data; // { [material]: qty }
 }
 
+// Pulls fresh stock from SAP and writes it into dbo.ConsignmentStockSnapshot
+// — the balance dashboard reads that cache (db.getConsignmentStockSnapshot)
+// rather than calling fetchSapConsignmentStock() itself, so a page load is
+// an instant SQL read instead of waiting on this potentially multi-minute
+// RFC call. Called from the daily cron (runConsignmentSync, below) and from
+// the manual POST /stock/refresh route.
+export async function refreshConsignmentStockSnapshot() {
+  const stockByMaterial = await fetchSapConsignmentStock();
+  return db.replaceConsignmentStockSnapshot(stockByMaterial);
+}
+
 // SAP dd.mm.yyyy -> DATETIME parse helper (GR dates come back from SapServer
 // in SAP GUI format, same convention as everywhere else this codebase parses
 // them from ZRFC_READ_TABLES output).
@@ -129,19 +140,25 @@ router.put('/vendors/:vendorId/config', requirePermission('LOG_MRP'), async (req
 // ── Balance dashboard ─────────────────────────────────────────────────────────
 //
 // Delivered/Declared come from SQL (db.getVendorDeliveredAndDeclaredTotals);
-// current stock is a fresh SAP pull every time this is called — see the SQL
-// migration header for why "undeclared" is computed as this balance rather
-// than pulled as a raw SAP consumption event. Also flags delivery lines
-// expiring within the vendor's ExpiryWarningDays window, when TrackExpiry is on.
+// current stock comes from the daily-refreshed dbo.ConsignmentStockSnapshot
+// cache (db.getConsignmentStockSnapshot), NOT a live SAP call — see
+// sql/migrate_consignment_stock_snapshot.sql for why: the underlying MKOL
+// scan is unfiltered and plant-wide, and calling it synchronously on every
+// dashboard open meant users waiting minutes for a page load. See the SQL
+// migration header (migrate_consignment_tracker.sql) for why "undeclared"
+// is computed as a balance rather than pulled as a raw SAP consumption
+// event. Also flags delivery lines expiring within the vendor's
+// ExpiryWarningDays window, when TrackExpiry is on.
 router.get('/vendors/:vendorId/balance', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const vendorId = req.params.vendorId;
     const vendor = await db.getConsignmentVendor(vendorId);
     if (!vendor) return res.status(404).json({ success: false, error: { message: 'Vendor not found.' } });
 
-    const [totals, stockByMaterial] = await Promise.all([
+    const [totals, stockByMaterial, stockSnapshot] = await Promise.all([
       db.getVendorDeliveredAndDeclaredTotals(vendorId),
-      fetchSapConsignmentStock(),
+      db.getConsignmentStockSnapshot(),
+      db.getConsignmentStockSnapshotMeta(),
     ]);
 
     const materials = totals.map(t => {
@@ -167,8 +184,25 @@ router.get('/vendors/:vendorId/balance', requirePermission('LOG_MRP'), async (re
       );
     }
 
-    res.json({ success: true, data: { vendor, materials, expiryWarnings } });
+    res.json({ success: true, data: { vendor, materials, expiryWarnings, stockSnapshot } });
   } catch (err) { fail(res, err); }
+});
+
+// Manual "Refresh Now" for the stock snapshot cache — the daily 06:20 cron
+// (see runConsignmentSync, below) covers the normal case; this is for
+// anyone who needs fresher numbers before tomorrow morning's run. Can take
+// several minutes (same unfiltered plant-wide MKOL scan) — the frontend
+// shows its own loading state and disables the button while this is in
+// flight, matching the turns-valclass "Refresh Now" pattern.
+router.post('/stock/refresh', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const result = await refreshConsignmentStockSnapshot();
+    await audit('SAP_OK', actor(req), `Manual consignment stock snapshot refresh: ${result.materialCount} materials`, req);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    await audit('SAP_ERROR', actor(req), 'Manual consignment stock snapshot refresh failed', req);
+    fail(res, err);
+  }
 });
 
 // ── Deliveries (GR lines) ────────────────────────────────────────────────────
@@ -380,6 +414,13 @@ router.post('/declarations/:declarationId/cancel', requirePermission('LOG_MRP'),
 // SapVendorNumber are skipped (not an error): Chemours/Fothergill start out
 // that way until someone fills it in via Vendor Master Data, same as the
 // per-request /sync route's own guard.
+//
+// Also refreshes dbo.ConsignmentStockSnapshot once, AFTER the per-vendor GR
+// loop finishes — deliberately sequential, not concurrent with the GR
+// pulls, so this doesn't compete with them for a SapServer connection-pool
+// worker slot. This is what lets the balance dashboard read stock from SQL
+// instead of making its own live SAP call (see the /stock/refresh route and
+// migrate_consignment_stock_snapshot.sql for the full rationale).
 export async function runConsignmentSync() {
   const vendors = await db.listConsignmentVendors();
   const results = [];
@@ -407,6 +448,14 @@ export async function runConsignmentSync() {
       console.error(`[consignment cron] GR sync failed for ${vendor.VendorName}:`, err.message);
       results.push({ vendor: vendor.VendorName, error: err.message });
     }
+  }
+
+  try {
+    const stockResult = await refreshConsignmentStockSnapshot();
+    results.push({ stockSnapshot: true, materialCount: stockResult.materialCount });
+  } catch (err) {
+    console.error('[consignment cron] stock snapshot refresh failed:', err.message);
+    results.push({ stockSnapshot: true, error: err.message });
   }
 
   return results;

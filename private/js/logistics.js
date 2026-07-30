@@ -7016,6 +7016,18 @@ async function ctShowVendorDashboard(vendor) {
   }
 }
 
+// dbo.ConsignmentStockSnapshot is refreshed once a day by the 06:20 cron
+// (see server.js/routes/consignment.js) — this renders that "as of"
+// timestamp plus a manual Refresh Stock Now action for anyone who needs
+// fresher numbers before tomorrow morning, same "Refresh Now" pattern as
+// the turns-valclass tile (runTurnsValClassManualRefresh).
+function ctFormatStockSnapshotStatus(stockSnapshot) {
+  const snap = stockSnapshot || {};
+  if (!snap.lastSnapshotAtUtc) return 'Stock has not been synced from SAP yet — click Refresh Stock Now.';
+  const when = new Date(snap.lastSnapshotAtUtc).toLocaleString('en-GB');
+  return `Stock as of ${when} (${snap.materialCount ?? 0} materials, refreshed daily at 06:20)`;
+}
+
 function ctRenderVendorDashboard(vendor, balance, declarations) {
   const matRows = balance.materials.map(m => `
     <tr class="admin-row">
@@ -7056,6 +7068,10 @@ function ctRenderVendorDashboard(vendor, balance, declarations) {
 
     <div class="ct-panel-title">Material Balance</div>
     <div class="ct-panel-sub">Undeclared = Delivered − current SAP consignment stock − already-Confirmed declarations.</div>
+    <div class="ct-panel-sub" id="ct-stock-status" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span>${esc(ctFormatStockSnapshotStatus(balance.stockSnapshot))}</span>
+      <button type="button" class="btn-secondary" id="ct-refresh-stock-btn" style="padding:2px 8px;font-size:10px">Refresh Stock Now</button>
+    </div>
     <div style="overflow-x:auto;margin-bottom:20px">
       <table class="pn-batch-table admin-table">
         <thead><tr><th>Material</th><th>Delivered</th><th>Current Stock</th><th>Declared</th><th>Undeclared</th><th></th></tr></thead>
@@ -7084,12 +7100,36 @@ function ctRenderVendorDashboard(vendor, balance, declarations) {
 
   document.getElementById('ct-back-btn').addEventListener('click', () => runConsignmentTracker());
   document.getElementById('ct-sync-btn').addEventListener('click', () => ctSyncVendor(vendor));
+  document.getElementById('ct-refresh-stock-btn').addEventListener('click', () => ctRefreshStockSnapshot(vendor));
   document.querySelectorAll('.ct-propose-btn').forEach(btn => {
     btn.addEventListener('click', () => ctOpenProposeModal(vendor, btn.dataset.material, Number(btn.dataset.undeclared)));
   });
   document.querySelectorAll('.ct-decl-row').forEach(tr => {
     tr.addEventListener('click', () => ctShowDeclaration(tr.dataset.id));
   });
+}
+
+// Manual refresh for dbo.ConsignmentStockSnapshot — POST /stock/refresh
+// makes SapServer do the same unfiltered plant-wide MKOL pull the 06:20
+// cron does, which can legitimately take several minutes (see
+// routes/consignment.js's fetchSapConsignmentStock timeout comment), so the
+// button stays disabled with a "this may take a while" label for the whole
+// wait rather than looking frozen. Reloads the whole dashboard afterward so
+// the balance figures and the "as of" timestamp both reflect the fresh pull.
+async function ctRefreshStockSnapshot(vendor) {
+  const btn = document.getElementById('ct-refresh-stock-btn');
+  const status = document.getElementById('ct-stock-status');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing… (can take several minutes)';
+
+  try {
+    await ctApi('/stock/refresh', { method: 'POST' });
+    await ctShowVendorDashboard(vendor);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Refresh Stock Now';
+    if (status) status.insertAdjacentHTML('beforeend', ` <span class="sap-error">Refresh failed: ${esc(err.message)}</span>`);
+  }
 }
 
 async function ctSyncVendor(vendor) {

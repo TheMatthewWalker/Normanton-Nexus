@@ -225,13 +225,69 @@ export async function updateConsignmentDelivery(deliveryId, body) {
     `);
 }
 
+// ── Stock snapshot cache (SAP MKOL SLABS, plant-wide) ────────────────────────
+//
+// Overwrite-only cache (TRUNCATE + re-insert every run), same convention as
+// dbo.TurnsValClassSnapshot — refreshed daily by the 06:20 cron (see
+// routes/consignment.js's runConsignmentSync/refreshConsignmentStockSnapshot)
+// plus an optional manual "Refresh Now". See
+// sql/migrate_consignment_stock_snapshot.sql for the full rationale: this
+// exists so the balance dashboard is an instant SQL read instead of a live
+// SAP call that could legitimately take minutes (the unfiltered plant-wide
+// MKOL scan — see BuildConsignmentStockRequest in SapServer).
+export async function replaceConsignmentStockSnapshot(stockByMaterial) {
+  const pool = await getPool();
+  const entries = Object.entries(stockByMaterial || {});
+  const syncedAt = new Date();
+
+  await pool.request().query('TRUNCATE TABLE dbo.ConsignmentStockSnapshot');
+  if (!entries.length) return { materialCount: 0, syncedAtUtc: syncedAt };
+
+  const batchSize = 600; // 3 params/row — comfortably under SQL Server's 2100-param limit
+  for (let i = 0; i < entries.length; i += batchSize) {
+    const batch = entries.slice(i, i + batchSize);
+    const request = pool.request();
+    const selectClauses = [];
+    batch.forEach(([material, qty], idx) => {
+      request.input(`m${idx}`, sql.NVarChar(18), material);
+      request.input(`q${idx}`, sql.Decimal(15, 3), Number(qty) || 0);
+      request.input(`t${idx}`, sql.DateTime, syncedAt);
+      selectClauses.push(`SELECT @m${idx} AS Material, @q${idx} AS Qty, @t${idx} AS SnapshotAtUtc`);
+    });
+    await request.query(`
+      INSERT INTO dbo.ConsignmentStockSnapshot (Material, Qty, SnapshotAtUtc)
+      ${selectClauses.join('\nUNION ALL\n')}
+    `);
+  }
+  return { materialCount: entries.length, syncedAtUtc: syncedAt };
+}
+
+export async function getConsignmentStockSnapshot() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query('SELECT Material, Qty FROM dbo.ConsignmentStockSnapshot');
+  const byMaterial = {};
+  for (const row of recordset) byMaterial[row.Material] = Number(row.Qty);
+  return byMaterial;
+}
+
+export async function getConsignmentStockSnapshotMeta() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT COUNT(*) AS MaterialCount, MAX(SnapshotAtUtc) AS LastSnapshotAtUtc
+    FROM dbo.ConsignmentStockSnapshot
+  `);
+  const row = recordset[0] || {};
+  return { materialCount: row.MaterialCount || 0, lastSnapshotAtUtc: row.LastSnapshotAtUtc || null };
+}
+
 // ── Balance calc ("undeclared consumption") ─────────────────────────────────
 //
 // See migrate_consignment_tracker.sql's header for why this is a balance
 // (Delivered - live SAP stock - already Declared) rather than a raw SAP
 // consumption-movement pull. Returns { [material]: { delivered, declared } }
-// — the caller (routes/consignment.js) combines this with a fresh SAP stock
-// pull to get `undeclared = delivered - stock - declared` per material.
+// — the caller (routes/consignment.js) combines this with the cached SAP
+// stock snapshot to get `undeclared = delivered - stock - declared` per
+// material.
 export async function getVendorDeliveredAndDeclaredTotals(vendorId) {
   const pool = await getPool();
   const { recordset } = await pool.request().input('vendorId', sql.Int, vendorId).query(`
