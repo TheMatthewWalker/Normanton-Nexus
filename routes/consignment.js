@@ -62,25 +62,26 @@ function fail(res, err, status = 500) {
 }
 
 // Queries SapServer's GET /api/consignment/gr — see ConsignmentHelpers.cs.
-// `materials` (this vendor's dbo.VendorMaterial list) is required — SapServer
-// now filters MSEG on MATNR IN opt as the primary/selective WHERE condition
-// rather than LIFNR (2026-07-30, per Matthew's direct SAP-reporting
-// experience: filtering on a known material list runs much faster than
-// filtering on vendor alone). LIFNR is still sent and still checked
-// server-side as a belt-and-suspenders filter, just no longer the thing
-// doing the heavy lifting.
-// Timeout bumped from 45s to 3min (2026-07-30): once BWART was actually
-// filtering correctly, a first-ever sync for a vendor with years of GR
-// history — no sinceDate cap is passed here or from the daily cron's
-// runConsignmentSync — legitimately exceeded 45s and the call was aborted
-// client-side before SAP finished. This is the same class of problem as the
-// balance dashboard's stock call (see fetchSapConsignmentStock below): a
-// narrower, plant+material+movement-type-filtered query than that unfiltered
-// plant-wide MKOL scan, so it doesn't need that same 10-minute allowance,
-// but 45s was too tight for real data even before the MATNR-filter speedup.
-async function fetchSapVendorGr(sapVendorNumber, materials, sinceDate) {
+// Filtering is LIFNR-based again (2026-07-30 rollback): SapServer briefly
+// filtered MSEG on MATNR IN opt as a performance experiment, but that (and
+// every other multi-value WHERE approach tried for BWART 101/102) never
+// actually returned data from ZRFC_READ_TABLES, so SapServer now makes two
+// separate single-value-EQ calls per sync (one per movement type, merged
+// server-side) and no longer uses a materials list at all. `materials` is
+// deliberately NOT sent/required here any more — see the reverted
+// `!materials.length` guards that used to gate both call sites below.
+// Timeout stays at 3min (2026-07-30): once BWART was actually filtering
+// correctly, a first-ever sync for a vendor with years of GR history — no
+// sinceDate cap is passed here or from the daily cron's runConsignmentSync —
+// legitimately exceeded 45s and the call was aborted client-side before SAP
+// finished. This is the same class of problem as the balance dashboard's
+// stock call (see fetchSapConsignmentStock below): a narrower,
+// plant+vendor+movement-type-filtered query than that unfiltered plant-wide
+// MKOL scan, so it doesn't need that same 10-minute allowance, but 45s was
+// too tight for real data.
+async function fetchSapVendorGr(sapVendorNumber, sinceDate) {
   const response = await axios.get(`${sapConfig.url}/api/consignment/gr`, {
-    params: { sapVendorNumber, materials: materials.join(','), sinceDate },
+    params: { sapVendorNumber, sinceDate },
     timeout: 3 * 60 * 1000, httpsAgent: sapAgent,
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
@@ -278,16 +279,7 @@ router.post('/vendors/:vendorId/sync', requirePermission('LOG_MRP'), async (req,
         `${vendor.VendorName} has no SAP vendor number set — add one on the Vendor Master Data page before syncing GR data from SAP.` } });
     }
 
-    // materials is now the primary/selective filter SapServer's WHERE clause
-    // uses (see fetchSapVendorGr's comment) — without at least one assigned
-    // material there's nothing to filter MSEG on.
-    const materials = (await db.listVendorMaterials(req.params.vendorId)).map(m => m.Material);
-    if (!materials.length) {
-      return res.status(422).json({ success: false, error: { message:
-        `${vendor.VendorName} has no materials assigned yet — add at least one on the Vendor Master Data page before syncing GR data from SAP.` } });
-    }
-
-    const grRows = await fetchSapVendorGr(vendor.SapVendorNumber, materials);
+    const grRows = await fetchSapVendorGr(vendor.SapVendorNumber);
     const mapped = grRows.map(r => ({
       material:         r.material,
       materialDocument: r.materialDocument,
@@ -456,12 +448,7 @@ export async function runConsignmentSync() {
       continue;
     }
     try {
-      const materials = (await db.listVendorMaterials(vendor.VendorId)).map(m => m.Material);
-      if (!materials.length) {
-        results.push({ vendor: vendor.VendorName, skipped: true, reason: 'no materials assigned' });
-        continue;
-      }
-      const grRows = await fetchSapVendorGr(vendor.SapVendorNumber, materials);
+      const grRows = await fetchSapVendorGr(vendor.SapVendorNumber);
       const mapped = grRows.map(r => ({
         material:         r.material,
         materialDocument: r.materialDocument,
