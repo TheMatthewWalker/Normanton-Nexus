@@ -253,18 +253,25 @@ ELSE
    MRP2.xlsx — see scripts/seed-vendor-materials.js). This just switches on
    TrackExpiry for Raaj (the only one whose workbook tracked expiry) and adds
    a default config row for the other two so the tile has something to show
-   immediately. Raaj's SAP vendor number (LIFNR 78200) is visible directly in
-   its own GR/Settlements data (the 'Supplier' column, constant across every
-   row) — pre-filled here rather than left for the user to look up. Chemours/
-   Fothergill's SAP vendor numbers aren't in their workbooks (no GR/Settlements
-   tabs), so those stay NULL — fill in via the existing Vendor Master Data
-   page (Logistics > Material Planning), same as any other vendor's
-   SapVendorNumber. GR/stock SAP sync for a vendor is blocked with a clear
-   error until SapVendorNumber is set, same pattern as PO creation. */
+   immediately. Raaj's SAP vendor number (LIFNR 200604, confirmed by the
+   user) is pre-filled here rather than left for the user to look up.
+   Chemours/Fothergill's SAP vendor numbers aren't in their workbooks (no
+   GR/Settlements tabs), so those stay NULL — fill in via the existing
+   Vendor Master Data page (Logistics > Material Planning), same as any
+   other vendor's SapVendorNumber. GR/stock SAP sync for a vendor is
+   blocked with a clear error until SapVendorNumber is set, same pattern
+   as PO creation.
+
+   NOTE: an earlier version of this migration pre-filled Raaj's number as
+   0000078200 (mis-derived from the GR sheet's 'Supplier' column, which
+   turned out not to be the LIFNR). The UPDATE below also corrects that
+   value if it was already applied, so re-running this script safely
+   fixes an already-migrated database as well as seeding a fresh one. */
 
 IF EXISTS (SELECT 1 FROM dbo.Vendor WHERE VendorName = N'Raaj')
 BEGIN
-  UPDATE dbo.Vendor SET SapVendorNumber = N'0000078200' WHERE VendorName = N'Raaj' AND SapVendorNumber IS NULL;
+  UPDATE dbo.Vendor SET SapVendorNumber = N'0000200604'
+    WHERE VendorName = N'Raaj' AND (SapVendorNumber IS NULL OR SapVendorNumber = N'0000078200');
 
   IF NOT EXISTS (SELECT 1 FROM dbo.ConsignmentVendorConfig cvc
                  JOIN dbo.Vendor v ON v.VendorId = cvc.VendorId WHERE v.VendorName = N'Raaj')
