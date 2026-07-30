@@ -62,10 +62,20 @@ function fail(res, err, status = 500) {
 }
 
 // Queries SapServer's GET /api/consignment/gr — see ConsignmentHelpers.cs.
+// Timeout bumped from 45s (2026-07-30): once the BWART=101/102 WHERE
+// condition was actually filtering correctly (see ConsignmentHelpers.cs's
+// value_list/IN-opt fix), a first-ever sync for a vendor with several
+// years of GR history — no sinceDate cap is passed here or from the daily
+// cron's runConsignmentSync — legitimately exceeded 45s and the call was
+// aborted client-side before SAP finished. This is the same class of
+// problem as the balance dashboard's stock call (see
+// fetchSapConsignmentStock below): a narrower, vendor+plant+movement-type
+// -filtered query than that unfiltered plant-wide MKOL scan, so it doesn't
+// need that same 10-minute allowance, but 45s was too tight for real data.
 async function fetchSapVendorGr(sapVendorNumber, sinceDate) {
   const response = await axios.get(`${sapConfig.url}/api/consignment/gr`, {
     params: { sapVendorNumber, sinceDate },
-    timeout: 45000, httpsAgent: sapAgent,
+    timeout: 3 * 60 * 1000, httpsAgent: sapAgent,
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;

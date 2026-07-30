@@ -56,7 +56,15 @@
    2. dbo.ConsignmentDelivery      — one row per GR line (SAP-synced via
                                       MSEG BWART=101/SOBKZ=K/LIFNR=vendor,
                                       or manually added/CSV-imported as a
-                                      fallback). RemainingQty is a running
+                                      fallback). Also includes BWART=102
+                                      reversal lines (a mistakenly-posted GR
+                                      undone in SAP) as their own row, signed
+                                      negative via MSEG-SHKZG, so a reversed
+                                      GR nets out of the vendor's delivered
+                                      total instead of inflating it. Quantity
+                                      and RemainingQty are intentionally NOT
+                                      constrained to be positive for this
+                                      reason. RemainingQty is a running
                                       balance, decremented as declaration
                                       lines against it are confirmed.
    3. dbo.ConsignmentDeclaration   — one header per declaration run
