@@ -75,9 +75,15 @@ async function fetchSapVendorGr(sapVendorNumber, sinceDate) {
 
 // Queries SapServer's GET /api/consignment/stock (MKOL SLABS, plant-wide,
 // same reused query already proven for MRP) — see ConsignmentController.cs.
+// Timeout matches performancesap.js's 10-minute client used for the
+// turns-valclass MRP sync, which calls this exact same
+// BuildConsignmentStockRequest RFC — that's the established precedent for
+// how slow this unfiltered plant-wide MKOL scan can legitimately be. The
+// balance dashboard's first 30s timeout was too tight and failed on a real
+// vendor lookup (2026-07-30).
 export async function fetchSapConsignmentStock() {
   const response = await axios.get(`${sapConfig.url}/api/consignment/stock`, {
-    timeout: 30000, httpsAgent: sapAgent,
+    timeout: 10 * 60 * 1000, httpsAgent: sapAgent,
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
