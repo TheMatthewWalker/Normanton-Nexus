@@ -132,6 +132,7 @@ function setupTiles() {
       if (fn === 'changeValuationClass')runChangeValuationClass();
       if (fn === 'stockHistoryForecast')runStockHistoryForecast();
       if (fn === 'vendorMasterData')    runVendorMasterData();
+      if (fn === 'consignmentTracker')  runConsignmentTracker();
       if (fn === 'orderSuggestions')    runOrderSuggestions();
       if (fn === 'inboundLog')         runInboundLog();
       if (fn === 'demandAdjustments')  runDemandAdjustments();
@@ -6867,6 +6868,484 @@ async function vmRemoveMaterial(vendor, vendorMaterialId, material) {
   } catch (err) {
     alert(err.message);
   }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// Vendor Consignment Tracker — replaces the manually-maintained per-vendor
+// Excel workbooks (Chemours/Fothergill(FCF)/Raaj) with a SQL-backed balance
+// dashboard + FEFO/FIFO declaration builder. See sql/migrate_consignment_
+// tracker.sql for the full design writeup — "undeclared consumption" is a
+// balance (Delivered - live SAP stock - already Declared), not a raw SAP
+// consumption pull; MRKO itself stays manual (run in SAP GUI, settlement
+// doc number pasted back), gated behind the VENDOR_CONSIGNMENT permission.
+// ══════════════════════════════════════════════════════════════════════════
+
+let ctVendors = [];
+let ctCurrentVendor = null;
+
+async function runConsignmentTracker() {
+  showResultPanel('Vendor Consignment Tracker', 'Delivered / current stock / declared balance per vendor — click a vendor to build a declaration');
+  try {
+    ctVendors = await ctApi('/vendors');
+    ctRenderVendorList();
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function ctApi(path, opts) {
+  const res = await fetch(`/api/consignment${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error?.message || 'Request failed');
+  return json.data;
+}
+
+function ctRenderVendorList() {
+  const rows = ctVendors.map(v => `
+    <tr class="admin-row ct-vendor-row" style="cursor:pointer" data-id="${esc(String(v.VendorId))}">
+      <td><strong>${esc(v.VendorName)}</strong></td>
+      <td>${v.SapVendorNumber ? esc(v.SapVendorNumber) : '<span class="sap-error" title="Needed before GR can be synced from SAP">Not set</span>'}</td>
+      <td>${v.TrackExpiry ? `Yes (${v.ExpiryWarningDays ?? '—'}d warning)` : 'No'}</td>
+      <td>${esc(v.DefaultAllocationMethod)}</td>
+      <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary ct-edit-vendor" data-id="${esc(String(v.VendorId))}" style="padding:3px 10px;font-size:11px">Config</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    ${ctVendors.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Vendor</th><th>SAP Vendor No.</th><th>Expiry Tracking</th><th>Default Method</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No consignment vendors configured yet.</div>'}
+  `;
+
+  document.querySelectorAll('.ct-vendor-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const v = ctVendors.find(x => String(x.VendorId) === tr.dataset.id);
+      if (v) ctShowVendorDashboard(v);
+    });
+  });
+  document.querySelectorAll('.ct-edit-vendor').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const v = ctVendors.find(x => String(x.VendorId) === btn.dataset.id);
+      if (v) ctOpenConfigModal(v);
+    });
+  });
+}
+
+function ctOpenConfigModal(vendor) {
+  openModal(`<div class="ps-modal" style="max-width:440px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${esc(vendor.VendorName)} — Consignment Config</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label"><input type="checkbox" id="ct-cfg-track-expiry" ${vendor.TrackExpiry ? 'checked' : ''}> Track Expiry</label>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Warning Window (days)</label>
+          <input class="tf-input" type="number" id="ct-cfg-warning-days" value="${vendor.ExpiryWarningDays ?? ''}">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Default Allocation Method</label>
+          <select class="tf-input" id="ct-cfg-method">
+            <option value="FEFO" ${vendor.DefaultAllocationMethod === 'FEFO' ? 'selected' : ''}>FEFO (First-Expire-First-Out)</option>
+            <option value="FIFO" ${vendor.DefaultAllocationMethod === 'FIFO' ? 'selected' : ''}>FIFO (First-In-First-Out)</option>
+            <option value="MANUAL" ${vendor.DefaultAllocationMethod === 'MANUAL' ? 'selected' : ''}>Manual selection only</option>
+          </select>
+        </div>
+      </div>
+      <div class="tf-field tf-field--wide">
+        <label class="tf-label">Notes</label>
+        <textarea class="tf-input" id="ct-cfg-notes" rows="2">${esc(vendor.Notes || '')}</textarea>
+      </div>
+      <div class="tf-actions">
+        <div id="ct-cfg-result"></div>
+        <button type="button" class="btn-submit" id="ct-cfg-save-btn">Save</button>
+      </div>
+    </div>
+  </div>`);
+
+  document.getElementById('ct-cfg-save-btn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('ct-cfg-result');
+    try {
+      await ctApi(`/vendors/${vendor.VendorId}/config`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          trackExpiry: document.getElementById('ct-cfg-track-expiry').checked,
+          expiryWarningDays: document.getElementById('ct-cfg-warning-days').value || null,
+          defaultAllocationMethod: document.getElementById('ct-cfg-method').value,
+          notes: document.getElementById('ct-cfg-notes').value,
+        }),
+      });
+      closePickModal();
+      runConsignmentTracker();
+    } catch (err) {
+      resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    }
+  });
+}
+
+// ── Vendor dashboard: balance per material + expiry warnings + history ──────
+
+async function ctShowVendorDashboard(vendor) {
+  ctCurrentVendor = vendor;
+  document.getElementById('result-title').textContent = `Consignment Tracker — ${vendor.VendorName}`;
+  document.getElementById('result-hint').textContent = 'Delivered / current SAP stock / declared balance, per material';
+  document.getElementById('result-body').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading balance…</div>';
+
+  try {
+    const [balance, declarations] = await Promise.all([
+      ctApi(`/vendors/${vendor.VendorId}/balance`),
+      ctApi(`/vendors/${vendor.VendorId}/declarations`),
+    ]);
+    ctRenderVendorDashboard(vendor, balance, declarations);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function ctRenderVendorDashboard(vendor, balance, declarations) {
+  const matRows = balance.materials.map(m => `
+    <tr class="admin-row">
+      <td><strong>${esc(m.material)}</strong></td>
+      <td style="text-align:right">${m.delivered.toLocaleString()}</td>
+      <td style="text-align:right">${m.currentStock.toLocaleString()}</td>
+      <td style="text-align:right">${m.declared.toLocaleString()}</td>
+      <td style="text-align:right"><strong>${m.undeclared.toLocaleString()}</strong></td>
+      <td style="text-align:right">
+        <button class="btn-secondary ct-propose-btn" data-material="${esc(m.material)}" data-undeclared="${m.undeclared}" style="padding:3px 10px;font-size:11px" ${m.undeclared > 0 ? '' : 'disabled'}>Build Declaration</button>
+      </td>
+    </tr>`).join('');
+
+  const warningRows = (balance.expiryWarnings || []).map(d => `
+    <tr class="admin-row ct-row--negative">
+      <td>${esc(d.Material)}</td>
+      <td>${esc(d.InvoiceNumber || '—')}</td>
+      <td style="text-align:right">${Number(d.RemainingQty).toLocaleString()}</td>
+      <td>${d.ExpiryDate ? new Date(d.ExpiryDate).toLocaleDateString('en-GB') : '—'}</td>
+    </tr>`).join('');
+
+  const declRows = declarations.map(d => `
+    <tr class="admin-row ct-decl-row" style="cursor:pointer" data-id="${d.DeclarationId}">
+      <td>#${d.DeclarationId}</td>
+      <td>${new Date(d.CreatedAtUtc).toLocaleDateString('en-GB')}</td>
+      <td>${esc(d.AllocationMethod)}</td>
+      <td style="text-align:right">${Number(d.TotalQty).toLocaleString()}</td>
+      <td><span class="tile-badge ${d.Status === 'Confirmed' ? 'tile-badge--live' : ''}">${esc(d.Status)}</span></td>
+      <td>${d.SettlementDocumentNumber ? esc(d.SettlementDocumentNumber) : '—'}</td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-actions" style="margin-bottom:14px">
+      <button type="button" class="btn-secondary" id="ct-back-btn">&larr; All Vendors</button>
+      <button type="button" class="btn-secondary" id="ct-sync-btn">Sync GR from SAP</button>
+      <div id="ct-sync-result" style="margin-left:8px"></div>
+    </div>
+
+    <div class="ct-panel-title">Material Balance</div>
+    <div class="ct-panel-sub">Undeclared = Delivered − current SAP consignment stock − already-Confirmed declarations.</div>
+    <div style="overflow-x:auto;margin-bottom:20px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Delivered</th><th>Current Stock</th><th>Declared</th><th>Undeclared</th><th></th></tr></thead>
+        <tbody>${matRows || '<tr><td colspan="6" class="sap-empty">No deliveries recorded for this vendor yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    ${vendor.TrackExpiry ? `
+    <div class="ct-panel-title">Expiry Warnings</div>
+    <div class="ct-panel-sub">Delivery lines with remaining balance expiring within the configured warning window.</div>
+    <div style="overflow-x:auto;margin-bottom:20px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Invoice/Ref</th><th>Remaining Qty</th><th>Expiry</th></tr></thead>
+        <tbody>${warningRows || '<tr><td colspan="4" class="sap-empty">Nothing expiring soon.</td></tr>'}</tbody>
+      </table>
+    </div>` : ''}
+
+    <div class="ct-panel-title">Declaration History</div>
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>#</th><th>Created</th><th>Method</th><th>Total Qty</th><th>Status</th><th>Settlement Doc</th></tr></thead>
+        <tbody>${declRows || '<tr><td colspan="6" class="sap-empty">No declarations yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+  `;
+
+  document.getElementById('ct-back-btn').addEventListener('click', () => runConsignmentTracker());
+  document.getElementById('ct-sync-btn').addEventListener('click', () => ctSyncVendor(vendor));
+  document.querySelectorAll('.ct-propose-btn').forEach(btn => {
+    btn.addEventListener('click', () => ctOpenProposeModal(vendor, btn.dataset.material, Number(btn.dataset.undeclared)));
+  });
+  document.querySelectorAll('.ct-decl-row').forEach(tr => {
+    tr.addEventListener('click', () => ctShowDeclaration(tr.dataset.id));
+  });
+}
+
+async function ctSyncVendor(vendor) {
+  const btn = document.getElementById('ct-sync-btn');
+  const resultEl = document.getElementById('ct-sync-result');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  resultEl.innerHTML = '';
+  try {
+    const data = await ctApi(`/vendors/${vendor.VendorId}/sync`, { method: 'POST' });
+    resultEl.innerHTML = `<span class="toolbar-hint">Pulled ${data.pulled} GR line(s) from SAP, ${data.inserted} new.</span>`;
+    ctShowVendorDashboard(vendor);
+  } catch (err) {
+    resultEl.innerHTML = `<span class="sap-error tf-inline-error">✕ ${esc(err.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync GR from SAP';
+  }
+}
+
+// ── Build declaration: propose (FEFO/FIFO/manual) -> edit -> save draft ────
+
+function ctOpenProposeModal(vendor, material, undeclared) {
+  const method = vendor.DefaultAllocationMethod || 'FIFO';
+  openModal(`<div class="ps-modal" style="max-width:420px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Build Declaration — ${esc(material)}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint" style="margin-bottom:10px">Undeclared consumption: <strong>${undeclared.toLocaleString()}</strong></div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Quantity to Declare</label>
+          <input class="tf-input" type="number" step="any" id="ct-propose-qty" value="${undeclared}">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Method</label>
+          <select class="tf-input" id="ct-propose-method">
+            <option value="FEFO" ${method === 'FEFO' ? 'selected' : ''}>FEFO</option>
+            <option value="FIFO" ${method === 'FIFO' ? 'selected' : ''}>FIFO</option>
+            <option value="MANUAL" ${method === 'MANUAL' ? 'selected' : ''}>Manual</option>
+          </select>
+        </div>
+      </div>
+      <div class="tf-actions">
+        <div id="ct-propose-result"></div>
+        <button type="button" class="btn-submit" id="ct-propose-btn">Propose Allocation</button>
+      </div>
+    </div>
+  </div>`);
+
+  document.getElementById('ct-propose-btn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('ct-propose-result');
+    const qty = Number(document.getElementById('ct-propose-qty').value);
+    const selMethod = document.getElementById('ct-propose-method').value;
+    if (!qty || qty <= 0) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter a valid quantity.</div>`; return; }
+    try {
+      const proposal = await ctApi(`/vendors/${vendor.VendorId}/declarations/propose`, {
+        method: 'POST',
+        body: JSON.stringify({ material, qtyToDeclare: qty, method: selMethod }),
+      });
+      closePickModal();
+      ctShowProposalEditor(vendor, material, selMethod, proposal);
+    } catch (err) {
+      resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    }
+  });
+}
+
+// Editable matrix preview — the FEFO/FIFO proposal (or, for MANUAL, every
+// open delivery line unallocated) with per-line qty editable before saving
+// as a Draft declaration. Mirrors exactly what Raaj's old Summary tab
+// recorded after the fact via MRKO.
+let ctEditorLines = [];
+
+function ctShowProposalEditor(vendor, material, method, proposal) {
+  ctEditorLines = (proposal.lines && proposal.lines.length ? proposal.lines : proposal.openLines.map(l => ({
+    deliveryId: l.DeliveryId, material: l.Material, qtyAllocated: 0,
+    invoiceNumber: l.InvoiceNumber, expiryDate: l.ExpiryDate, documentDate: l.DocumentDate,
+    remainingBeforeAllocation: Number(l.RemainingQty),
+  }))).map(l => ({ ...l }));
+
+  document.getElementById('result-title').textContent = `Declaration Preview — ${material}`;
+  document.getElementById('result-hint').textContent = `${method} allocation — adjust quantities before saving as a draft`;
+  ctRenderProposalEditor(vendor, method, proposal.unallocatedQty || 0);
+}
+
+function ctRenderProposalEditor(vendor, method, unallocatedQty) {
+  const rows = ctEditorLines.map((l, i) => `
+    <tr class="admin-row">
+      <td>${esc(l.invoiceNumber || '—')}</td>
+      <td>${l.expiryDate ? new Date(l.expiryDate).toLocaleDateString('en-GB') : '—'}</td>
+      <td>${l.documentDate ? new Date(l.documentDate).toLocaleDateString('en-GB') : '—'}</td>
+      <td style="text-align:right">${(l.remainingBeforeAllocation ?? '').toLocaleString?.() ?? l.remainingBeforeAllocation}</td>
+      <td style="text-align:right"><input class="tf-input ct-line-qty" data-idx="${i}" type="number" step="any" style="width:100px;text-align:right" value="${l.qtyAllocated}"></td>
+      <td><button class="btn-secondary ct-line-remove" data-idx="${i}" style="padding:2px 8px;font-size:11px;color:var(--error,#DC2626)">×</button></td>
+    </tr>`).join('');
+
+  const total = ctEditorLines.reduce((s, l) => s + Number(l.qtyAllocated || 0), 0);
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-actions" style="margin-bottom:14px">
+      <button type="button" class="btn-secondary" id="ct-editor-back-btn">&larr; Back to Dashboard</button>
+    </div>
+    ${unallocatedQty > 0 ? `<div class="ct-disc-warn" style="margin-bottom:12px">${unallocatedQty.toLocaleString()} could not be auto-allocated — not enough open delivery balance found. Add lines manually or reduce the quantity.</div>` : ''}
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Invoice/Ref</th><th>Expiry</th><th>Delivery Date</th><th>Open Balance</th><th>Qty to Declare</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="sap-empty">No lines — nothing to declare.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="tf-actions" style="margin-top:16px">
+      <div class="toolbar-hint">Total: <strong>${total.toLocaleString()}</strong></div>
+      <div id="ct-editor-result"></div>
+      <button type="button" class="btn-submit" id="ct-editor-save-btn">Save as Draft</button>
+    </div>
+  `;
+
+  document.getElementById('ct-editor-back-btn').addEventListener('click', () => ctShowVendorDashboard(vendor));
+  document.querySelectorAll('.ct-line-qty').forEach(input => {
+    input.addEventListener('change', () => {
+      ctEditorLines[Number(input.dataset.idx)].qtyAllocated = Number(input.value) || 0;
+      ctRenderProposalEditor(vendor, method, unallocatedQty);
+    });
+  });
+  document.querySelectorAll('.ct-line-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      ctEditorLines.splice(Number(btn.dataset.idx), 1);
+      ctRenderProposalEditor(vendor, method, unallocatedQty);
+    });
+  });
+  document.getElementById('ct-editor-save-btn').addEventListener('click', () => ctSaveDraftDeclaration(vendor, method));
+}
+
+async function ctSaveDraftDeclaration(vendor, method) {
+  const resultEl = document.getElementById('ct-editor-result');
+  const lines = ctEditorLines.filter(l => Number(l.qtyAllocated) > 0)
+    .map(l => ({ deliveryId: l.deliveryId, material: l.material, qtyAllocated: l.qtyAllocated }));
+  if (!lines.length) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter a quantity on at least one line.</div>`; return; }
+
+  try {
+    const declaration = await ctApi(`/vendors/${vendor.VendorId}/declarations`, {
+      method: 'POST',
+      body: JSON.stringify({ allocationMethod: method, lines }),
+    });
+    ctShowDeclaration(declaration.DeclarationId, vendor);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Declaration detail: view, print, confirm (elevated), cancel ─────────────
+
+async function ctShowDeclaration(declarationId, vendor) {
+  document.getElementById('result-title').textContent = `Declaration #${declarationId}`;
+  document.getElementById('result-hint').textContent = 'Review, print, and confirm once MRKO has been run in SAP';
+  document.getElementById('result-body').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+
+  try {
+    const declaration = await ctApi(`/declarations/${declarationId}`);
+    ctRenderDeclaration(declaration, vendor);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function ctRenderDeclaration(d, vendor) {
+  const canConfirm = sessionRole === 'superadmin' || userPermissions.includes('VENDOR_CONSIGNMENT');
+
+  const rows = d.lines.map(l => `
+    <tr class="admin-row">
+      <td>${esc(l.Material)}</td>
+      <td>${esc(l.InvoiceNumber || '—')}</td>
+      <td>${esc(l.MaterialDocument || '—')}</td>
+      <td>${l.ExpiryDate ? new Date(l.ExpiryDate).toLocaleDateString('en-GB') : '—'}</td>
+      <td style="text-align:right">${Number(l.QtyAllocated).toLocaleString()}</td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-actions" style="margin-bottom:14px">
+      <button type="button" class="btn-secondary" id="ct-decl-back-btn">&larr; Back</button>
+      <button type="button" class="btn-secondary" id="ct-decl-print-btn">Print Declaration (PDF)</button>
+      ${d.Status === 'Draft' ? `<button type="button" class="btn-secondary" id="ct-decl-cancel-btn" style="color:var(--error,#DC2626)">Cancel Draft</button>` : ''}
+    </div>
+
+    <div class="tf-row" style="margin-bottom:14px">
+      <div class="tf-field"><label class="tf-label">Vendor</label><div>${esc(d.VendorName)}</div></div>
+      <div class="tf-field"><label class="tf-label">Status</label><div><span class="tile-badge ${d.Status === 'Confirmed' ? 'tile-badge--live' : ''}">${esc(d.Status)}</span></div></div>
+      <div class="tf-field"><label class="tf-label">Method</label><div>${esc(d.AllocationMethod)}</div></div>
+      <div class="tf-field"><label class="tf-label">Total Qty</label><div>${Number(d.TotalQty).toLocaleString()}</div></div>
+    </div>
+
+    <div style="overflow-x:auto;margin-bottom:16px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Invoice/Ref</th><th>GR Doc</th><th>Expiry</th><th>Qty Declared</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+
+    ${d.Status === 'Draft' ? `
+      <div class="ct-panel-title">Confirm Declaration</div>
+      <div class="ct-panel-sub">Run MRKO in SAP GUI for this quantity first, then paste the resulting settlement document number below.</div>
+      ${canConfirm ? `
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Settlement Document Number</label>
+            <input class="tf-input" type="text" id="ct-decl-settlement-doc" placeholder="e.g. 1700003535">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Reconciled Qty <span class="tf-optional">(optional — what MRKO actually settled)</span></label>
+            <input class="tf-input" type="number" step="any" id="ct-decl-reconciled-qty">
+          </div>
+        </div>
+        <div class="tf-actions">
+          <div id="ct-decl-confirm-result"></div>
+          <button type="button" class="btn-submit" id="ct-decl-confirm-btn">Confirm Declaration</button>
+        </div>
+      ` : `<div class="toolbar-hint">You don't have permission to confirm a declaration — ask a supervisor with Vendor Consignment Settlement access.</div>`}
+    ` : d.SettlementDocumentNumber ? `
+      <div class="toolbar-hint">Confirmed ${new Date(d.ConfirmedAtUtc).toLocaleDateString('en-GB')} by ${esc(d.ConfirmedByUsername || '—')} — settlement document ${esc(d.SettlementDocumentNumber)}${d.SettlementReconciledQty != null ? `, reconciled qty ${Number(d.SettlementReconciledQty).toLocaleString()}` : ''}</div>
+    ` : ''}
+  `;
+
+  document.getElementById('ct-decl-back-btn').addEventListener('click', () => vendor ? ctShowVendorDashboard(vendor) : runConsignmentTracker());
+  document.getElementById('ct-decl-print-btn').addEventListener('click', () => window.open(`/api/consignment/declarations/${d.DeclarationId}/pdf`, '_blank'));
+
+  const cancelBtn = document.getElementById('ct-decl-cancel-btn');
+  if (cancelBtn) cancelBtn.addEventListener('click', async () => {
+    if (!confirm('Cancel this draft declaration?')) return;
+    try {
+      await ctApi(`/declarations/${d.DeclarationId}/cancel`, { method: 'POST' });
+      vendor ? ctShowVendorDashboard(vendor) : runConsignmentTracker();
+    } catch (err) { alert(err.message); }
+  });
+
+  const confirmBtn = document.getElementById('ct-decl-confirm-btn');
+  if (confirmBtn) confirmBtn.addEventListener('click', async () => {
+    const resultEl = document.getElementById('ct-decl-confirm-result');
+    const settlementDocumentNumber = document.getElementById('ct-decl-settlement-doc').value.trim();
+    const reconciledQtyVal = document.getElementById('ct-decl-reconciled-qty').value;
+    if (!settlementDocumentNumber) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter the SAP settlement document number.</div>`; return; }
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Confirming…';
+    try {
+      await ctApi(`/declarations/${d.DeclarationId}/confirm`, {
+        method: 'POST',
+        body: JSON.stringify({ settlementDocumentNumber, settlementReconciledQty: reconciledQtyVal ? Number(reconciledQtyVal) : null }),
+      });
+      ctShowDeclaration(d.DeclarationId, vendor);
+    } catch (err) {
+      resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Confirm Declaration';
+    }
+  });
 }
 
 

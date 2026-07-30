@@ -981,3 +981,23 @@ body::before {
   .lg-post-grid { grid-template-columns: 1fr; }
   .lg-actions { flex-wrap: wrap; }
 }
+
+/* ── Vendor Consignment Tracker (ct-) ───────────────────────────────────── */
+.ct-panel-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.ct-panel-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  margin-bottom: 14px;
+}
+.ct-disc-warn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--error);
+  background: rgba(220,38,38,0.06);
+  border: 1px solid rgba(220,38,38,0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.ct-disc-warn ul { margin: 6px 0 0 18px; padding: 0; }
+.ct-row--negative td { color: var(--error); font-weight: 700; }

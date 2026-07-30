@@ -58,6 +58,7 @@ import financeRoutes           from './routes/finance.js';
 import notificationsRoutes     from './routes/notifications.js';
 import performanceRoutes       from './routes/performance.js';
 import stagingRoutes           from './routes/staging.js';
+import consignmentRoutes, { runConsignmentSync } from './routes/consignment.js';
 import productionScheduleRoutes, { runProductionScheduleOtifDiff } from './routes/productionschedule.js';
 import salesRoutes              from './routes/sales.js';
 import packagingRoutes          from './routes/packaging.js';
@@ -199,6 +200,19 @@ cron.schedule('10 6 * * *', () => {
     .catch(err => console.error('[cron] production schedule OTIF diff failed', err));
 });
 
+// Vendor Consignment Tracker GR sync — once a day at 06:20 (after the 05:45
+// turns-valclass job and 06:10 OTIF diff, clear of the 30-min refresh and
+// the warehouse sync at xx:55). Pulls fresh consignment goods-receipt lines
+// for every active vendor with a SapVendorNumber set — see
+// routes/consignment.js's runConsignmentSync and
+// sql/migrate_consignment_tracker.sql for the full feature writeup.
+cron.schedule('20 6 * * *', () => {
+  console.log('[cron] starting consignment GR sync');
+  runConsignmentSync()
+    .then(results => console.log('[cron] consignment GR sync complete', results))
+    .catch(err => console.error('[cron] consignment GR sync failed', err));
+});
+
 // Scheduled deployment checker — every minute. Looks for due, pending rows
 // in ScheduledDeployments and hands each one off to a detached
 // deploy-runner.cjs process (git pull + Windows Service restart). Detached
@@ -311,6 +325,7 @@ app.use('/api/finance',       requireLogin,   financeRoutes);
 app.use('/api/notifications', requireLogin,   notificationsRoutes);
 app.use('/api/performance', requireLogin, performanceRoutes);
 app.use('/api/staging', requireLogin, stagingRoutes);
+app.use('/api/consignment', requireLogin, consignmentRoutes);
 app.use('/api/production-schedule', requireLogin, productionScheduleRoutes);
 app.use('/api/sales',               requireLogin, salesRoutes);
 app.use('/api/packaging',           requireLogin, packagingRoutes);
