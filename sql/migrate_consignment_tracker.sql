@@ -266,17 +266,26 @@ ELSE
    0000078200 (mis-derived from the GR sheet's 'Supplier' column, which
    turned out not to be the LIFNR). The UPDATE below also corrects that
    value if it was already applied, so re-running this script safely
-   fixes an already-migrated database as well as seeding a fresh one. */
+   fixes an already-migrated database as well as seeding a fresh one.
 
-IF EXISTS (SELECT 1 FROM dbo.Vendor WHERE VendorName = N'Raaj')
+   NOTE 2: the vendor's real dbo.Vendor.VendorName is "Raaj Ratna" — an
+   earlier version of this migration matched on just "Raaj" (the MRP2.xlsx
+   tab name used when the vendor was originally seeded — see
+   scripts/seed-vendor-materials.js), which never matched the real row, so
+   this whole block silently no-opped and Raaj Ratna never got a
+   ConsignmentVendorConfig row (confirmed missing from the tracker's vendor
+   list, 2026-07-30). Fixed to match the real name below — re-running this
+   script now picks it up. */
+
+IF EXISTS (SELECT 1 FROM dbo.Vendor WHERE VendorName = N'Raaj Ratna')
 BEGIN
   UPDATE dbo.Vendor SET SapVendorNumber = N'0000200604'
-    WHERE VendorName = N'Raaj' AND (SapVendorNumber IS NULL OR SapVendorNumber = N'0000078200');
+    WHERE VendorName = N'Raaj Ratna' AND (SapVendorNumber IS NULL OR SapVendorNumber = N'0000078200');
 
   IF NOT EXISTS (SELECT 1 FROM dbo.ConsignmentVendorConfig cvc
-                 JOIN dbo.Vendor v ON v.VendorId = cvc.VendorId WHERE v.VendorName = N'Raaj')
+                 JOIN dbo.Vendor v ON v.VendorId = cvc.VendorId WHERE v.VendorName = N'Raaj Ratna')
     INSERT INTO dbo.ConsignmentVendorConfig (VendorId, TrackExpiry, ExpiryWarningDays, DefaultAllocationMethod)
-    SELECT VendorId, 1, 30, N'FEFO' FROM dbo.Vendor WHERE VendorName = N'Raaj';
+    SELECT VendorId, 1, 30, N'FEFO' FROM dbo.Vendor WHERE VendorName = N'Raaj Ratna';
 END
 
 IF EXISTS (SELECT 1 FROM dbo.Vendor WHERE VendorName = N'Chemours')
