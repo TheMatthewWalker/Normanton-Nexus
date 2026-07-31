@@ -208,10 +208,25 @@ async function fetchMixingHeader(recordID) {
   return { rec, operators: opsR.recordset, tubs: tubsR.recordset };
 }
 
-async function fetchMixingTicketsData(recordID) {
-  const { rec, operators, tubs } = await fetchMixingHeader(recordID);
+// tubSeq (optional): when given, reprint just that one tub's label instead
+// of the whole batch's tub run — the reprint UI previously always sent every
+// tub to the printer with no way to pick just the one that actually needs
+// reprinting (e.g. a single label that jammed/smudged), which either wasted
+// labels on the rest of the batch or forced someone to manually intercept
+// the ones they didn't want. Matches on prod.MixingTubs.TubSeq (the number
+// shown as "Tub" in the tubs modal/table and embedded in the printed
+// batchRef's "-T{n}" suffix), not TubID.
+async function fetchMixingTicketsData(recordID, tubSeq = null) {
+  const { rec, operators, tubs: allTubs } = await fetchMixingHeader(recordID);
   const baseBatchRef = rec.BatchRef || `MX${String(recordID).padStart(8, '0')}`;
   const isComplete   = rec.Status === 4;
+
+  let tubs = allTubs;
+  if (tubSeq != null) {
+    tubs = allTubs.filter(t => t.TubSeq === tubSeq);
+    if (!tubs.length)
+      throw Object.assign(new Error(`Tub ${tubSeq} not found on this mixing batch.`), { statusCode: 404 });
+  }
 
   const shared = {
     processCode:     'MX',
@@ -231,7 +246,8 @@ async function fetchMixingTicketsData(recordID) {
   if (!tubs.length) {
     // No tub rows yet (legacy record, or printed before any tub was
     // weighed) — one ticket for the whole batch so printing never
-    // silently produces nothing.
+    // silently produces nothing. (Only reachable when tubSeq wasn't
+    // specified — the filtered-empty case above already threw.)
     return [{
       ...shared,
       batchRef:      baseBatchRef,
@@ -739,17 +755,20 @@ router.patch('/printers/default', async (req, res) => {
 });
 
 // Browser preview (opens in new tab, auto-prints via window.print())
+// ?tub=<TubSeq> (MX only) — reprint just that one tub instead of the whole
+// batch's tub run. See fetchMixingTicketsData's header comment.
 router.get('/process/:processCode/:recordID', async (req, res) => {
   const code     = req.params.processCode.toUpperCase();
   const recordID = Number(req.params.recordID);
   if (!SUPPORTED.has(code)) return res.status(400).json({ error: `Label not supported for ${code}.` });
   if (!recordID)            return res.status(400).json({ error: 'Invalid record ID.' });
+  const tubSeq = req.query.tub != null && req.query.tub !== '' ? Number(req.query.tub) : null;
   try {
     // MX prints one ticket per tub (each with its own weight/SAP material
     // document) instead of one combined-batch ticket — see
     // fetchMixingTicketsData's header comment.
     const html = code === 'MX'
-      ? await buildLabelsHTML(await fetchMixingTicketsData(recordID))
+      ? await buildLabelsHTML(await fetchMixingTicketsData(recordID, tubSeq))
       : await buildHTML(await fetchLabelData(code, recordID));
     res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.send(html);
@@ -759,13 +778,15 @@ router.get('/process/:processCode/:recordID', async (req, res) => {
 });
 
 // Server-side print — generates PDF and sends directly to network printer
+// body.tub (MX only) — same single-tub reprint as the preview route above.
 router.post('/process/:processCode/:recordID/print', async (req, res) => {
   const code     = req.params.processCode.toUpperCase();
   const recordID = Number(req.params.recordID);
   if (!SUPPORTED.has(code)) return res.status(400).json({ error: `Label not supported for ${code}.` });
   if (!recordID)            return res.status(400).json({ error: 'Invalid record ID.' });
 
-  const { printerId } = req.body;
+  const { printerId, tub } = req.body;
+  const tubSeq = tub != null && tub !== '' ? Number(tub) : null;
   const printer = printerId
     ? printersConfig.find(p => p.id === printerId)
     : printersConfig[0];
@@ -777,9 +798,10 @@ router.post('/process/:processCode/:recordID/print', async (req, res) => {
 
   try {
     // Same MX fan-out as the preview route above — one PDF page (one
-    // tcpPrint job) per tub rather than a single combined-batch label.
+    // tcpPrint job) per tub rather than a single combined-batch label,
+    // unless tubSeq narrows it down to just one.
     const pdf = code === 'MX'
-      ? await buildLabelsPDF(await fetchMixingTicketsData(recordID), printer.paperSize)
+      ? await buildLabelsPDF(await fetchMixingTicketsData(recordID, tubSeq), printer.paperSize)
       : await buildPDF(await fetchLabelData(code, recordID), printer.paperSize);
     await tcpPrint(pdf, printer.host, printer.port ?? 9100);
     res.json({ success: true, message: `Sent to ${printer.name || printer.host}` });

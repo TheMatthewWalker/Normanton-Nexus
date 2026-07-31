@@ -242,7 +242,10 @@ function backToTiles() {
 // ── Server-side label printing ────────────────────────────────────────────────
 let _printerCache = null;  // { printers: [...], userDefault: string|null }
 
-async function labelPrint(processCode, recordID, btnEl) {
+// tubSeq (optional, MX only): reprint just that one tub's label instead of
+// every tub on the batch — passed straight through to POST .../print's
+// body.tub, see routes/labels.js.
+async function labelPrint(processCode, recordID, btnEl, tubSeq = null) {
   const origText = btnEl.textContent;
   btnEl.disabled = true;
   btnEl.textContent = 'Loading…';
@@ -321,7 +324,7 @@ async function labelPrint(processCode, recordID, btnEl) {
     btnEl.textContent = 'Sending…';
     const res = await fetch(`/api/labels/process/${processCode}/${recordID}/print`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ printerId }),
+      body: JSON.stringify({ printerId, ...(tubSeq != null ? { tub: tubSeq } : {}) }),
     }).then(r => r.json());
 
     const printerName = printers.find(p => p.id === printerId)?.name || printerId;
@@ -2070,7 +2073,7 @@ async function openMixingTubsModal(mixingID, row) {
         <div class="ps-modal-sub">${esc(row?.Material || '')} &nbsp;·&nbsp; ${row ? Number(row.TotalWeightKG).toFixed(3) + ' KG total' : ''}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
-        <button class="btn-secondary" onclick="labelPrint('MX',${mixingID},this)" style="font-size:12px;padding:4px 10px">🖨 Reprint Label</button>
+        <button class="btn-secondary" onclick="labelPrint('MX',${mixingID},this)" style="font-size:12px;padding:4px 10px" title="Reprints every tub's label">🖨 Reprint All</button>
         <button class="ps-modal-close" onclick="closeModal()">×</button>
       </div>
     </div>
@@ -2089,6 +2092,10 @@ async function openMixingTubsModal(mixingID, row) {
       return;
     }
 
+    // Per-tub print button — the header's "Reprint All" button sends every
+    // tub's label in one job, which wasted labels (or forced someone to
+    // manually pull the extras off the printer) when only one tub's label
+    // actually needed reprinting, e.g. a jam or a smudged print.
     bodyEl.innerHTML = `
       <table class="pn-batch-table" style="margin:0">
         <thead>
@@ -2097,6 +2104,7 @@ async function openMixingTubsModal(mixingID, row) {
             <th>Weight (KG)</th>
             <th>Material Document</th>
             <th>SAP Status</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -2110,6 +2118,9 @@ async function openMixingTubsModal(mixingID, row) {
                 : t.SAPErrorMessage
                   ? `<span class="pn-status pn-status--cancelled" title="${esc(t.SAPErrorMessage)}">Failed</span>`
                   : `<span class="pn-status pn-status--open">Pending</span>`}
+              </td>
+              <td style="text-align:right">
+                <button class="btn-secondary" onclick="labelPrint('MX',${mixingID},this,${t.TubSeq})" style="font-size:11px;padding:3px 8px" title="Reprint just this tub's label">🖨 Tub ${t.TubSeq}</button>
               </td>
             </tr>`).join('')}
         </tbody>
