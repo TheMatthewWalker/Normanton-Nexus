@@ -319,6 +319,21 @@ async function drawLabelPage(doc, data, isA4) {
       const HALF = CW / 2;
       const xR   = M + HALF + 8;
 
+      // ── Giant mix/batch code ─────────────────────────────────────────────────
+      // Operators picking the wrong physical mix off the shelf/room was
+      // reported as a real mix-up risk, and this is the one field that
+      // identifies which mix a tub/label actually is. At 50pt a ref + tub
+      // suffix (up to ~13-14 characters, e.g. "MX00012345-T3") needs the
+      // label's full width, so it gets its own row above everything else —
+      // sharing the half-width column below with the SAP Material Document
+      // value (as an earlier, smaller version of this did at 26pt) would
+      // overflow into/over that column at this size. The technical
+      // "BATCH REFERENCE" barcode + small text row below is unchanged and
+      // still repeats the same value for scanning/reference.
+      doc.font('Helvetica-Bold').fontSize(50).fillColor('#111827')
+         .text(data.batchRef, M, y, { width: CW, lineBreak: false });
+      y += 65;
+
       // ── Top row: Batch ref  |  SAP doc ──────────────────────────────────────
       const bcRef = await barcodeBuffer(data.batchRef);
       const bcSap = (isComplete && data.sapMatDoc) ? await barcodeBuffer(data.sapMatDoc) : null;
@@ -344,20 +359,12 @@ async function drawLabelPage(doc, data, isA4) {
       }
       y += bcRowH + 3;
 
-      // Batch/mix reference is drawn MUCH larger than everything else on the
-      // label (26pt vs. the 11pt this and the SAP doc column used to share)
-      // — operators picking the wrong physical mix off the shelf/room was
-      // reported as a real mix-up risk, and this is the one field that
-      // identifies which mix a tub/label actually is, so it gets to dominate
-      // the label. SAP Material Document (right column, completed labels
-      // only) is unrelated to that risk and stays at the original size.
-      doc.font('Helvetica-Bold').fontSize(26).fillColor('#111827')
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
          .text(data.batchRef, M, y, { width: HALF - 10, lineBreak: false });
       if (bcSap) {
-        doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
-           .text(data.sapMatDoc, xR, y, { width: HALF - 10, lineBreak: false });
+        doc.text(data.sapMatDoc, xR, y, { width: HALF - 10, lineBreak: false });
       }
-      y += 34;
+      y += 16;
 
       // Divider
       doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
@@ -549,11 +556,12 @@ async function renderLabelDiv(data) {
     <div class="badge" style="background:${badge.bg}">${esc(badge.text)}</div>
   </div>
   <div class="body">
+    <div class="mix-id">${esc(data.batchRef)}</div>
     <div class="two-col">
       <div>
         <div class="lbl">BATCH REFERENCE</div>
         ${bcImg(b64(bcRef), 13)}
-        <div class="mix-id">${esc(data.batchRef)}</div>
+        <div class="batch-id">${esc(data.batchRef)}</div>
       </div>
       ${isComplete && data.sapMatDoc ? `
       <div>
@@ -636,13 +644,16 @@ async function buildLabelsHTML(dataArray) {
   .divider { border: none; border-top: 0.5px solid #d1d5db; margin: 2px 0; flex-shrink: 0; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
   .batch-id { font-size: 11pt; font-weight: 700; letter-spacing: 0.08em; margin-top: 1px; }
-  /* Batch/mix reference — deliberately MUCH larger than .batch-id (which the
-     SAP Material Document column still uses). Operators picking the wrong
-     physical mix in the room was reported as a real mix-up risk, and this is
-     the one field that identifies which mix a label belongs to, so it's
-     sized to be readable at a glance rather than matching the rest of the
-     label's compact scale. */
-  .mix-id   { font-size: 26pt; font-weight: 800; letter-spacing: 0.03em; line-height: 1.05; margin-top: 1px; }
+  /* Batch/mix reference — own full-width row above the technical
+     BATCH REFERENCE/SAP MATERIAL DOCUMENT barcode row (.batch-id, unchanged
+     at 11pt), deliberately MUCH larger. Operators picking the wrong physical
+     mix in the room was reported as a real mix-up risk, and this is the one
+     field that identifies which mix a label belongs to, so it dominates the
+     label rather than matching the rest of the compact scale. white-space:
+     nowrap is safe — refs are a fixed "XX########[-T#]" pattern (~10-14
+     chars, see fetchLabelData), well inside the label's 210mm width even at
+     this size. */
+  .mix-id   { font-size: 50pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; margin-bottom: 3px; }
   .mat-val  { font-size: 9pt;  font-weight: 700; }
   .mat-bc img { height: 9mm; width: auto; max-width: 100%; margin-top: 2px; }
   .mach-val { font-size: 9pt; font-weight: 700; }
