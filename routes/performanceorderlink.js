@@ -100,7 +100,6 @@ export async function resolveDeliveryReferenceDocuments(rows, req) {
     // be a rare case.
   }
 
-  let unresolvedCount = 0;
   for (const row of candidates) {
     const delivery = String(row.referenceDocument).trim();
     const item = String(row.item ?? '').trim();
@@ -109,17 +108,13 @@ export async function resolveDeliveryReferenceDocuments(rows, req) {
     if (link) {
       row.originalDoc = link.orderNumber;
       row.originalDocItem = link.orderItem;
-    } else {
-      // No VBFA link found for this exact item — originalDoc/originalDocItem
-      // stay at the pass-through default set above (the raw delivery
-      // number/item). Notes/risk flags for this line key off the delivery
-      // number until SAP creates the VBFA record, same behaviour as before
-      // this fix existed.
-      unresolvedCount++;
     }
-  }
-
-  if (unresolvedCount) {
-    console.warn(`[resolveDeliveryReferenceDocuments] ${unresolvedCount} of ${candidates.length} delivery-shaped ReferenceDocument row(s) had no VBFA order link (left as delivery numbers).`);
+    // else: no VBFA link found for this exact item — originalDoc/
+    // originalDocItem stay at the pass-through default set above (the raw
+    // delivery number/item). Notes/risk flags for this line key off the
+    // delivery number until SAP creates the VBFA record, same behaviour as
+    // before this fix existed. Not logged — this is routine/expected for
+    // any delivery SAP hasn't yet written a VBFA 'J' record for, not an
+    // error condition.
   }
 }
