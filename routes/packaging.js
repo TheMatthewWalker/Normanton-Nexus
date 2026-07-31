@@ -26,6 +26,7 @@ import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
 import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 import { requireDepartment, requirePermission } from '../middleware/auth.js';
+import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 
 const router = express.Router();
 
@@ -270,6 +271,16 @@ router.post('/mass-update', canWrite, async (req, res) => {
 });
 
 // ── New Packaging Creation ─────────────────────────────────────────────────
+// Runs under the CALLING USER's own SAP credentials, not the shared service
+// account — MM01 (create material) and CS01 (create BOM) need real SAP
+// authorization the service account doesn't have (and isn't being given),
+// same reasoning as shipmentcost.js's post-migo flow. The caller must have
+// already saved their SAP username/password via My Account (POST
+// /api/profile/sap-credentials, see lib/sapCredentials.js); if not, this
+// fails fast with a clear message rather than a confusing SAP logon error.
+// Calls SapServer's elevated POST /api/packaging/create-elevated (mirrors
+// PurchasingController's create-po-elevated pattern) instead of the plain
+// /create endpoint.
 
 router.post('/create', canWrite, async (req, res) => {
   try {
@@ -278,7 +289,17 @@ router.post('/create', canWrite, async (req, res) => {
       return res.status(400).json({ success: false, error: { message: 'customerPart is required.' } });
     }
 
-    const data = await sapPost('post', '/create', {
+    const sapCreds = await getDecryptedSapCredentials(userId(req));
+    if (!sapCreds) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'You need to save your SAP username and password in My Account before creating packaging materials in SAP.' },
+      });
+    }
+
+    const data = await sapPost('post', '/create-elevated', {
+      SapUsername:  sapCreds.sapUsername,
+      SapPassword:  sapCreds.sapPassword,
       CustomerPart: customerPart,
       Codes: Array.isArray(codes) ? codes : [],
     }, userId(req));
