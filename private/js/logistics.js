@@ -7029,8 +7029,14 @@ function ctFormatStockSnapshotStatus(stockSnapshot) {
 }
 
 function ctRenderVendorDashboard(vendor, balance, declarations) {
+  // Checkbox column feeds the "Build Declaration for Selected" bulk action
+  // below — lets a user declare several part numbers in one go instead of
+  // one material at a time. The per-row "Build Declaration" button is kept
+  // too, as a one-click shortcut for the single-material case; both funnel
+  // into the same ctOpenProposeModal(vendor, materials[]).
   const matRows = balance.materials.map(m => `
     <tr class="admin-row">
+      <td>${m.undeclared > 0 ? `<input type="checkbox" class="ct-mat-check" data-material="${esc(m.material)}" data-undeclared="${m.undeclared}">` : ''}</td>
       <td><strong>${esc(m.material)}</strong></td>
       <td style="text-align:right">${m.delivered.toLocaleString()}</td>
       <td style="text-align:right">${m.currentStock.toLocaleString()}</td>
@@ -7063,19 +7069,20 @@ function ctRenderVendorDashboard(vendor, balance, declarations) {
     <div class="tf-actions" style="margin-bottom:14px">
       <button type="button" class="btn-secondary" id="ct-back-btn">&larr; All Vendors</button>
       <button type="button" class="btn-secondary" id="ct-sync-btn">Sync GR from SAP</button>
+      <button type="button" class="btn-submit" id="ct-bulk-declare-btn" disabled>Build Declaration for Selected (0)</button>
       <div id="ct-sync-result" style="margin-left:8px"></div>
     </div>
 
     <div class="ct-panel-title">Material Balance</div>
-    <div class="ct-panel-sub">Undeclared = Delivered − current SAP consignment stock − already-Confirmed declarations.</div>
+    <div class="ct-panel-sub">Undeclared = Delivered − current SAP consignment stock − already-Confirmed declarations. Tick more than one material to build a single declaration covering all of them.</div>
     <div class="ct-panel-sub" id="ct-stock-status" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <span>${esc(ctFormatStockSnapshotStatus(balance.stockSnapshot))}</span>
       <button type="button" class="btn-secondary" id="ct-refresh-stock-btn" style="padding:2px 8px;font-size:10px">Refresh Stock Now</button>
     </div>
     <div style="overflow-x:auto;margin-bottom:20px">
       <table class="pn-batch-table admin-table">
-        <thead><tr><th>Material</th><th>Delivered</th><th>Current Stock</th><th>Declared</th><th>Undeclared</th><th></th></tr></thead>
-        <tbody>${matRows || '<tr><td colspan="6" class="sap-empty">No deliveries recorded for this vendor yet.</td></tr>'}</tbody>
+        <thead><tr><th></th><th>Material</th><th>Delivered</th><th>Current Stock</th><th>Declared</th><th>Undeclared</th><th></th></tr></thead>
+        <tbody>${matRows || '<tr><td colspan="7" class="sap-empty">No deliveries recorded for this vendor yet.</td></tr>'}</tbody>
       </table>
     </div>
 
@@ -7101,8 +7108,23 @@ function ctRenderVendorDashboard(vendor, balance, declarations) {
   document.getElementById('ct-back-btn').addEventListener('click', () => runConsignmentTracker());
   document.getElementById('ct-sync-btn').addEventListener('click', () => ctSyncVendor(vendor));
   document.getElementById('ct-refresh-stock-btn').addEventListener('click', () => ctRefreshStockSnapshot(vendor));
+
+  const bulkBtn = document.getElementById('ct-bulk-declare-btn');
+  const updateBulkBtn = () => {
+    const checked = document.querySelectorAll('.ct-mat-check:checked').length;
+    bulkBtn.disabled = checked === 0;
+    bulkBtn.textContent = `Build Declaration for Selected (${checked})`;
+  };
+  document.querySelectorAll('.ct-mat-check').forEach(cb => cb.addEventListener('change', updateBulkBtn));
+  bulkBtn.addEventListener('click', () => {
+    const materials = [...document.querySelectorAll('.ct-mat-check:checked')].map(cb => ({
+      material: cb.dataset.material, undeclared: Number(cb.dataset.undeclared),
+    }));
+    ctOpenProposeModal(vendor, materials);
+  });
+
   document.querySelectorAll('.ct-propose-btn').forEach(btn => {
-    btn.addEventListener('click', () => ctOpenProposeModal(vendor, btn.dataset.material, Number(btn.dataset.undeclared)));
+    btn.addEventListener('click', () => ctOpenProposeModal(vendor, [{ material: btn.dataset.material, undeclared: Number(btn.dataset.undeclared) }]));
   });
   document.querySelectorAll('.ct-decl-row').forEach(tr => {
     tr.addEventListener('click', () => ctShowDeclaration(tr.dataset.id));
@@ -7152,28 +7174,44 @@ async function ctSyncVendor(vendor) {
 
 // ── Build declaration: propose (FEFO/FIFO/manual) -> edit -> save draft ────
 
-function ctOpenProposeModal(vendor, material, undeclared) {
+// `materials` is an array of { material, undeclared } — one entry for the
+// per-row "Build Declaration" quick action, or several when built from the
+// checkbox-driven "Build Declaration for Selected" bulk action (see
+// ctRenderVendorDashboard). One declaration can cover any number of part
+// numbers: dbo.ConsignmentDeclarationLine already carries its own Material
+// per line (see consignmentsql.js's createDeclaration), so nothing on the
+// save path needs to change — only the proposal step, which previously
+// only ever asked SAP/SQL to propose an allocation for one material at a
+// time, needs to loop.
+function ctOpenProposeModal(vendor, materials) {
   const method = vendor.DefaultAllocationMethod || 'FIFO';
-  openModal(`<div class="ps-modal" style="max-width:420px;width:92vw">
+  const single = materials.length === 1;
+  const matRows = materials.map(m => `
+    <tr class="admin-row">
+      <td>${esc(m.material)}</td>
+      <td style="text-align:right">${m.undeclared.toLocaleString()}</td>
+      <td style="text-align:right"><input class="tf-input ct-propose-mat-qty" data-material="${esc(m.material)}" type="number" step="any" style="width:110px;text-align:right" value="${m.undeclared}"></td>
+    </tr>`).join('');
+
+  openModal(`<div class="ps-modal" style="max-width:520px;width:92vw">
     <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Build Declaration — ${esc(material)}</div></div>
+      <div><div class="ps-modal-title">Build Declaration — ${single ? esc(materials[0].material) : `${materials.length} materials`}</div></div>
       <button class="ps-modal-close" onclick="closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
-      <div class="toolbar-hint" style="margin-bottom:10px">Undeclared consumption: <strong>${undeclared.toLocaleString()}</strong></div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Quantity to Declare</label>
-          <input class="tf-input" type="number" step="any" id="ct-propose-qty" value="${undeclared}">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Method</label>
-          <select class="tf-input" id="ct-propose-method">
-            <option value="FEFO" ${method === 'FEFO' ? 'selected' : ''}>FEFO</option>
-            <option value="FIFO" ${method === 'FIFO' ? 'selected' : ''}>FIFO</option>
-            <option value="MANUAL" ${method === 'MANUAL' ? 'selected' : ''}>Manual</option>
-          </select>
-        </div>
+      <div class="tf-field" style="margin-bottom:10px">
+        <label class="tf-label">Method${single ? '' : ' (applied to every material below)'}</label>
+        <select class="tf-input" id="ct-propose-method">
+          <option value="FEFO" ${method === 'FEFO' ? 'selected' : ''}>FEFO</option>
+          <option value="FIFO" ${method === 'FIFO' ? 'selected' : ''}>FIFO</option>
+          <option value="MANUAL" ${method === 'MANUAL' ? 'selected' : ''}>Manual</option>
+        </select>
+      </div>
+      <div style="overflow-x:auto;margin-bottom:10px">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Undeclared</th><th>Qty to Declare</th></tr></thead>
+          <tbody>${matRows}</tbody>
+        </table>
       </div>
       <div class="tf-actions">
         <div id="ct-propose-result"></div>
@@ -7184,18 +7222,35 @@ function ctOpenProposeModal(vendor, material, undeclared) {
 
   document.getElementById('ct-propose-btn').addEventListener('click', async () => {
     const resultEl = document.getElementById('ct-propose-result');
-    const qty = Number(document.getElementById('ct-propose-qty').value);
     const selMethod = document.getElementById('ct-propose-method').value;
-    if (!qty || qty <= 0) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter a valid quantity.</div>`; return; }
+    const requests = [];
+    document.querySelectorAll('.ct-propose-mat-qty').forEach(input => {
+      const qty = Number(input.value);
+      if (qty > 0) requests.push({ material: input.dataset.material, qty });
+    });
+    if (!requests.length) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter a quantity for at least one material.</div>`; return; }
+
+    const btn = document.getElementById('ct-propose-btn');
+    btn.disabled = true;
+    btn.textContent = 'Proposing…';
     try {
-      const proposal = await ctApi(`/vendors/${vendor.VendorId}/declarations/propose`, {
-        method: 'POST',
-        body: JSON.stringify({ material, qtyToDeclare: qty, method: selMethod }),
-      });
+      // One /propose call per material — the endpoint (and the FEFO/FIFO
+      // greedy-walk it wraps) is single-material by design, so a
+      // multi-material declaration is built by proposing each material's
+      // allocation independently and merging the results client-side.
+      const results = await Promise.all(requests.map(async r => ({
+        material: r.material,
+        proposal: await ctApi(`/vendors/${vendor.VendorId}/declarations/propose`, {
+          method: 'POST',
+          body: JSON.stringify({ material: r.material, qtyToDeclare: r.qty, method: selMethod }),
+        }),
+      })));
       closePickModal();
-      ctShowProposalEditor(vendor, material, selMethod, proposal);
+      ctShowProposalEditor(vendor, selMethod, results);
     } catch (err) {
       resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Propose Allocation';
     }
   });
 }
@@ -7203,24 +7258,36 @@ function ctOpenProposeModal(vendor, material, undeclared) {
 // Editable matrix preview — the FEFO/FIFO proposal (or, for MANUAL, every
 // open delivery line unallocated) with per-line qty editable before saving
 // as a Draft declaration. Mirrors exactly what Raaj's old Summary tab
-// recorded after the fact via MRKO.
+// recorded after the fact via MRKO. Every line already carries its own
+// `material` (buildAllocationProposal's lines do; the MANUAL openLines map
+// below sets it explicitly), so lines from different materials can sit in
+// the same flat list and still save as one declaration.
 let ctEditorLines = [];
 
-function ctShowProposalEditor(vendor, material, method, proposal) {
-  ctEditorLines = (proposal.lines && proposal.lines.length ? proposal.lines : proposal.openLines.map(l => ({
-    deliveryId: l.DeliveryId, material: l.Material, qtyAllocated: 0,
-    invoiceNumber: l.InvoiceNumber, expiryDate: l.ExpiryDate, documentDate: l.DocumentDate,
-    remainingBeforeAllocation: Number(l.RemainingQty),
-  }))).map(l => ({ ...l }));
+function ctShowProposalEditor(vendor, method, results) {
+  ctEditorLines = [];
+  const unallocatedByMaterial = {};
 
-  document.getElementById('result-title').textContent = `Declaration Preview — ${material}`;
+  for (const { material, proposal } of results) {
+    const lines = proposal.lines && proposal.lines.length ? proposal.lines : proposal.openLines.map(l => ({
+      deliveryId: l.DeliveryId, material: l.Material, qtyAllocated: 0,
+      invoiceNumber: l.InvoiceNumber, expiryDate: l.ExpiryDate, documentDate: l.DocumentDate,
+      remainingBeforeAllocation: Number(l.RemainingQty),
+    }));
+    ctEditorLines.push(...lines.map(l => ({ ...l, material: l.material || material })));
+    if (proposal.unallocatedQty) unallocatedByMaterial[material] = proposal.unallocatedQty;
+  }
+
+  const materialList = results.map(r => r.material).join(', ');
+  document.getElementById('result-title').textContent = `Declaration Preview — ${materialList}`;
   document.getElementById('result-hint').textContent = `${method} allocation — adjust quantities before saving as a draft`;
-  ctRenderProposalEditor(vendor, method, proposal.unallocatedQty || 0);
+  ctRenderProposalEditor(vendor, method, unallocatedByMaterial);
 }
 
-function ctRenderProposalEditor(vendor, method, unallocatedQty) {
+function ctRenderProposalEditor(vendor, method, unallocatedByMaterial) {
   const rows = ctEditorLines.map((l, i) => `
     <tr class="admin-row">
+      <td>${esc(l.material)}</td>
       <td>${esc(l.invoiceNumber || '—')}</td>
       <td>${l.expiryDate ? new Date(l.expiryDate).toLocaleDateString('en-GB') : '—'}</td>
       <td>${l.documentDate ? new Date(l.documentDate).toLocaleDateString('en-GB') : '—'}</td>
@@ -7230,16 +7297,17 @@ function ctRenderProposalEditor(vendor, method, unallocatedQty) {
     </tr>`).join('');
 
   const total = ctEditorLines.reduce((s, l) => s + Number(l.qtyAllocated || 0), 0);
+  const warnings = Object.entries(unallocatedByMaterial || {}).filter(([, qty]) => qty > 0);
 
   document.getElementById('result-body').innerHTML = `
     <div class="tf-actions" style="margin-bottom:14px">
       <button type="button" class="btn-secondary" id="ct-editor-back-btn">&larr; Back to Dashboard</button>
     </div>
-    ${unallocatedQty > 0 ? `<div class="ct-disc-warn" style="margin-bottom:12px">${unallocatedQty.toLocaleString()} could not be auto-allocated — not enough open delivery balance found. Add lines manually or reduce the quantity.</div>` : ''}
+    ${warnings.map(([material, qty]) => `<div class="ct-disc-warn" style="margin-bottom:8px">${esc(material)}: ${qty.toLocaleString()} could not be auto-allocated — not enough open delivery balance found. Add lines manually or reduce the quantity.</div>`).join('')}
     <div style="overflow-x:auto">
       <table class="pn-batch-table admin-table">
-        <thead><tr><th>Invoice/Ref</th><th>Expiry</th><th>Delivery Date</th><th>Open Balance</th><th>Qty to Declare</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6" class="sap-empty">No lines — nothing to declare.</td></tr>'}</tbody>
+        <thead><tr><th>Material</th><th>Invoice/Ref</th><th>Expiry</th><th>Delivery Date</th><th>Open Balance</th><th>Qty to Declare</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" class="sap-empty">No lines — nothing to declare.</td></tr>'}</tbody>
       </table>
     </div>
     <div class="tf-actions" style="margin-top:16px">
@@ -7253,13 +7321,13 @@ function ctRenderProposalEditor(vendor, method, unallocatedQty) {
   document.querySelectorAll('.ct-line-qty').forEach(input => {
     input.addEventListener('change', () => {
       ctEditorLines[Number(input.dataset.idx)].qtyAllocated = Number(input.value) || 0;
-      ctRenderProposalEditor(vendor, method, unallocatedQty);
+      ctRenderProposalEditor(vendor, method, unallocatedByMaterial);
     });
   });
   document.querySelectorAll('.ct-line-remove').forEach(btn => {
     btn.addEventListener('click', () => {
       ctEditorLines.splice(Number(btn.dataset.idx), 1);
-      ctRenderProposalEditor(vendor, method, unallocatedQty);
+      ctRenderProposalEditor(vendor, method, unallocatedByMaterial);
     });
   });
   document.getElementById('ct-editor-save-btn').addEventListener('click', () => ctSaveDraftDeclaration(vendor, method));
@@ -7372,6 +7440,14 @@ function ctRenderDeclaration(d, vendor) {
     const settlementDocumentNumber = document.getElementById('ct-decl-settlement-doc').value.trim();
     const reconciledQtyVal = document.getElementById('ct-decl-reconciled-qty').value;
     if (!settlementDocumentNumber) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter the SAP settlement document number.</div>`; return; }
+    // dbo.ConsignmentDeclaration.SettlementDocumentNumber is NVARCHAR(10) —
+    // catching a mistyped/pasted value here (before the API round-trip)
+    // gives a clear reason instead of a generic server error. Server-side
+    // (routes/consignment.js) enforces the same rule as a backstop.
+    if (!/^\d{1,10}$/.test(settlementDocumentNumber)) {
+      resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Settlement document number must be numeric, up to 10 digits (e.g. 1700003535).</div>`;
+      return;
+    }
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Confirming…';
     try {

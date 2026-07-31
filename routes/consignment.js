@@ -56,9 +56,15 @@ function actor(req) {
   return req.session?.user?.username || 'unknown';
 }
 
+// Defensive against err not being a normal Error (or having an empty/
+// undefined .message) — this used to surface as a literal "undefined" error
+// in the UI (e.g. a SQL Server parameter-validation failure that doesn't set
+// .message the way a plain Error does). Always guarantee a real string so
+// the client's error banner has something useful to show.
 function fail(res, err, status = 500) {
-  console.error('[consignment]', err.message);
-  res.status(status).json({ success: false, error: { message: err.message } });
+  const message = (err && err.message) ? err.message : 'Unexpected error — check server logs for details.';
+  console.error('[consignment]', err);
+  res.status(status).json({ success: false, error: { message } });
 }
 
 // Queries SapServer's GET /api/consignment/gr — see ConsignmentHelpers.cs.
@@ -376,7 +382,21 @@ router.put('/declarations/:declarationId/lines', requirePermission('LOG_MRP'), a
 router.post('/declarations/:declarationId/confirm', requirePermission('VENDOR_CONSIGNMENT'), async (req, res) => {
   try {
     const { settlementDocumentNumber, settlementReconciledQty } = req.body;
-    const data = await db.confirmDeclaration(req.params.declarationId, settlementDocumentNumber, settlementReconciledQty, actor(req));
+
+    // dbo.ConsignmentDeclaration.SettlementDocumentNumber is NVARCHAR(10)
+    // (see migrate_consignment_tracker.sql) — a value that's too long or
+    // non-numeric used to reach db.confirmDeclaration and fail inside the
+    // SQL parameter binding with an opaque error (no clean .message),
+    // which surfaced in the UI as a literal "undefined". Reject it here
+    // instead, with a message that tells the user what a valid value looks
+    // like, before it ever gets near the DB layer.
+    const trimmedDoc = (settlementDocumentNumber ?? '').toString().trim();
+    if (trimmedDoc && !/^\d{1,10}$/.test(trimmedDoc)) {
+      return res.status(400).json({ success: false, error: { message:
+        `"${settlementDocumentNumber}" isn't a valid settlement document number — SAP MRKO settlement documents are numeric, up to 10 digits (e.g. 1700003535).` } });
+    }
+
+    const data = await db.confirmDeclaration(req.params.declarationId, trimmedDoc || null, settlementReconciledQty, actor(req));
     await audit('SAP_OK', actor(req), `Confirmed consignment declaration #${req.params.declarationId} — settlement doc ${settlementDocumentNumber || '(none)'}`, req);
     res.json({ success: true, data });
   } catch (err) { fail(res, err, 400); }
