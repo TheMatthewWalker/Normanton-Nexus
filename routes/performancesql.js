@@ -158,10 +158,23 @@ async function upsertBatch(tableName, keyColumns, columns, rows) {
       const parts = [];
 
       for (let colIdx = 0; colIdx < allColumns.length; colIdx++) {
-        const [colName, key, type, transform] = allColumns[colIdx];
+        const [colName, key, type, transform, maxLen] = allColumns[colIdx];
         const paramName = `${paramPrefix}${rowIdx}_${colIdx}`;
         let value = transform ? transform(row[key], row) : row[key];
         if (value === undefined) value = null;
+
+        // Same guard as replaceTable() above, and for the same reason: a
+        // fixed-length type (e.g. VarChar(1) for the Won't Get/Last
+        // Day/Bring Forward flags) that receives a longer string than its
+        // declared length doesn't fail with a clean "data would be
+        // truncated" SQL error — tedious throws a much more confusing
+        // "Data type 0xA7 has an invalid data length or metadata length"
+        // at the TDS layer instead. Truncating client-side avoids that
+        // entirely and matches what a human would expect ("just take the
+        // first character").
+        if (typeof value === 'string' && maxLen && value.length > maxLen) {
+          value = value.substring(0, maxLen);
+        }
 
         request.input(paramName, type, value);
         parts.push(`@${paramName} AS [${colName}]`);
@@ -199,7 +212,25 @@ async function upsertBatch(tableName, keyColumns, columns, rows) {
       `);
     } catch (err) {
       console.error('❌ UPSERT FAILED:', { table: tableName, batchStart: i, error: err.message });
-      console.error('🔴 SAMPLE BAD ROW:', batch[0]);
+
+      // mssql/tedious errors for this kind of failure name the exact
+      // parameter, e.g. `Parameter 767 ("@u76_4")` — paramName is always
+      // `${'u'|'i'}${rowIdx}_${colIdx}`. Decode it so the log points at the
+      // actual bad row instead of always dumping batch[0], which is
+      // unrelated to the failure most of the time.
+      const m = /@[ui](\d+)_(\d+)/.exec(err.message || '');
+      if (m) {
+        const [, rowIdx, colIdx] = m.map(Number);
+        const col = allColumns[colIdx];
+        console.error('🔴 BAD ROW:', {
+          column: col ? col[0] : `(unknown col index ${colIdx})`,
+          rowIndexInBatch: rowIdx,
+          row: batch[rowIdx],
+        });
+      } else {
+        console.error('🔴 SAMPLE BAD ROW:', batch[0]);
+      }
+
       throw err;
     }
   }
@@ -948,8 +979,8 @@ export async function upsertOrderBookLineNotes(rows, username) {
   if (!rows.length) return;
 
   const keyColumns = [
-    ['ReferenceDocument', 'referenceDocument', sql.NVarChar(10)],
-    ['Material',          'material',          sql.NVarChar(18)],
+    ['ReferenceDocument', 'referenceDocument', sql.NVarChar(10), null, 10],
+    ['Material',          'material',          sql.NVarChar(18), null, 18],
   ];
 
   const shaped = rows.map(r => ({
@@ -973,14 +1004,14 @@ export async function upsertOrderBookLineNotes(rows, username) {
   }));
 
   await upsertBatch('dbo.OrderBookLineNotes', keyColumns, [
-    ['Risk',                 'risk',                 sql.VarChar(1)],
-    ['Reason',               'reason',               sql.NVarChar(500)],
-    ['WontGet',              'wontGet',              sql.VarChar(1)],
-    ['LastDay',              'lastDay',              sql.VarChar(1)],
-    ['LastDayTime',          'lastDayTime',          sql.VarChar(20)],
-    ['BringForward',         'bringForward',         sql.VarChar(1)],
+    ['Risk',                 'risk',                 sql.VarChar(1),    null, 1],
+    ['Reason',               'reason',               sql.NVarChar(500), null, 500],
+    ['WontGet',              'wontGet',              sql.VarChar(1),    null, 1],
+    ['LastDay',              'lastDay',              sql.VarChar(1),    null, 1],
+    ['LastDayTime',          'lastDayTime',          sql.VarChar(20),   null, 20],
+    ['BringForward',         'bringForward',         sql.VarChar(1),    null, 1],
     ['PlannedProductionQty', 'plannedProductionQty', sql.Decimal(15, 3)],
-    ['UpdatedByUsername',    'updatedByUsername',    sql.NVarChar(80)],
+    ['UpdatedByUsername',    'updatedByUsername',    sql.NVarChar(80),  null, 80],
   ], shaped);
 }
 
