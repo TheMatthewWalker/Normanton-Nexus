@@ -26,7 +26,7 @@ export async function listConsignmentVendors() {
     SELECT
       v.VendorId, v.VendorName, v.SapVendorNumber, v.Currency,
       ISNULL(cvc.TrackExpiry, 0)               AS TrackExpiry,
-      cvc.ExpiryWarningDays,
+      cvc.ExpiryWarningDays, cvc.ExpiryDays,
       ISNULL(cvc.DefaultAllocationMethod, 'FIFO') AS DefaultAllocationMethod,
       ISNULL(cvc.Active, 1)                    AS Active,
       cvc.Notes, cvc.UpdatedAtUtc, cvc.UpdatedByUsername
@@ -45,7 +45,7 @@ export async function getConsignmentVendor(vendorId) {
       SELECT
         v.VendorId, v.VendorName, v.SapVendorNumber, v.Currency,
         ISNULL(cvc.TrackExpiry, 0)               AS TrackExpiry,
-        cvc.ExpiryWarningDays,
+        cvc.ExpiryWarningDays, cvc.ExpiryDays,
         ISNULL(cvc.DefaultAllocationMethod, 'FIFO') AS DefaultAllocationMethod,
         ISNULL(cvc.Active, 1)                    AS Active,
         cvc.Notes
@@ -67,6 +67,12 @@ export async function upsertConsignmentVendorConfig(vendorId, body, username) {
     .input('vendorId', sql.Int, vendorId)
     .input('trackExpiry', sql.Bit, !!body.trackExpiry)
     .input('expiryWarningDays', sql.Int, body.expiryWarningDays ?? null)
+    // Calendar days from goods-receipt DocumentDate until stock must be
+    // declared — SAP has no reliable expiry field for this material, so
+    // this is what listConsignmentDeliveries/getDeclaration use to CALCULATE
+    // ExpiryDate (DocumentDate + ExpiryDays) whenever nobody has manually
+    // entered one on the delivery line. See migrate_consignment_expiry_days.sql.
+    .input('expiryDays', sql.Int, body.expiryDays ?? null)
     .input('defaultAllocationMethod', sql.NVarChar(10), body.defaultAllocationMethod || 'FIFO')
     .input('active', sql.Bit, body.active === undefined ? true : !!body.active)
     .input('notes', sql.NVarChar(500), body.notes || null)
@@ -76,6 +82,7 @@ export async function upsertConsignmentVendorConfig(vendorId, body, username) {
     await req.query(`
       UPDATE dbo.ConsignmentVendorConfig SET
         TrackExpiry = @trackExpiry, ExpiryWarningDays = @expiryWarningDays,
+        ExpiryDays = @expiryDays,
         DefaultAllocationMethod = @defaultAllocationMethod, Active = @active,
         Notes = @notes, UpdatedAtUtc = GETUTCDATE(), UpdatedByUsername = @username
       WHERE VendorId = @vendorId
@@ -83,9 +90,9 @@ export async function upsertConsignmentVendorConfig(vendorId, body, username) {
   } else {
     await req.query(`
       INSERT INTO dbo.ConsignmentVendorConfig
-        (VendorId, TrackExpiry, ExpiryWarningDays, DefaultAllocationMethod, Active, Notes, UpdatedByUsername)
+        (VendorId, TrackExpiry, ExpiryWarningDays, ExpiryDays, DefaultAllocationMethod, Active, Notes, UpdatedByUsername)
       VALUES
-        (@vendorId, @trackExpiry, @expiryWarningDays, @defaultAllocationMethod, @active, @notes, @username)
+        (@vendorId, @trackExpiry, @expiryWarningDays, @expiryDays, @defaultAllocationMethod, @active, @notes, @username)
     `);
   }
   return getConsignmentVendor(vendorId);
@@ -103,19 +110,36 @@ export async function listVendorMaterials(vendorId) {
 // ── Deliveries (GR lines) ────────────────────────────────────────────────────
 
 const DELIVERY_COLUMNS = `
-  DeliveryId, VendorId, Material, MaterialDocument, MaterialDocItem,
-  Quantity, Uom, Container, BillOfLading, InvoiceNumber,
-  DocumentDate, PostingDate, ExpiryDate, RemainingQty, Source, CreatedAtUtc, CreatedByUsername
+  d.DeliveryId, d.VendorId, d.Material, d.MaterialDocument, d.MaterialDocItem,
+  d.Quantity, d.Uom, d.Container, d.BillOfLading, d.InvoiceNumber,
+  d.DocumentDate, d.PostingDate, d.RemainingQty, d.Source, d.CreatedAtUtc, d.CreatedByUsername,
+  -- ExpiryDate is calculated, not SAP-sourced (SAP has no reliable expiry
+  -- field for this material at GR time) — a manual entry on the delivery
+  -- line (d.ExpiryDate) always wins when present; otherwise it's derived
+  -- from the vendor's own policy window (ConsignmentVendorConfig.ExpiryDays
+  -- calendar days after DocumentDate). NULL either way if neither is set —
+  -- same "no expiry known" behaviour as before this existed. See
+  -- migrate_consignment_expiry_days.sql for the full rationale.
+  ISNULL(d.ExpiryDate,
+         CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
+              THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END) AS ExpiryDate
 `;
 
 export async function listConsignmentDeliveries(vendorId, material) {
   const pool = await getPool();
   const req = pool.request().input('vendorId', sql.Int, vendorId);
-  let where = 'WHERE VendorId = @vendorId';
-  if (material) { req.input('material', sql.NVarChar(18), material); where += ' AND Material = @material'; }
+  let where = 'WHERE d.VendorId = @vendorId';
+  if (material) { req.input('material', sql.NVarChar(18), material); where += ' AND d.Material = @material'; }
   const { recordset } = await req.query(`
-    SELECT ${DELIVERY_COLUMNS} FROM dbo.ConsignmentDelivery ${where}
-    ORDER BY Material, ISNULL(ExpiryDate, '9999-12-31'), DocumentDate
+    SELECT ${DELIVERY_COLUMNS}
+    FROM dbo.ConsignmentDelivery d
+    LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
+    ${where}
+    ORDER BY d.Material, COALESCE(d.ExpiryDate,
+                                   CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
+                                        THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END,
+                                   '9999-12-31'),
+             d.DocumentDate
   `);
   return recordset;
 }
@@ -399,13 +423,26 @@ export async function getDeclaration(declarationId) {
   `);
   if (!headerRes.recordset.length) return null;
 
+  // ExpiryDate here is the same calculated-fallback expression as
+  // listConsignmentDeliveries (manual override wins, else DocumentDate +
+  // vendor's ExpiryDays) — see that function's comment. Computed fresh on
+  // every read rather than snapshotted at declaration-creation time, so a
+  // later correction to a vendor's ExpiryDays config is reflected on a
+  // still-open Draft declaration too.
   const linesRes = await pool.request().input('declarationId', sql.Int, declarationId).query(`
     SELECT dl.DeclarationLineId, dl.DeliveryId, dl.Material, dl.QtyAllocated,
-           d.InvoiceNumber, d.MaterialDocument, d.DocumentDate, d.ExpiryDate, d.Uom
+           d.InvoiceNumber, d.MaterialDocument, d.DocumentDate, d.Uom,
+           ISNULL(d.ExpiryDate,
+                  CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
+                       THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END) AS ExpiryDate
     FROM dbo.ConsignmentDeclarationLine dl
     JOIN dbo.ConsignmentDelivery d ON d.DeliveryId = dl.DeliveryId
+    LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
     WHERE dl.DeclarationId = @declarationId
-    ORDER BY dl.Material, d.ExpiryDate
+    ORDER BY dl.Material, COALESCE(d.ExpiryDate,
+                                    CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
+                                         THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END,
+                                    '9999-12-31')
   `);
 
   return { ...headerRes.recordset[0], lines: linesRes.recordset };

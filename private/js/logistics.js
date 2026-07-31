@@ -6951,11 +6951,18 @@ function ctOpenConfigModal(vendor) {
         <div class="tf-field">
           <label class="tf-label"><input type="checkbox" id="ct-cfg-track-expiry" ${vendor.TrackExpiry ? 'checked' : ''}> Track Expiry</label>
         </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Declare Within (calendar days)</label>
+          <input class="tf-input" type="number" id="ct-cfg-expiry-days" value="${vendor.ExpiryDays ?? ''}" placeholder="e.g. 90">
+        </div>
         <div class="tf-field">
           <label class="tf-label">Warning Window (days)</label>
           <input class="tf-input" type="number" id="ct-cfg-warning-days" value="${vendor.ExpiryWarningDays ?? ''}">
         </div>
       </div>
+      <div class="toolbar-hint" style="margin-bottom:10px">SAP doesn't track a real expiry date for this material — "Declare Within" calculates one as this many calendar days after the goods-receipt date, whenever nobody's typed in a real expiry from the supplier's shipment certificate. "Warning Window" then flags a delivery line on the dashboard once its (real or calculated) expiry is within that many days.</div>
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Default Allocation Method</label>
@@ -6984,6 +6991,7 @@ function ctOpenConfigModal(vendor) {
         method: 'PUT',
         body: JSON.stringify({
           trackExpiry: document.getElementById('ct-cfg-track-expiry').checked,
+          expiryDays: document.getElementById('ct-cfg-expiry-days').value || null,
           expiryWarningDays: document.getElementById('ct-cfg-warning-days').value || null,
           defaultAllocationMethod: document.getElementById('ct-cfg-method').value,
           notes: document.getElementById('ct-cfg-notes').value,
@@ -7038,10 +7046,10 @@ function ctRenderVendorDashboard(vendor, balance, declarations) {
     <tr class="admin-row">
       <td>${m.undeclared > 0 ? `<input type="checkbox" class="ct-mat-check" data-material="${esc(m.material)}" data-undeclared="${m.undeclared}">` : ''}</td>
       <td><strong>${esc(m.material)}</strong></td>
-      <td style="text-align:right">${m.delivered.toLocaleString()}</td>
-      <td style="text-align:right">${m.currentStock.toLocaleString()}</td>
-      <td style="text-align:right">${m.declared.toLocaleString()}</td>
-      <td style="text-align:right"><strong>${m.undeclared.toLocaleString()}</strong></td>
+      <td>${m.delivered.toLocaleString()}</td>
+      <td>${m.currentStock.toLocaleString()}</td>
+      <td>${m.declared.toLocaleString()}</td>
+      <td><strong>${m.undeclared.toLocaleString()}</strong></td>
       <td style="text-align:right">
         <button class="btn-secondary ct-propose-btn" data-material="${esc(m.material)}" data-undeclared="${m.undeclared}" style="padding:3px 10px;font-size:11px" ${m.undeclared > 0 ? '' : 'disabled'}>Build Declaration</button>
       </td>
