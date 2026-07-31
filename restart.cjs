@@ -26,7 +26,6 @@ const {
   sleep,
   withTimeout,
   getHealth,
-  waitForPortFree,
   waitForNewInstance,
   forceKillPort443,
   svcCommandAndWaitAck,
@@ -37,8 +36,6 @@ const {
 
 const REPO_DIR = __dirname;
 
-const STOP_VERIFY_MAX_WAIT_MS  = 15 * 1000;
-const STOP_VERIFY_POLL_MS      = 2 * 1000;
 const START_VERIFY_MAX_WAIT_MS = 25 * 1000;
 const START_VERIFY_POLL_MS     = 3 * 1000;
 const SVC_EVENT_TIMEOUT_MS     = 60 * 1000;
@@ -56,22 +53,23 @@ async function main() {
 
   console.log('[restart] stopping service…');
   await svcCommandAndWaitAck(svc, 'stop', 'stop', SVC_EVENT_TIMEOUT_MS);
-  console.log('[restart] Windows acknowledged the stop — confirming the old process actually exited…');
+  // The emulated-SIGINT stop (see restart-lib.cjs's big comment) has never
+  // actually killed the old process in practice on this box — every run
+  // ends up going to the force-kill path anyway, so polling waitForPortFree()
+  // first (up to 15s) just burns time waiting on an outcome that never
+  // happens. Skip straight to finding its PID and force-killing it.
+  console.log('[restart] Windows acknowledged the stop — force-killing whatever is still bound to the port…');
 
-  const portFree = await waitForPortFree(STOP_VERIFY_MAX_WAIT_MS, STOP_VERIFY_POLL_MS);
-  if (!portFree) {
-    console.warn('[restart] old process is still answering after stop — forcing it to exit…');
-    // Independent outer deadline — see the comment on withTimeout() in
-    // restart-lib.cjs for why this doesn't just trust forceKillPort443()'s
-    // own internal timeouts.
-    await withTimeout(forceKillPort443(), 30000, false);
-    await sleep(3000);
-    const stillUp = await getHealth();
-    if (stillUp) {
-      console.error(`[restart] FAILED: old process (pid ${stillUp.pid}) would not exit even after a forced kill. Manual intervention needed.`);
-      process.exitCode = 1;
-      return;
-    }
+  // Independent outer deadline — see the comment on withTimeout() in
+  // restart-lib.cjs for why this doesn't just trust forceKillPort443()'s
+  // own internal timeouts.
+  await withTimeout(forceKillPort443(), 30000, false);
+  await sleep(3000);
+  const stillUp = await getHealth();
+  if (stillUp) {
+    console.error(`[restart] FAILED: old process (pid ${stillUp.pid}) would not exit even after a forced kill. Manual intervention needed.`);
+    process.exitCode = 1;
+    return;
   }
   console.log('[restart] old process confirmed gone.');
 
