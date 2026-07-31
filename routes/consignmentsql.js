@@ -117,12 +117,15 @@ const DELIVERY_COLUMNS = `
   -- field for this material at GR time) — a manual entry on the delivery
   -- line (d.ExpiryDate) always wins when present; otherwise it's derived
   -- from the vendor's own policy window (ConsignmentVendorConfig.ExpiryDays
-  -- calendar days after DocumentDate). NULL either way if neither is set —
+  -- calendar days after PostingDate — MKPF-BUDAT, the date the goods
+  -- receipt actually posted to stock, not BLDAT/DocumentDate which is just
+  -- the date printed on the supplier's paperwork and can lag or lead the
+  -- real posting by a day or more. NULL either way if neither is set —
   -- same "no expiry known" behaviour as before this existed. See
   -- migrate_consignment_expiry_days.sql for the full rationale.
   ISNULL(d.ExpiryDate,
-         CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
-              THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END) AS ExpiryDate
+         CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
+              THEN DATEADD(day, cvc.ExpiryDays, d.PostingDate) END) AS ExpiryDate
 `;
 
 export async function listConsignmentDeliveries(vendorId, material) {
@@ -136,8 +139,8 @@ export async function listConsignmentDeliveries(vendorId, material) {
     LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
     ${where}
     ORDER BY d.Material, COALESCE(d.ExpiryDate,
-                                   CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
-                                        THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END,
+                                   CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
+                                        THEN DATEADD(day, cvc.ExpiryDays, d.PostingDate) END,
                                    '9999-12-31'),
              d.DocumentDate
   `);
@@ -424,8 +427,9 @@ export async function getDeclaration(declarationId) {
   if (!headerRes.recordset.length) return null;
 
   // ExpiryDate here is the same calculated-fallback expression as
-  // listConsignmentDeliveries (manual override wins, else DocumentDate +
-  // vendor's ExpiryDays) — see that function's comment. Computed fresh on
+  // listConsignmentDeliveries (manual override wins, else PostingDate —
+  // BUDAT, not BLDAT/DocumentDate — plus vendor's ExpiryDays) — see that
+  // function's comment. Computed fresh on
   // every read rather than snapshotted at declaration-creation time, so a
   // later correction to a vendor's ExpiryDays config is reflected on a
   // still-open Draft declaration too.
@@ -433,15 +437,15 @@ export async function getDeclaration(declarationId) {
     SELECT dl.DeclarationLineId, dl.DeliveryId, dl.Material, dl.QtyAllocated,
            d.InvoiceNumber, d.MaterialDocument, d.DocumentDate, d.Uom,
            ISNULL(d.ExpiryDate,
-                  CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
-                       THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END) AS ExpiryDate
+                  CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
+                       THEN DATEADD(day, cvc.ExpiryDays, d.PostingDate) END) AS ExpiryDate
     FROM dbo.ConsignmentDeclarationLine dl
     JOIN dbo.ConsignmentDelivery d ON d.DeliveryId = dl.DeliveryId
     LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
     WHERE dl.DeclarationId = @declarationId
     ORDER BY dl.Material, COALESCE(d.ExpiryDate,
-                                    CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.DocumentDate IS NOT NULL
-                                         THEN DATEADD(day, cvc.ExpiryDays, d.DocumentDate) END,
+                                    CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
+                                         THEN DATEADD(day, cvc.ExpiryDays, d.PostingDate) END,
                                     '9999-12-31')
   `);
 
