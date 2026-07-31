@@ -335,20 +335,34 @@ async function drawLabelPage(doc, data, isA4) {
       const HALF = CW / 2;
       const xR   = M + HALF + 8;
 
+      // ── Giant material code ──────────────────────────────────────────────────
+      // Follow-up to the batch/mix code enlargement below: Material
+      // identifies WHAT is physically in the tub (vs. batchRef, which
+      // identifies WHICH mix run it came from) and is now sized even larger
+      // (50pt vs. 40pt) so it reads as the primary at-a-glance field.
+      // Material is NVARCHAR(18) (sql/create_production_database.sql), and
+      // an 18-character worst case measures ~500pt against CW's ~571pt
+      // usable width — verified before shipping this, so it never wraps or
+      // overflows onto the row below.
+      doc.font('Helvetica-Bold').fontSize(50).fillColor('#111827')
+         .text(data.material, M, y, { width: CW, lineBreak: false });
+      y += 58;
+
       // ── Giant mix/batch code ─────────────────────────────────────────────────
       // Operators picking the wrong physical mix off the shelf/room was
       // reported as a real mix-up risk, and this is the one field that
-      // identifies which mix a tub/label actually is. At 50pt a ref + tub
-      // suffix (up to ~13-14 characters, e.g. "MX00012345-T3") needs the
-      // label's full width, so it gets its own row above everything else —
-      // sharing the half-width column below with the SAP Material Document
-      // value (as an earlier, smaller version of this did at 26pt) would
-      // overflow into/over that column at this size. The technical
-      // "BATCH REFERENCE" barcode + small text row below is unchanged and
-      // still repeats the same value for scanning/reference.
-      doc.font('Helvetica-Bold').fontSize(50).fillColor('#111827')
+      // identifies which mix a tub/label actually is. Sized smaller than
+      // Material above (40pt vs. 50pt) — Material is now the primary field,
+      // this is the secondary confirmation code. A ref + tub suffix (up to
+      // ~13-14 characters, e.g. "MX00012345-T3") still needs its own
+      // full-width row at this size — sharing the half-width column below
+      // with the SAP Material Document value (as an earlier, smaller
+      // version of this did at 26pt) would overflow into/over that column.
+      // The technical "BATCH REFERENCE" barcode + small text row below is
+      // unchanged and still repeats the same value for scanning/reference.
+      doc.font('Helvetica-Bold').fontSize(40).fillColor('#111827')
          .text(data.batchRef, M, y, { width: CW, lineBreak: false });
-      y += 65;
+      y += 48;
 
       // ── Top row: Batch ref  |  SAP doc ──────────────────────────────────────
       const bcRef = await barcodeBuffer(data.batchRef);
@@ -380,11 +394,11 @@ async function drawLabelPage(doc, data, isA4) {
       if (bcSap) {
         doc.text(data.sapMatDoc, xR, y, { width: HALF - 10, lineBreak: false });
       }
-      y += 16;
+      y += 13;
 
       // Divider
       doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-      y += 6;
+      y += 4;
 
       // ── Material  |  Machine ─────────────────────────────────────────────────
       const bcMat = await barcodeBuffer(data.material);
@@ -418,11 +432,11 @@ async function drawLabelPage(doc, data, isA4) {
       doc.font('Helvetica').fontSize(8).fillColor('#111827')
          .text(opList,   M,  y, { width: HALF - 10, lineBreak: false })
          .text(dateVal,  xR, y, { width: HALF - 8,  lineBreak: false });
-      y += 13;
+      y += 11;
 
       // Divider
       doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-      y += 6;
+      y += 4;
 
       // ── Traceability ─────────────────────────────────────────────────────────
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
@@ -440,30 +454,48 @@ async function drawLabelPage(doc, data, isA4) {
       }
       doc.font('Helvetica').fontSize(8).fillColor('#111827')
          .text(traceStr, M, y, { width: CW, lineBreak: false });
-      y += 13;
+      y += 11;
 
       // ── Completion section ───────────────────────────────────────────────────
       if (isComplete) {
         doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-        y += 6;
+        y += 4;
 
         const qLabel = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
         const qValue = data.quantity != null ? `${Number(data.quantity).toFixed(3)} ${data.uom}` : '—';
         doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
            .text(qLabel, M, y, { lineBreak: false });
         y += 9;
-        doc.font('Helvetica-Bold').fontSize(12).fillColor('#0d4c45')
+        doc.font('Helvetica-Bold').fontSize(30).fillColor('#0d4c45')
            .text(qValue, M, y, { lineBreak: false });
-        y += 18;
+        y += 32;
 
         if (data.notes) {
           doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-          y += 6;
+          y += 4;
           doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
              .text('NOTES', M, y, { lineBreak: false });
           y += 9;
-          doc.font('Helvetica').fontSize(8).fillColor('#111827')
-             .text(data.notes, M, y, { width: CW });
+          doc.font('Helvetica').fontSize(8).fillColor('#111827');
+          // The two giant rows above (Material + batch code) leave much
+          // less spare vertical room than before this change, so a long
+          // note can no longer be assumed to fit above the footer rule the
+          // way it safely did when Weight was only 12pt. PDFKit doesn't
+          // clip overflowing text the way the HTML preview's CSS
+          // (overflow:hidden) does, so an unchecked long note would print
+          // through/past the footer line. Trim to whatever actually fits,
+          // with an ellipsis, instead of risking that.
+          let notesText = data.notes;
+          const availH = (H - 14) - y - 2;
+          if (availH > 0 && doc.heightOfString(notesText, { width: CW }) > availH) {
+            let lo = 0, hi = notesText.length;
+            while (lo < hi) {
+              const mid = (lo + hi + 1) >> 1;
+              if (doc.heightOfString(notesText.slice(0, mid) + '…', { width: CW }) <= availH) lo = mid; else hi = mid - 1;
+            }
+            notesText = lo > 0 ? notesText.slice(0, lo) + '…' : '';
+          }
+          if (notesText) doc.text(notesText, M, y, { width: CW });
         }
       }
 
@@ -572,6 +604,7 @@ async function renderLabelDiv(data) {
     <div class="badge" style="background:${badge.bg}">${esc(badge.text)}</div>
   </div>
   <div class="body">
+    <div class="mat-id">${esc(data.material)}</div>
     <div class="mix-id">${esc(data.batchRef)}</div>
     <div class="two-col">
       <div>
@@ -660,23 +693,25 @@ async function buildLabelsHTML(dataArray) {
   .divider { border: none; border-top: 0.5px solid #d1d5db; margin: 2px 0; flex-shrink: 0; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
   .batch-id { font-size: 11pt; font-weight: 700; letter-spacing: 0.08em; margin-top: 1px; }
-  /* Batch/mix reference — own full-width row above the technical
-     BATCH REFERENCE/SAP MATERIAL DOCUMENT barcode row (.batch-id, unchanged
-     at 11pt), deliberately MUCH larger. Operators picking the wrong physical
-     mix in the room was reported as a real mix-up risk, and this is the one
-     field that identifies which mix a label belongs to, so it dominates the
-     label rather than matching the rest of the compact scale. white-space:
-     nowrap is safe — refs are a fixed "XX########[-T#]" pattern (~10-14
-     chars, see fetchLabelData), well inside the label's 210mm width even at
-     this size. */
-  .mix-id   { font-size: 50pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; margin-bottom: 3px; }
+  /* Material + batch/mix reference — own full-width rows above the technical
+     MATERIAL/BATCH REFERENCE barcode rows below (.mat-val/.batch-id,
+     unchanged at 9pt/11pt), deliberately MUCH larger. Operators picking the
+     wrong physical mix in the room was reported as a real mix-up risk.
+     Material (what's physically in the tub) is sized largest at 50pt as the
+     primary at-a-glance field; the batch/mix code (which run it came from)
+     is the secondary confirmation code at 40pt below it. white-space:
+     nowrap is safe — Material is NVARCHAR(18) max and refs are a fixed
+     "XX########[-T#]" pattern (~10-14 chars, see fetchLabelData), both well
+     inside the label's 210mm width even at these sizes. */
+  .mat-id   { font-size: 50pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; margin-bottom: 2px; }
+  .mix-id   { font-size: 40pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; margin-bottom: 3px; }
   .mat-val  { font-size: 9pt;  font-weight: 700; }
   .mat-bc img { height: 9mm; width: auto; max-width: 100%; margin-top: 2px; }
   .mach-val { font-size: 9pt; font-weight: 700; }
   .op-val   { font-size: 8pt; }
   .date-val { font-size: 8pt; }
   .trace-val { font-size: 8pt; }
-  .qty      { font-size: 12pt; font-weight: 700; color: #0d4c45; margin-top: 1px; }
+  .qty      { font-size: 30pt; font-weight: 700; color: #0d4c45; margin-top: 1px; }
   .notes    { font-size: 7.5pt; }
   .footer   { border-top: 2px solid #0d4c45; padding: 2px 12px; font-size: 6pt; color: #9ca3af; flex-shrink: 0; }
   @media screen {
