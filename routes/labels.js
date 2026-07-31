@@ -331,114 +331,118 @@ async function drawLabelPage(doc, data, isA4) {
       doc.fillColor('#ffffff').text(badge.text, bdgX, bdgY + 5,
         { width: bdgW, align: 'center', lineBreak: false });
 
-      let y = HDR + 8;
       const HALF = CW / 2;
       const xR   = M + HALF + 8;
+      const colW = HALF - 10;   // per-column text/value width
+      const BW   = Math.min(colW, 250);
 
-      // ── Giant material code ──────────────────────────────────────────────────
-      // Follow-up to the batch/mix code enlargement below: Material
-      // identifies WHAT is physically in the tub (vs. batchRef, which
-      // identifies WHICH mix run it came from) and is now sized even larger
-      // (50pt vs. 40pt) so it reads as the primary at-a-glance field.
-      // Material is NVARCHAR(18) (sql/create_production_database.sql), and
-      // an 18-character worst case measures ~500pt against CW's ~571pt
-      // usable width — verified before shipping this, so it never wraps or
-      // overflows onto the row below.
-      doc.font('Helvetica-Bold').fontSize(50).fillColor('#111827')
-         .text(data.material, M, y, { width: CW, lineBreak: false });
-      y += 58;
+      // ── Two independent column cursors ─────────────────────────────────────
+      // Batch Reference/Material (left) and SAP Material Document/Operators/
+      // Machine/Completed (right) are different lengths depending on the
+      // record (e.g. SAP Material Document is blank until the batch backflushes),
+      // so each column is laid out top-down on its own y cursor rather than
+      // forcing both sides into lockstep rows. Per user's mockup: each
+      // identifying value now appears as a big number ONCE, immediately
+      // followed by its barcode — no separate small-text repeat of the same
+      // value underneath the barcode like earlier iterations of this label had.
+      let yL = HDR + 8;
+      let yR = HDR + 8;
 
-      // ── Giant mix/batch code ─────────────────────────────────────────────────
-      // Operators picking the wrong physical mix off the shelf/room was
-      // reported as a real mix-up risk, and this is the one field that
-      // identifies which mix a tub/label actually is. Sized smaller than
-      // Material above (40pt vs. 50pt) — Material is now the primary field,
-      // this is the secondary confirmation code. A ref + tub suffix (up to
-      // ~13-14 characters, e.g. "MX00012345-T3") still needs its own
-      // full-width row at this size — sharing the half-width column below
-      // with the SAP Material Document value (as an earlier, smaller
-      // version of this did at 26pt) would overflow into/over that column.
-      // The technical "BATCH REFERENCE" barcode + small text row below is
-      // unchanged and still repeats the same value for scanning/reference.
-      doc.font('Helvetica-Bold').fontSize(40).fillColor('#111827')
-         .text(data.batchRef, M, y, { width: CW, lineBreak: false });
-      y += 48;
-
-      // ── Top row: Batch ref  |  SAP doc ──────────────────────────────────────
+      // ── LEFT: Batch Reference ────────────────────────────────────────────────
+      // Sized to the largest font that still fits a worst-case ref + tub
+      // suffix ("MX00012345-T99", 14 chars) inside one column's width
+      // (measured: 14 chars @ 32pt ≈ 256pt against a ~270pt safe budget).
+      doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
+         .text('BATCH REFERENCE', M, yL, { lineBreak: false });
+      yL += 9;
+      doc.font('Helvetica-Bold').fontSize(32).fillColor('#111827')
+         .text(data.batchRef, M, yL, { width: colW, lineBreak: false });
+      yL += 40;
       const bcRef = await barcodeBuffer(data.batchRef);
-      const bcSap = (isComplete && data.sapMatDoc) ? await barcodeBuffer(data.sapMatDoc) : null;
-      const BW    = Math.min(HALF - 10, 250);
-
-      doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
-         .text('BATCH REFERENCE', M, y, { lineBreak: false });
-      if (bcSap) {
-        doc.text('SAP MATERIAL DOCUMENT', xR, y, { lineBreak: false });
-      }
-      y += 9;
-
-      let bcRowH = 0;
       if (bcRef) {
-        const bh = renderedH(bcRef, BW);
-        doc.image(bcRef, M, y, { width: BW });
-        bcRowH = Math.max(bcRowH, bh);
+        doc.image(bcRef, M, yL, { width: BW });
+        yL += renderedH(bcRef, BW) + 4;
       }
-      if (bcSap) {
-        const bh = renderedH(bcSap, BW);
-        doc.image(bcSap, xR, y, { width: BW });
-        bcRowH = Math.max(bcRowH, bh);
-      }
-      y += bcRowH + 3;
+      doc.moveTo(M, yL).lineTo(M + HALF - 8, yL).strokeColor('#d1d5db').lineWidth(0.5).stroke();
+      yL += 6;
 
-      doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
-         .text(data.batchRef, M, y, { width: HALF - 10, lineBreak: false });
-      if (bcSap) {
-        doc.text(data.sapMatDoc, xR, y, { width: HALF - 10, lineBreak: false });
-      }
-      y += 13;
-
-      // Divider
-      doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-      y += 4;
-
-      // ── Material  |  Machine ─────────────────────────────────────────────────
-      const bcMat = await barcodeBuffer(data.material);
+      // ── LEFT: Material ────────────────────────────────────────────────────────
+      // Material is NVARCHAR(18) (sql/create_production_database.sql) — 26pt
+      // is the largest size an 18-char worst case still fits inside one
+      // column's width (measured: 18 chars @ 26pt ≈ 260pt against the same
+      // ~270pt budget).
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
-         .text('MATERIAL', M, y, { lineBreak: false })
-         .text('MACHINE',  xR, y, { lineBreak: false });
-      y += 9;
-      doc.font('Helvetica-Bold').fontSize(9).fillColor('#111827')
-         .text(data.material,          M,  y, { width: HALF - 10, lineBreak: false })
-         .text(data.machine || '—',    xR, y, { width: HALF - 8,  lineBreak: false });
-      y += 12;
+         .text('MATERIAL', M, yL, { lineBreak: false });
+      yL += 9;
+      doc.font('Helvetica-Bold').fontSize(26).fillColor('#111827')
+         .text(data.material, M, yL, { width: colW, lineBreak: false });
+      yL += 32;
+      const bcMat = await barcodeBuffer(data.material);
       if (bcMat) {
-        const mw = Math.min(HALF - 20, 160);
-        const mh = renderedH(bcMat, mw);
-        doc.image(bcMat, M, y, { width: mw });
-        y += mh + 3;
+        const mw = Math.min(colW, 160);
+        doc.image(bcMat, M, yL, { width: mw });
+        yL += renderedH(bcMat, mw) + 4;
       }
 
-      // ── Operators  |  Date ───────────────────────────────────────────────────
+      // ── RIGHT: SAP Material Document ─────────────────────────────────────────
+      // Only present once the batch has backflushed to SAP — MaterialDocumentSAP
+      // is NVARCHAR(10), so 32pt (matching Batch Reference above for visual
+      // symmetry) comfortably fits the 10-digit worst case with room to spare.
+      const bcSap = (isComplete && data.sapMatDoc) ? await barcodeBuffer(data.sapMatDoc) : null;
+      if (bcSap) {
+        doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
+           .text('SAP MATERIAL DOCUMENT', xR, yR, { lineBreak: false });
+        yR += 9;
+        doc.font('Helvetica-Bold').fontSize(32).fillColor('#111827')
+           .text(data.sapMatDoc, xR, yR, { width: colW, lineBreak: false });
+        yR += 40;
+        doc.image(bcSap, xR, yR, { width: BW });
+        yR += renderedH(bcSap, BW) + 4;
+        doc.moveTo(xR, yR).lineTo(xR + HALF - 8, yR).strokeColor('#d1d5db').lineWidth(0.5).stroke();
+        yR += 6;
+      }
+
+      // ── RIGHT: Operators / Machine / Completed ──────────────────────────────
+      // Machine is only meaningful for the non-Mixing processes (Mixing has
+      // no machine — fetchMixingTicketsData always sets it null) so it's
+      // skipped entirely rather than printing a bare "—" on every Mixing tub
+      // label.
       const primaryOp = data.operators.find(o => o.IsPrimary) || data.operators[0];
       const opList    = isComplete
         ? data.operators.map(o => o.DisplayName || o.Username).join(', ')
         : (primaryOp?.DisplayName || primaryOp?.Username || '—');
-      const dateLabel = isComplete ? 'COMPLETED' : 'CREATED';
-      const dateVal   = fmtLabel(isComplete ? data.completedAt : data.createdAt);
 
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
-         .text(isComplete ? 'OPERATORS' : 'OPERATOR', M, y, { lineBreak: false })
-         .text(dateLabel, xR, y, { lineBreak: false });
-      y += 9;
+         .text(isComplete ? 'OPERATORS' : 'OPERATOR', xR, yR, { lineBreak: false });
+      yR += 9;
       doc.font('Helvetica').fontSize(8).fillColor('#111827')
-         .text(opList,   M,  y, { width: HALF - 10, lineBreak: false })
-         .text(dateVal,  xR, y, { width: HALF - 8,  lineBreak: false });
-      y += 11;
+         .text(opList, xR, yR, { width: colW, lineBreak: false });
+      yR += 11;
 
-      // Divider
+      if (data.machine) {
+        doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
+           .text('MACHINE', xR, yR, { lineBreak: false });
+        yR += 9;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#111827')
+           .text(data.machine, xR, yR, { width: colW, lineBreak: false });
+        yR += 12;
+      }
+
+      doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
+         .text(isComplete ? 'COMPLETED' : 'CREATED', xR, yR, { lineBreak: false });
+      yR += 9;
+      doc.font('Helvetica').fontSize(8).fillColor('#111827')
+         .text(fmtLabel(isComplete ? data.completedAt : data.createdAt), xR, yR, { width: colW, lineBreak: false });
+      yR += 11;
+
+      // ── Below both columns: Input Batches, then Weight, then Notes ─────────
+      // Full label width rather than squeezed into a column — traceability
+      // for the non-Mixing processes can be several concatenated parent
+      // batch refs (see data.parentBatches below) and needs the room.
+      let y = Math.max(yL, yR);
       doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-      y += 4;
+      y += 6;
 
-      // ── Traceability ─────────────────────────────────────────────────────────
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
          .text('INPUT BATCHES', M, y, { lineBreak: false });
       y += 9;
@@ -459,7 +463,7 @@ async function drawLabelPage(doc, data, isA4) {
       // ── Completion section ───────────────────────────────────────────────────
       if (isComplete) {
         doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-        y += 4;
+        y += 6;
 
         const qLabel = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
         const qValue = data.quantity != null ? `${Number(data.quantity).toFixed(3)} ${data.uom}` : '—';
@@ -468,23 +472,21 @@ async function drawLabelPage(doc, data, isA4) {
         y += 9;
         doc.font('Helvetica-Bold').fontSize(30).fillColor('#0d4c45')
            .text(qValue, M, y, { lineBreak: false });
-        y += 32;
+        y += 33;
 
         if (data.notes) {
           doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
-          y += 4;
+          y += 6;
           doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
              .text('NOTES', M, y, { lineBreak: false });
           y += 9;
           doc.font('Helvetica').fontSize(8).fillColor('#111827');
-          // The two giant rows above (Material + batch code) leave much
-          // less spare vertical room than before this change, so a long
-          // note can no longer be assumed to fit above the footer rule the
-          // way it safely did when Weight was only 12pt. PDFKit doesn't
-          // clip overflowing text the way the HTML preview's CSS
-          // (overflow:hidden) does, so an unchecked long note would print
-          // through/past the footer line. Trim to whatever actually fits,
-          // with an ellipsis, instead of risking that.
+          // Belt-and-braces: this redesign leaves far more spare vertical
+          // room than the earlier full-width-giant-row version did, but
+          // PDFKit still doesn't clip overflowing text the way the HTML
+          // preview's CSS (overflow:hidden) does, so keep the safety net —
+          // trim to whatever height is actually available, with an
+          // ellipsis, rather than ever risking text through the footer.
           let notesText = data.notes;
           const availH = (H - 14) - y - 2;
           if (availH > 0 && doc.heightOfString(notesText, { width: CW }) > availH) {
@@ -582,6 +584,14 @@ async function renderLabelDiv(data) {
   const qLabel = data.uom === 'KG' ? 'WEIGHT (KG)' : 'LENGTH (M)';
   const qValue = data.quantity != null ? `${Number(data.quantity).toFixed(3)} ${esc(data.uom)}` : '—';
 
+  // Two independent columns (left: Batch Reference/Material, right: SAP
+  // Material Document/Operators/Machine/Completed) laid out per the user's
+  // mockup — each identifying value appears ONCE as a big number
+  // immediately followed by its barcode, with no separate small-text
+  // repeat underneath like earlier iterations of this label had. Machine
+  // is only shown when present (Mixing tickets never have one — see
+  // fetchMixingTicketsData, which always sets machine: null — so it's
+  // skipped rather than printing a bare "—" on every Mixing tub label).
   const completionSection = isComplete ? `
     <div class="divider"></div>
     <div>
@@ -604,39 +614,27 @@ async function renderLabelDiv(data) {
     <div class="badge" style="background:${badge.bg}">${esc(badge.text)}</div>
   </div>
   <div class="body">
-    <div class="mat-id">${esc(data.material)}</div>
-    <div class="mix-id">${esc(data.batchRef)}</div>
     <div class="two-col">
-      <div>
+      <div class="col">
         <div class="lbl">BATCH REFERENCE</div>
+        <div class="mix-id">${esc(data.batchRef)}</div>
         ${bcImg(b64(bcRef), 13)}
-        <div class="batch-id">${esc(data.batchRef)}</div>
-      </div>
-      ${isComplete && data.sapMatDoc ? `
-      <div>
-        <div class="lbl">SAP MATERIAL DOCUMENT</div>
-        ${bcImg(b64(bcSap), 13)}
-        <div class="batch-id">${esc(data.sapMatDoc)}</div>
-      </div>` : ''}
-    </div>
-    <div class="divider"></div>
-    <div class="two-col">
-      <div>
+        <div class="divider"></div>
         <div class="lbl">MATERIAL</div>
-        <div class="mat-val">${esc(data.material)}</div>
-        <div class="mat-bc">${bcImg(b64(bcMat), 9)}</div>
+        <div class="mat-id">${esc(data.material)}</div>
+        ${bcImg(b64(bcMat), 9)}
       </div>
-      <div>
-        <div class="lbl">MACHINE</div>
-        <div class="mach-val">${esc(data.machine || '—')}</div>
-      </div>
-    </div>
-    <div class="two-col">
-      <div>
+      <div class="col">
+        ${isComplete && data.sapMatDoc ? `
+        <div class="lbl">SAP MATERIAL DOCUMENT</div>
+        <div class="mix-id">${esc(data.sapMatDoc)}</div>
+        ${bcImg(b64(bcSap), 13)}
+        <div class="divider"></div>` : ''}
         <div class="lbl">${isComplete ? 'OPERATORS' : 'OPERATOR'}</div>
         <div class="op-val">${opList}</div>
-      </div>
-      <div>
+        ${data.machine ? `
+        <div class="lbl">MACHINE</div>
+        <div class="mach-val">${esc(data.machine)}</div>` : ''}
         <div class="lbl">${dateLabel}</div>
         <div class="date-val">${esc(dateVal)}</div>
       </div>
@@ -692,21 +690,18 @@ async function buildLabelsHTML(dataArray) {
   .lbl     { font-size: 5.5pt; font-weight: 700; color: #6b7280; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 2px; }
   .divider { border: none; border-top: 0.5px solid #d1d5db; margin: 2px 0; flex-shrink: 0; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
-  .batch-id { font-size: 11pt; font-weight: 700; letter-spacing: 0.08em; margin-top: 1px; }
-  /* Material + batch/mix reference — own full-width rows above the technical
-     MATERIAL/BATCH REFERENCE barcode rows below (.mat-val/.batch-id,
-     unchanged at 9pt/11pt), deliberately MUCH larger. Operators picking the
-     wrong physical mix in the room was reported as a real mix-up risk.
-     Material (what's physically in the tub) is sized largest at 50pt as the
-     primary at-a-glance field; the batch/mix code (which run it came from)
-     is the secondary confirmation code at 40pt below it. white-space:
-     nowrap is safe — Material is NVARCHAR(18) max and refs are a fixed
-     "XX########[-T#]" pattern (~10-14 chars, see fetchLabelData), both well
-     inside the label's 210mm width even at these sizes. */
-  .mat-id   { font-size: 50pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; margin-bottom: 2px; }
-  .mix-id   { font-size: 40pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; margin-bottom: 3px; }
-  .mat-val  { font-size: 9pt;  font-weight: 700; }
-  .mat-bc img { height: 9mm; width: auto; max-width: 100%; margin-top: 2px; }
+  .col     { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  /* Batch/mix reference (left) + SAP Material Document (right) at 32pt, and
+     Material (left, below batch reference) at 26pt — each appears ONCE as
+     a big number immediately followed by its barcode, with no separate
+     small-text repeat underneath like earlier iterations of this label
+     had (per user's mockup). Sized to the largest font that still fits a
+     worst-case value inside one column's width without wrapping:
+     batch/SAP refs ("XX########[-T#]", ~10-14 chars, or
+     MaterialDocumentSAP's 10-digit max) at 32pt, Material (NVARCHAR(18)
+     max) at 26pt. */
+  .mix-id  { font-size: 32pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; overflow: hidden; }
+  .mat-id  { font-size: 26pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; overflow: hidden; margin-top: 2px; }
   .mach-val { font-size: 9pt; font-weight: 700; }
   .op-val   { font-size: 8pt; }
   .date-val { font-size: 8pt; }
