@@ -37,14 +37,14 @@ const {
 
 const REPO_DIR = __dirname;
 
-const STOP_VERIFY_MAX_WAIT_MS  = 25 * 1000;
+const STOP_VERIFY_MAX_WAIT_MS  = 15 * 1000;
 const STOP_VERIFY_POLL_MS      = 2 * 1000;
-const START_VERIFY_MAX_WAIT_MS = 45 * 1000;
+const START_VERIFY_MAX_WAIT_MS = 25 * 1000;
 const START_VERIFY_POLL_MS     = 3 * 1000;
 const SVC_EVENT_TIMEOUT_MS     = 60 * 1000;
 // Shorter than deploy-runner.cjs's — this is an interactive script; someone
 // is watching it run, rather than it needing to self-supervise unattended.
-const STABILITY_CHECKS_MS = [10 * 1000, 20 * 1000];
+const STABILITY_CHECKS_MS = [5 * 1000, 10 * 1000];
 
 async function main() {
   const svc = new Service({ name: 'Normanton Nexus', script: path.join(REPO_DIR, 'server.js') });
