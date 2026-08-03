@@ -355,7 +355,7 @@ async function drawLabelPage(doc, data, isA4) {
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
          .text('BATCH REFERENCE', M, yL, { lineBreak: false });
       yL += 9;
-      doc.font('Helvetica-Bold').fontSize(32).fillColor('#111827')
+      doc.font('Helvetica-Bold').fontSize(22).fillColor('#111827')
          .text(data.batchRef, M, yL, { width: colW, lineBreak: false });
       yL += 40;
       const bcRef = await barcodeBuffer(data.batchRef);
@@ -374,9 +374,11 @@ async function drawLabelPage(doc, data, isA4) {
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
          .text('MATERIAL', M, yL, { lineBreak: false });
       yL += 9;
-      doc.font('Helvetica-Bold').fontSize(26).fillColor('#111827')
+      let matFontSize;
+      if (data.material.length < 10) matFontSize = 56; else if (data.material.length < 13) matFontSize = 36; else matFontSize = 26;
+      doc.font('Helvetica-Bold').fontSize(matFontSize).fillColor('#111827')
          .text(data.material, M, yL, { width: colW, lineBreak: false });
-      yL += 32;
+      yL += matFontSize;
       const bcMat = await barcodeBuffer(data.material);
       if (bcMat) {
         const mw = Math.min(colW, 160);
@@ -393,7 +395,7 @@ async function drawLabelPage(doc, data, isA4) {
         doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
            .text('SAP MATERIAL DOCUMENT', xR, yR, { lineBreak: false });
         yR += 9;
-        doc.font('Helvetica-Bold').fontSize(32).fillColor('#111827')
+        doc.font('Helvetica-Bold').fontSize(22).fillColor('#111827')
            .text(data.sapMatDoc, xR, yR, { width: colW, lineBreak: false });
         yR += 40;
         doc.image(bcSap, xR, yR, { width: BW });
