@@ -1600,7 +1600,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     placeCard(0, 2, {
       label: 'INVOICED + POTENTIAL STOCK (PTFE)',
       value: {
-        formula: `$${invoicedCellAddr}+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataRiskValueRange},"<=0",${dataWontGetRange},"<>x")`,
+        formula: `$${invoicedCellAddr}+SUMIFS(${dataStockRange},${dataStreamRange},"PTFE",${dataWontGetRange},"<>x")`,
         result: invoicedToDate + stockTotalPtfe
       },
       numFmt: '#,##0.00',
