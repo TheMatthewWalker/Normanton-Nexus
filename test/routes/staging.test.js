@@ -1,0 +1,332 @@
+// routes/staging.js (Staging Post) delegates persistence to stagingsql.js
+// (`db`, mocked wholesale) and SAP stock lookups to SapServer via axios
+// directly (not through routes/sap.js's proxies). Covers the CRUD/
+// validation surface, the Needed-By lead-time rule, the bin-restriction
+// isAllowed logic on the stock-lookup route, and the LOG_SUPER gate on
+// bin-restriction management, plus (see the POST /requests/:id/deliver
+// describe block near the end) the consignment-vs-transfer-order branching,
+// SAP-rejection handling at both the axios-throw and business-level-
+// success:false layers, and the audit/redrum-reversal side effects on a
+// successful delivery.
+
+import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
+import { jest } from '@jest/globals';
+import request from 'supertest';
+import { createMockSql, resetMockSql } from '../helpers/mockPool.js';
+import { buildTestApp } from '../helpers/testApp.js';
+import { operatorUser } from '../helpers/fixtures/users.js';
+
+const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
+jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
+
+const db = {
+  searchMaterials: jest.fn(),
+  listOpenStagingRequests: jest.fn(),
+  getStagingOpenSummary: jest.fn(),
+  listStagingRequests: jest.fn(),
+  listCompletedStagingRequests: jest.fn(),
+  getStagingRequestById: jest.fn(),
+  listStagingRequestDeliveries: jest.fn(),
+  createStagingRequest: jest.fn(),
+  cancelStagingRequest: jest.fn(),
+  completeStagingRequest: jest.fn(),
+  getBinRestrictionsForMaterial: jest.fn(),
+  listBinRestrictions: jest.fn(),
+  createBinRestriction: jest.fn(),
+  updateBinRestriction: jest.fn(),
+  deleteBinRestriction: jest.fn(),
+  recordStagingDelivery: jest.fn(),
+};
+jest.unstable_mockModule('../../routes/stagingsql.js', () => db);
+
+const axiosMock = { get: jest.fn(), post: jest.fn() };
+jest.unstable_mockModule('axios', () => ({ default: axiosMock }));
+
+const maybeReverseBatchManagedReturnMock = jest.fn();
+jest.unstable_mockModule('../../lib/redrumReversal.js', () => ({
+  maybeReverseBatchManagedReturn: maybeReverseBatchManagedReturnMock,
+}));
+
+const logSuperUser = { ...operatorUser, permissions: ['LOG_SUPER'] };
+
+let stagingRouter;
+let app;
+let appLogSuper;
+
+beforeAll(async () => {
+  ({ default: stagingRouter } = await import('../../routes/staging.js'));
+  app = buildTestApp(stagingRouter, { sessionUser: operatorUser });
+  appLogSuper = buildTestApp(stagingRouter, { sessionUser: logSuperUser });
+});
+
+beforeEach(() => {
+  resetMockSql({ pool, request: dbRequest, connect });
+  Object.values(db).forEach(fn => fn.mockReset());
+  axiosMock.get.mockReset();
+  axiosMock.post.mockReset();
+  maybeReverseBatchManagedReturnMock.mockReset();
+  dbRequest.query.mockResolvedValue({ recordset: [] }); // audit()/notify() default to succeeding
+});
+
+function auditedEventTypes() {
+  return dbRequest.input.mock.calls.filter(c => c[0] === 'eventType').map(c => c[2]);
+}
+
+describe('GET /materials', () => {
+  test('short-circuits on an empty search term without calling the DB', async () => {
+    const res = await request(app).get('/materials');
+    expect(res.body).toEqual({ success: true, data: [] });
+    expect(db.searchMaterials).not.toHaveBeenCalled();
+  });
+
+  test('searches when given a term', async () => {
+    db.searchMaterials.mockResolvedValueOnce([{ Material: '30005R' }]);
+    const res = await request(app).get('/materials?search=3000');
+    expect(res.body.data).toEqual([{ Material: '30005R' }]);
+  });
+});
+
+describe('GET /requests/:id', () => {
+  test('404s when the request does not exist', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(null);
+    const res = await request(app).get('/requests/999');
+    expect(res.status).toBe(404);
+  });
+
+  test('includes deliveries alongside the request', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce({ RequestID: 1, Material: '30005R' });
+    db.listStagingRequestDeliveries.mockResolvedValueOnce([{ DeliveryID: 1 }]);
+    const res = await request(app).get('/requests/1');
+    expect(res.body.data.deliveries).toEqual([{ DeliveryID: 1 }]);
+  });
+});
+
+describe('POST /requests — validation', () => {
+  const validBody = () => ({
+    material: '30005R',
+    quantityRequested: 10,
+    location: 'Line 1',
+    dueAtUtc: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+  });
+
+  test('requires material', async () => {
+    const res = await request(app).post('/requests').send({ ...validBody(), material: '' });
+    expect(res.status).toBe(400);
+  });
+
+  test('requires a positive quantityRequested', async () => {
+    const res = await request(app).post('/requests').send({ ...validBody(), quantityRequested: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  test('requires location', async () => {
+    const res = await request(app).post('/requests').send({ ...validBody(), location: '' });
+    expect(res.status).toBe(400);
+  });
+
+  test('requires dueAtUtc', async () => {
+    const res = await request(app).post('/requests').send({ ...validBody(), dueAtUtc: '' });
+    expect(res.status).toBe(400);
+  });
+
+  test('rejects a dueAtUtc less than the minimum lead time from now', async () => {
+    const res = await request(app).post('/requests').send({ ...validBody(), dueAtUtc: new Date(Date.now() + 30 * 60000).toISOString() });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/at least 4 hours/);
+  });
+
+  test('creates the request when valid', async () => {
+    db.createStagingRequest.mockResolvedValueOnce(123);
+    const res = await request(app).post('/requests').send(validBody());
+    expect(res.status).toBe(200);
+    expect(res.body.data.requestId).toBe(123);
+  });
+});
+
+describe('POST /requests/:id/cancel', () => {
+  test('400s when the request can no longer be cancelled', async () => {
+    db.cancelStagingRequest.mockResolvedValueOnce(false);
+    const res = await request(app).post('/requests/1/cancel');
+    expect(res.status).toBe(400);
+  });
+
+  test('cancels successfully', async () => {
+    db.cancelStagingRequest.mockResolvedValueOnce(true);
+    const res = await request(app).post('/requests/1/cancel');
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('GET /requests/:id/stock — bin-restriction isAllowed logic', () => {
+  test('every bin is allowed when no restrictions are configured for the material', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce({ Material: '30005R', RequestedBatch: null });
+    db.getBinRestrictionsForMaterial.mockResolvedValueOnce([]);
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ storageType: 'SA', bin: 'BIN-999' }] } });
+
+    const res = await request(app).get('/requests/1/stock');
+
+    expect(res.body.data.hasRestrictions).toBe(false);
+    expect(res.body.data.stock[0].isAllowed).toBe(true);
+  });
+
+  test('flags a bin not matching any configured restriction as not allowed', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce({ Material: '30005R', RequestedBatch: null });
+    db.getBinRestrictionsForMaterial.mockResolvedValueOnce([{ StorageType: 'SA', Bin: 'BIN-001' }]);
+    axiosMock.get.mockResolvedValueOnce({
+      data: { success: true, data: [{ storageType: 'SA', bin: 'BIN-999' }, { storageType: 'SA', bin: 'BIN-001' }] },
+    });
+
+    const res = await request(app).get('/requests/1/stock');
+
+    expect(res.body.data.stock[0].isAllowed).toBe(false); // BIN-999 doesn't match
+    expect(res.body.data.stock[1].isAllowed).toBe(true);  // BIN-001 matches exactly
+  });
+
+  test('a restriction with no specific Bin allows any bin of that storage type', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce({ Material: '30005R', RequestedBatch: null });
+    db.getBinRestrictionsForMaterial.mockResolvedValueOnce([{ StorageType: 'SA', Bin: null }]);
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ storageType: 'SA', bin: 'ANY-BIN' }] } });
+
+    const res = await request(app).get('/requests/1/stock');
+
+    expect(res.body.data.stock[0].isAllowed).toBe(true);
+  });
+});
+
+describe('bin-restrictions — LOG_SUPER gate', () => {
+  test('POST is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/bin-restrictions').send({ material: '30005R', storageType: 'SA' });
+    expect(res.status).toBe(403);
+    expect(db.createBinRestriction).not.toHaveBeenCalled();
+  });
+
+  test('POST succeeds for a LOG_SUPER user', async () => {
+    db.createBinRestriction.mockResolvedValueOnce(5);
+    const res = await request(appLogSuper).post('/bin-restrictions').send({ material: '30005R', storageType: 'SA' });
+    expect(res.status).toBe(200);
+  });
+
+  test('DELETE is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).delete('/bin-restrictions/1');
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('POST /requests/:id/deliver', () => {
+  const openRequest = { RequestID: 1, Material: '30005R', RequestedBatch: 'B1', Status: 'Open' };
+  const validBody = {
+    quantity: 10, storageLocation: '1000',
+    sourceStorageType: 'PDR', sourceBin: 'B01',
+    destinationStorageType: 'SA', destinationBin: 'B02',
+  };
+
+  test('404s when the request does not exist', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(null);
+    const res = await request(app).post('/requests/999/deliver').send(validBody);
+    expect(res.status).toBe(404);
+  });
+
+  test('400s when the request is no longer open', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce({ ...openRequest, Status: 'Delivered' });
+    const res = await request(app).post('/requests/1/deliver').send(validBody);
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/no longer open/);
+  });
+
+  test('400s on a zero/negative quantity', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    const res = await request(app).post('/requests/1/deliver').send({ ...validBody, quantity: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/quantity/);
+  });
+
+  test('400s when a required bin/type/location field is missing', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    const res = await request(app).post('/requests/1/deliver').send({ ...validBody, destinationBin: undefined });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/Storage location, source bin\/type and destination bin\/type/);
+  });
+
+  test('400s on consignment stock (SOBKZ K into SA) with no special stock number', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    const res = await request(app).post('/requests/1/deliver').send({ ...validBody, specialStockIndicator: 'K' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/consignment stock/);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('422s and audits STAGING_DELIVER_SAP_ERROR when the SAP call itself throws', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    axiosMock.post.mockRejectedValueOnce(new Error('RFC timeout'));
+    const res = await request(app).post('/requests/1/deliver').send(validBody);
+    expect(res.status).toBe(422);
+    expect(res.body.error.message).toMatch(/SAP rejected the transfer order: RFC timeout/);
+    expect(auditedEventTypes()).toEqual(['STAGING_DELIVER_SAP_ERROR']);
+    expect(db.recordStagingDelivery).not.toHaveBeenCalled();
+  });
+
+  test('422s with SAP\'s own messages when the transfer order itself reports failure (business-level, not the envelope)', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: false, messages: [{ type: 'E', message: 'Bin is full' }] } },
+    });
+    const res = await request(app).post('/requests/1/deliver').send(validBody);
+    expect(res.status).toBe(422);
+    expect(res.body.error.message).toBe('Bin is full');
+    expect(res.body.data.messages).toEqual([{ type: 'E', message: 'Bin is full' }]);
+  });
+
+  test('creates a standard transfer order, records the delivery, and audits STAGING_DELIVERED', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: 'TO123', messages: [] } },
+    });
+    db.recordStagingDelivery.mockResolvedValueOnce({ deliveryID: 5 });
+    maybeReverseBatchManagedReturnMock.mockResolvedValueOnce(null);
+
+    const res = await request(app).post('/requests/1/deliver').send(validBody);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ transferOrderNumber: 'TO123', deliveryID: 5 });
+    expect(db.recordStagingDelivery).toHaveBeenCalledWith('1', expect.objectContaining({
+      quantityMoved: 10, batch: 'B1', transferOrderNumber: 'TO123',
+    }));
+    expect(axiosMock.post.mock.calls[0][0]).toContain('/api/warehouse/transfer-order');
+    expect(auditedEventTypes()).toEqual(['STAGING_DELIVERED']);
+    expect(res.body.data.redrum).toBeUndefined();
+  });
+
+  test('includes the redrum result in the response when a batch-managed return was reversed', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: 'TO124', messages: [] } },
+    });
+    db.recordStagingDelivery.mockResolvedValueOnce({});
+    maybeReverseBatchManagedReturnMock.mockResolvedValueOnce({ reversed: true, note: 'Return RD1 reversed' });
+
+    const res = await request(app).post('/requests/1/deliver').send(validBody);
+
+    expect(res.body.data.redrum).toEqual({ reversed: true, note: 'Return RD1 reversed' });
+  });
+
+  test('routes consignment stock (SOBKZ K into SA) through the MB1B endpoint instead of a transfer order', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { mb1bMessage: 'MB1B posted', toNonConsignMessage: null, toConsignMessage: 'LT01 posted' } },
+    });
+    db.recordStagingDelivery.mockResolvedValueOnce({});
+    maybeReverseBatchManagedReturnMock.mockResolvedValueOnce(null);
+
+    const res = await request(app).post('/requests/1/deliver').send({
+      ...validBody, specialStockIndicator: 'K', specialStockNumber: 'VENDOR1',
+    });
+
+    expect(res.status).toBe(200);
+    expect(axiosMock.post.mock.calls[0][0]).toContain('/api/warehouse/consignment-mb1b');
+    expect(res.body.data.transferOrderNumber).toBeNull(); // consignment issues have no transfer order number
+    expect(res.body.data.messages).toEqual([
+      { type: 'S', message: 'MB1B posted' },
+      { type: 'S', message: 'LT01 posted' },
+    ]);
+  });
+});

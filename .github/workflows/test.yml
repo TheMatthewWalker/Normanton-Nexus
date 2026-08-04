@@ -1,0 +1,29 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24' # matches the current LTS this suite was built/verified against
+
+      - run: npm ci
+
+      # Unit tests always run here. Integration tests (test/integration/*.integration.test.js)
+      # skip automatically — not fail — until TEST_SQL_* secrets are configured
+      # once the staging SQL Server exists (see test/helpers/stagingDb.js).
+      - run: npm test
+        env:
+          TEST_SQL_SERVER: ${{ secrets.TEST_SQL_SERVER }}
+          TEST_SQL_DATABASE: ${{ secrets.TEST_SQL_DATABASE }}
+          TEST_SQL_USER: ${{ secrets.TEST_SQL_USER }}
+          TEST_SQL_PASSWORD: ${{ secrets.TEST_SQL_PASSWORD }}
