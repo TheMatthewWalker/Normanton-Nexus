@@ -16,6 +16,7 @@
  *   PUT  /users/:id                    — update role, status, departments, notes
  *   POST /users/:id/approve            — activate a pending user
  *   POST /users/:id/reject             — delete a pending registration
+ *   POST /users/bulk-create            — mass-create accounts from an imported list (superadmin only)
  *   GET  /audit                        — audit log, optionally filtered by event type
  *
  * Permission definition endpoints (superadmin only):
@@ -32,6 +33,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
+import bcrypt  from 'bcrypt';
 import { sqlConfig } from '../config.js';
 
 const router = express.Router();
@@ -431,6 +433,168 @@ router.post('/users/:id/reject', async (req, res) => {
   }
 });
 
+// ── POST /users/bulk-create ───────────────────────────────────────────────────
+// Superadmin only. Mass-creates accounts from an imported list (e.g. a CSV
+// of new starters), parsed to JSON client-side.
+//
+// Body: { department: string|null, rows: [{
+//   role, username, email, firstName, lastName, password,
+//   approved, unlocked, permissionCode
+// }] }
+//
+// Every row gets MustChangePassword = 1 — the whole point of this endpoint
+// is importing many accounts that share one known initial password, so
+// each new user is forced through POST /api/profile/change-password (see
+// routes/profile.js) before they can use anything past the landing page
+// (see server.js's /private/:page route and private/js/landing.js).
+//
+// Each row is validated and inserted independently in its own transaction
+// so one bad row (duplicate username, bad password, etc.) doesn't abort
+// the rest of the batch — the response is a per-row result array plus a
+// summary count.
+router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
+  const { department = null, rows } = req.body;
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ success: false, error: 'No rows provided.' });
+  }
+  if (rows.length > 500) {
+    return res.status(400).json({ success: false, error: 'Maximum 500 rows per batch.' });
+  }
+  if (department && !VALID_DEPTS.includes(department)) {
+    return res.status(400).json({ success: false, error: 'Invalid department.' });
+  }
+
+  const actor      = req.session.user.username;
+  const actorID    = req.session.user.userID;
+  const results    = [];
+  const hashCache  = new Map();
+  const seenUsernames = new Set();
+  const seenEmails    = new Set();
+
+  try {
+    const pool = await sql.connect(sqlConfig);
+
+    for (let i = 0; i < rows.length; i++) {
+      const raw    = rows[i] || {};
+      const rowNum = i + 1;
+
+      const role           = String(raw.role || 'operator').trim().toLowerCase();
+      const username       = String(raw.username || '').trim();
+      const email          = String(raw.email || '').trim().toLowerCase();
+      const firstName      = String(raw.firstName || '').trim();
+      const lastName       = String(raw.lastName || '').trim();
+      const password       = String(raw.password || '');
+      const approved       = raw.approved === undefined ? true : !!raw.approved;
+      const isLocked       = raw.unlocked === undefined ? false : !raw.unlocked;
+      const permissionCode = raw.permissionCode ? String(raw.permissionCode).trim().toUpperCase() : null;
+
+      const fail = (error) => results.push({ row: rowNum, username, success: false, error });
+
+      if (!VALID_ROLES.includes(role))                                     { fail(`Invalid role "${role}"`); continue; }
+      if (!username || !/^[a-z0-9._-]{1,80}$/.test(username))              { fail('Invalid username — use lowercase letters, digits, dots, hyphens, underscores.'); continue; }
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))             { fail('Invalid email address.'); continue; }
+      if (!firstName || !lastName)                                         { fail('First and last name are required.'); continue; }
+      if (password.length < 10 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+        fail('Password must be at least 10 characters with one uppercase letter and one number.'); continue;
+      }
+      if (permissionCode && !/^[A-Z0-9_]{2,50}$/.test(permissionCode))     { fail(`Invalid permission code "${permissionCode}".`); continue; }
+
+      const usernameKey = username.toLowerCase();
+      if (seenUsernames.has(usernameKey)) { fail('Duplicate username within this batch.'); continue; }
+      if (seenEmails.has(email))          { fail('Duplicate email within this batch.'); continue; }
+
+      const taken = await pool.request()
+        .input('u', sql.NVarChar(80),  username)
+        .input('e', sql.NVarChar(160), email)
+        .query(`SELECT Username, Email FROM kongsberg.dbo.PortalUsers WHERE Username = @u OR Email = @e`);
+      if (taken.recordset.length) {
+        fail(taken.recordset[0].Username === username ? 'Username already exists.' : 'Email already registered.');
+        continue;
+      }
+
+      if (permissionCode) {
+        const permExists = await pool.request()
+          .input('code', sql.NVarChar(50), permissionCode)
+          .query(`SELECT 1 FROM kongsberg.dbo.PortalPermissions WHERE PermissionCode = @code`);
+        if (!permExists.recordset.length) { fail(`Permission code "${permissionCode}" does not exist.`); continue; }
+      }
+
+      seenUsernames.add(usernameKey);
+      seenEmails.add(email);
+
+      let hash = hashCache.get(password);
+      if (!hash) {
+        hash = await bcrypt.hash(password, 12);
+        hashCache.set(password, hash);
+      }
+
+      const tx = new sql.Transaction(pool);
+      await tx.begin();
+      try {
+        const insertResult = await tx.request()
+          .input('username',    sql.NVarChar(80),  username)
+          .input('firstName',   sql.NVarChar(80),  firstName)
+          .input('lastName',    sql.NVarChar(80),  lastName)
+          .input('email',       sql.NVarChar(160), email)
+          .input('hash',        sql.NVarChar(256), hash)
+          .input('role',        sql.NVarChar(20),  role)
+          .input('isActive',    sql.Bit,           approved ? 1 : 0)
+          .input('isLocked',    sql.Bit,           isLocked ? 1 : 0)
+          .input('approvedBy',  sql.NVarChar(80),  approved ? actor : null)
+          .query(`
+            INSERT INTO kongsberg.dbo.PortalUsers
+              (Username, FirstName, LastName, Email, PasswordHash, Role,
+               IsActive, IsLocked, MustChangePassword, ApprovedBy, ApprovedAt)
+            OUTPUT INSERTED.UserID
+            VALUES (@username, @firstName, @lastName, @email, @hash, @role,
+                    @isActive, @isLocked, 1, @approvedBy,
+                    CASE WHEN @isActive = 1 THEN GETDATE() ELSE NULL END)
+          `);
+
+        const newUserID = insertResult.recordset[0].UserID;
+
+        if (department) {
+          await tx.request()
+            .input('userID',    sql.Int,          newUserID)
+            .input('dept',      sql.NVarChar(50), department)
+            .input('grantedBy', sql.NVarChar(80), actor)
+            .query(`INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+                    VALUES (@userID, @dept, @grantedBy)`);
+        }
+
+        if (permissionCode) {
+          await tx.request()
+            .input('userID',       sql.Int,          newUserID)
+            .input('code',         sql.NVarChar(50), permissionCode)
+            .input('grantedByID',  sql.Int,          actorID)
+            .query(`INSERT INTO kongsberg.dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
+                    VALUES (@userID, @code, @grantedByID)`);
+        }
+
+        await tx.commit();
+        results.push({ row: rowNum, username, success: true, userID: newUserID });
+      } catch (err) {
+        await tx.rollback();
+        fail(err.message);
+      }
+    }
+
+    const succeeded = results.filter(r => r.success).length;
+    const failed    = results.length - succeeded;
+
+    await audit('BULK_CREATE', actor,
+      `Bulk-created ${succeeded} user(s)${failed ? `, ${failed} failed` : ''}` +
+      `${department ? ` — department: ${department}` : ''}`, req);
+
+    res.json({ success: true, results, summary: { total: rows.length, succeeded, failed } });
+
+  } catch (err) {
+    console.error('[admin/users bulk-create]', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /audit ────────────────────────────────────────────────────────────────
 router.get('/audit', async (req, res) => {
   const { event } = req.query;
@@ -442,6 +606,7 @@ router.get('/audit', async (req, res) => {
     'RAW_SQL','RAW_SQL_BLOCKED','RAW_SQL_ERROR',
     'SAP_OK','SAP_ERROR',
     'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE',
+    'BULK_CREATE','PASSWORD_CHANGE',
   ];
 
   if (event && !VALID_EVENTS.includes(event)) {

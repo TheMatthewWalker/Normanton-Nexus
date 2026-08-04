@@ -62,6 +62,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (dbxNav) {
     dbxNav.addEventListener('click', () => { setupDbExplorer(); }, { once: true });
   }
+
+  // Set up Bulk Create Users when that section is first opened (superadmin only)
+  const bulkCreateNav = document.getElementById('nav-bulk-create');
+  if (bulkCreateNav) {
+    bulkCreateNav.addEventListener('click', () => { setupBulkCreate(); }, { once: true });
+  }
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -81,6 +87,12 @@ function applyRoleVisibility() {
   // Show permissions nav only for superadmin
   const permNav = document.getElementById('nav-permissions');
   if (permNav) permNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
+
+  // Show Bulk Create Users nav only for superadmin — client-side convenience
+  // only; the real gate is server-side (routes/useradmin.js's requireSuperadmin
+  // on POST /users/bulk-create).
+  const bulkCreateNav = document.getElementById('nav-bulk-create');
+  if (bulkCreateNav) bulkCreateNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 
   // Show deployments nav only for superadmin
   const deployNav = document.getElementById('nav-deployments');
@@ -613,6 +625,178 @@ async function confirmDeletePermission(code) {
     showToast(`Permission ${code} deleted`, 'success');
   } catch (err) {
     showToast('Delete failed: ' + err.message, 'error');
+  }
+}
+
+// ── Bulk Create Users (superadmin only) ───────────────────────────────────────
+// Client-side CSV parsing (tab- or comma-delimited — a straight paste from
+// Excel into a .csv is tab-delimited) into the row shape expected by
+// routes/useradmin.js's POST /users/bulk-create. Real gating is server-side
+// (requireSuperadmin on that route); the nav item is hidden client-side too
+// (see applyRoleVisibility) purely for UX.
+let bulkCreateSetup = false;
+let bulkParsedRows  = []; // canonical rows, same order as the preview table
+
+const BULK_HEADER_MAP = {
+  level: 'role', role: 'role',
+  approved: 'approved',
+  unlocked: 'unlocked',
+  permission: 'permissionCode', permissioncode: 'permissionCode',
+  firstname: 'firstName',
+  lastname: 'lastName',
+  username: 'username',
+  email: 'email',
+  password: 'password',
+};
+
+function setupBulkCreate() {
+  if (bulkCreateSetup) return;
+  bulkCreateSetup = true;
+
+  const deptSelect = document.getElementById('bulk-department');
+  deptSelect.innerHTML = '<option value="">— No department —</option>' +
+    DEPARTMENTS.map(d => `<option value="${d}">${DEPT_LABELS[d]}</option>`).join('');
+
+  document.getElementById('bulk-csv-input').addEventListener('change', handleBulkCsvSelected);
+  document.getElementById('bulk-create-btn').addEventListener('click', submitBulkCreate);
+}
+
+function bulkParseYN(v) {
+  return ['y', 'yes', 'true', '1'].includes(String(v ?? '').trim().toLowerCase());
+}
+
+function parseDelimited(text) {
+  const lines = text.split(/\r\n|\n|\r/).filter(l => l.trim().length > 0);
+  if (!lines.length) return { headers: [], rows: [] };
+  const delim = lines[0].includes('\t') ? '\t' : ',';
+  const headers = lines[0].split(delim).map(h => h.trim());
+  const rows = lines.slice(1).map(line => {
+    const cells = line.split(delim);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = (cells[i] ?? '').trim(); });
+    return obj;
+  });
+  return { headers, rows };
+}
+
+function handleBulkCsvSelected(e) {
+  const file       = e.target.files[0];
+  const summaryEl  = document.getElementById('bulk-parse-summary');
+  const btn        = document.getElementById('bulk-create-btn');
+  document.getElementById('bulk-create-result').textContent = '';
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const { headers, rows: rawRows } = parseDelimited(String(reader.result));
+
+    // Map each raw header to a canonical field name, case-insensitively
+    const fieldByHeader = {};
+    headers.forEach(h => {
+      const key = h.toLowerCase().replace(/[^a-z]/g, '');
+      if (BULK_HEADER_MAP[key]) fieldByHeader[h] = BULK_HEADER_MAP[key];
+    });
+
+    bulkParsedRows = rawRows.map(raw => {
+      const row = {};
+      for (const [header, field] of Object.entries(fieldByHeader)) {
+        row[field] = raw[header] ?? '';
+      }
+      return {
+        role:           (row.role || 'operator').trim().toLowerCase(),
+        approved:       row.approved === undefined ? true : bulkParseYN(row.approved),
+        unlocked:       row.unlocked === undefined ? true : bulkParseYN(row.unlocked),
+        permissionCode: (row.permissionCode || '').trim().toUpperCase() || null,
+        firstName:      (row.firstName || '').trim(),
+        lastName:       (row.lastName || '').trim(),
+        username:       (row.username || '').trim(),
+        email:          (row.email || '').trim().toLowerCase(),
+        password:       row.password || '',
+      };
+    });
+
+    if (!bulkParsedRows.length) {
+      summaryEl.style.color = 'var(--error)';
+      summaryEl.textContent = 'No rows found in that file.';
+      btn.disabled = true;
+      renderBulkPreview();
+      return;
+    }
+
+    summaryEl.style.color = 'var(--text-dim)';
+    summaryEl.textContent = `Parsed ${bulkParsedRows.length} row(s). Review below, then click Create Users.`;
+    btn.disabled = false;
+    renderBulkPreview();
+  };
+  reader.onerror = () => {
+    summaryEl.style.color = 'var(--error)';
+    summaryEl.textContent = 'Failed to read that file.';
+  };
+  reader.readAsText(file);
+}
+
+function renderBulkPreview(results) {
+  const tbody = document.getElementById('bulk-preview-tbody');
+  if (!bulkParsedRows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="loading-cell">Choose a CSV file to preview its rows.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = bulkParsedRows.map((r, i) => {
+    const result = results && results[i];
+    const status = result
+      ? (result.success
+          ? '<span class="badge badge--active">Created</span>'
+          : `<span class="badge badge--locked" title="${esc(result.error || '')}">${esc(result.error || 'Failed')}</span>`)
+      : '<span style="color:var(--text-muted)">Pending</span>';
+    return `
+      <tr>
+        <td>${i + 1}</td>
+        <td><strong>${esc(r.username)}</strong></td>
+        <td>${esc(r.email)}</td>
+        <td>${esc(r.firstName)} ${esc(r.lastName)}</td>
+        <td><span class="badge badge--${esc(r.role)}">${esc(r.role)}</span></td>
+        <td>${r.approved ? 'Y' : 'N'}</td>
+        <td>${r.unlocked ? 'Y' : 'N'}</td>
+        <td>${r.permissionCode ? esc(r.permissionCode) : '—'}</td>
+        <td>${status}</td>
+      </tr>`;
+  }).join('');
+}
+
+async function submitBulkCreate() {
+  if (!bulkParsedRows.length) return;
+
+  const department = document.getElementById('bulk-department').value || null;
+  const btn         = document.getElementById('bulk-create-btn');
+  const resultEl     = document.getElementById('bulk-create-result');
+
+  if (!confirm(`Create ${bulkParsedRows.length} user account(s)? Each will be forced to change its password on first login.`)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+  resultEl.textContent = '';
+
+  const rows = bulkParsedRows.map(r => ({
+    role: r.role, approved: r.approved, unlocked: r.unlocked,
+    permissionCode: r.permissionCode, firstName: r.firstName, lastName: r.lastName,
+    username: r.username, email: r.email, password: r.password,
+  }));
+
+  try {
+    const data = await api('/api/admin/users/bulk-create', 'POST', { department, rows });
+    renderBulkPreview(data.results);
+    const { succeeded, failed } = data.summary;
+    resultEl.style.color = failed ? 'var(--error)' : 'var(--accent)';
+    resultEl.textContent = `✓ Created ${succeeded} user(s)` + (failed ? `, ${failed} failed — see Status column.` : '.');
+    showToast(`Bulk create: ${succeeded} created, ${failed} failed`, failed ? 'error' : 'success');
+    await loadUsers();
+  } catch (err) {
+    resultEl.style.color = 'var(--error)';
+    resultEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Create Users';
   }
 }
 

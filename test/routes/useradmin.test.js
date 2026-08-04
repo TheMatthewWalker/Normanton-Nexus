@@ -10,7 +10,7 @@ import { createMockSql, resetMockSql } from '../helpers/mockPool.js';
 import { buildTestApp } from '../helpers/testApp.js';
 import { adminUser, superadminUser } from '../helpers/fixtures/users.js';
 
-const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
+const { sqlModule, pool, request: dbRequest, connect, transaction, Transaction } = createMockSql();
 jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 
 let adminRouter;
@@ -24,7 +24,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  resetMockSql({ pool, request: dbRequest, connect });
+  resetMockSql({ pool, request: dbRequest, connect, transaction, Transaction });
 });
 
 function queueResults(...results) {
@@ -203,6 +203,94 @@ describe('POST /users/:id/reject', () => {
     queueResults({ recordset: [{ Username: 'new.user' }] }, { recordset: [] });
     const res = await request(appAsAdmin).post('/users/5/reject');
     expect(res.status).toBe(200);
+  });
+});
+
+describe('POST /users/bulk-create — superadmin only', () => {
+  test('rejected for a plain admin (requireSuperadmin gate)', async () => {
+    const res = await request(appAsAdmin).post('/users/bulk-create').send({ rows: [{}] });
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('400s when rows is missing or empty', async () => {
+    const res = await request(appAsSuperadmin).post('/users/bulk-create').send({ rows: [] });
+    expect(res.status).toBe(400);
+  });
+
+  test('400s on an invalid department', async () => {
+    const res = await request(appAsSuperadmin).post('/users/bulk-create').send({
+      department: 'not-a-real-department',
+      rows: [{ username: 'a.b', email: 'a@x.com', firstName: 'A', lastName: 'B', password: 'Kongsberg1!' }],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('marks a row with a weak password as failed without touching the DB for that row', async () => {
+    queueResults({ recordset: [] }); // audit(BULK_CREATE) insert at the end
+    const res = await request(appAsSuperadmin).post('/users/bulk-create').send({
+      rows: [{ username: 'a.b', email: 'a@x.com', firstName: 'A', lastName: 'B', password: 'weak' }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].success).toBe(false);
+    expect(res.body.results[0].error).toMatch(/at least 10 characters/);
+    expect(res.body.summary).toEqual({ total: 1, succeeded: 0, failed: 1 });
+  });
+
+  test('creates a user with department and permission in one transaction, then audits a summary', async () => {
+    queueResults(
+      { recordset: [] },               // username/email uniqueness — free
+      { recordset: [{}] },             // permission code exists
+      { recordset: [{ UserID: 42 }] }, // INSERT PortalUsers OUTPUT INSERTED.UserID
+      { recordset: [] },               // INSERT PortalUserDepartments
+      { recordset: [] },               // INSERT PortalUserPermissions
+      { recordset: [] },               // audit(BULK_CREATE)
+    );
+
+    const res = await request(appAsSuperadmin).post('/users/bulk-create').send({
+      department: 'production',
+      rows: [{
+        role: 'operator', username: 'new.starter', email: 'new.starter@ka-group.com',
+        firstName: 'New', lastName: 'Starter', password: 'Kongsberg1!',
+        approved: true, unlocked: true, permissionCode: 'PROD_SUPER',
+      }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ success: true, userID: 42 });
+    expect(res.body.summary).toEqual({ total: 1, succeeded: 1, failed: 0 });
+    expect(transaction.commit).toHaveBeenCalledTimes(1);
+  });
+
+  test('duplicate username within the same batch — second row fails, first succeeds', async () => {
+    queueResults(
+      { recordset: [] },               // row1 uniqueness check
+      { recordset: [{ UserID: 1 }] },  // row1 INSERT PortalUsers
+      { recordset: [] },               // audit(BULK_CREATE)
+    );
+    const res = await request(appAsSuperadmin).post('/users/bulk-create').send({
+      rows: [
+        { username: 'dupe.user', email: 'dupe1@x.com', firstName: 'A', lastName: 'B', password: 'Kongsberg1!' },
+        { username: 'dupe.user', email: 'dupe2@x.com', firstName: 'C', lastName: 'D', password: 'Kongsberg1!' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].success).toBe(true);
+    expect(res.body.results[1].success).toBe(false);
+    expect(res.body.results[1].error).toMatch(/Duplicate username/);
+  });
+
+  test('existing username in the DB is rejected', async () => {
+    queueResults(
+      { recordset: [{ Username: 'existing.user', Email: 'e@x.com' }] }, // uniqueness check — found
+      { recordset: [] }, // audit(BULK_CREATE)
+    );
+    const res = await request(appAsSuperadmin).post('/users/bulk-create').send({
+      rows: [{ username: 'existing.user', email: 'new@x.com', firstName: 'A', lastName: 'B', password: 'Kongsberg1!' }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].success).toBe(false);
+    expect(res.body.results[0].error).toBe('Username already exists.');
   });
 });
 

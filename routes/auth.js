@@ -75,7 +75,8 @@ router.post('/login', loginLimiter, async (req, res) => {
       .query(`
         SELECT
           u.UserID, u.Username, u.Email, u.PasswordHash,
-          u.Role, u.IsActive, u.IsLocked, u.FailedLogins, u.ShortIdleTimeout
+          u.Role, u.IsActive, u.IsLocked, u.FailedLogins, u.ShortIdleTimeout,
+          u.MustChangePassword
         FROM kongsberg.dbo.PortalUsers u
         WHERE u.Username = @username
       `);
@@ -163,6 +164,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         departments,
         permissions,
         shortIdleTimeout: !!user.ShortIdleTimeout,
+        mustChangePassword: !!user.MustChangePassword,
       };
       // Set immediately rather than waiting for server.js's cookie-maxAge
       // middleware on the next request — covers the (unlikely but free to
@@ -482,6 +484,7 @@ router.get('/session-check', (req, res) => {
     role:              user.role,
     departments:       user.departments,
     permissions:       user.permissions || [],
+    mustChangePassword: !!user.mustChangePassword,
     expiresAt:         req.session.cookie.expires,
     idleTimeoutMinutes: idleTimeoutMsFor(user) / 60000,
   });

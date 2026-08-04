@@ -9,6 +9,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
 import request from 'supertest';
+import bcrypt from 'bcrypt';
 import { createMockSql, resetMockSql } from '../helpers/mockPool.js';
 import { buildTestApp } from '../helpers/testApp.js';
 import { operatorUser } from '../helpers/fixtures/users.js';
@@ -112,6 +113,64 @@ describe('DELETE /sap-credentials', () => {
   test('a clear failure is reported as a 500', async () => {
     sapCredentialsMock.clearSapCredentials.mockRejectedValueOnce(new Error('boom'));
     const res = await request(app).delete('/sap-credentials');
+    expect(res.status).toBe(500);
+  });
+});
+
+describe('POST /change-password', () => {
+  // Low bcrypt cost — only test speed matters here, not production security.
+  const CURRENT_PASSWORD = 'CorrectPass123';
+  let realHash;
+
+  beforeAll(async () => {
+    realHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
+  });
+
+  test('rejects when not logged in', async () => {
+    const res = await request(appNoSession).post('/change-password').send({ currentPassword: 'x', newPassword: 'BrandNewPass9' });
+    expect([302, 401]).toContain(res.status);
+  });
+
+  test('400s when a field is missing', async () => {
+    const res = await request(app).post('/change-password').send({ currentPassword: 'x' });
+    expect(res.status).toBe(400);
+  });
+
+  test('400s when the new password fails the policy (min length/upper/digit)', async () => {
+    const res = await request(app).post('/change-password').send({ currentPassword: 'x', newPassword: 'weak' });
+    expect(res.status).toBe(400);
+  });
+
+  test('401s when the current password is wrong, and audits the failure', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ PasswordHash: realHash }] });
+    const res = await request(app).post('/change-password').send({ currentPassword: 'WrongPass1', newPassword: 'BrandNewPass9' });
+    expect(res.status).toBe(401);
+    expect(auditedEventTypes()).toEqual(['PASSWORD_CHANGE']);
+  });
+
+  test('400s when the new password is the same as the current password', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ PasswordHash: realHash }] });
+    const res = await request(app).post('/change-password').send({ currentPassword: CURRENT_PASSWORD, newPassword: CURRENT_PASSWORD });
+    expect(res.status).toBe(400);
+  });
+
+  test('404s when the user row is not found', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+    const res = await request(app).post('/change-password').send({ currentPassword: CURRENT_PASSWORD, newPassword: 'BrandNewPass9' });
+    expect(res.status).toBe(404);
+  });
+
+  test('changes the password and audits PASSWORD_CHANGE on success', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ PasswordHash: realHash }] }); // fetch current hash
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });                           // UPDATE
+    const res = await request(app).post('/change-password').send({ currentPassword: CURRENT_PASSWORD, newPassword: 'BrandNewPass9' });
+    expect(res.status).toBe(200);
+    expect(auditedEventTypes()).toEqual(['PASSWORD_CHANGE']);
+  });
+
+  test('a lookup failure is reported as a 500', async () => {
+    dbRequest.query.mockRejectedValueOnce(new Error('boom'));
+    const res = await request(app).post('/change-password').send({ currentPassword: CURRENT_PASSWORD, newPassword: 'BrandNewPass9' });
     expect(res.status).toBe(500);
   });
 });

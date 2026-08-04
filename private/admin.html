@@ -70,6 +70,17 @@
           <span class="nav-badge" id="users-count">…</span>
         </div>
 
+        <!-- Bulk Create Users — shown only for superadmin -->
+        <div class="nav-item" data-section="bulk-create" id="nav-bulk-create" style="display:none">
+          <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
+            <circle cx="5" cy="4.5" r="2.3" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M1.2 12.2c0-2.7 2.1-4 3.8-4s3.8 1.3 3.8 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            <line x1="10.5" y1="3.5" x2="10.5" y2="7.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            <line x1="8.5" y1="5.5" x2="12.5" y2="5.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          Bulk Create Users
+        </div>
+
         <div class="nav-item" data-section="audit">
           <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
             <rect x="1.5" y="1.5" width="11" height="11" rx="1" stroke="currentColor" stroke-width="1.2"/>
@@ -179,6 +190,66 @@
         </div>
       </section>
 
+      <!-- ── BULK CREATE USERS ─────────────────────────────────────────── -->
+      <section class="section" id="section-bulk-create">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Bulk Create Users</div>
+            <div class="section-sub">Import accounts from a CSV file &middot; superadmin only</div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;padding:20px 22px;margin-bottom:24px">
+          <div class="modal-hint" style="margin-bottom:16px">
+            Expected columns (header names, any order, case-insensitive): <strong>Level</strong> (role — Operator/Admin/Superadmin),
+            <strong>Approved</strong> (Y/N), <strong>Unlocked</strong> (Y/N), <strong>PERMISSION</strong> (optional permission code),
+            <strong>FirstName</strong>, <strong>LastName</strong>, <strong>UserName</strong>, <strong>Email</strong>, <strong>Password</strong>.
+            Every account created here is forced to change its password on first login.
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+            <div>
+              <label class="modal-label">CSV File</label>
+              <input type="file" id="bulk-csv-input" accept=".csv,text/csv" class="modal-input">
+            </div>
+            <div>
+              <label class="modal-label">Department <span style="color:var(--text-muted);font-weight:400">(applied to every user in this batch)</span></label>
+              <select id="bulk-department" class="modal-select">
+                <option value="">— No department —</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="bulk-parse-summary" style="font-size:13px;margin-bottom:12px"></div>
+
+          <div style="display:flex;align-items:center;gap:12px">
+            <button type="button" class="btn-primary" id="bulk-create-btn" disabled>Create Users</button>
+            <span id="bulk-create-result" style="font-size:13px"></span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table id="bulk-preview-table">
+            <thead>
+              <tr>
+                <th>Row</th>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Approved</th>
+                <th>Unlocked</th>
+                <th>Permission</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="bulk-preview-tbody">
+              <tr><td colspan="9" class="loading-cell">Choose a CSV file to preview its rows.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- ── AUDIT LOG ──────────────────────────────────────────────────── -->
       <section class="section" id="section-audit">
         <div class="section-header">
@@ -209,6 +280,8 @@
               <option value="USERNAME_CHANGE">Username changes</option>
               <option value="PROFILE_CHANGE">Profile changes</option>
               <option value="IDLE_TIMEOUT_CHANGE">Idle timeout changes</option>
+              <option value="BULK_CREATE">Bulk user creation</option>
+              <option value="PASSWORD_CHANGE">Password changes</option>
             </select>
             <button type="button" class="btn-secondary" onclick="loadAudit()">Refresh</button>
           </div>

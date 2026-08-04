@@ -135,7 +135,14 @@ describe('GET /session-check', () => {
       role: operatorUser.role,
       departments: operatorUser.departments,
       permissions: operatorUser.permissions,
+      mustChangePassword: false,
     });
+  });
+
+  test('reports mustChangePassword: true for an account forced to change it (e.g. bulk-created — see routes/useradmin.js)', async () => {
+    const appWithSession = buildTestApp(authRouter, { sessionUser: { ...operatorUser, mustChangePassword: true } });
+    const res = await request(appWithSession).get('/session-check');
+    expect(res.body.mustChangePassword).toBe(true);
   });
 });
 

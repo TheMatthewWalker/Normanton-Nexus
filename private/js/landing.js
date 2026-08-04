@@ -17,6 +17,29 @@ const sapCredResult   = document.getElementById('sap-cred-result');
 const sapCredSaveBtn  = document.getElementById('sap-cred-save-btn');
 const sapCredClearBtn = document.getElementById('sap-cred-clear-btn');
 
+// ── My Account modal — Change Password ──────────────────────────────────────
+// Self-service password change (routes/profile.js's POST /change-password).
+// Also does double duty as the forced-change flow: accounts created via the
+// superadmin bulk-create tool (routes/useradmin.js's POST /users/bulk-create)
+// share a known initial password and carry MustChangePassword = 1 until
+// changed. When that flag is set, openAccountModal(true) below opens this
+// same modal but hides the close button and the SAP Credentials section and
+// skips the click-outside-to-close handler, so the modal can't be dismissed
+// without changing the password. server.js's /private/:page route backs
+// this up server-side by redirecting any other page back to landing.html
+// while the flag is set.
+const pwdForm    = document.getElementById('password-change-form');
+const pwdCurrent = document.getElementById('pwd-current');
+const pwdNew     = document.getElementById('pwd-new');
+const pwdConfirm = document.getElementById('pwd-confirm');
+const pwdResult  = document.getElementById('pwd-result');
+const pwdSaveBtn = document.getElementById('pwd-save-btn');
+const forceNotice   = document.getElementById('force-password-notice');
+const sapSection     = document.getElementById('account-sap-section');
+const sapSectionSep  = document.getElementById('account-sap-sep');
+
+let accountModalForced = false;
+
 async function loadSapCredStatus() {
   sapCredStatus.textContent = 'Loading…';
   sapCredResult.textContent = '';
@@ -42,17 +65,74 @@ async function loadSapCredStatus() {
   }
 }
 
-function openAccountModal() {
+function openAccountModal(forced = false) {
+  accountModalForced = forced;
   acctOverlay.classList.remove('hidden');
-  loadSapCredStatus();
+  acctCloseBtn.style.display = forced ? 'none' : '';
+  forceNotice.style.display  = forced ? '' : 'none';
+  sapSection.style.display    = forced ? 'none' : '';
+  sapSectionSep.style.display = forced ? 'none' : '';
+  pwdResult.textContent = ''; pwdResult.className = 'account-result';
+  pwdCurrent.value = ''; pwdNew.value = ''; pwdConfirm.value = '';
+  if (!forced) loadSapCredStatus();
+  if (forced) pwdCurrent.focus();
 }
 function closeAccountModal() {
+  if (accountModalForced) return; // can't dismiss until the password is changed
   acctOverlay.classList.add('hidden');
 }
 
-if (acctBtn) acctBtn.addEventListener('click', openAccountModal);
+if (acctBtn) acctBtn.addEventListener('click', () => openAccountModal(false));
 if (acctCloseBtn) acctCloseBtn.addEventListener('click', closeAccountModal);
 if (acctOverlay) acctOverlay.addEventListener('click', e => { if (e.target === acctOverlay) closeAccountModal(); });
+
+if (pwdForm) pwdForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const currentPassword = pwdCurrent.value;
+  const newPassword     = pwdNew.value;
+  const confirmPassword = pwdConfirm.value;
+
+  if (!currentPassword || !newPassword) {
+    pwdResult.textContent = 'Current and new password are both required.';
+    pwdResult.className = 'account-result account-result--error';
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    pwdResult.textContent = 'New password and confirmation do not match.';
+    pwdResult.className = 'account-result account-result--error';
+    return;
+  }
+  if (newPassword.length < 10 || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+    pwdResult.textContent = 'New password must be at least 10 characters with one uppercase letter and one number.';
+    pwdResult.className = 'account-result account-result--error';
+    return;
+  }
+
+  pwdSaveBtn.disabled = true; pwdSaveBtn.textContent = 'Changing…';
+  try {
+    const res = await fetch('/api/profile/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to change password');
+
+    pwdResult.textContent = 'Password changed.';
+    pwdResult.className = 'account-result account-result--ok';
+    pwdCurrent.value = ''; pwdNew.value = ''; pwdConfirm.value = '';
+
+    if (accountModalForced) {
+      accountModalForced = false;
+      setTimeout(closeAccountModal, 900);
+    }
+  } catch (err) {
+    pwdResult.textContent = err.message;
+    pwdResult.className = 'account-result account-result--error';
+  } finally {
+    pwdSaveBtn.disabled = false; pwdSaveBtn.textContent = 'Change Password';
+  }
+});
 
 if (sapCredForm) sapCredForm.addEventListener('submit', async e => {
   e.preventDefault();
@@ -133,6 +213,7 @@ const sendBtn = document.getElementById('gemini-send');
     armSessionTimer(session.expiresAt, session.idleTimeoutMinutes);
     tickSessionTimer();
     setInterval(tickSessionTimer, 1000);
+    if (session.mustChangePassword) openAccountModal(true);
   } catch {
     window.location.href = '/';
   }

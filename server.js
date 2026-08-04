@@ -346,6 +346,17 @@ app.get('/private/:page', requireLogin, (req, res, next) => {
   const page = req.params.page;
   const dept = configJS.DEPT_PAGE_MAP[page];
 
+  // Accounts created via the superadmin bulk-create tool (routes/useradmin.js's
+  // POST /users/bulk-create) share a known initial password and carry
+  // MustChangePassword = 1 until they change it (routes/profile.js's
+  // POST /change-password clears it on both the row and the live session).
+  // Force them onto landing.html — its blocking modal (private/js/landing.js)
+  // is the only way off this restriction — rather than letting them reach
+  // any other module while still on the shared password.
+  if (req.session.user.mustChangePassword && page !== 'landing.html') {
+    return res.redirect('/private/landing.html');
+  }
+
   // If it maps to a department, check access (superadmin bypasses this in middleware)
   if (dept) {
     return requireDepartment(dept)(req, res, () => {
