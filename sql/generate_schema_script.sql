@@ -9,10 +9,10 @@
 
    HOW TO RUN
    ----------
-   This is written to run as ONE paste into the Raw SQL Console
-   (private/rawsql.html -> /sql/query), which now shows every SELECT
-   in a semicolon-separated batch as its own result set. Paste this
-   entire file into the console's query box and click Run once.
+   This is written to run as ONE paste into the SQL Console section of
+   private/admin.html (-> /sql/query), which shows every SELECT in a
+   semicolon-separated batch as its own result set. Paste this entire
+   file into the console's query box and click Run once.
 
    The console's default connection is the Kongsberg database
    (config.json's sqlConfig.database), so every statement below that

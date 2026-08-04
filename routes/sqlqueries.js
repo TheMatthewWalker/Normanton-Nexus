@@ -13,12 +13,15 @@ router.post("/query", requireLogin, async (req, res) => {
   // Normalize query for case-insensitive checking
   const normalized = query.trim().toUpperCase();
 
-  // Allow Admin to by-pass the block.
+  // Only superadmin may bypass the destructive-keyword block — this same
+  // route also serves plain SELECTs for ordinary department data-browser
+  // pages (any logged-in user, see production.js), so it can't be locked
+  // down to superadmin entirely; only the dangerous-keyword bypass is.
   const userRole   = req.session?.user?.role;
   const username   = req.session?.user?.username || null;
-  const serverAdmin = userRole === 'admin' || userRole === 'superadmin';
+  const isSuperadmin = userRole === 'superadmin';
 
-  if (!serverAdmin) {
+  if (!isSuperadmin) {
     // 🚫 Block any dangerous keywords even if embedded later
     const forbidden = ["DELETE", "DROP", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "EXEC", "MERGE"];
     if (forbidden.some(word => normalized.includes(word))) {

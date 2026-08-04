@@ -40,9 +40,8 @@ describe('DEPT_PAGE_MAP', () => {
     expect(configJS.DEPT_PAGE_MAP['finance.html']).toBe('finance');
   });
 
-  test('does not map admin/rawsql/landing pages (those are role-gated, not department-gated)', () => {
+  test('does not map admin/landing pages (those are role-gated, not department-gated)', () => {
     expect(configJS.DEPT_PAGE_MAP['admin.html']).toBeUndefined();
-    expect(configJS.DEPT_PAGE_MAP['rawsql.html']).toBeUndefined();
     expect(configJS.DEPT_PAGE_MAP['landing.html']).toBeUndefined();
   });
 });

@@ -106,7 +106,8 @@
           Notifications
         </div>
 
-        <div class="nav-item" data-section="sql">
+        <!-- SQL Console — shown only for superadmin -->
+        <div class="nav-item" data-section="sql" id="nav-sql" style="display:none">
           <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
             <rect x="1" y="1" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
             <path d="M4 5l2.5 2L4 9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -264,7 +265,7 @@
         <div class="section-header">
           <div>
             <div class="section-title">SQL Console</div>
-            <div class="section-sub">Ad-hoc queries via the /query endpoint · Destructive keywords blocked for non-admins · All commands are logged</div>
+            <div class="section-sub">Ad-hoc queries via the /query endpoint · Destructive keywords blocked for non-superadmins · All commands are logged</div>
           </div>
           <div class="section-actions">
             <span id="sql-row-count" class="sql-count" style="display:none"></span>

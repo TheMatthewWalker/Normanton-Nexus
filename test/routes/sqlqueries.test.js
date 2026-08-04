@@ -1,5 +1,5 @@
 // routes/sqlqueries.js exposes a raw-SQL console (POST /query, gated by
-// requireLogin + a forbidden-keyword block for non-admins) and a CSV export
+// requireLogin + a forbidden-keyword block for non-superadmins) and a CSV export
 // endpoint (POST /query-csv, gated by a shared API key for Excel/external-
 // tool access — no session required).
 //
@@ -104,11 +104,12 @@ describe('POST /query', () => {
     expect(res.body.recordset).toEqual([{ a: 1 }]); // back-compat: still just the first
   });
 
-  test('an admin bypasses the forbidden-keyword block', async () => {
-    dbRequest.query.mockResolvedValueOnce({ recordset: [], rowsAffected: [3] });
+  test('a plain admin (not superadmin) is still blocked by the forbidden-keyword check', async () => {
     const res = await request(appAdmin).post('/query').send({ query: 'DELETE FROM dbo.Foo' });
-    expect(res.status).toBe(200);
-    expect(dbRequest.query).toHaveBeenCalledTimes(2); // the DELETE, then the audit insert
+    expect(res.status).toBe(403);
+    // Only the audit-log insert should have run — never the query itself.
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+    expect(auditedEventTypes()).toEqual(['RAW_SQL_BLOCKED']);
   });
 
   test('a superadmin bypasses the forbidden-keyword block', async () => {

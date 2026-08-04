@@ -92,6 +92,14 @@ function applyRoleVisibility() {
   // here.
   const dbxNav = document.getElementById('nav-dbexplorer');
   if (dbxNav) dbxNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
+
+  // Show SQL Console nav only for superadmin — same client-side convenience
+  // as above. The real gate is server-side: routes/sqlqueries.js only lets
+  // superadmin bypass the destructive-keyword block (plain admin no longer
+  // can), since /sql/query is shared infrastructure other department pages
+  // also use for plain SELECTs and can't be locked to superadmin outright.
+  const sqlNav = document.getElementById('nav-sql');
+  if (sqlNav) sqlNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -699,7 +707,9 @@ function formatDateTime(val) {
 }
 
 // ── SQL Console ───────────────────────────────────────────────────────────────
-let sqlLastRows = [];
+// One entry per SELECT statement in the last-run batch — exportSqlCsv(index)
+// reads whichever one the user clicked "Export" next to.
+let sqlLastRecordsets = [];
 
 function buildSqlTable(rows) {
   const cols = Object.keys(rows[0]);
@@ -715,12 +725,40 @@ function buildSqlTable(rows) {
   return h;
 }
 
-function exportSqlCsv() {
-  if (!sqlLastRows.length) return;
-  const cols  = Object.keys(sqlLastRows[0]);
+// Renders every non-empty recordset from a (possibly multi-statement) batch
+// as its own labelled section, reusing buildSqlTable() per result — a query
+// with several SELECTs separated by semicolons comes back as one entry per
+// SELECT, in order.
+function buildSqlResultsHTML(recordsets) {
+  const nonEmpty = recordsets
+    .map((rows, i) => ({ rows, i }))
+    .filter(r => r.rows && r.rows.length > 0);
+
+  if (!nonEmpty.length) return '';
+
+  const multi = nonEmpty.length > 1;
+  let h = '';
+  nonEmpty.forEach(({ rows, i }) => {
+    h += '<div class="sql-result-block">';
+    if (multi) {
+      h += `<div class="sql-result-heading">`
+        + `<span>Result ${i + 1} — ${rows.length} row(s)</span>`
+        + `<button type="button" class="btn-secondary" data-sql-export-index="${i}">Export CSV</button>`
+        + `</div>`;
+    }
+    h += buildSqlTable(rows);
+    h += '</div>';
+  });
+  return h;
+}
+
+function exportSqlCsv(index) {
+  const rows = index == null ? sqlLastRecordsets.find(r => r && r.length) : sqlLastRecordsets[index];
+  if (!rows || !rows.length) return;
+  const cols  = Object.keys(rows[0]);
   const lines = [
     cols.map(c  => `"${String(c).replace(/"/g, '""')}"`).join(','),
-    ...sqlLastRows.map(row =>
+    ...rows.map(row =>
       cols.map(c => `"${String(row[c] ?? '').replace(/"/g, '""')}"`).join(',')
     ),
   ];
@@ -728,7 +766,8 @@ function exportSqlCsv() {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `sql-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
+  const suffix = sqlLastRecordsets.filter(r => r && r.length).length > 1 && index != null ? `-result${index + 1}` : '';
+  a.download = `sql${suffix}-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -743,7 +782,7 @@ async function runSql() {
   const query = inputEl.value.trim();
   if (!query) return;
 
-  sqlLastRows = [];
+  sqlLastRecordsets = [];
   if (countEl)   { countEl.textContent = ''; countEl.style.display = 'none'; }
   if (exportBtn) exportBtn.style.display = 'none';
   resultEl.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Running…</div>';
@@ -761,12 +800,29 @@ async function runSql() {
       return;
     }
 
-    const rows = data.recordset || [];
-    if (rows.length) {
-      sqlLastRows = rows;
-      resultEl.innerHTML = buildSqlTable(rows);
-      if (countEl)   { countEl.textContent = `${rows.length} row(s)`; countEl.style.display = ''; }
-      if (exportBtn) exportBtn.style.display = '';
+    // recordsets covers every SELECT in the batch, in order; recordset
+    // (older shape, still sent for back-compat) is just recordsets[0].
+    const recordsets = Array.isArray(data.recordsets) && data.recordsets.length
+      ? data.recordsets
+      : [data.recordset || []];
+    sqlLastRecordsets = recordsets;
+
+    const nonEmptyCount = recordsets.filter(r => r && r.length > 0).length;
+    if (nonEmptyCount > 0) {
+      resultEl.innerHTML = buildSqlResultsHTML(recordsets);
+      const totalRows = recordsets.reduce((sum, r) => sum + (r ? r.length : 0), 0);
+      if (nonEmptyCount === 1) {
+        // Single result: keep the original single-table UX — the toolbar's
+        // own Export button drives the one table directly.
+        if (countEl)   { countEl.textContent = `${totalRows} row(s)`; countEl.style.display = ''; }
+        if (exportBtn) { exportBtn.style.display = ''; exportBtn.onclick = () => exportSqlCsv(recordsets.findIndex(r => r && r.length)); }
+      } else {
+        // Multiple results: each block has its own Export button (wired via
+        // delegation in setupSqlConsole) — the toolbar-level one doesn't map
+        // to a single table, so hide it rather than silently export the wrong one.
+        if (countEl)   { countEl.textContent = `${nonEmptyCount} result sets, ${totalRows} row(s) total`; countEl.style.display = ''; }
+        if (exportBtn) exportBtn.style.display = 'none';
+      }
     } else {
       const affected = Array.isArray(data.rowsAffected)
         ? data.rowsAffected.reduce((s, v) => s + (v || 0), 0)
@@ -783,19 +839,28 @@ function setupSqlConsole() {
   const runBtn    = document.getElementById('sql-run');
   const clearBtn  = document.getElementById('sql-clear');
   const exportBtn = document.getElementById('sql-export');
+  const resultEl  = document.getElementById('sql-result');
 
   if (inputEl) {
     inputEl.addEventListener('keydown', e => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runSql(); }
     });
   }
-  if (runBtn)    runBtn.addEventListener('click', runSql);
-  if (exportBtn) exportBtn.addEventListener('click', exportSqlCsv);
+  if (runBtn) runBtn.addEventListener('click', runSql);
+  // exportBtn's click handler is (re)assigned per run in runSql() for the
+  // single-result case, since which recordset it should export changes each
+  // time. Per-result-block export buttons (multi-result case) are handled
+  // here via delegation, since they're recreated on every run.
+  if (resultEl) {
+    resultEl.addEventListener('click', e => {
+      const btn = e.target.closest('[data-sql-export-index]');
+      if (btn) exportSqlCsv(Number(btn.dataset.sqlExportIndex));
+    });
+  }
   if (clearBtn) {
     clearBtn.addEventListener('click', () => {
       if (inputEl) inputEl.value = '';
-      sqlLastRows = [];
-      const resultEl  = document.getElementById('sql-result');
+      sqlLastRecordsets = [];
       const countEl   = document.getElementById('sql-row-count');
       const exportBtn2 = document.getElementById('sql-export');
       if (resultEl)   resultEl.innerHTML = '<div class="empty-state">No query executed yet.</div>';

@@ -583,6 +583,21 @@ tbody td:last-child { border-right: none; }
 .sql-result .error-state {
   color: var(--error);
 }
+/* One block per SELECT when a query batch returns more than one result set */
+.sql-result-block + .sql-result-block {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.sql-result-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 
 /* ── DB EXPLORER ─────────────────────────────────────────────────────────── */
 .dbx-breadcrumb {

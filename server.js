@@ -360,13 +360,6 @@ app.get('/private/:page', requireLogin, (req, res, next) => {
     });
   }
 
-  // rawsql.html — superadmin only
-  if (page === 'rawsql.html') {
-    return requireRole('superadmin')(req, res, () => {
-      res.sendFile(path.join(__dirname, 'private', page));
-    });
-  }
-
   // landing.html and other pages — just requireLogin (already checked)
   res.sendFile(path.join(__dirname, 'private', page));
 });
