@@ -9618,10 +9618,12 @@ async function openManualInboundShipmentModal() {
 }
 
 // Detail/edit view for one inbound shipment — header fields (editable via
-// PUT), linked order lines (read-only), and Mark Received when not yet
+// PUT), linked order lines (read-only except for a per-line Qty Received
+// input while the shipment is still open), and Mark Received when not yet
 // received. Mark Received bulk-flips every linked order to 'Booked' server
-// side (markShipmentReceived) and calls the SAP goods-receipt placeholder —
-// see that function's comment in performancesql.js.
+// side (markShipmentReceived) using the confirmed Qty Received per line and
+// calls the SAP goods-receipt placeholder — see that function's comment in
+// performancesql.js.
 async function openInboundShipmentDetail(shipmentId) {
   openModal(`<div class="ps-modal lg-modal" style="max-width:640px;width:94vw">
     <div class="ps-modal-header">
@@ -9651,15 +9653,50 @@ async function refreshInboundShipmentDetail(shipmentId) {
         ? `Received ${formatDisplayDate(s.ReceivedAtUtc)}${s.ReceivedBy ? ' by ' + s.ReceivedBy : ''}`
         : `${s.orders.length} order line${s.orders.length === 1 ? '' : 's'} — not yet received`);
 
-    const ordersRows = s.orders.map(o => `
+    // Computed up front (rather than down by the actions block, like
+    // before) since the order-lines table below also needs it — a
+    // received/cancelled shipment shows each line's already-confirmed
+    // ReceivedQty read-only, an open one gets an editable "Qty Received"
+    // input per line (defaulted to OrderQty) so a short/over delivery can
+    // be confirmed at Mark Received time instead of assuming everything
+    // ordered showed up.
+    const canReceive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
+
+    const ordersRows = s.orders.map(o => {
+      const isCancelled = o.Status === 'Cancelled';
+      const qtyReceivedCell = canReceive
+        ? (isCancelled
+          ? '<span style="color:var(--text-secondary,#666)">—</span>'
+          : `<input class="tf-input isd-received-qty" type="number" step="0.001" min="0"
+                    data-suggestion-id="${o.SuggestionId}" data-material="${esc(o.Material)}"
+                    value="${Number(o.OrderQty)}" style="width:90px">`)
+        : (o.ReceivedQty != null ? Number(o.ReceivedQty).toLocaleString() : '-');
+
+      // Only shown once the shipment itself is received (canReceive false) —
+      // reflects markShipmentReceived's per-line SAP outcome
+      // (SapMaterialDocument/SapGrError/SapGrSkipped, see
+      // sql/migrate_order_suggestion_sap_gr.sql). A cancelled line never had
+      // a GR attempted against it.
+      const sapGrCell = canReceive ? '' : `<td>${
+        isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
+        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped</span>'
+        : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
+        : o.SapGrError ? `<span class="sap-error" title="${esc(o.SapGrError)}">Failed</span>`
+        : '-'
+      }</td>`;
+
+      return `
       <tr class="admin-row">
         <td><strong>${esc(o.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(o.MaterialText || '')}</div></td>
         <td>${esc(o.VendorName)}</td>
         <td>${Number(o.OrderQty).toLocaleString()}</td>
+        <td>${qtyReceivedCell}</td>
         <td>${esc(o.Status)}</td>
         <td>${esc(o.PoNumber || '-')}</td>
         <td>${esc(o.SupplierReference || '-')}</td>
-      </tr>`).join('');
+        ${sapGrCell}
+      </tr>`;
+    }).join('');
 
     body.innerHTML = `
       ${s.IsManual ? `<div class="toolbar-hint" style="margin-bottom:10px">Manual shipment — not linked to any tracked order. Origin: <strong>${esc(s.OriginName || '—')}</strong></div>` : ''}
@@ -9713,12 +9750,18 @@ async function refreshInboundShipmentDetail(shipmentId) {
       </form>
       ${s.orders.length ? `
       <div class="tf-section-label">Order Lines</div>
+      ${canReceive ? '<div class="toolbar-hint">Qty Received defaults to what was ordered — adjust any line before Mark Received to confirm a short or over delivery. Only the confirmed quantity is posted as goods receipt in SAP.</div>' : ''}
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th></tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
-      </div>` : ''}
+      </div>
+      ${canReceive ? `
+      <label class="tf-checkbox-row" style="display:flex;align-items:center;gap:6px;margin-top:8px">
+        <input type="checkbox" id="isd-skip-sap">
+        <span>Skip SAP posting (testing only) — marks received in the portal without posting any goods receipt to SAP</span>
+      </label>` : ''}` : ''}
       <div class="tf-section-label">Documents</div>
       <div class="toolbar-hint">Purchase orders assigned to this shipment are filed here automatically. Upload shipping documents or the supplier invoice too — everything lands in the same folder.</div>
       <div id="isd-documents"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
@@ -9762,9 +9805,9 @@ async function refreshInboundShipmentDetail(shipmentId) {
     // cancelled — including after it's been marked received (see
     // cancelOrderShipment's comment in performancesql.js for why). Marking
     // received is the narrower action: only makes sense once, on a shipment
-    // that isn't already cancelled or received.
+    // that isn't already cancelled or received (canReceive computed above,
+    // alongside the order-lines table that also depends on it).
     const canCancel = !s.CancelledAtUtc;
-    const canReceive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
     actions.innerHTML = `
       <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
       ${canCancel ? '<button type="button" class="btn-secondary" id="isd-cancel-btn">Cancel Shipment</button>' : ''}
@@ -9958,23 +10001,64 @@ async function saveInboundShipmentDetail(shipmentId) {
 
 // Bulk-flips every linked order to 'Booked' server-side — a significant,
 // hard-to-reverse action affecting every order on the shipment, so this
-// gets an explicit confirm() rather than firing straight away.
+// gets an explicit confirm() rather than firing straight away. Reads the
+// per-line "Qty Received" inputs (rendered by refreshInboundShipmentDetail,
+// defaulted to each order's OrderQty) and sends them along so the server
+// records what was actually confirmed received, not just the ordered qty,
+// and posts each line's goods receipt to SAP — see markShipmentReceived's
+// comment in performancesql.js. The "Skip SAP posting" checkbox (testing
+// phase only) bypasses every SAP call for this receive so nothing books
+// into SAP before the operator is ready — every line still gets marked
+// Booked in the portal with its confirmed quantity, just flagged Skipped
+// instead of posted.
 async function markInboundShipmentReceived(shipmentId, shipment) {
   const orderCount = shipment.orders?.length || 0;
-  if (!confirm(`Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Booked.`)) return;
-  const btn = document.getElementById('isd-receive-btn');
   const result = document.getElementById('isd-result');
+
+  const receivedQuantities = {};
+  for (const input of document.querySelectorAll('.isd-received-qty')) {
+    const suggestionId = input.dataset.suggestionId;
+    const qty = Number(input.value);
+    if (input.value.trim() === '' || !Number.isFinite(qty) || qty < 0) {
+      if (result) result.innerHTML = `<div class="sap-error">Enter a valid received quantity for ${esc(input.dataset.material || 'every order line')}.</div>`;
+      return;
+    }
+    receivedQuantities[suggestionId] = qty;
+  }
+
+  const skipSap = !!document.getElementById('isd-skip-sap')?.checked;
+  const confirmMsg = skipSap
+    ? `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Booked using the confirmed quantities — SAP posting will be SKIPPED (testing mode).`
+    : `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Booked and posted as goods receipt in SAP using the confirmed quantities.`;
+  if (!confirm(confirmMsg)) return;
+
+  const btn = document.getElementById('isd-receive-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
   try {
     const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/receive`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ receivedQuantities, skipSap }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to mark shipment received');
     runInboundLog();
     await refreshInboundShipmentDetail(shipmentId);
+
+    // sapResults is a flat per-line array — {suggestionId, material,
+    // success?, documentNumber?, error?, skipped?} — see
+    // markShipmentReceived's comment. The refresh above already redraws the
+    // Order Lines table with a per-line SAP GR column, so this is just a
+    // one-line heads-up if anything needs attention (skipped or failed).
+    const sapResults = json.data?.sapResults || [];
+    const failed = sapResults.filter(r => r.success === false);
+    const skipped = sapResults.filter(r => r.skipped);
+    const newResult = document.getElementById('isd-result');
+    if (newResult && (failed.length || skipped.length)) {
+      newResult.innerHTML = skipped.length
+        ? `<div class="toolbar-hint">SAP posting skipped for ${skipped.length} order line${skipped.length === 1 ? '' : 's'} (testing mode).</div>`
+        : `<div class="sap-error">${failed.length} order line${failed.length === 1 ? '' : 's'} failed to post to SAP — see the SAP GR column for details.</div>`;
+    }
   } catch (err) {
     if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = 'Mark Received'; }

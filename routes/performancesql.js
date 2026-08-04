@@ -1752,7 +1752,8 @@ export async function getOrderShipmentWithOrders(shipmentId) {
   const { recordset: orders } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
-      SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.Status, p.SupplierReference, p.PoNumber
+      SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.ReceivedQty, p.Status, p.SupplierReference, p.PoNumber, p.PoItemNumber,
+             p.SapMaterialDocument, p.SapGrError, p.SapGrSkipped
       FROM dbo.PurchaseOrderSuggestion p
       JOIN dbo.Vendor v ON v.VendorId = p.VendorId
       LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
@@ -1908,31 +1909,63 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
   return { unlinkedCount: unlinked.length };
 }
 
-// PLACEHOLDER — real SAP goods-receipt posting (MIGO-equivalent RFC via
-// SapServer, matching the pattern used by sap.postChangeValuationClass
-// elsewhere in this app) goes here later. Deliberately a no-op stub for
-// now: markShipmentReceived below calls this once per order so the future
-// implementation has an obvious, already-wired hook, but doesn't yet gate
-// the Status='Booked' update on its result — once real posting exists, only
-// a successful call should flip an order's status.
-async function postGoodsReceiptToSap(order) {
-  return { success: true, placeholder: true, suggestionId: order.SuggestionId };
-}
-
 // Marks a shipment received (Inbound Log's "Mark Received" action) and
 // bulk-flips every non-cancelled order on it to 'Booked' — see
 // sql/migrate_order_shipments.sql's STATUS LIFECYCLE ADDITION note for why
 // this is a distinct status from 'Received', not a reuse of it.
-export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt } = {}) {
+//
+// receivedQuantities is an optional { [suggestionId]: qty } map — the
+// operator's confirmed-received quantity per order line, so a short or
+// over delivery can be recorded instead of assuming every line arrived in
+// full (see sql/migrate_order_shipment_received_qty.sql). Any order line
+// missing from the map (or omitted entirely, e.g. an older/manual caller)
+// falls back to its OrderQty. Quantities are validated up front, before any
+// write happens, so one bad value can't leave the receive half-applied.
+//
+// postGoodsReceipt is an optional async (order, shipment) => { success,
+// documentNumber?, error? } callback — routes/performance.js supplies the
+// real SapServer call (POST /api/purchasing/post-goods-receipt, MB01 BDC,
+// see sql/migrate_order_suggestion_sap_gr.sql). Kept as an injected
+// callback rather than importing axios/sapConfig here, matching this
+// module's existing DB-only scope (see this file's own comments — no other
+// export here talks to SAP directly, routes/performance.js owns that).
+// skipSap (or omitting postGoodsReceipt entirely) bypasses every SAP call
+// for this receive — for the testing phase, where a real posting might land
+// in SAP before the operator is ready to mark the shipment received in the
+// portal — and every line is recorded as skipped instead of attempted.
+//
+// A single line's SAP failure does NOT stop the others, or stop the
+// shipment/remaining lines being marked Booked — 'Booked' has always meant
+// "physically arrived and logged as received", independent of whether SAP
+// posting itself succeeded (see the STATUS LIFECYCLE note); the per-line
+// outcome (documentNumber/error/skipped) is stamped onto the order row and
+// returned so a failure can be seen and retried without blocking receiving
+// the rest of the shipment.
+export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt, receivedQuantities, skipSap, postGoodsReceipt } = {}) {
   const pool = await getPool();
   const { recordset: shipmentRows } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query('SELECT ShipmentId, ReceivedAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+    .query('SELECT ShipmentId, ShipmentReference, TrackingNumber, ReceivedAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
   const shipment = shipmentRows[0];
   if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   if (shipment.ReceivedAtUtc) { const err = new Error('This shipment has already been marked received.'); err.statusCode = 400; throw err; }
 
   const receivedDate = receivedAt ? new Date(receivedAt) : new Date();
+
+  const { recordset: orders } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`SELECT SuggestionId, Material, OrderQty, PoNumber, PoItemNumber FROM dbo.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'`);
+
+  const resolvedOrders = orders.map(order => {
+    const raw = receivedQuantities ? receivedQuantities[order.SuggestionId] : undefined;
+    const qty = (raw === undefined || raw === null || raw === '') ? Number(order.OrderQty) : Number(raw);
+    if (!Number.isFinite(qty) || qty < 0) {
+      const err = new Error(`Invalid received quantity for material ${order.Material}.`);
+      err.statusCode = 400;
+      throw err;
+    }
+    return { ...order, ReceivedQty: qty };
+  });
 
   await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
@@ -1943,22 +1976,36 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt 
       WHERE ShipmentId = @shipmentId
     `);
 
-  const { recordset: orders } = await pool.request()
-    .input('shipmentId', sql.Int, shipmentId)
-    .query(`SELECT SuggestionId FROM dbo.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'`);
+  const shipmentForSap = { ...shipment, ReceivedAtUtc: receivedDate };
+  const sapResults = [];
 
-  for (const order of orders) {
-    await postGoodsReceiptToSap(order);
+  for (const order of resolvedOrders) {
+    let sapResult = { skipped: true };
+    if (!skipSap && typeof postGoodsReceipt === 'function') {
+      try {
+        sapResult = await postGoodsReceipt(order, shipmentForSap);
+      } catch (sapErr) {
+        sapResult = { success: false, error: sapErr.message };
+      }
+    }
+    sapResults.push({ suggestionId: order.SuggestionId, material: order.Material, ...sapResult });
+
+    await pool.request()
+      .input('suggestionId',         sql.Int, order.SuggestionId)
+      .input('receivedQty',          sql.Decimal(15, 3), order.ReceivedQty)
+      .input('sapMaterialDocument',  sql.NVarChar(20),  sapResult.documentNumber || null)
+      .input('sapGrError',           sql.NVarChar(500), sapResult.success === false ? (sapResult.error || 'Goods receipt failed.') : null)
+      .input('sapGrSkipped',         sql.Bit, sapResult.skipped ? 1 : 0)
+      .query(`
+        UPDATE dbo.PurchaseOrderSuggestion SET
+          Status = 'Booked', ReceivedQty = @receivedQty,
+          SapMaterialDocument = @sapMaterialDocument, SapGrError = @sapGrError, SapGrSkipped = @sapGrSkipped,
+          UpdatedAtUtc = GETUTCDATE()
+        WHERE SuggestionId = @suggestionId
+      `);
   }
 
-  await pool.request()
-    .input('shipmentId', sql.Int, shipmentId)
-    .query(`
-      UPDATE dbo.PurchaseOrderSuggestion SET Status = 'Booked', UpdatedAtUtc = GETUTCDATE()
-      WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'
-    `);
-
-  return { orderCount: orders.length };
+  return { orderCount: resolvedOrders.length, sapResults };
 }
 
 

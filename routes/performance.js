@@ -3493,16 +3493,90 @@ router.put('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MR
   }
 });
 
-// Inbound Log's "Mark Received" action — stamps the shipment received and
-// bulk-flips every linked order to 'Booked' (see markShipmentReceived's
-// comment for why that's a distinct status, and the SAP-booking placeholder
-// it calls per order). Body: { receivedAt? } — defaults to now.
+// Posts one order line's goods receipt to SAP via SapServer's
+// POST /api/purchasing/post-goods-receipt (MB01 BDC — see
+// GoodsReceiptHelper.cs). Runs on SapServer's shared SERVICE worker pool,
+// not an elevated per-user session like Create PO in SAP — MB01 doesn't
+// need the calling user's own SAP credentials, only a valid JWT (checked
+// against dbo.SapDepartmentPermissions for function code "MB01") and
+// LineNumber/PurchaseOrder identifying the PO item.
+//
+// Only attempted for a line that actually has a real SAP PO on file
+// (PoNumber/PoItemNumber, set by Create PO in SAP) — a manually-entered
+// order line with no PO has nothing to post against and is reported back
+// as skipped rather than attempted. PoItemNumber is stored as the padded
+// SAP item string ("00010", "00020", ..., see routes/performance.js's
+// create-po route) — divided by 10 to recover the 1-based LineNumber
+// GoodsReceiptRequest expects.
+//
+// Quantity is the operator-confirmed ReceivedQty (see
+// sql/migrate_order_shipment_received_qty.sql), not OrderQty — SapServer's
+// BDC now writes this into MSEG-ERFMG(01), overriding the XFULL default
+// that would otherwise book the full outstanding PO quantity regardless of
+// what actually arrived (see GoodsReceiptHelper.BuildGoodsReceiptRequest's
+// comment). That specific override combination hasn't been captured as a
+// real BDC recording against this SAP system yet — treat any
+// short/over-quantity posting through this path as unverified until
+// confirmed live, which is exactly what the Mark Received "skip SAP"
+// checkbox exists to guard against during that testing.
+async function postGoodsReceiptToSap(order, shipment, callerUserId) {
+  if (!order.PoNumber || !order.PoItemNumber) {
+    return { success: false, skipped: true, error: 'No SAP PO number on file for this order line — nothing to post.' };
+  }
+  const lineNumber = Math.round(Number(order.PoItemNumber) / 10);
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    const sapResp = await axios.post(
+      `${sapConfig.url}/api/purchasing/post-goods-receipt`,
+      {
+        PurchaseOrder:          order.PoNumber,
+        LineNumber:             lineNumber,
+        Reference:              shipment.ShipmentReference || '',
+        TrackingNumber:         shipment.TrackingNumber || '',
+        AddressCode:            '',
+        ShipmentCompletionDate: (shipment.ReceivedAtUtc ? new Date(shipment.ReceivedAtUtc) : new Date()).toISOString().slice(0, 10),
+        PostingDate:            today,
+        Quantity:               Number(order.ReceivedQty),
+      },
+      { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(callerUserId)}` } }
+    );
+    const sapBody = sapResp.data;
+    if (!sapBody.success) return { success: false, error: extractPoErrorMessage(sapBody, 'SapServer returned success=false') };
+
+    const result = sapBody.data || {};
+    // Type "E"/"A" (error/abort) means the BDC itself ran but SAP rejected
+    // the posting — same convention PackagingController's MM01 result check
+    // uses. A 200-with-success:true response can still carry one of these.
+    if (result.type === 'E' || result.type === 'A') {
+      return { success: false, error: result.message || 'Goods receipt failed.' };
+    }
+    return { success: true, documentNumber: result.documentNumber || null };
+  } catch (err) {
+    return { success: false, error: extractPoErrorMessage(err.response?.data, err.message) };
+  }
+}
+
+// Inbound Log's "Mark Received" action — stamps the shipment received,
+// bulk-flips every linked order to 'Booked', and posts each line's goods
+// receipt to SAP (see postGoodsReceiptToSap and markShipmentReceived's own
+// comment for why one line's SAP failure doesn't block the others). Body:
+// { receivedAt?, receivedQuantities?, skipSap? } — receivedAt defaults to
+// now; receivedQuantities is an optional { [suggestionId]: qty } map of the
+// operator-confirmed received quantity per order line (falls back to each
+// order's OrderQty when omitted); skipSap (testing phase only — see the
+// Inbound Log's "Skip SAP posting" checkbox) bypasses every SAP call for
+// this receive, recording every line as skipped instead of attempted, so
+// nothing books into SAP before the operator is ready.
 router.post('/order-suggestions/shipments/:shipmentId/receive', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const receivedBy = req.session?.user?.username || 'unknown';
+    const callerUserId = req.session?.user?.userID;
     const data = await db.markShipmentReceived(req.params.shipmentId, {
       receivedBy,
       receivedAt: req.body?.receivedAt || null,
+      receivedQuantities: req.body?.receivedQuantities || null,
+      skipSap: !!req.body?.skipSap,
+      postGoodsReceipt: (order, shipment) => postGoodsReceiptToSap(order, shipment, callerUserId),
     });
     res.json({ success: true, data });
   } catch (err) {
