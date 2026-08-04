@@ -56,20 +56,25 @@ const baseConnection = {
   },
 };
 
-function dbConfig(databaseName, migrationsDir) {
+function dbConfig(databaseName, dir, hasSeeds) {
   return {
     client: 'mssql',
     connection: { ...baseConnection, database: databaseName },
     migrations: {
-      directory: `./migrations/${migrationsDir}`,
+      directory: `./migrations/${dir}`,
       tableName: 'knex_migrations',
     },
+    // Seeds are separate from migrations on purpose: migrations are schema
+    // changes, tracked and run once each; seeds are re-runnable reference/
+    // lookup DATA loaders (see seeds/README.md), run explicitly via
+    // `knex seed:run`, never auto-applied by migrate:latest.
+    ...(hasSeeds ? { seeds: { directory: `./seeds/${dir}` } } : {}),
   };
 }
 
 module.exports = {
-  kongsberg: dbConfig('Kongsberg', 'kongsberg'),
-  production: dbConfig('Production', 'production'),
-  logistics: dbConfig('Logistics', 'logistics'),
-  production_archive: dbConfig('production_archive', 'production_archive'),
+  kongsberg: dbConfig('Kongsberg', 'kongsberg', true),
+  production: dbConfig('Production', 'production', true),
+  logistics: dbConfig('Logistics', 'logistics', true),
+  production_archive: dbConfig('production_archive', 'production_archive', false),
 };

@@ -10,3 +10,8 @@ debug
 .deploykey
 deploy-runner.log
 .vs
+
+# Contains real bcrypt password hashes, AES-encrypted SAP credentials, and
+# staff PII for every PortalUsers account — deliberately not committed. See
+# seeds/README.md.
+seeds/kongsberg/001_reference_data.cjs

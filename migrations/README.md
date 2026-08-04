@@ -79,3 +79,6 @@ Once all four have an initial migration, every *new* schema change goes
 through `npx knex migrate:make <description> --env <db> --knexfile knexfile.cjs`
 instead of a new hand-written `sql/migrate_*.sql` file — this is what
 replaces that ad-hoc convention going forward.
+
+Reference/lookup **data** (not schema) is seeded separately — see
+`../seeds/README.md`.
