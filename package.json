@@ -9,9 +9,11 @@
     "migrate:kongsberg": "knex migrate:latest --env kongsberg --knexfile knexfile.cjs",
     "migrate:production": "knex migrate:latest --env production --knexfile knexfile.cjs",
     "migrate:logistics": "knex migrate:latest --env logistics --knexfile knexfile.cjs",
+    "migrate:production_archive": "knex migrate:latest --env production_archive --knexfile knexfile.cjs",
     "migrate:status:kongsberg": "knex migrate:status --env kongsberg --knexfile knexfile.cjs",
     "migrate:status:production": "knex migrate:status --env production --knexfile knexfile.cjs",
-    "migrate:status:logistics": "knex migrate:status --env logistics --knexfile knexfile.cjs"
+    "migrate:status:logistics": "knex migrate:status --env logistics --knexfile knexfile.cjs",
+    "migrate:status:production_archive": "knex migrate:status --env production_archive --knexfile knexfile.cjs"
   },
   "keywords": [],
   "author": "",

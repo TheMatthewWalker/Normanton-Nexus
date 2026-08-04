@@ -1,6 +1,10 @@
-// Knex migration config for the three databases this app depends on:
-// Kongsberg (portal/session/audit), Production (prod.* shop-floor tables),
-// Logistics (Logistics.dbo.* shipping/warehouse tables).
+// Knex migration config for the databases this app depends on: Kongsberg
+// (portal/session/audit), Production (prod.* shop-floor tables), Logistics
+// (Logistics.dbo.* shipping/warehouse tables), plus production_archive — a
+// new database holding the legacy per-process production-tracking tables
+// (Mixing/Extrusion/Convo/Ewald/Firewall/Batches/Coils/Waste/etc.) that
+// predate Production Nexus and are being retired out of Kongsberg proper.
+// See migrations/README.md.
 //
 // This is the "EF Migrations for Node" system referenced in chat: the
 // existing sql/*.sql files (59 of them) capture ad-hoc, manually-applied
@@ -26,11 +30,19 @@
 
 require('dotenv').config();
 
+// Named-instance support (e.g. SQL Server Express's default "SQLEXPRESS"
+// instance): when MIGRATE_DB_INSTANCE is set, tedious resolves the actual
+// TCP port itself via the SQL Server Browser service (UDP 1434) — an
+// explicit `port` is mutually exclusive with `options.instanceName` and
+// must be omitted, not just left at its default, or the connection is
+// rejected outright.
+const instanceName = process.env.MIGRATE_DB_INSTANCE || undefined;
+
 const baseConnection = {
   server: process.env.MIGRATE_DB_SERVER || 'localhost',
   user: process.env.MIGRATE_DB_USER,
   password: process.env.MIGRATE_DB_PASSWORD,
-  port: Number(process.env.MIGRATE_DB_PORT) || 1433,
+  ...(instanceName ? {} : { port: Number(process.env.MIGRATE_DB_PORT) || 1433 }),
   options: {
     // SQL Server 2005 (the current production instance this app's TLS
     // bridge exists for) has no encryption support worth relying on here;
@@ -40,6 +52,7 @@ const baseConnection = {
     // certificate situation is known.
     encrypt: false,
     trustServerCertificate: true,
+    ...(instanceName ? { instanceName } : {}),
   },
 };
 
@@ -58,4 +71,5 @@ module.exports = {
   kongsberg: dbConfig('Kongsberg', 'kongsberg'),
   production: dbConfig('Production', 'production'),
   logistics: dbConfig('Logistics', 'logistics'),
+  production_archive: dbConfig('production_archive', 'production_archive'),
 };
