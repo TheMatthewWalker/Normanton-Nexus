@@ -74,6 +74,19 @@ describe('POST /block and /unblock', () => {
     await request(appQual).post('/unblock').send({ Material: 'M2' });
     expect(axiosMock.post.mock.calls[0][1]).toMatchObject({ Material: 'M2', Username: qualUser.username });
   });
+
+  // SapServer now returns a structured error: { code, message } (rather than
+  // always 200/success:true) when the MB11 block/unblock leg is rejected by
+  // SAP — unwrap .message so the operator sees SAP's real reason instead of
+  // "[object Object]" (private/js/quality.js does `new Error(json.error)`).
+  test('/block unwraps SapServer\'s structured 422 error object to a plain message', async () => {
+    axiosMock.post.mockRejectedValueOnce({
+      response: { status: 422, data: { success: false, error: { code: '422', message: 'E M7 021 Deficit of SL stock' } } },
+    });
+    const res = await request(appQual).post('/block').send({ Material: 'M1' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('E M7 021 Deficit of SL stock');
+  });
 });
 
 describe('POST /bulk', () => {
@@ -172,5 +185,19 @@ describe('POST /bulk', () => {
     const events = sseEvents(res.text);
     expect(events[1]).toMatchObject({ success: false, material: 'M1', error: 'Locked' });
     expect(events[2]).toMatchObject({ success: true, material: 'M2', message: 'OK' });
+  });
+
+  test('unwraps SapServer\'s structured 422 error object to a plain message per row', async () => {
+    axiosMock.post.mockRejectedValueOnce({
+      response: { data: { success: false, error: { code: '422', message: 'E M7 021 Deficit of SL stock' } } },
+    });
+
+    const res = await request(appQual).post('/bulk').send({
+      direction: 'block',
+      rows: [{ Material: 'M1', 'Storage Loc': '1000', Qty: '1' }],
+    });
+
+    const events = sseEvents(res.text);
+    expect(events[1]).toMatchObject({ success: false, material: 'M1', error: 'E M7 021 Deficit of SL stock' });
   });
 });

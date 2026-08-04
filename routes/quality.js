@@ -40,8 +40,12 @@ function sapHeaders() {
 function sapError(err, res) {
   const d      = err.response?.data;
   const status = err.response?.status || 502;
+  // A rejected block/unblock (MB11 or a WHM transfer-order leg) comes back
+  // from SapServer as a 422 with error: { code, message } — unwrap
+  // .message so the operator sees SAP's real reason instead of
+  // "[object Object]" (private/js/quality.js does `new Error(json.error)`).
   const msg    = (typeof d === 'string' ? d : null)
-              || d?.error || d?.message || d?.title
+              || d?.error?.message || d?.error || d?.message || d?.title
               || (d?.errors ? JSON.stringify(d.errors) : null)
               || err.message;
   res.status(status).json({ success: false, error: msg });
@@ -150,7 +154,7 @@ router.post('/bulk', requirePermission('QUAL_BLOCKING'), async (req, res) => {
     } catch (err) {
       const d   = err.response?.data;
       const msg = (typeof d === 'string' ? d : null)
-               || d?.error || d?.message || d?.title || err.message;
+               || d?.error?.message || d?.error || d?.message || d?.title || err.message;
       send({ type: 'progress', done: i + 1, total: rows.length, success: false,
              material: body.Material, error: msg });
     }

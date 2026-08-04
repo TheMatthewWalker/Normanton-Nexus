@@ -380,8 +380,12 @@ router.post("/warehouse/consignment-mb1b", async (req, res) => {
         res.json({ success: true, data: rows });
 
     } catch (err) {
-        const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const status = err.response?.status ?? 500;
+        // A rejected MB1B/LT01 leg (deficit stock, etc.) comes back from
+        // SapServer as a 422 with error: { code, message } — unwrap
+        // .message so the operator sees SAP's real reason instead of
+        // "[object Object]".
+        const message = err.response?.data?.error?.message ?? err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Consignment MB1B failed for material ${params.Material || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -481,7 +485,7 @@ router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'),
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message ?? err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} failed for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));

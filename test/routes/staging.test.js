@@ -312,7 +312,7 @@ describe('POST /requests/:id/deliver', () => {
   test('routes consignment stock (SOBKZ K into SA) through the MB1B endpoint instead of a transfer order', async () => {
     db.getStagingRequestById.mockResolvedValueOnce(openRequest);
     axiosMock.post.mockResolvedValueOnce({
-      data: { success: true, data: { mb1bMessage: 'MB1B posted', toNonConsignMessage: null, toConsignMessage: 'LT01 posted' } },
+      data: { success: true, data: { success: true, mb1bMessage: 'S M7 011 MB1B posted', toNonConsignMessage: null, toConsignMessage: 'S M7 012 LT01 posted' } },
     });
     db.recordStagingDelivery.mockResolvedValueOnce({});
     maybeReverseBatchManagedReturnMock.mockResolvedValueOnce(null);
@@ -325,8 +325,34 @@ describe('POST /requests/:id/deliver', () => {
     expect(axiosMock.post.mock.calls[0][0]).toContain('/api/warehouse/consignment-mb1b');
     expect(res.body.data.transferOrderNumber).toBeNull(); // consignment issues have no transfer order number
     expect(res.body.data.messages).toEqual([
-      { type: 'S', message: 'MB1B posted' },
-      { type: 'S', message: 'LT01 posted' },
+      { type: 'S', message: 'S M7 011 MB1B posted' },
+      { type: 'S', message: 'S M7 012 LT01 posted' },
     ]);
+    expect(db.recordStagingDelivery).toHaveBeenCalled();
+    expect(auditedEventTypes()).toEqual(['STAGING_DELIVERED']);
+  });
+
+  // Regression test for the bug this whole describe block was written to
+  // catch: SapServer previously always returned success:true for
+  // consignment-mb1b, and this route hardcoded every message's type to 'S',
+  // so a rejected MB1B (e.g. deficit stock) still looked like a successful
+  // delivery and got recorded/audited as one — the stock never actually
+  // left consignment in SAP. SapServer now returns a 422 (axios throws) when
+  // any of the three BDC legs reports an SAP error; this route must treat
+  // that the same way it already treats a rejected plain transfer order.
+  test('422s and does not record a delivery when SAP rejects the MB1B leg (consignment stock never actually moved)', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    axiosMock.post.mockRejectedValueOnce({
+      response: { status: 422, data: { success: false, error: { code: '422', message: 'E M7 021 Deficit of SL stock 5 PC : 30005R 1000 SA B02' } } },
+    });
+
+    const res = await request(app).post('/requests/1/deliver').send({
+      ...validBody, specialStockIndicator: 'K', specialStockNumber: 'VENDOR1',
+    });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error.message).toMatch(/SAP rejected the consignment issue: E M7 021 Deficit of SL stock/);
+    expect(auditedEventTypes()).toEqual(['STAGING_DELIVER_SAP_ERROR']);
+    expect(db.recordStagingDelivery).not.toHaveBeenCalled();
   });
 });

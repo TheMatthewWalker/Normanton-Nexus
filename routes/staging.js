@@ -98,14 +98,23 @@ async function createSapTransferOrder(body) {
 // bin-to-bin, which would leave it showing as consignment stock in SAP while
 // physically sitting in Production.
 async function createSapConsignmentMb1b(body) {
-  const response = await axios.post(`${sapConfig.url}/api/warehouse/consignment-mb1b`, body, {
-    timeout: 60000,
-    httpsAgent: sapAgent,
-    headers: { Authorization: `Bearer ${makeSapToken()}` },
-  });
-  const responseBody = response.data;
-  if (!responseBody.success) throw new Error(responseBody.error ?? 'SapServer returned success=false');
-  return responseBody.data;
+  try {
+    const response = await axios.post(`${sapConfig.url}/api/warehouse/consignment-mb1b`, body, {
+      timeout: 60000,
+      httpsAgent: sapAgent,
+      headers: { Authorization: `Bearer ${makeSapToken()}` },
+    });
+    const responseBody = response.data;
+    if (!responseBody.success) throw new Error(responseBody.error ?? 'SapServer returned success=false');
+    return responseBody.data;
+  } catch (err) {
+    // A rejected MB1B/LT01 leg comes back as an HTTP 422 (deficit stock,
+    // missing authorization, etc.) — axios throws on that before the
+    // success/error body above is ever read, so pull SapServer's real
+    // message out of the rejected response instead of surfacing axios's
+    // generic "Request failed with status code 422".
+    throw new Error(err.response?.data?.error?.message ?? err.message);
+  }
 }
 
 // Minimum lead time a production request can specify — protects Stores from
@@ -370,12 +379,18 @@ router.post('/requests/:id/deliver', async (req, res) => {
           DestinationType: destinationStorageType,
           DestinationBin: destinationBin,
         });
+        // mb1b.success reflects whether SAP actually accepted all three legs
+        // (MB1B goods issue + both LT01 transfer postings) — previously this
+        // was hardcoded to true with every message force-labelled type 'S',
+        // so a rejected MB1B (deficit stock, etc.) still recorded a
+        // "successful" delivery below even though the stock never left
+        // consignment. See WarehouseHelpers.ParseConsignmentResponse.
         transferOrder = {
-          success: true,
+          success: mb1b.success,
           transferOrderNumber: null,
           messages: [mb1b.mb1bMessage, mb1b.toNonConsignMessage, mb1b.toConsignMessage]
             .filter(Boolean)
-            .map(message => ({ type: 'S', message })),
+            .map(message => ({ type: message.startsWith('E ') ? 'E' : 'S', message })),
         };
       } else {
         transferOrder = await createSapTransferOrder({
