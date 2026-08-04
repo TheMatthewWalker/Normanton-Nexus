@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import { requireDepartment, requireLogin, requirePermission, requireRole } from '../middleware/auth.js';
-import { auditQuery, sqlConfig } from '../config.js';
+import { apiKey, auditQuery, sqlConfig } from '../config.js';
 
 const router = express.Router();
 
@@ -31,11 +31,18 @@ router.post("/query", requireLogin, async (req, res) => {
     const pool = await sql.connect(sqlConfig);
     const result = await pool.request().query(query);
     auditQuery('RAW_SQL', username, query.slice(0, 500), req);
-    // Always return JSON, even if recordset is empty (e.g., for INSERT/DELETE)
+    // Always return JSON, even if recordset is empty (e.g., for INSERT/DELETE).
+    // A query batch with several SELECTs (semicolon-separated statements)
+    // produces one entry per SELECT in result.recordsets, in order —
+    // `recordset` alone (mssql's alias for recordsets[0]) only ever exposed
+    // the first one. Both are returned: `recordset`/`recordsets[0]` stay
+    // identical for existing single-statement callers, `recordsets` is what
+    // the console UI now renders when a batch has more than one.
     res.json({
       success: true,
       rowsAffected: result.rowsAffected,   // array of rows affected per statement
-      recordset: result.recordset || []    // will be empty if no SELECT returned
+      recordset: result.recordset || [],   // back-compat: first statement's rows only
+      recordsets: result.recordsets || []  // every statement's rows, in order
     });
   } catch (err) {
     console.error('[SQL]', err.message, err.number ? `(#${err.number})` : '');
@@ -47,7 +54,7 @@ router.post("/query", requireLogin, async (req, res) => {
 // ✅ POST version for Excel or tools sending long queries
 router.post("/query-csv", async (req, res) => {
   const { query, key } = req.body;
-  if (key !== config.apiKey) return res.status(403).send(key + " " + query);
+  if (key !== apiKey) return res.status(403).send(key + " " + query);
   if (!query) return res.status(400).send("Missing query");
 
   try {

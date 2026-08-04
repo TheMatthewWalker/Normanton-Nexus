@@ -21,6 +21,10 @@ export const sapCredEncryptionKey = process.env.SAP_CRED_ENCRYPTION_KEY || null;
 
 export const printersConfig = config.printers || [];
 
+// Shared API key gating POST /api/query-csv (routes/sqlqueries.js) for
+// external tools (Excel, etc.) that can't hold a portal session.
+export const apiKey = config.apiKey;
+
 export const sqlConfig = {
   user: config.sqlConfig.user,
   password: config.sqlConfig.password,

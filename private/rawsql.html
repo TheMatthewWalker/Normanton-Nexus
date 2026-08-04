@@ -25,6 +25,9 @@
     /* Keep the result area within the viewport; DataTable scrolls horizontally inside it */
     .rawsql-result              { max-width: 100%; overflow-x: auto; }
     .rawsql-result .dataTables_wrapper { min-width: 0; }
+    /* One block per SELECT when a query batch returns more than one result set */
+    .rawsql-result-block + .rawsql-result-block { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border-color, #333); }
+    .rawsql-result-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -74,7 +77,7 @@
         <div>
           <div class="rawsql-title">Execute SQL against SQL2005 Bridge</div>
           <div class="rawsql-subtitle">
-            For testing only. All commands run as the bridge service user and are logged by SQL Server. Destructive keywords are blocked for non‑admin users.
+            For testing only. All commands run as the bridge service user and are logged by SQL Server. Destructive keywords are blocked for non‑admin users. Multiple semicolon‑separated SELECT statements are each shown as their own result set below.
           </div>
         </div>
         <div class="rawsql-hint">Ctrl+Enter to run</div>

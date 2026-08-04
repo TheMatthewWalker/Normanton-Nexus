@@ -5,11 +5,25 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "migrate:kongsberg": "knex migrate:latest --env kongsberg --knexfile knexfile.cjs",
+    "migrate:production": "knex migrate:latest --env production --knexfile knexfile.cjs",
+    "migrate:logistics": "knex migrate:latest --env logistics --knexfile knexfile.cjs",
+    "migrate:status:kongsberg": "knex migrate:status --env kongsberg --knexfile knexfile.cjs",
+    "migrate:status:production": "knex migrate:status --env production --knexfile knexfile.cjs",
+    "migrate:status:logistics": "knex migrate:status --env logistics --knexfile knexfile.cjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "jest": {
+    "testEnvironment": "node",
+    "transform": {},
+    "setupFiles": [
+      "<rootDir>/test/jest.setupEnv.js"
+    ],
+    "globalSetup": "<rootDir>/test/jest.globalSetup.js"
+  },
   "dependencies": {
     "axios": "^1.15.2",
     "bcrypt": "^6.0.0",
@@ -34,5 +48,11 @@
     "pdfkit": "^0.18.0",
     "proxy-from-env": "^2.1.0",
     "resend": "^6.4.2"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "knex": "^3.3.0",
+    "supertest": "^7.2.2",
+    "tedious": "^20.0.0"
   }
 }
