@@ -9661,6 +9661,11 @@ async function refreshInboundShipmentDetail(shipmentId) {
     // be confirmed at Mark Received time instead of assuming everything
     // ordered showed up.
     const canReceive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
+    // "Undo Received" — reverses Mark Received (see undoShipmentReceived's
+    // comment in performancesql.js). Not offered on a cancelled shipment —
+    // Cancel Shipment already unlinked its orders, so there'd be nothing
+    // left here to reverse.
+    const canUndoReceive = !s.CancelledAtUtc && !!s.ReceivedAtUtc;
 
     const ordersRows = s.orders.map(o => {
       const isCancelled = o.Status === 'Cancelled';
@@ -9677,10 +9682,18 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // (SapMaterialDocument/SapGrError/SapGrSkipped, see
       // sql/migrate_order_suggestion_sap_gr.sql). A cancelled line never had
       // a GR attempted against it.
+      //
+      // SapGrSkipped is true both when the operator ticked "Skip SAP
+      // posting" AND when the line had no real SAP PO to post against (see
+      // postGoodsReceiptToSap's noPo comment in performance.js) — those are
+      // very different situations, so SapGrError (only ever populated for
+      // the latter) is checked FIRST to tell them apart, rather than
+      // showing a plain "Skipped" for both.
       const sapGrCell = canReceive ? '' : `<td>${
         isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
-        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped</span>'
         : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error" title="${esc(o.SapGrError)}">No PO on file</span>`
+        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
         : o.SapGrError ? `<span class="sap-error" title="${esc(o.SapGrError)}">Failed</span>`
         : '-'
       }</td>`;
@@ -9761,6 +9774,11 @@ async function refreshInboundShipmentDetail(shipmentId) {
       <label class="tf-checkbox-row" style="display:flex;align-items:center;gap:6px;margin-top:8px">
         <input type="checkbox" id="isd-skip-sap">
         <span>Skip SAP posting (testing only) — marks received in the portal without posting any goods receipt to SAP</span>
+      </label>` : ''}
+      ${canUndoReceive ? `
+      <label class="tf-checkbox-row" style="display:flex;align-items:center;gap:6px;margin-top:8px">
+        <input type="checkbox" id="isd-undo-skip-sap">
+        <span>Skip SAP reversal (testing only / already reversed by hand) — force-clears the portal record without calling SAP</span>
       </label>` : ''}` : ''}
       <div class="tf-section-label">Documents</div>
       <div class="toolbar-hint">Purchase orders assigned to this shipment are filed here automatically. Upload shipping documents or the supplier invoice too — everything lands in the same folder.</div>
@@ -9812,12 +9830,16 @@ async function refreshInboundShipmentDetail(shipmentId) {
       <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
       ${canCancel ? '<button type="button" class="btn-secondary" id="isd-cancel-btn">Cancel Shipment</button>' : ''}
       <button type="button" class="btn-secondary" id="isd-save-btn">Save Details</button>
+      ${canUndoReceive ? '<button type="button" class="btn-secondary" id="isd-undo-receive-btn">Undo Received</button>' : ''}
       ${canReceive ? '<button type="button" class="btn-submit" id="isd-receive-btn">Mark Received</button>' : ''}
     `;
 
     document.getElementById('isd-save-btn').addEventListener('click', () => saveInboundShipmentDetail(shipmentId));
     if (canReceive) {
       document.getElementById('isd-receive-btn').addEventListener('click', () => markInboundShipmentReceived(shipmentId, s));
+    }
+    if (canUndoReceive) {
+      document.getElementById('isd-undo-receive-btn').addEventListener('click', () => undoInboundShipmentReceived(shipmentId, s));
     }
     if (canCancel) {
       document.getElementById('isd-cancel-btn').addEventListener('click', () => cancelInboundShipment(shipmentId, s));
@@ -10046,22 +10068,71 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
     await refreshInboundShipmentDetail(shipmentId);
 
     // sapResults is a flat per-line array — {suggestionId, material,
-    // success?, documentNumber?, error?, skipped?} — see
+    // success?, documentNumber?, error?, skipped?, noPo?} — see
     // markShipmentReceived's comment. The refresh above already redraws the
     // Order Lines table with a per-line SAP GR column, so this is just a
-    // one-line heads-up if anything needs attention (skipped or failed).
+    // one-line heads-up if anything needs attention. noPo (no SAP PO item on
+    // file for that line) is checked separately from a real testing-mode
+    // skip — both come back skipped:true, but only noPo also carries an
+    // error, and conflating the two here is exactly what made an unticked
+    // "Skip SAP posting" checkbox look like it had fired.
     const sapResults = json.data?.sapResults || [];
-    const failed = sapResults.filter(r => r.success === false);
-    const skipped = sapResults.filter(r => r.skipped);
+    const noPo = sapResults.filter(r => r.skipped && r.noPo);
+    const testSkipped = sapResults.filter(r => r.skipped && !r.noPo);
+    const failed = sapResults.filter(r => r.success === false && !r.skipped);
     const newResult = document.getElementById('isd-result');
-    if (newResult && (failed.length || skipped.length)) {
-      newResult.innerHTML = skipped.length
-        ? `<div class="toolbar-hint">SAP posting skipped for ${skipped.length} order line${skipped.length === 1 ? '' : 's'} (testing mode).</div>`
-        : `<div class="sap-error">${failed.length} order line${failed.length === 1 ? '' : 's'} failed to post to SAP — see the SAP GR column for details.</div>`;
+    if (newResult && (noPo.length || testSkipped.length || failed.length)) {
+      const parts = [];
+      if (testSkipped.length) parts.push(`<div class="toolbar-hint">SAP posting skipped for ${testSkipped.length} order line${testSkipped.length === 1 ? '' : 's'} (testing mode).</div>`);
+      if (noPo.length) parts.push(`<div class="sap-error">${noPo.length} order line${noPo.length === 1 ? '' : 's'} had no SAP PO number/item on file — nothing was posted. Create the PO in SAP first, or post this line's goods receipt manually.</div>`);
+      if (failed.length) parts.push(`<div class="sap-error">${failed.length} order line${failed.length === 1 ? '' : 's'} failed to post to SAP — see the SAP GR column for details.</div>`);
+      newResult.innerHTML = parts.join('');
     }
   } catch (err) {
     if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = 'Mark Received'; }
+  }
+}
+
+// Reverses Mark Received (see undoShipmentReceived's comment in
+// performancesql.js): reverses each line's posted SAP material document,
+// clears ReceivedQty/SapMaterialDocument/SapGrError/SapGrSkipped, reverts
+// Status back to Ordered, and — only once every line is confirmed clear —
+// drops the shipment itself back out of the Inbound Log's Completed bucket
+// into its ETA-based buckets. Safe to click again: an already-cleared line
+// has nothing left to reverse and is skipped straight through, so a retry
+// only touches whichever line(s) failed the first time.
+async function undoInboundShipmentReceived(shipmentId, shipment) {
+  const orderCount = shipment.orders?.filter(o => o.Status === 'Booked' || o.Status === 'Received').length || 0;
+  const result = document.getElementById('isd-result');
+  const skipSap = !!document.getElementById('isd-undo-skip-sap')?.checked;
+
+  const confirmMsg = skipSap
+    ? `Undo Received on ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will move back to Ordered and this shipment will show as not yet received again — SAP reversal will be SKIPPED (testing mode / already reversed by hand).`
+    : `Undo Received on ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be reversed in SAP and moved back to Ordered, and this shipment will show as not yet received again.`;
+  if (!confirm(confirmMsg)) return;
+
+  const btn = document.getElementById('isd-undo-receive-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Undoing…'; }
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/undo-receive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skipSap }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to undo Mark Received');
+    runInboundLog();
+    await refreshInboundShipmentDetail(shipmentId);
+
+    const data = json.data || {};
+    const newResult = document.getElementById('isd-result');
+    if (newResult && data.stillPostedCount) {
+      newResult.innerHTML = `<div class="sap-error">${data.stillPostedCount} order line${data.stillPostedCount === 1 ? '' : 's'} could not be reversed in SAP — left as Booked with their material document intact. Fix the SAP issue and click Undo Received again to retry just those lines.</div>`;
+    }
+  } catch (err) {
+    if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Undo Received'; }
   }
 }
 

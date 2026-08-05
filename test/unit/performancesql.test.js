@@ -17,9 +17,10 @@ jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 
 let createDemandAdjustment;
 let markShipmentReceived;
+let undoShipmentReceived;
 
 beforeAll(async () => {
-  ({ createDemandAdjustment, markShipmentReceived } = await import('../../routes/performancesql.js'));
+  ({ createDemandAdjustment, markShipmentReceived, undoShipmentReceived } = await import('../../routes/performancesql.js'));
 });
 
 beforeEach(() => {
@@ -219,6 +220,122 @@ describe('markShipmentReceived', () => {
     const result = await markShipmentReceived(1, { postGoodsReceipt });
 
     expect(result.orderCount).toBe(1);
+    expect(result.sapResults).toEqual([{ suggestionId: 1, material: 'MAT1', success: false, error: 'SapServer unreachable' }]);
+  });
+});
+
+// Inbound Log's "Undo Received" action. Query order inside
+// undoShipmentReceived: (1) shipment lookup, (2) Booked/Received linked
+// orders, then per order either an UPDATE clearing everything (reversed) or
+// an UPDATE stamping just SapGrError (still posted), and finally an UPDATE
+// clearing the shipment's ReceivedAtUtc/ReceivedBy — only issued when every
+// line was reversed.
+describe('undoShipmentReceived', () => {
+  function queueShipmentAndOrders(orders, { received = true, cancelled = false } = {}) {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ ShipmentId: 1, ReceivedAtUtc: received ? '2026-08-01T00:00:00Z' : null, CancelledAtUtc: cancelled ? '2026-08-02T00:00:00Z' : null }] })
+      .mockResolvedValueOnce({ recordset: orders });
+  }
+
+  function inputCalls(name) {
+    return dbRequest.input.mock.calls.filter(call => call[0] === name).map(call => call[2]);
+  }
+
+  test('rejects with a 404 when the shipment does not exist', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+    await expect(undoShipmentReceived(999, {})).rejects.toMatchObject({
+      statusCode: 404,
+      message: expect.stringContaining('Shipment not found'),
+    });
+  });
+
+  test('rejects with a 400 when the shipment was never marked received', async () => {
+    queueShipmentAndOrders([], { received: false });
+    await expect(undoShipmentReceived(1, {})).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('has not been marked received'),
+    });
+  });
+
+  test('rejects with a 400 when the shipment has been cancelled', async () => {
+    queueShipmentAndOrders([], { received: true, cancelled: true });
+    await expect(undoShipmentReceived(1, {})).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('cancelled'),
+    });
+  });
+
+  test('clears a line with no SapMaterialDocument straight through with no SAP call', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', SapMaterialDocument: null }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+    const reverseGoodsReceipt = jest.fn();
+
+    const result = await undoShipmentReceived(1, { reverseGoodsReceipt });
+
+    expect(reverseGoodsReceipt).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      reversedCount: 1, stillPostedCount: 0, shipmentUndone: true,
+      sapResults: [{ suggestionId: 1, material: 'MAT1', success: true, skipped: true }],
+    });
+  });
+
+  test('reverses a posted line via the callback, clears its fields, and un-receives the shipment', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', SapMaterialDocument: '5000000001' }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+    const reverseGoodsReceipt = jest.fn().mockResolvedValue({ success: true });
+
+    const result = await undoShipmentReceived(1, { reverseGoodsReceipt });
+
+    expect(reverseGoodsReceipt).toHaveBeenCalledWith(expect.objectContaining({ SuggestionId: 1, SapMaterialDocument: '5000000001' }));
+    expect(result.reversedCount).toBe(1);
+    expect(result.shipmentUndone).toBe(true);
+    // The clearing UPDATE stamps Status back to 'Ordered' with everything else nulled.
+    expect(inputCalls('suggestionId')).toContain(1);
+  });
+
+  test('leaves a line whose SAP reversal fails untouched (status/document intact) and does not un-receive the shipment', async () => {
+    queueShipmentAndOrders([
+      { SuggestionId: 1, Material: 'MAT1', SapMaterialDocument: '5000000001' },
+      { SuggestionId: 2, Material: 'MAT2', SapMaterialDocument: '5000000002' },
+    ]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+    const reverseGoodsReceipt = jest.fn()
+      .mockResolvedValueOnce({ success: false, error: 'Document already reversed.' })
+      .mockResolvedValueOnce({ success: true });
+
+    const result = await undoShipmentReceived(1, { reverseGoodsReceipt });
+
+    expect(result.reversedCount).toBe(1);
+    expect(result.stillPostedCount).toBe(1);
+    expect(result.shipmentUndone).toBe(false); // one line still posted — shipment stays "received"
+    expect(result.sapResults).toEqual([
+      { suggestionId: 1, material: 'MAT1', success: false, error: 'Document already reversed.' },
+      { suggestionId: 2, material: 'MAT2', success: true },
+    ]);
+    expect(inputCalls('sapGrError')).toContain('Document already reversed.');
+  });
+
+  test('skipSap force-clears every line and un-receives the shipment without calling SAP', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', SapMaterialDocument: '5000000001' }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+    const reverseGoodsReceipt = jest.fn();
+
+    const result = await undoShipmentReceived(1, { skipSap: true, reverseGoodsReceipt });
+
+    expect(reverseGoodsReceipt).not.toHaveBeenCalled();
+    expect(result.reversedCount).toBe(1);
+    expect(result.shipmentUndone).toBe(true);
+  });
+
+  test('treats a thrown reverseGoodsReceipt as a failure rather than aborting the undo', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', SapMaterialDocument: '5000000001' }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+    const reverseGoodsReceipt = jest.fn().mockRejectedValue(new Error('SapServer unreachable'));
+
+    const result = await undoShipmentReceived(1, { reverseGoodsReceipt });
+
+    expect(result.stillPostedCount).toBe(1);
+    expect(result.shipmentUndone).toBe(false);
     expect(result.sapResults).toEqual([{ suggestionId: 1, material: 'MAT1', success: false, error: 'SapServer unreachable' }]);
   });
 });

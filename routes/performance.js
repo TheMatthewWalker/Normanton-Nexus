@@ -3520,8 +3520,14 @@ router.put('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MR
 // confirmed live, which is exactly what the Mark Received "skip SAP"
 // checkbox exists to guard against during that testing.
 async function postGoodsReceiptToSap(order, shipment, callerUserId) {
+  // noPo distinguishes this from an operator-requested skip (skipSap) —
+  // both end up SapGrSkipped=1 in the DB, but only this one also carries an
+  // error explaining why, and the frontend/summary-message code below
+  // checks noPo specifically so "no PO on file" is never shown as if the
+  // testing checkbox had been ticked (see the Inbound Log SAP GR column and
+  // markInboundShipmentReceived's post-receive summary in logistics.js).
   if (!order.PoNumber || !order.PoItemNumber) {
-    return { success: false, skipped: true, error: 'No SAP PO number on file for this order line — nothing to post.' };
+    return { success: false, skipped: true, noPo: true, error: 'No SAP PO number on file for this order line — nothing to post.' };
   }
   const lineNumber = Math.round(Number(order.PoItemNumber) / 10);
   const today = new Date().toISOString().slice(0, 10);
@@ -3578,6 +3584,64 @@ router.post('/order-suggestions/shipments/:shipmentId/receive', requirePermissio
       skipSap: !!req.body?.skipSap,
       postGoodsReceipt: (order, shipment) => postGoodsReceiptToSap(order, shipment, callerUserId),
     });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Reverses one order line's posted goods receipt via SapServer's
+// POST /api/purchasing/reverse-goods-receipt (MBST — reuses the same BDC as
+// production scrap reversal, see PurchasingController.ReverseGoodsReceipt).
+// Only needs the material document number; nothing else identifies the
+// movement to reverse. Same non-elevated service-worker call shape as
+// postGoodsReceiptToSap, but checked against a different permission
+// function code (ProductionHelpers.FnCreate, not "MB01" — see that
+// controller method's own comment).
+async function reverseGoodsReceiptToSap(order, callerUserId) {
+  try {
+    const sapResp = await axios.post(
+      `${sapConfig.url}/api/purchasing/reverse-goods-receipt`,
+      { MaterialDocument: order.SapMaterialDocument },
+      { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(callerUserId)}` } }
+    );
+    const sapBody = sapResp.data;
+    if (!sapBody.success) return { success: false, error: extractPoErrorMessage(sapBody, 'SapServer returned success=false') };
+
+    const result = sapBody.data || {};
+    if (result.type === 'E' || result.type === 'A') {
+      return { success: false, error: result.message || 'Goods receipt reversal failed.' };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: extractPoErrorMessage(err.response?.data, err.message) };
+  }
+}
+
+// Inbound Log's "Undo Received" action — reverses Mark Received: reverses
+// each order line's posted SAP material document, clears
+// ReceivedQty/SapMaterialDocument/SapGrError/SapGrSkipped, and reverts
+// Status back to 'Ordered' (see undoShipmentReceived's own comment for why
+// a line whose SAP reversal fails is deliberately left alone rather than
+// force-cleared, and why the shipment only drops back into the Inbound
+// Log's ETA-based buckets — i.e. ReceivedAtUtc cleared — once every line is
+// actually clear). Body: { skipSap? } — testing-phase escape hatch, same as
+// Mark Received's, for when the SAP side has already been reversed by hand
+// (or was never really posted, e.g. after the "no PO on file" skip case).
+router.post('/order-suggestions/shipments/:shipmentId/undo-receive', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const undoneBy = req.session?.user?.username || 'unknown';
+    const callerUserId = req.session?.user?.userID;
+    const data = await db.undoShipmentReceived(req.params.shipmentId, {
+      skipSap: !!req.body?.skipSap,
+      reverseGoodsReceipt: (order) => reverseGoodsReceiptToSap(order, callerUserId),
+    });
+    await auditQuery(
+      'INBOUND_SHIPMENT_UNDO_RECEIVE', undoneBy,
+      `Undid Mark Received on shipment #${req.params.shipmentId} — ${data.reversedCount} line(s) reversed` +
+        (data.stillPostedCount ? `, ${data.stillPostedCount} still SAP-posted (reversal failed, retry needed)` : ''),
+      req,
+    );
     res.json({ success: true, data });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });

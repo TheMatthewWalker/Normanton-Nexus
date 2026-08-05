@@ -2008,6 +2008,102 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
   return { orderCount: resolvedOrders.length, sapResults };
 }
 
+// Reverses markShipmentReceived (Inbound Log's "Undo Received" action) —
+// for correcting a shipment marked received in error (wrong shipment, SAP
+// posting needs redoing with a different quantity, etc.).
+//
+// Scoped to every currently-linked, non-cancelled order still sitting in
+// 'Booked' or 'Received' (i.e. whatever markShipmentReceived put there, or
+// an operator manually advanced further afterwards) — a Cancelled order was
+// never touched by Mark Received and is left alone here too.
+//
+// reverseGoodsReceipt is an optional async (order) => { success, error? }
+// callback, same injection pattern as markShipmentReceived's
+// postGoodsReceipt (kept out of this DB-only module — routes/performance.js
+// supplies the real SapServer call, POST /api/purchasing/reverse-goods-receipt,
+// MBST). Only called for a line that actually has a SapMaterialDocument —
+// nothing was really posted for a skipped/no-PO line, so there's nothing to
+// reverse in SAP, and it's cleared locally immediately.
+//
+// A line whose SAP reversal fails is deliberately left completely alone —
+// still Booked/Received, ReceivedQty and SapMaterialDocument untouched,
+// only SapGrError updated — rather than force-clearing the portal's record
+// of something that's still actually posted in SAP. This function is safe
+// to call again later: already-cleared lines have no SapMaterialDocument
+// and are skipped straight to the "nothing to reverse" path, so only the
+// still-stuck lines are retried. skipSap (testing-phase escape hatch, same
+// as markShipmentReceived's) bypasses every SAP call and force-clears every
+// line regardless — for when the SAP side was already reversed by hand, or
+// was never really posted (e.g. the "no PO on file" skip case).
+//
+// The shipment itself only drops out of the Inbound Log's "Completed"
+// bucket back into its ETA-based buckets (ReceivedAtUtc/ReceivedBy cleared)
+// once every line is confirmed clear — leaving it marked received if any
+// line is still actually SAP-posted, so the Inbound Log never shows a
+// shipment as "not yet received" while SAP disagrees.
+export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsReceipt } = {}) {
+  const pool = await getPool();
+  const { recordset: shipmentRows } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query('SELECT ShipmentId, ReceivedAtUtc, CancelledAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+  const shipment = shipmentRows[0];
+  if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
+  if (!shipment.ReceivedAtUtc) { const err = new Error('This shipment has not been marked received.'); err.statusCode = 400; throw err; }
+  if (shipment.CancelledAtUtc) { const err = new Error('This shipment has been cancelled — its orders were already unlinked, so there is nothing to undo here.'); err.statusCode = 400; throw err; }
+
+  const { recordset: orders } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`SELECT SuggestionId, Material, SapMaterialDocument FROM dbo.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status IN ('Booked', 'Received')`);
+
+  const sapResults = [];
+  let reversedCount = 0;
+  let stillPostedCount = 0;
+
+  for (const order of orders) {
+    let reverseResult = { success: true, skipped: true };
+    if (order.SapMaterialDocument && !skipSap && typeof reverseGoodsReceipt === 'function') {
+      try {
+        reverseResult = await reverseGoodsReceipt(order);
+      } catch (sapErr) {
+        reverseResult = { success: false, error: sapErr.message };
+      }
+    }
+    sapResults.push({ suggestionId: order.SuggestionId, material: order.Material, ...reverseResult });
+
+    if (reverseResult.success === false) {
+      stillPostedCount++;
+      await pool.request()
+        .input('suggestionId', sql.Int, order.SuggestionId)
+        .input('sapGrError',   sql.NVarChar(500), reverseResult.error || 'Goods receipt reversal failed.')
+        .query(`UPDATE dbo.PurchaseOrderSuggestion SET SapGrError = @sapGrError, UpdatedAtUtc = GETUTCDATE() WHERE SuggestionId = @suggestionId`);
+      continue;
+    }
+
+    reversedCount++;
+    await pool.request()
+      .input('suggestionId', sql.Int, order.SuggestionId)
+      .query(`
+        UPDATE dbo.PurchaseOrderSuggestion SET
+          Status = 'Ordered', ReceivedQty = NULL,
+          SapMaterialDocument = NULL, SapGrError = NULL, SapGrSkipped = NULL,
+          UpdatedAtUtc = GETUTCDATE()
+        WHERE SuggestionId = @suggestionId
+      `);
+  }
+
+  const shipmentUndone = stillPostedCount === 0;
+  if (shipmentUndone) {
+    await pool.request()
+      .input('shipmentId', sql.Int, shipmentId)
+      .query(`
+        UPDATE dbo.PurchaseOrderShipment SET ReceivedAtUtc = NULL, ReceivedBy = NULL, UpdatedAtUtc = GETUTCDATE()
+        WHERE ShipmentId = @shipmentId
+      `);
+  }
+
+  return { reversedCount, stillPostedCount, shipmentUndone, sapResults };
+}
+
 
 // Fresh, authoritative lookups used by the accept/accept-batch routes'
 // server-side enforcement (routes/performance.js) — deliberately re-read
