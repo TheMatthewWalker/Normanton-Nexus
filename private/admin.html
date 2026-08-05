@@ -79,6 +79,16 @@
           Mass Apply Permissions
         </div>
 
+        <div class="nav-item" data-section="mass-departments">
+          <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
+            <rect x="1.5" y="5.5" width="4.5" height="7" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
+            <rect x="8" y="2.5" width="4.5" height="10" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="3.75" y1="8" x2="3.75" y2="8.01" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            <line x1="10.25" y1="5.5" x2="10.25" y2="5.51" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+          Mass Apply Departments
+        </div>
+
         <!-- Bulk Create Users — shown only for superadmin -->
         <div class="nav-item" data-section="bulk-create" id="nav-bulk-create" style="display:none">
           <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
@@ -240,6 +250,47 @@
         </div>
       </section>
 
+      <!-- ── MASS APPLY DEPARTMENTS ────────────────────────────────────── -->
+      <section class="section" id="section-mass-departments">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Mass Apply Departments</div>
+            <div class="section-sub">Grant one or more department areas to many users at once</div>
+          </div>
+          <div class="section-actions">
+            <input type="text" id="mass-dept-search" class="search-input" placeholder="Search username or email…">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start">
+          <div class="table-wrap">
+            <table id="mass-dept-users-table">
+              <thead>
+                <tr>
+                  <th style="width:34px"><input type="checkbox" id="mass-dept-select-all" aria-label="Select all visible users"></th>
+                  <th>Username</th>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Current Departments</th>
+                </tr>
+              </thead>
+              <tbody id="mass-dept-users-tbody">
+                <tr><td colspan="6" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div style="background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;padding:18px 20px;position:sticky;top:0">
+            <label class="modal-label">Departments to Apply</label>
+            <div class="dept-grid" id="mass-dept-codes"></div>
+            <div id="mass-dept-summary" style="font-size:12px;color:var(--text-dim);margin-top:12px">0 users selected</div>
+            <button type="button" class="btn-primary" id="mass-dept-apply-btn" style="width:100%;margin-top:10px" disabled>Apply to Selected Users</button>
+            <div id="mass-dept-result" style="font-size:13px;margin-top:10px"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- ── BULK CREATE USERS ─────────────────────────────────────────── -->
       <section class="section" id="section-bulk-create">
         <div class="section-header">
@@ -328,6 +379,7 @@
               <option value="PERM_CREATE">Permission created</option>
               <option value="PERM_DELETE">Permission deleted</option>
               <option value="PERM_BULK_GRANT">Mass permission grants</option>
+              <option value="DEPT_BULK_GRANT">Mass department grants</option>
               <option value="USERNAME_CHANGE">Username changes</option>
               <option value="PROFILE_CHANGE">Profile changes</option>
               <option value="IDLE_TIMEOUT_CHANGE">Idle timeout changes</option>

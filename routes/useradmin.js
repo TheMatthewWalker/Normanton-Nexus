@@ -17,6 +17,7 @@
  *   POST /users/:id/approve            — activate a pending user
  *   POST /users/:id/reject             — delete a pending registration
  *   POST /users/bulk-create            — mass-create accounts from an imported list (superadmin only)
+ *   POST /users/bulk-departments       — grant one or more departments to many users at once
  *   GET  /audit                        — audit log, optionally filtered by event type
  *
  * Permission definition endpoints (superadmin only):
@@ -596,6 +597,101 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
   }
 });
 
+// ── POST /users/bulk-departments ────────────────────────────────────────────────
+// Admin or superadmin. Grants one or more departments to many users at once —
+// e.g. fixing a bulk-created batch that missed picking a department the
+// first time round. Body: { userIDs: [1,2,3], departments: ['production'] }
+// A (userID, department) pair the user already holds is silently skipped,
+// not treated as an error — relies on the real DB-level uniqueness
+// (UX_UserDept on PortalUserDepartments) to detect the duplicate, same
+// pattern as POST /users/bulk-permissions above.
+router.post('/users/bulk-departments', async (req, res) => {
+  const { userIDs, departments } = req.body;
+
+  if (!Array.isArray(userIDs) || !userIDs.length) {
+    return res.status(400).json({ success: false, error: 'Select at least one user.' });
+  }
+  if (!Array.isArray(departments) || !departments.length) {
+    return res.status(400).json({ success: false, error: 'Select at least one department.' });
+  }
+  if (userIDs.length > 500) {
+    return res.status(400).json({ success: false, error: 'Maximum 500 users per batch.' });
+  }
+
+  const ids = [...new Set(userIDs.map(id => parseInt(id, 10)))];
+  if (ids.some(id => !id || isNaN(id))) {
+    return res.status(400).json({ success: false, error: 'Invalid user ID in selection.' });
+  }
+
+  const depts = [...new Set(departments)];
+  if (!depts.every(d => VALID_DEPTS.includes(d))) {
+    return res.status(400).json({ success: false, error: 'Invalid department in selection.' });
+  }
+
+  try {
+    const pool  = await sql.connect(sqlConfig);
+    const actor = req.session.user.username;
+
+    // Fetch usernames for every selected user in one round trip
+    const userReq = pool.request();
+    ids.forEach((id, i) => userReq.input(`u${i}`, sql.Int, id));
+    const userResult = await userReq.query(`
+      SELECT UserID, Username FROM kongsberg.dbo.PortalUsers
+      WHERE UserID IN (${ids.map((_, i) => `@u${i}`).join(',')})
+    `);
+    const userMap = new Map(userResult.recordset.map(r => [r.UserID, r.Username]));
+
+    const results = [];
+    for (const userID of ids) {
+      const username = userMap.get(userID);
+      if (!username) {
+        results.push({ userID, username: null, granted: 0, alreadyHad: 0, error: 'User not found' });
+        continue;
+      }
+
+      let granted = 0, alreadyHad = 0;
+      for (const dept of depts) {
+        try {
+          await pool.request()
+            .input('userID',    sql.Int,         userID)
+            .input('dept',      sql.NVarChar(50), dept)
+            .input('grantedBy', sql.NVarChar(80), actor)
+            .query(`
+              INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+              VALUES (@userID, @dept, @grantedBy)
+            `);
+          granted++;
+        } catch (dupErr) {
+          if (dupErr.number === 2627 || dupErr.message?.includes('UNIQUE') || dupErr.message?.includes('duplicate')) {
+            alreadyHad++;
+          } else {
+            throw dupErr;
+          }
+        }
+      }
+      results.push({ userID, username, granted, alreadyHad });
+    }
+
+    const totalGranted = results.reduce((s, r) => s + r.granted, 0);
+    const totalAlready = results.reduce((s, r) => s + r.alreadyHad, 0);
+    const totalFailed  = results.filter(r => r.error).length;
+
+    await audit('DEPT_BULK_GRANT', actor,
+      `Granted [${depts.join(', ')}] to ${ids.length} user(s) — ${totalGranted} new grant(s), ${totalAlready} already held` +
+      `${totalFailed ? `, ${totalFailed} user(s) not found` : ''}`, req);
+
+    res.json({
+      success: true,
+      results,
+      summary: { users: ids.length, granted: totalGranted, alreadyHad: totalAlready, failed: totalFailed },
+    });
+
+  } catch (err) {
+    console.error('[admin/users bulk-departments]', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /audit ────────────────────────────────────────────────────────────────
 router.get('/audit', async (req, res) => {
   const { event } = req.query;
@@ -607,7 +703,7 @@ router.get('/audit', async (req, res) => {
     'RAW_SQL','RAW_SQL_BLOCKED','RAW_SQL_ERROR',
     'SAP_OK','SAP_ERROR',
     'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE','PERM_BULK_GRANT',
-    'BULK_CREATE','PASSWORD_CHANGE',
+    'BULK_CREATE','PASSWORD_CHANGE','DEPT_BULK_GRANT',
   ];
 
   if (event && !VALID_EVENTS.includes(event)) {

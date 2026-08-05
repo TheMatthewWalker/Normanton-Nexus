@@ -72,6 +72,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Set up Mass Apply Permissions when that section is first opened
   document.querySelector('[data-section="mass-permissions"]')
     .addEventListener('click', () => { setupMassPermissions(); }, { once: true });
+
+  // Set up Mass Apply Departments when that section is first opened
+  document.querySelector('[data-section="mass-departments"]')
+    .addEventListener('click', () => { setupMassDepartments(); }, { once: true });
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -958,6 +962,128 @@ async function submitMassPermissions() {
     // local cache by hand.
     await loadUsers();
     renderMassPermUsersTable();
+  } catch (err) {
+    resultEl.style.color = 'var(--error)';
+    resultEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply to Selected Users';
+  }
+}
+
+// ── Mass Apply Departments ──────────────────────────────────────────────────────
+// Admin or superadmin. Same shape as Mass Apply Permissions above, but grants
+// department access (routes/useradmin.js's POST /users/bulk-departments)
+// instead of permission codes — reuses the existing renderDeptGrid()/
+// getCheckedDepts() helpers (see Department Grid Helper below) rather than
+// building a bespoke checklist renderer, since departments are a small fixed
+// list already handled by those.
+let massDeptSetup = false;
+let massDeptSelectedUserIDs = new Set();
+
+function setupMassDepartments() {
+  if (massDeptSetup) return;
+  massDeptSetup = true;
+
+  renderDeptGrid('mass-dept-codes', []);
+  document.getElementById('mass-dept-codes').addEventListener('click', updateMassDeptSummary);
+
+  document.getElementById('mass-dept-search').addEventListener('input', () => renderMassDeptUsersTable());
+  document.getElementById('mass-dept-select-all').addEventListener('change', e => {
+    massDeptVisibleUsers().forEach(u => {
+      if (e.target.checked) massDeptSelectedUserIDs.add(u.UserID);
+      else massDeptSelectedUserIDs.delete(u.UserID);
+    });
+    renderMassDeptUsersTable();
+  });
+  document.getElementById('mass-dept-apply-btn').addEventListener('click', submitMassDepartments);
+
+  renderMassDeptUsersTable();
+}
+
+function massDeptVisibleUsers() {
+  const q = document.getElementById('mass-dept-search').value.trim().toLowerCase();
+  if (!q) return allUsers;
+  return allUsers.filter(u => u.Username.toLowerCase().includes(q) || u.Email.toLowerCase().includes(q));
+}
+
+function renderMassDeptUsersTable() {
+  const tbody = document.getElementById('mass-dept-users-tbody');
+  const users = massDeptVisibleUsers();
+
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="loading-cell">No users found</td></tr>';
+    updateMassDeptSummary();
+    return;
+  }
+
+  tbody.innerHTML = users.map(u => {
+    const checked = massDeptSelectedUserIDs.has(u.UserID);
+    const deptTags = (u.departments || [])
+      .map(d => `<span class="dept-tag">${esc(DEPT_LABELS[d] || d)}</span>`)
+      .join('');
+    return `
+      <tr>
+        <td><input type="checkbox" class="mass-dept-user-check" data-user-id="${u.UserID}" ${checked ? 'checked' : ''} aria-label="Select ${esc(u.Username)}"></td>
+        <td><strong>${esc(u.Username)}</strong></td>
+        <td>${esc(u.FirstName || '—')} ${esc(u.LastName || '')}</td>
+        <td>${esc(u.Email)}</td>
+        <td><span class="badge badge--${esc(u.Role)}">${esc(u.Role)}</span></td>
+        <td><div class="dept-tags">${deptTags || '<span style="color:var(--text-muted);font-size:11px">None</span>'}</div></td>
+      </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('.mass-dept-user-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const id = Number(cb.dataset.userId);
+      if (cb.checked) massDeptSelectedUserIDs.add(id);
+      else massDeptSelectedUserIDs.delete(id);
+      updateMassDeptSummary();
+    });
+  });
+
+  // Reflect current selection state onto the header "select all" checkbox
+  const selectAll = document.getElementById('mass-dept-select-all');
+  selectAll.checked = users.length > 0 && users.every(u => massDeptSelectedUserIDs.has(u.UserID));
+
+  updateMassDeptSummary();
+}
+
+function updateMassDeptSummary() {
+  const summaryEl = document.getElementById('mass-dept-summary');
+  const btn       = document.getElementById('mass-dept-apply-btn');
+  const userCount = massDeptSelectedUserIDs.size;
+  const deptCount = getCheckedDepts('mass-dept-codes').length;
+  summaryEl.textContent = `${userCount} user${userCount !== 1 ? 's' : ''} selected, ${deptCount} department${deptCount !== 1 ? 's' : ''} chosen`;
+  btn.disabled = userCount === 0 || deptCount === 0;
+}
+
+async function submitMassDepartments() {
+  const userIDs    = [...massDeptSelectedUserIDs];
+  const departments = getCheckedDepts('mass-dept-codes');
+  if (!userIDs.length || !departments.length) return;
+
+  const deptLabels = departments.map(d => DEPT_LABELS[d] || d).join(', ');
+  if (!confirm(`Grant ${deptLabels} access to ${userIDs.length} user(s)?`)) return;
+
+  const btn      = document.getElementById('mass-dept-apply-btn');
+  const resultEl = document.getElementById('mass-dept-result');
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  resultEl.textContent = '';
+
+  try {
+    const data = await api('/api/admin/users/bulk-departments', 'POST', { userIDs, departments });
+    const { granted, alreadyHad, failed } = data.summary;
+
+    resultEl.style.color = failed ? 'var(--error)' : 'var(--accent)';
+    resultEl.textContent = `✓ ${granted} new grant(s), ${alreadyHad} already held` + (failed ? `, ${failed} user(s) not found.` : '.');
+    showToast(`Mass apply: ${granted} new grant(s)`, failed ? 'error' : 'success');
+
+    // Refresh from the server so both this table and the main Users table
+    // reflect the grant with authoritative data.
+    await loadUsers();
+    renderMassDeptUsersTable();
   } catch (err) {
     resultEl.style.color = 'var(--error)';
     resultEl.textContent = err.message;
