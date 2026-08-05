@@ -7,21 +7,47 @@
  * share the actual restart-verification logic via restart-lib.cjs, so they
  * can't silently drift apart again).
  *
- * IMPORTANT — why this has to run as a DETACHED process:
+ * IMPORTANT — why this has to run as a Task Scheduler task, NOT a plain
+ * spawn(..., { detached: true }):
  * This script is triggered by a node-cron job running inside server.js,
- * which itself runs under the very "Normanton Nexus" service this script
- * stops and restarts. If this script were spawned as an ordinary (attached)
- * child process, the moment svc.stop() takes down server.js, the OS/service
- * manager could tear this script down right along with it — mid-restart,
- * before svc.start() ever fires. The cron checker in server.js spawns this
- * with { detached: true } + .unref() specifically so it keeps running
- * independently of server.js's lifecycle. Its stdout/stderr are redirected
- * to deploy-runner.log (NOT 'ignore') — this file is your primary source of
- * truth if a deployment gets stuck; the ScheduledDeployments.OutputLog /
- * ErrorMessage columns only get populated for the specific failure modes
- * this script anticipates and catches, whereas the log file captures
- * everything, including crashes this script never gets a chance to record
- * to the database.
+ * which itself runs under the very "Normanton Nexus" Windows Service this
+ * script stops and restarts. A plain detached spawn() used to be used here
+ * on the theory that `detached` + .unref() is enough to survive server.js
+ * being killed mid-restart. It isn't, on Windows: node-windows wraps the
+ * service via WinSW, which runs it inside a Job Object with kill-on-close
+ * semantics specifically so no child process ever outlives the service.
+ * `detached` only creates a new process group — it does NOT exempt the
+ * child from the parent's Job Object (that needs CREATE_BREAKAWAY_FROM_JOB,
+ * which Node's spawn() never sets on Windows). Confirmed directly: a
+ * scheduled deployment force-killed the OLD server.js process
+ * (forceKillPort443() in restart-lib.cjs) and deploy-runner.log went dead
+ * silent at exactly that line — the whole Job Object, including THIS
+ * script's own process, was torn down along with the process it had just
+ * killed, before it ever reached svc.start() again. The service stayed
+ * down with nothing left running to notice or recover.
+ *
+ * server.js's cron checker now instead creates + immediately runs a
+ * one-shot Task Scheduler task (`schtasks /create ... && schtasks /run`)
+ * whose command line is this script + a DeploymentID. A Task Scheduler task
+ * is launched by the Task Scheduler service (svchost.exe) — a completely
+ * separate process lineage from server.js — so it survives the Job Object
+ * teardown above entirely. Same reason SapServer itself runs via Task
+ * Scheduler rather than a Windows Service (see that repo's CLAUDE.md).
+ *
+ * Two consequences of the Task Scheduler launch:
+ *   1. There's no inherited stdio to redirect to deploy-runner.log the way
+ *      server.js used to do at spawn time — this script now opens and
+ *      writes that log itself (see the console.* overrides right after the
+ *      requires below). This file is your primary source of truth if a
+ *      deployment gets stuck; the ScheduledDeployments.OutputLog /
+ *      ErrorMessage columns only get populated for the specific failure
+ *      modes this script anticipates and catches, whereas the log file
+ *      captures everything, including crashes this script never gets a
+ *      chance to record to the database.
+ *   2. This script deletes its own one-shot task on every exit path
+ *      (success or failure) via cleanupScheduledTask() below, so Task
+ *      Scheduler doesn't accumulate one leftover "Ready" task per
+ *      deployment forever.
  *
  * IMPORTANT — auth: the "Normanton Nexus" service has no `user` set in
  * install.cjs, so Windows runs it as LocalSystem — a completely different
@@ -104,6 +130,25 @@ const {
   HEALTH_PATH,
   LIVENESS_PORT,
 } = require('./restart-lib.cjs');
+
+// Launched via Task Scheduler now (see the top-of-file comment), which
+// gives this process no inherited stdio to redirect to deploy-runner.log
+// the way server.js's old direct spawn() used to — so this writes the log
+// itself. Appends, never throws (a logging failure must never be what
+// takes down a deployment) — best-effort via a plain fs.appendFileSync per
+// line rather than a stream, since a stream left open across this script's
+// various process.exit() calls risks losing buffered-but-unflushed lines.
+const LOG_PATH = path.join(__dirname, 'deploy-runner.log');
+function appendLog(line) {
+  try { fs.appendFileSync(LOG_PATH, `${new Date().toISOString()} ${line}\n`); } catch { /* best effort */ }
+}
+for (const level of ['log', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    original(...args);
+    appendLog(args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+  };
+}
 
 const REPO_DIR       = __dirname;
 const TOKEN_PATH      = path.join(REPO_DIR, '.deploykey', 'github_token');
@@ -250,6 +295,21 @@ async function deploySapServer(gitRef) {
   return { skipped: false, output: pullResult.stdout + '\n' + deployResult.stdout };
 }
 
+// Deletes the one-shot Task Scheduler task this run was launched from (see
+// server.js's cron checker and the top-of-file comment on why this now
+// runs via Task Scheduler rather than a direct spawn()). Best-effort and
+// called right before every process.exit() below — a leftover task is just
+// Task Scheduler clutter, never worth failing or retrying a deployment
+// over, so this never throws.
+async function cleanupScheduledTask(deploymentID) {
+  const taskName = `NNDeployRunner_${deploymentID}`;
+  const result = await runCommand('schtasks', ['/delete', '/tn', taskName, '/f'], { timeoutMs: 15000 });
+  if (!result.ok) {
+    console.warn(`[deploy-runner] could not delete Task Scheduler task ${taskName} (harmless clutter, not fatal): ` +
+      (result.stderr || result.error?.message || 'unknown'));
+  }
+}
+
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
   if (!deploymentID) {
@@ -308,6 +368,7 @@ async function main() {
     } catch (err) {
       console.error('[deploy-runner] also failed to record failure:', err.message);
     } finally {
+      await cleanupScheduledTask(deploymentID);
       await pool.close();
       process.exit(1);
     }
@@ -451,6 +512,7 @@ async function main() {
               WHERE DeploymentID = @id`);
     await audit('DEPLOY_COMPLETED',
       `Deployment #${deploymentID} completed (${gitRef})${sapResult.skipped ? '' : ' + SapServer redeployed'}`);
+    await cleanupScheduledTask(deploymentID);
     await pool.close();
     process.exit(0);
 
@@ -460,7 +522,13 @@ async function main() {
   }
 }
 
-main().catch(err => {
+main().catch(async err => {
   console.error('[deploy-runner] fatal error:', err);
+  // Covers failures before main()'s own try/catch even starts (e.g.
+  // config.json unreadable, SQL Server unreachable) — deploymentID is
+  // still known at that point (parsed from argv first thing), so the
+  // one-shot task can still be cleaned up rather than left behind.
+  const deploymentID = parseInt(process.argv[2], 10);
+  if (deploymentID) await cleanupScheduledTask(deploymentID);
   process.exit(1);
 });

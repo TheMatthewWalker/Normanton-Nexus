@@ -9,7 +9,7 @@ import https from "https";
 import http from "http";
 import fs from "fs";
 import crypto from "crypto";
-import { spawn }             from 'child_process';
+import { execFile }          from 'child_process';
 import bcrypt                 from 'bcrypt';
 import rateLimit              from 'express-rate-limit';
 import cron                   from 'node-cron';
@@ -218,11 +218,56 @@ cron.schedule('20 6 * * *', () => {
     .catch(err => console.error('[cron] consignment GR + stock sync failed', err));
 });
 
+// Runs `schtasks args...` and resolves { ok, stdout, stderr }, never
+// rejects — mirrors restart-lib.cjs's runCommand() (async execFile, no
+// shell, own timeout) so a hung schtasks.exe can never block this cron
+// tick or the rest of the process.
+function runSchtasks(args, timeoutMs = 15000) {
+  return new Promise(resolve => {
+    let settled = false;
+    const child = execFile('schtasks', args, { windowsHide: true, encoding: 'utf8' }, (err, stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: !err, stdout: stdout || '', stderr: stderr || '', error: err || null });
+    });
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch { /* best effort */ }
+      resolve({ ok: false, stdout: '', stderr: '', error: new Error(`schtasks ${args.join(' ')} timed out`) });
+    }, timeoutMs).unref();
+  });
+}
+
 // Scheduled deployment checker — every minute. Looks for due, pending rows
-// in ScheduledDeployments and hands each one off to a detached
-// deploy-runner.cjs process (git pull + Windows Service restart). Detached
-// so it survives this very process being killed mid-restart — see
-// deploy-runner.cjs for the full explanation.
+// in ScheduledDeployments and hands each one off to deploy-runner.cjs via a
+// ONE-SHOT Task Scheduler task, NOT a direct child_process.spawn.
+//
+// WHY: a plain spawn(..., { detached: true }) used to be used here, on the
+// theory that `detached` + .unref() is enough to survive this very process
+// (running under the "Normanton Nexus" Windows Service) being killed
+// mid-restart. It isn't, on Windows: node-windows wraps the service via
+// WinSW, which runs it inside a Job Object with kill-on-close semantics
+// specifically so no child process ever outlives the service. `detached`
+// only creates a new process group — it does NOT exempt the child from the
+// parent's Job Object (that needs CREATE_BREAKAWAY_FROM_JOB, which Node's
+// spawn() never sets on Windows). Confirmed directly: a scheduled
+// deployment force-killed the OLD server.js process (forceKillPort443() in
+// restart-lib.cjs) and deploy-runner.log went dead silent at exactly that
+// line — the whole Job Object, including the spawned deploy-runner.cjs
+// process itself, was torn down along with the process it had just killed,
+// before it ever got to call svc.start() again. The service stayed down
+// with nothing left running to notice or recover.
+//
+// A Task Scheduler task is launched by the Task Scheduler service
+// (svchost.exe), a completely separate process lineage from server.js —
+// same reason SapServer itself runs via Task Scheduler rather than a
+// Windows Service (see that repo's CLAUDE.md). deploy-runner.cjs now does
+// its own logging directly to deploy-runner.log (see that file) rather
+// than relying on stdio redirection here, since a Task Scheduler-launched
+// process has no inherited stdio to redirect. It also deletes its own
+// one-shot task on every exit path (success or failure) — see
+// cleanupScheduledTask() there.
 cron.schedule('* * * * *', async () => {
   try {
     const pool = await sql.connect(configJS.sqlConfig);
@@ -233,21 +278,62 @@ cron.schedule('* * * * *', async () => {
       WHERE Status = 'pending' AND ScheduledAt <= GETDATE()
     `);
     for (const row of due.recordset) {
-      console.log(`[cron] triggering scheduled deployment #${row.DeploymentID}`);
-      // stdio is redirected to deploy-runner.log (NOT 'ignore') — deploy-runner.cjs
-      // logs every step it takes, and this was previously being discarded entirely,
-      // which is why a stuck/failed deployment showed zero diagnostic evidence.
-      const logFd = fs.openSync(path.join(__dirname, 'deploy-runner.log'), 'a');
-      const child = spawn(
-        process.execPath,
-        [path.join(__dirname, 'deploy-runner.cjs'), String(row.DeploymentID)],
-        { detached: true, stdio: ['ignore', logFd, logFd], cwd: __dirname }
-      );
-      fs.closeSync(logFd); // the child keeps its own handle to the same file
-      child.unref();
+      const taskName = `NNDeployRunner_${row.DeploymentID}`;
+      const scriptPath = path.join(__dirname, 'deploy-runner.cjs');
+      console.log(`[cron] triggering scheduled deployment #${row.DeploymentID} via Task Scheduler task ${taskName}`);
+
+      // /sc once /sd/st in the past + /f (force-overwrite, in case a
+      // previous run's self-cleanup failed) — the schedule itself is
+      // irrelevant since this is always launched immediately via a
+      // separate `/run` right below, never left to fire on its own.
+      const createResult = await runSchtasks([
+        '/create', '/tn', taskName,
+        '/tr', `"${process.execPath}" "${scriptPath}" ${row.DeploymentID}`,
+        '/sc', 'once', '/sd', '01/01/2020', '/st', '00:00',
+        '/ru', 'SYSTEM', '/rl', 'HIGHEST', '/f',
+      ]);
+      const runResult = createResult.ok ? await runSchtasks(['/run', '/tn', taskName]) : createResult;
+
+      if (!runResult.ok) {
+        const detail = `Failed to launch deploy-runner.cjs via Task Scheduler (task ${taskName}): ` +
+          (runResult.stderr || runResult.error?.message || 'unknown schtasks failure');
+        console.error(`[cron] ${detail}`);
+        // Don't leave the row stuck at 'running' forever with nothing ever
+        // going to pick it back up — the whole point of the safety-net
+        // logic below is redundant if this specific failure mode isn't
+        // itself recorded immediately.
+        await pool.request()
+          .input('id',  sql.Int, row.DeploymentID)
+          .input('err', sql.NVarChar(sql.MAX), detail)
+          .query(`UPDATE kongsberg.dbo.ScheduledDeployments
+                  SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
+                  WHERE DeploymentID = @id`);
+      }
     }
   } catch (err) {
     console.error('[cron] deployment checker failed', err);
+  }
+});
+
+// Safety net — every 5 minutes. A deployment stuck at 'running' for a long
+// time (deploy-runner.cjs crashed, was killed, or the box itself rebooted
+// mid-restart) would otherwise sit 'running' forever with nothing left to
+// ever clear it, permanently pinning the countdown banner (GET /next
+// unconditionally shows any 'running' row). deploy-runner.cjs's own
+// SERVICE_RESTART_TIMEOUT_MS watchdog caps a genuinely-still-working run at
+// 10 minutes, so 20 minutes here is a comfortable margin past that, not a
+// tight race against it.
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const pool = await sql.connect(configJS.sqlConfig);
+    await pool.request().query(`
+      UPDATE kongsberg.dbo.ScheduledDeployments
+      SET Status = 'failed', CompletedAt = GETDATE(),
+          ErrorMessage = 'Stuck at running for over 20 minutes with no completion — deploy-runner.cjs likely crashed, was killed, or the host restarted mid-deployment. Check deploy-runner.log and confirm the service manually.'
+      WHERE Status = 'running' AND StartedAt <= DATEADD(minute, -20, GETDATE())
+    `);
+  } catch (err) {
+    console.error('[cron] stuck-deployment safety net failed', err);
   }
 });
 
