@@ -765,18 +765,29 @@ router.post('/process/:processCode/draft', async (req, res) => {
 
     for (const pb of parentBatches) {
       if (!pb.processCode || !pb.recordID) continue;
+      const isMxTub = pb.processCode.toUpperCase() === 'MX' && pb.tubID;
       await pool.request()
-        .input('cc',  sql.NVarChar(5), code)
-        .input('cr',  sql.Int,         recordID)
-        .input('pc',  sql.NVarChar(5), pb.processCode.toUpperCase())
-        .input('pr',  sql.Int,         Number(pb.recordID))
-        .input('uid', sql.Int,         uid)
-        .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
+        .input('cc',   sql.NVarChar(5), code)
+        .input('cr',   sql.Int,         recordID)
+        .input('pc',   sql.NVarChar(5), pb.processCode.toUpperCase())
+        .input('pr',   sql.Int,         Number(pb.recordID))
+        .input('ptub', sql.Int,         isMxTub ? Number(pb.tubID) : null)
+        .input('uid',  sql.Int,         uid)
+        .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,ParentTubID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@ptub,@uid)`);
     }
 
     await writeEvent(pool, code, recordID, 'STARTED', `${code} open entry created: ${material}`, 0, uid);
 
-    res.status(201).json({ success: true, data: { recordID, batchRef } });
+    // Informational only at draft time (clarification #2) — a mix not yet
+    // staged doesn't block creating the open run, it just warns the
+    // operator now rather than only discovering it at completion.
+    let warnings = [];
+    if (code === 'EX') {
+      const problems = await validateMxTubLinks(pool, material, parentBatches).catch(() => []);
+      warnings = problems.map(p => p.reason);
+    }
+
+    res.status(201).json({ success: true, data: { recordID, batchRef }, ...(warnings.length ? { warnings } : {}) });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
   }
@@ -958,6 +969,32 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
       return res.status(200).json({ success: true, data: { recordID, batchRef, status: 'COMPLETE' } });
     }
 
+    // Billet-staging gate — EX only (mix material only flows into Extrusion
+    // in the real value stream). Populate reporting data regardless of
+    // outcome, then re-check fresh (don't trust anything computed at draft
+    // time — the linked tub's status may have changed since). A problem
+    // here skips the SAP call entirely, landing this exactly where a real
+    // SAP failure would (Status=6, failed-backflush queue) — the EX
+    // record/ExtRef/label already exist from draft time either way.
+    if (code === 'EX') {
+      const traceMxParents = await pool.request()
+        .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, recordID)
+        .query(`SELECT ParentRecordID AS recordID, ParentTubID AS tubID
+                FROM prod.ProductionTrace
+                WHERE ChildProcessCode=@cc AND ChildRecordID=@cr AND ParentProcessCode=N'MX'`);
+      const mxParentBatches = traceMxParents.recordset.map(r => ({ processCode: 'MX', recordID: r.recordID, tubID: r.tubID }));
+
+      if (mxParentBatches.length) {
+        await apportionMxExpectedConsumption(pool, code, recordID, material, length).catch(() => {});
+
+        const problems = await validateMxTubLinks(pool, material, mxParentBatches);
+        if (problems.length) {
+          const errMsg = `Blocked: ${problems.map(p => p.reason).join(' ')}`;
+          return await markSapFailed(res, req, pool, code, cfg, recordID, batchRef, length, errMsg, uid);
+        }
+      }
+    }
+
     try {
       const sapRaw = await sapPost('/api/production/backflush', {
         Material:  material,
@@ -996,39 +1033,8 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
       });
 
     } catch (sapErr) {
-      await pool.request()
-        .input('rid', sql.Int, recordID)
-        .query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@rid`);
-
       const errMsg = sapErr.response?.data?.error || sapErr.message;
-      audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' FAILED - Message = "${errMsg}"`, req);
-
-      await pool.request()
-        .input('pc',   sql.NVarChar(5),      code)
-        .input('rid',  sql.Int,              recordID)
-        .input('type', sql.NVarChar(20),     'BACKFLUSH')
-        .input('qty',  sql.Decimal(12,3),    length)
-        .input('err',  sql.NVarChar(sql.MAX), errMsg)
-        .input('uid',  sql.Int,              uid)
-        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
-
-      await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
-
-      sql.connect(sqlConfig).then(kPool => notify(kPool, {
-        title:       'SAP Backflush Failed',
-        body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
-        severity:    2,
-        category:    'production',
-        actionLabel: 'Open Queue',
-        actionURL:   '/private/production-nexus.html',
-        target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
-      })).catch(() => {});
-
-      res.status(200).json({
-        success: true,
-        data: { recordID, batchRef, status: 'SAP_FAILED', error: errMsg },
-        warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
-      });
+      await markSapFailed(res, req, pool, code, cfg, recordID, batchRef, length, errMsg, uid);
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -1095,6 +1101,120 @@ async function assertParentBatchesReversed(pool, parentBatches) {
       );
       err.statusCode = 409;
       throw err;
+    }
+  }
+}
+
+// ── Billet staging: MX tub parent-link validation + BOM apportionment ───────
+// Extrusion is the only downstream process that consumes mixed material
+// directly (see PROFIT_CENTRES and BR's own comment on not consuming
+// mixed rubber directly) — these two helpers are only ever invoked for EX.
+//
+// Mix materials are confirmed NOT batch-managed in SAP — there is no SAP
+// batch/charge for a mix at all. Staging and tub-level traceability here
+// are a Normanton-Nexus-only concept; nothing below has, or needs, a SAP
+// counterpart to keep in sync.
+
+// Checks every MX parentBatches entry (each must carry a tubID — the
+// caller is responsible for having collected that from the tub picker,
+// not just a bare MixingID) against two independent conditions: (1) the
+// tub is actually staged into Billet, not scrapped, and belongs to the
+// stated mix; (2) the tub's own Material is really a component of the
+// extruded material's real SAP BOM — a wrong-mix pick is just as much a
+// problem as an unstaged one. Returns a problems[] array (empty = all
+// good); never throws — callers decide whether a non-empty result is a
+// soft warning (draft time) or a hard block (complete/retry time).
+async function validateMxTubLinks(pool, extrudedMaterial, parentBatches) {
+  const mxParents = (parentBatches || [])
+    .filter(pb => pb.processCode && String(pb.processCode).toUpperCase() === 'MX' && pb.recordID);
+  if (!mxParents.length) return [];
+
+  // One BOM lookup covers every MX parent on this record — no per-tub SAP round trips.
+  let bomRows;
+  try {
+    const bomRaw = await sapGet('/api/production/bom', { Material: extrudedMaterial });
+    bomRows = bomRaw?.data ?? bomRaw ?? [];
+  } catch {
+    // BOM lookup itself failing is a SAP-availability problem, not a
+    // traceability problem — surface it as its own single entry rather
+    // than treating every linked tub as "wrong material".
+    return [{ reason: `Unable to verify BOM for ${extrudedMaterial} — SAP BOM lookup failed.` }];
+  }
+  const bomMaterials = new Set(bomRows.map(r => r.component));
+
+  const problems = [];
+  for (const pb of mxParents) {
+    const label = `mix ${Number(pb.recordID)}${pb.tubID ? ` tub #${pb.tubID}` : ''}`;
+    if (!pb.tubID) {
+      problems.push({ ...pb, reason: `No specific tub selected for ${label} — pick a tub via the tub picker.` });
+      continue;
+    }
+    const r = await pool.request().input('id', sql.Int, Number(pb.tubID))
+      .query(`SELECT t.MixingID, t.IsStaged, t.IsScrapped, m.Material
+              FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+              WHERE t.TubID = @id`);
+    const t = r.recordset[0];
+    if (!t || t.MixingID !== Number(pb.recordID)) {
+      problems.push({ ...pb, reason: `Tub not found or does not belong to the selected mix (${label}).` });
+      continue;
+    }
+    if (t.IsScrapped) {
+      problems.push({ ...pb, reason: `Tub ${pb.tubID} (mix ${pb.recordID}) has been scrapped.` });
+      continue;
+    }
+    if (!t.IsStaged) {
+      problems.push({ ...pb, reason: `Tub ${pb.tubID} (mix ${pb.recordID}) has not been staged into Billet yet.` });
+      continue;
+    }
+    if (!bomMaterials.has(t.Material)) {
+      problems.push({ ...pb, reason: `Tub ${pb.tubID}'s material (${t.Material}) is not a component of ${extrudedMaterial}'s SAP BOM.` });
+    }
+  }
+  return problems;
+}
+
+// Populates ProductionTrace.ExpectedConsumptionKG for every MX-tub parent
+// link on an Extrusion record, using the same BOM-ratio-times-quantity
+// formula backflushBraidedComponents already uses elsewhere in this file.
+// When multiple linked tubs share the same component material, that
+// material's BOM-derived total is split EQUALLY across them — the operator
+// picked several tubs of the same mix; there's no other signal in the data
+// to weight them by. Purely a reporting/reconciliation figure (see the
+// plan's clarification #5) — it never gates or decrements anything.
+// Safe to call even when validateMxTubLinks found problems — a rejected
+// entry should still get accurate expected-consumption data recorded.
+async function apportionMxExpectedConsumption(pool, code, recordID, extrudedMaterial, lengthMetres) {
+  const traceRows = await pool.request()
+    .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, recordID)
+    .query(`SELECT tr.TraceID, t.Material
+            FROM prod.ProductionTrace tr
+            JOIN prod.MixingTubs t ON t.TubID = tr.ParentTubID
+            WHERE tr.ChildProcessCode = @cc AND tr.ChildRecordID = @cr
+              AND tr.ParentProcessCode = N'MX' AND tr.ParentTubID IS NOT NULL`);
+  if (!traceRows.recordset.length) return;
+
+  let bomRows;
+  try {
+    const bomRaw = await sapGet('/api/production/bom', { Material: extrudedMaterial });
+    bomRows = bomRaw?.data ?? bomRaw ?? [];
+  } catch { return; } // BOM unavailable — leave ExpectedConsumptionKG unset rather than guess
+
+  const bomByMaterial = new Map(bomRows.map(r => [r.component, Number(r.componentQty || 0)]));
+
+  const traceIDsByMaterial = new Map();
+  for (const row of traceRows.recordset) {
+    if (!traceIDsByMaterial.has(row.Material)) traceIDsByMaterial.set(row.Material, []);
+    traceIDsByMaterial.get(row.Material).push(row.TraceID);
+  }
+
+  for (const [material, traceIDs] of traceIDsByMaterial) {
+    const ratio = bomByMaterial.get(material);
+    if (!(ratio > 0)) continue; // not a real BOM component — validateMxTubLinks already flags this
+    const totalExpectedKG = Math.round(ratio * Number(lengthMetres) * 1000) / 1000;
+    const share = Math.round((totalExpectedKG / traceIDs.length) * 1000) / 1000;
+    for (const traceID of traceIDs) {
+      await pool.request().input('id', sql.Int, traceID).input('kg', sql.Decimal(12, 3), share)
+        .query(`UPDATE prod.ProductionTrace SET ExpectedConsumptionKG = @kg WHERE TraceID = @id`);
     }
   }
 }
@@ -1891,6 +2011,26 @@ function parseBomScrapResponse(sapRaw) {
       throw new Error(r.message || `SAP posting failed: ${r.type} ${r.messageClass} ${r.messageNumber}`);
   }
   return responses;
+}
+
+// Unwraps the StockAdjustmentResponse-shaped result from
+// /api/production/mixing-scrap (BAPI_GOODSMVT_CREATE, movement 551) — the
+// mix-expiry finished-good scrap endpoint, distinct from parseBomScrapResponse
+// above (which handles /scrap/post's BDC array-of-responses shape for
+// looping over BOM components). SapServer's own ParseStockAdjustmentResponse
+// already computes `success` (non-blank material document + no blocking
+// RETURN message) — this just unwraps the envelope and turns a failure into
+// a thrown Error carrying SAP's own RETURN messages, same contract every
+// other parse* helper in this file follows.
+function parseMixingScrapResponse(sapRaw) {
+  if (sapRaw?.success === false) throw new Error(sapRaw.error?.message || sapRaw.error || 'SAP scrap server error');
+  const r = sapRaw?.data;
+  if (!r) throw new Error('SAP returned no posting response');
+  if (!r.success) {
+    const msg = (r.messages || []).map(m => m.message).filter(Boolean).join(' ');
+    throw new Error(msg || 'SAP rejected the mixing scrap posting.');
+  }
+  return r;
 }
 
 // Inserts one ScrapMaterialDocuments row per BdcResponse.
@@ -2820,12 +2960,275 @@ router.get('/mixing/:mixingId/tubs', async (req, res) => {
     const r = await pool.request()
       .input('id', sql.Int, Number(req.params.mixingId))
       .query(`SELECT TubID, TubSeq, TubWeightKG,
-                     MaterialDocumentSAP, SAPSuccess, SAPErrorMessage
+                     MaterialDocumentSAP, SAPSuccess, SAPErrorMessage,
+                     IsStaged, StagedAt, ConditioningTimeHours, StagedByUserID, StagedQuantityKG,
+                     IsScrapped, ScrappedAt, ScrappedByUserID, ScrapReasonID, ScrapMaterialDocumentSAP, ScrapSAPErrorMessage,
+                     ExpiryOverrideAt, ExpiryOverrideByUserID, ExpiryOverrideReason
               FROM   prod.MixingTubs
               WHERE  MixingID = @id
               ORDER BY TubSeq`);
     res.json({ success: true, data: r.recordset });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── Billet staging — mix tub lifecycle (stage / return / expiry) ────────────
+// Mix materials are not batch-managed in SAP; everything below is a
+// Normanton-Nexus-only concept (staging status, "Conditioning Time", Billet
+// balance) with no SAP counterpart to keep in sync — see validateMxTubLinks
+// above for why.
+
+const MX_AGE_HOURS_SQL  = `(DATEDIFF(MINUTE, m.CompletedAt, GETDATE()) / 60.0)`;
+const MX_AGE_BUCKET_SQL = `CASE
+    WHEN ${MX_AGE_HOURS_SQL} > 96 THEN N'expired'
+    WHEN ${MX_AGE_HOURS_SQL} > 72 THEN N'72-96'
+    WHEN ${MX_AGE_HOURS_SQL} > 48 THEN N'48-72'
+    WHEN ${MX_AGE_HOURS_SQL} > 24 THEN N'24-48'
+    ELSE N'0-24'
+  END`;
+
+// Mixes produced but not (or no longer) staged into Billet, bucketed by age
+// and sorted oldest-first — powers the "Billet Staging" dashboard tile.
+// Naturally re-surfaces fully-returned tubs too (they're back at IsStaged=0).
+router.get('/mixing/staging/queue', async (req, res) => {
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request().query(`
+      SELECT t.TubID, t.MixingID, t.TubSeq, t.SupplierTubNo, t.TubWeightKG,
+             m.Material, m.MixCode, m.MixRef, m.CompletedAt,
+             ${MX_AGE_HOURS_SQL} AS AgeHours,
+             ${MX_AGE_BUCKET_SQL} AS Bucket
+      FROM   prod.MixingTubs t
+      JOIN   prod.Mixing m ON m.MixingID = t.MixingID
+      WHERE  t.IsStaged = 0 AND t.IsScrapped = 0 AND t.SAPSuccess = 1
+        AND  m.IsReversed = 0 AND m.Status NOT IN (5, 6)
+      ORDER BY m.CompletedAt ASC`);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// Stage a tub into Billet — an ordinary operator action (see the plan's
+// open question on PROD_ENTRY enforcement; matches today's unenforced
+// convention for entry-level routes elsewhere in this file).
+router.patch('/mixing/tubs/:tubId/stage', async (req, res) => {
+  const tubId = Number(req.params.tubId);
+  try {
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+
+    const cur = await pool.request().input('id', sql.Int, tubId).query(`
+      SELECT t.MixingID, t.TubWeightKG, t.IsStaged, t.IsScrapped, t.ExpiryOverrideAt,
+             m.IsReversed, m.Status,
+             ${MX_AGE_HOURS_SQL} AS AgeHours,
+             (SELECT ISNULL(SUM(QuantityKG), 0) FROM prod.MixingTubReturns WHERE TubID = t.TubID) AS ReturnedKG
+      FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+      WHERE t.TubID = @id`);
+    const t = cur.recordset[0];
+    if (!t) return res.status(404).json({ success: false, error: 'Tub not found.' });
+    if (t.IsScrapped) return res.status(409).json({ success: false, error: 'This tub has been scrapped and cannot be staged.' });
+    if (t.IsReversed || [5, 6].includes(t.Status)) return res.status(409).json({ success: false, error: 'The parent mix has been reversed or cancelled.' });
+    if (t.AgeHours > 96 && !t.ExpiryOverrideAt)
+      return res.status(409).json({ success: false, error: 'This tub is expired (>96h) and requires supervisor review — approve scrap or override expiry from the Expired Mix Batches queue.' });
+
+    const balance = Math.round((Number(t.TubWeightKG) - Number(t.ReturnedKG)) * 1000) / 1000;
+    await pool.request()
+      .input('id', sql.Int, tubId).input('uid', sql.Int, uid).input('bal', sql.Decimal(10, 3), balance)
+      .input('hrs', sql.Decimal(6, 2), t.AgeHours)
+      .query(`UPDATE prod.MixingTubs
+              SET IsStaged=1, StagedAt=GETDATE(), ConditioningTimeHours=@hrs, StagedByUserID=@uid, StagedQuantityKG=@bal
+              WHERE TubID=@id`);
+
+    await writeEvent(pool, 'MX', t.MixingID, 'STAGED', `Tub ${tubId} staged into Billet (${t.AgeHours.toFixed(1)}h after production)`, 0, uid);
+    res.json({ success: true, data: { tubId, stagedQuantityKG: balance } });
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
+
+// Return part or all of a staged tub's remaining Billet balance back to the
+// Conditioning Room — the only action that decrements StagedQuantityKG.
+router.post('/mixing/tubs/:tubId/return-to-conditioning', async (req, res) => {
+  const tubId      = Number(req.params.tubId);
+  const quantityKG = Number(req.body?.quantityKG);
+  const notes      = req.body?.notes ? String(req.body.notes).slice(0, 500) : null;
+  try {
+    if (!(quantityKG > 0)) return res.status(400).json({ success: false, error: 'quantityKG must be greater than 0.' });
+
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+
+    const cur = await pool.request().input('id', sql.Int, tubId)
+      .query(`SELECT MixingID, IsStaged, StagedQuantityKG FROM prod.MixingTubs WHERE TubID=@id`);
+    const t = cur.recordset[0];
+    if (!t) return res.status(404).json({ success: false, error: 'Tub not found.' });
+    if (!t.IsStaged) return res.status(409).json({ success: false, error: 'This tub is not currently staged.' });
+    if (quantityKG > Number(t.StagedQuantityKG))
+      return res.status(409).json({ success: false, error: `Cannot return ${quantityKG} KG — only ${t.StagedQuantityKG} KG is currently staged.` });
+
+    await pool.request()
+      .input('tid', sql.Int, tubId).input('qty', sql.Decimal(10, 3), quantityKG)
+      .input('uid', sql.Int, uid).input('notes', sql.NVarChar(500), notes)
+      .query(`INSERT INTO prod.MixingTubReturns (TubID,QuantityKG,ReturnedByUserID,Notes) VALUES (@tid,@qty,@uid,@notes)`);
+
+    const newBalance = Math.round((Number(t.StagedQuantityKG) - quantityKG) * 1000) / 1000;
+    await pool.request()
+      .input('id', sql.Int, tubId).input('bal', sql.Decimal(10, 3), newBalance)
+      .input('staged', sql.Bit, newBalance > 0 ? 1 : 0)
+      .query(`UPDATE prod.MixingTubs SET StagedQuantityKG=@bal, IsStaged=@staged WHERE TubID=@id`);
+
+    await writeEvent(pool, 'MX', t.MixingID, 'COND_RETURN', `${quantityKG} KG returned to Conditioning from tub ${tubId}${notes ? ` — ${notes}` : ''}`, 0, uid);
+    res.json({ success: true, data: { tubId, stagedQuantityKG: newBalance, isStaged: newBalance > 0 } });
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
+
+// Tub search/picker — used by the front-end MX parent picker in the
+// Extrusion entry wizard. Returns every tub (not just staged ones) so the
+// picker can show status rather than silently filtering.
+router.get('/mixing/tubs/search', async (req, res) => {
+  const qRaw = String(req.query.q || '').trim();
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request().input('q', sql.NVarChar(60), qRaw ? `%${qRaw}%` : null).query(`
+      SELECT TOP 50
+             t.TubID, t.MixingID, t.TubSeq, t.SupplierTubNo, t.TubWeightKG,
+             t.IsStaged, t.StagedQuantityKG, t.ConditioningTimeHours, t.IsScrapped,
+             m.Material, m.MixCode, m.MixRef, m.CompletedAt,
+             ${MX_AGE_HOURS_SQL} AS AgeHours,
+             ${MX_AGE_BUCKET_SQL} AS Bucket
+      FROM   prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+      WHERE  m.IsReversed = 0 AND t.SAPSuccess = 1
+        AND  (@q IS NULL OR m.MixRef LIKE @q OR m.MixCode LIKE @q OR m.Material LIKE @q OR t.SupplierTubNo LIKE @q)
+      ORDER BY m.CompletedAt DESC`);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── Billet staging — supervisor expiry actions ───────────────────────────────
+
+// Expired, unstaged, un-actioned tubs — the supervisor review queue.
+router.get('/mixing/expired', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  try {
+    const pool = await getProductionPool();
+    const r = await pool.request().query(`
+      SELECT t.TubID, t.MixingID, t.TubSeq, t.SupplierTubNo, t.TubWeightKG,
+             m.Material, m.MixCode, m.MixRef, m.CompletedAt,
+             ${MX_AGE_HOURS_SQL} AS AgeHours
+      FROM   prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+      WHERE  ${MX_AGE_HOURS_SQL} > 96 AND t.IsStaged = 0 AND t.IsScrapped = 0
+        AND  t.ExpiryOverrideAt IS NULL AND t.SAPSuccess = 1
+        AND  m.IsReversed = 0 AND m.Status NOT IN (5, 6)
+      ORDER BY m.CompletedAt ASC`);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// Approve scrapping an expired, unstaged tub — posts a real SAP scrap
+// movement against the mix material itself (SapServer's
+// POST /api/production/mixing-scrap, movement 551, no batch — see the
+// comment on validateMxTubLinks). Reuses the existing prod.ScrapEntries
+// approve/post lifecycle (same fields/flow as /scrap/approve above) so the
+// Posted Scrap / Scrap Reversal tiles pick this up for free.
+router.post('/mixing/tubs/:tubId/expiry/scrap', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const tubId    = Number(req.params.tubId);
+  const reasonID = Number(req.body?.reasonID) || 241; // default: 'Out of date polymer mix' (AppliesTo='MX')
+  const pool = await getProductionPool();
+  const uid  = userId(req);
+  let scrapID;
+
+  try {
+    const cur = await pool.request().input('id', sql.Int, tubId).query(`
+      SELECT t.MixingID, t.TubWeightKG, t.IsStaged, t.IsScrapped, t.ExpiryOverrideAt,
+             m.MixCode, m.MixRef, ${MX_AGE_HOURS_SQL} AS AgeHours
+      FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+      WHERE t.TubID = @id`);
+    const t = cur.recordset[0];
+    if (!t) return res.status(404).json({ success: false, error: 'Tub not found.' });
+    if (t.IsScrapped) return res.status(409).json({ success: false, error: 'This tub has already been scrapped.' });
+    if (t.IsStaged) return res.status(409).json({ success: false, error: 'This tub is already staged into Billet — scrapping is only for unstaged, expired tubs.' });
+    if (t.ExpiryOverrideAt) return res.status(409).json({ success: false, error: "This tub's expiry has already been overridden." });
+    if (!(t.AgeHours > 96)) return res.status(409).json({ success: false, error: 'This tub is not yet expired.' });
+
+    const seIns = await pool.request()
+      .input('rid', sql.Int, t.MixingID).input('r', sql.Int, reasonID)
+      .input('qty', sql.Decimal(12, 3), t.TubWeightKG).input('uid', sql.Int, uid)
+      .query(`INSERT INTO prod.ScrapEntries (ProcessCode,ProcessRecordID,ReasonID,Quantity,UnitOfMeasure,EnteredByUserID)
+              OUTPUT INSERTED.ScrapID
+              VALUES ('MX',@rid,@r,@qty,'KG',@uid)`);
+    scrapID = seIns.recordset[0].ScrapID;
+
+    const mixRef = t.MixRef || `MX${String(t.MixingID).padStart(8, '0')}`;
+    const sapRaw = await sapPost('/api/production/mixing-scrap', {
+      Material: t.MixCode, Quantity: Number(t.TubWeightKG),
+      ScrapReason: '4917', Header: mixRef,
+    });
+    const bdc = parseMixingScrapResponse(sapRaw);
+
+    await pool.request()
+      .input('id', sql.Int, scrapID).input('uid', sql.Int, uid).input('doc', sql.NVarChar(10), bdc.materialDocument || null)
+      .query(`UPDATE prod.ScrapEntries SET IsApproved=1, ApprovedAt=GETDATE(), ApprovedByUserID=@uid, SAPPosted=1, SAPMaterialDocument=@doc, SAPErrorMessage=NULL WHERE ScrapID=@id`);
+
+    await pool.request()
+      .input('id', sql.Int, tubId).input('uid', sql.Int, uid).input('r', sql.Int, reasonID).input('doc', sql.NVarChar(10), bdc.materialDocument || null)
+      .query(`UPDATE prod.MixingTubs SET IsScrapped=1, ScrappedAt=GETDATE(), ScrappedByUserID=@uid, ScrapReasonID=@r, ScrapMaterialDocumentSAP=@doc, ScrapSAPErrorMessage=NULL WHERE TubID=@id`);
+
+    await pool.request()
+      .input('pc', sql.NVarChar(5), 'MX').input('rid', sql.Int, t.MixingID)
+      .input('type', sql.NVarChar(20), 'SCRAP').input('qty', sql.Decimal(12, 3), t.TubWeightKG)
+      .input('doc', sql.NVarChar(10), bdc.materialDocument || null).input('uid', sql.Int, uid)
+      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'KG',@doc,1,@uid)`);
+
+    audit('SAP_OK', req.session?.user?.username, `Mixing tub ${tubId} SCRAP POSTED - Material Document = '${bdc.materialDocument}'`, req);
+    await writeEvent(pool, 'MX', t.MixingID, 'SCRAP', `Tub ${tubId} scrapped (expired, ${t.AgeHours.toFixed(1)}h) — MatDoc: ${bdc.materialDocument}`, 1, uid);
+
+    res.json({ success: true, data: { tubId, scrapID, materialDocument: bdc.materialDocument } });
+  } catch (err) {
+    if (scrapID) {
+      const d = err.response?.data;
+      const errMsg = (typeof d === 'string' ? d : null) || d?.error?.message || d?.error || d?.message || err.message;
+      await pool.request()
+        .input('id', sql.Int, scrapID).input('uid', sql.Int, uid).input('err', sql.NVarChar(sql.MAX), errMsg)
+        .query(`UPDATE prod.ScrapEntries SET IsApproved=1, ApprovedAt=GETDATE(), ApprovedByUserID=@uid, SAPPosted=0, SAPErrorMessage=@err WHERE ScrapID=@id`).catch(() => {});
+      await pool.request().input('id', sql.Int, tubId).input('err', sql.NVarChar(sql.MAX), errMsg)
+        .query(`UPDATE prod.MixingTubs SET ScrapSAPErrorMessage=@err WHERE TubID=@id`).catch(() => {});
+      audit('SAP_ERROR', req.session?.user?.username, `Mixing tub ${tubId} SCRAP FAILED - Message = "${errMsg}"`, req);
+      return res.status(502).json({ success: false, error: `SAP scrap posting failed: ${errMsg}` });
+    }
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// Supervisor override — moves an expired, unstaged tub into Billet anyway,
+// with a required reason, unblocking backflush for anything linked to it.
+router.post('/mixing/tubs/:tubId/expiry/override', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const tubId  = Number(req.params.tubId);
+  const reason = String(req.body?.reason || '').trim();
+  try {
+    if (!reason) return res.status(400).json({ success: false, error: 'A reason is required to override expiry.' });
+
+    const pool = await getProductionPool();
+    const uid  = userId(req);
+
+    const cur = await pool.request().input('id', sql.Int, tubId).query(`
+      SELECT t.MixingID, t.TubWeightKG, t.IsStaged, t.IsScrapped,
+             ${MX_AGE_HOURS_SQL} AS AgeHours,
+             (SELECT ISNULL(SUM(QuantityKG), 0) FROM prod.MixingTubReturns WHERE TubID = t.TubID) AS ReturnedKG
+      FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+      WHERE t.TubID = @id`);
+    const t = cur.recordset[0];
+    if (!t) return res.status(404).json({ success: false, error: 'Tub not found.' });
+    if (t.IsScrapped) return res.status(409).json({ success: false, error: 'This tub has been scrapped.' });
+    if (t.IsStaged) return res.status(409).json({ success: false, error: 'This tub is already staged.' });
+    if (!(t.AgeHours > 96)) return res.status(409).json({ success: false, error: 'This tub is not yet expired — use the normal staging action.' });
+
+    const balance = Math.round((Number(t.TubWeightKG) - Number(t.ReturnedKG)) * 1000) / 1000;
+    await pool.request()
+      .input('id', sql.Int, tubId).input('uid', sql.Int, uid).input('bal', sql.Decimal(10, 3), balance)
+      .input('hrs', sql.Decimal(6, 2), t.AgeHours).input('reason', sql.NVarChar(500), reason)
+      .query(`UPDATE prod.MixingTubs
+              SET IsStaged=1, StagedAt=GETDATE(), ConditioningTimeHours=@hrs, StagedByUserID=@uid, StagedQuantityKG=@bal,
+                  ExpiryOverrideAt=GETDATE(), ExpiryOverrideByUserID=@uid, ExpiryOverrideReason=@reason
+              WHERE TubID=@id`);
+
+    await writeEvent(pool, 'MX', t.MixingID, 'EXPIRY_OVERRIDE', `Expiry overridden by supervisor for tub ${tubId} (${t.AgeHours.toFixed(1)}h) — ${reason}`, 1, uid);
+    res.json({ success: true, data: { tubId, stagedQuantityKG: balance } });
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
 
 // ── Drumming — get coil lengths for a record ─────────────────────────────────
@@ -3307,7 +3710,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
     // Metre-based processes (EX/CO/BR/CL/TW) — retry via ZF40N backflush
     if (METRE_PROCESSES.has(code)) {
       const cfg = PROCESS[code];
-      const { material, lengthMetres, notes } = req.body;
+      const { material, lengthMetres, notes, parentBatches } = req.body;
 
       // Apply any corrections before re-reading
       await pool.request()
@@ -3325,6 +3728,45 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
         .query(`SELECT ${cfg.ref} AS BatchRef, Material, LengthMetres FROM ${cfg.table} WHERE ${cfg.pk}=@id`);
       if (!cur.recordset.length) return res.status(404).json({ success: false, error: 'Record not found.' });
       const d = cur.recordset[0];
+
+      // Billet-staging re-gate — EX only. A supervisor can either fix the
+      // underlying mix (stage it / override its expiry) and retry with the
+      // same link, or replace which tub(s) this run traces back to by
+      // supplying a fresh parentBatches array here. Either way, this must
+      // not fall through to a real SAP call until the link is valid.
+      if (code === 'EX') {
+        if (Array.isArray(parentBatches)) {
+          await pool.request().input('cc', sql.NVarChar(5), code).input('cr', sql.Int, id)
+            .query(`DELETE FROM prod.ProductionTrace WHERE ChildProcessCode=@cc AND ChildRecordID=@cr AND ParentProcessCode=N'MX'`);
+          for (const pb of parentBatches) {
+            if (!pb.processCode || !pb.recordID || pb.processCode.toUpperCase() !== 'MX') continue;
+            await pool.request()
+              .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, id)
+              .input('pr', sql.Int, Number(pb.recordID)).input('ptub', sql.Int, pb.tubID ? Number(pb.tubID) : null)
+              .input('uid', sql.Int, uid)
+              .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,ParentTubID,LinkedByUserID) VALUES (@cc,@cr,N'MX',@pr,@ptub,@uid)`);
+          }
+        }
+
+        const traceMxParents = await pool.request()
+          .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, id)
+          .query(`SELECT ParentRecordID AS recordID, ParentTubID AS tubID
+                  FROM prod.ProductionTrace
+                  WHERE ChildProcessCode=@cc AND ChildRecordID=@cr AND ParentProcessCode=N'MX'`);
+        const mxParentBatches = traceMxParents.recordset.map(r => ({ processCode: 'MX', recordID: r.recordID, tubID: r.tubID }));
+
+        if (mxParentBatches.length) {
+          await apportionMxExpectedConsumption(pool, code, id, d.Material, d.LengthMetres).catch(() => {});
+
+          const problems = await validateMxTubLinks(pool, d.Material, mxParentBatches);
+          if (problems.length) {
+            return res.status(409).json({
+              success: false,
+              error: `Cannot retry — ${problems.map(p => p.reason).join(' ')} Stage the tub, override its expiry, or change the linked tub.`,
+            });
+          }
+        }
+      }
 
       await writeEvent(pool, code, id, 'NOTE', `Retry by supervisor ${uid}`, 0, uid);
 
@@ -4123,6 +4565,49 @@ async function logBackflushAlert(pool, processCode, recordID, batchRef, material
     .query(`INSERT INTO prod.BackflushAlerts
               (ProcessCode,ProcessRecordID,BatchRef,MaterialDocument,MessageNumber,MessageText,AlertType)
             VALUES (@pc,@rid,@ref,@doc,@mn,@msg,'NO_COMPONENT_CONSUMPTION')`);
+}
+
+// Shared "SAP posting didn't happen" tail for the metre-process complete
+// route — used both when a genuine SAP backflush call throws, and when a
+// portal-side check (e.g. an unstaged/wrong-material MX tub link) deliberately
+// skips the SAP call altogether before ever attempting it. Sets Status=6,
+// records a failed SAPPostings row, writes SAP_FAIL to the event log,
+// notifies PROD_SUPERVISOR, and sends the standard SAP_FAILED response —
+// identical shape either way, so the failed-backflush queue can't tell (and
+// doesn't need to) which case produced a given row.
+async function markSapFailed(res, req, pool, code, cfg, recordID, batchRef, length, errMsg, uid) {
+  await pool.request()
+    .input('rid', sql.Int, recordID)
+    .query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@rid`);
+
+  audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' FAILED - Message = "${errMsg}"`, req);
+
+  await pool.request()
+    .input('pc',   sql.NVarChar(5),      code)
+    .input('rid',  sql.Int,              recordID)
+    .input('type', sql.NVarChar(20),     'BACKFLUSH')
+    .input('qty',  sql.Decimal(12,3),    length)
+    .input('err',  sql.NVarChar(sql.MAX), errMsg)
+    .input('uid',  sql.Int,              uid)
+    .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,IsSuccess,ErrorMessage,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',0,@err,@uid)`);
+
+  await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
+
+  sql.connect(sqlConfig).then(kPool => notify(kPool, {
+    title:       'SAP Backflush Failed',
+    body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
+    severity:    2,
+    category:    'production',
+    actionLabel: 'Open Queue',
+    actionURL:   '/private/production-nexus.html',
+    target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
+  })).catch(() => {});
+
+  res.status(200).json({
+    success: true,
+    data: { recordID, batchRef, status: 'SAP_FAILED', error: errMsg },
+    warning: 'Record saved but SAP backflush failed. See failed backflush queue.',
+  });
 }
 
 // ── Shift helper ──────────────────────────────────────────────────────────────

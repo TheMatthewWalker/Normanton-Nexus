@@ -73,6 +73,12 @@
             <div class="tile-title">Extrusion</div>
             <div class="tile-desc">Enter a completed extrusion run and post to SAP</div>
           </div>
+          <div class="sap-tile sap-tile--live" data-fn="billetStaging">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="12" rx="1"/><path d="M7 8V6a2 2 0 012-2h6a2 2 0 012 2v2"/><line x1="3" y1="13" x2="21" y2="13"/></svg></div>
+            <span id="billet-badge" class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Billet Staging</div>
+            <div class="tile-desc">Move mixed tubs into the Billet room · 96h shelf-life age tracking</div>
+          </div>
           <div class="sap-tile sap-tile--live" data-fn="convolutingEntry">
             <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 010 20M2 12h10"/><path d="M8 8l4 4-4 4"/></svg></div>
             <span class="tile-badge tile-badge--live">LIVE</span>
@@ -228,6 +234,12 @@
             <span id="fbf-badge" class="tile-badge tile-badge--live" style="background:rgba(220,38,38,0.12);color:#DC2626;border-color:rgba(220,38,38,0.3)">ALERTS</span>
             <div class="tile-title">Failed Backflush</div>
             <div class="tile-desc">Supervisor queue — records saved locally but rejected by SAP</div>
+          </div>
+          <div class="sap-tile sap-tile--live" data-fn="expiredMixBatches">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M8 12c0-2.21 1.79-4 4-4s4 1.79 4 4-1.79 4-4 4"/><line x1="12" y1="8" x2="12" y2="16"/></svg></div>
+            <span id="expired-mix-badge" class="tile-badge tile-badge--live" style="background:rgba(220,38,38,0.12);color:#DC2626;border-color:rgba(220,38,38,0.3)">REVIEW</span>
+            <div class="tile-title">Expired Mix Batches</div>
+            <div class="tile-desc">Supervisor queue — approve scrap or override expiry for tubs past 96h</div>
           </div>
           <div class="sap-tile sap-tile--live" data-fn="traceability">
             <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></div>

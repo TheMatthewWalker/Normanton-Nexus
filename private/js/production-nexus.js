@@ -7,6 +7,7 @@ let selectedStation = null;
 let selectedBatch   = null;
 let liveTimer       = null;
 let refreshTimer    = null;
+let rtMxReplacement = null; // set by openRetryModal's MX tub-replacement picker (EX only)
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -104,7 +105,11 @@ function stateColor(s) {
     if (session.role === 'superadmin' || perms.includes('PROD_SUPERVISOR')) {
       pollFailedBackflushCount();
       setInterval(pollFailedBackflushCount, 60000);
+      pollExpiredMixCount();
+      setInterval(pollExpiredMixCount, 60000);
     }
+    pollBilletStagingCount();
+    setInterval(pollBilletStagingCount, 60000);
   } catch { window.location.href = '/'; }
 })();
 
@@ -175,6 +180,8 @@ function openFunction(fn) {
     approveScrap:    ['Approve Scrap',     'Supervisor approval queue — review and post operator scrap entries to SAP'],
     postedScrap:     ['Posted Scrap',      'Approved and SAP-posted scrap summary by work centre and reason'],
     failedBackflush: ['Failed Backflush',  'Records saved locally but rejected by SAP'],
+    billetStaging:   ['Billet Staging',    'Move mixed tubs into the Billet room — 96h shelf-life age tracking'],
+    expiredMixBatches: ['Expired Mix Batches', 'Supervisor queue — approve scrap or override expiry for tubs past 96h'],
     sapReversals:    ['SAP Reversals',     'Search by material document or batch ref — select and bulk-reverse postings'],
     scrapReversal:   ['Scrap Reversal',    'Search and reverse SAP scrap documents · alerts on missed reversals from reversed backflushes'],
     reportOutput:    ['Production Output',  'Metres and KG produced by process, over time'],
@@ -215,6 +222,8 @@ function openFunction(fn) {
     approveScrap:    runApproveScrap,
     postedScrap:     runPostedScrap,
     failedBackflush: runFailedBackflush,
+    billetStaging:   runBilletStaging,
+    expiredMixBatches: runExpiredMixBatches,
     sapReversals:    runSapReversals,
     scrapReversal:   runScrapReversal,
     reportOutput:    runReportOutput,
@@ -1404,12 +1413,17 @@ function runNewEntry(processCode, machines, reasons) {
         <div class="bm-section" style="margin-bottom:14px">
           <div class="bm-section-title">Previous Batch Numbers for Traceability</div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Add each input batch this run consumes.</div>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
+          <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
             <select class="tf-input" id="ne-parent-pc" style="width:150px">
               ${Object.entries(PROCESS_LABELS).filter(([k])=>k!==processCode).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
             </select>
             <input class="tf-input" id="ne-parent-rid" type="number" placeholder="Record ID" style="width:130px">
             <button class="btn-secondary" id="ne-add-batch">+ Add</button>
+            ${processCode === 'EX' ? `
+            <div id="ne-mx-picker" style="display:none;flex:1;min-width:240px;position:relative">
+              <input class="tf-input" id="ne-mx-search" type="text" placeholder="Search staged mix tubs — mix ref, material, tub no…" style="width:100%">
+              <div id="ne-mx-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:260px;overflow-y:auto;z-index:20;box-shadow:0 8px 24px rgba(0,0,0,0.15)"></div>
+            </div>` : ''}
           </div>
           <div id="ne-batch-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
@@ -1426,7 +1440,7 @@ function runNewEntry(processCode, machines, reasons) {
       el.innerHTML = state.parentBatches.length
         ? state.parentBatches.map((pb, i) =>
             `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
-              ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
+              ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}${pb.tubID ? ` T${pb.tubID}` : ''}
               <button class="ne-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
             </span>`).join(' ')
         : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
@@ -1446,6 +1460,66 @@ function runNewEntry(processCode, machines, reasons) {
       document.getElementById('ne-parent-rid').value = '';
       refreshBatchTags();
     });
+
+    // MX parent picker (EX only) — a raw numeric MixingID means nothing to
+    // an operator once mixes are tub-tracked; swap in a searchable picker
+    // over staged tubs (with status/age/balance shown) whenever "Mixing" is
+    // selected as the parent process, instead of the generic ID box.
+    if (processCode === 'EX') {
+      const pcSelect  = document.getElementById('ne-parent-pc');
+      const ridInput  = document.getElementById('ne-parent-rid');
+      const addBtn    = document.getElementById('ne-add-batch');
+      const mxPicker  = document.getElementById('ne-mx-picker');
+      const mxSearch  = document.getElementById('ne-mx-search');
+      const mxResults = document.getElementById('ne-mx-results');
+
+      const syncPickerMode = () => {
+        const isMx = pcSelect.value === 'MX';
+        ridInput.style.display = isMx ? 'none' : '';
+        addBtn.style.display   = isMx ? 'none' : '';
+        if (mxPicker) mxPicker.style.display = isMx ? '' : 'none';
+      };
+      pcSelect?.addEventListener('change', syncPickerMode);
+      syncPickerMode();
+
+      let mxSearchTimer = null;
+      mxSearch?.addEventListener('input', () => {
+        clearTimeout(mxSearchTimer);
+        mxSearchTimer = setTimeout(async () => {
+          const q = mxSearch.value.trim();
+          try {
+            const json = await api(`/mixing/tubs/search?q=${encodeURIComponent(q)}`);
+            const rows = json.data || [];
+            mxResults.innerHTML = rows.length ? rows.map(r => {
+              const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
+              const status = r.IsScrapped
+                ? `<span style="color:var(--error)">Scrapped</span>`
+                : r.IsStaged
+                  ? `<span style="color:var(--accent)">Staged · ${Number(r.StagedQuantityKG).toFixed(1)} KG in Billet · ${Number(r.ConditioningTimeHours || 0).toFixed(1)}h conditioning</span>`
+                  : `<span style="color:#D97706">Not staged · ${esc(r.Bucket)} bucket (${Number(r.AgeHours).toFixed(1)}h)</span>`;
+              return `<div class="ne-mx-result" data-mid="${r.MixingID}" data-tid="${r.TubID}" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px">
+                <div style="font-weight:600">${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</div>
+                <div style="color:var(--text-muted);margin-top:2px">${r.TubWeightKG} KG · ${status}</div>
+              </div>`;
+            }).join('') : `<div style="padding:10px;font-size:12px;color:var(--text-muted)">No matching tubs.</div>`;
+            mxResults.style.display = '';
+          } catch { mxResults.style.display = 'none'; }
+        }, 250);
+      });
+      mxResults?.addEventListener('click', e => {
+        const row = e.target.closest('.ne-mx-result');
+        if (!row) return;
+        const recordID = Number(row.dataset.mid), tubID = Number(row.dataset.tid);
+        if (!state.parentBatches.find(pb => pb.processCode === 'MX' && pb.tubID === tubID))
+          state.parentBatches.push({ processCode: 'MX', recordID, tubID });
+        mxSearch.value = '';
+        mxResults.style.display = 'none';
+        refreshBatchTags();
+      });
+      document.addEventListener('click', e => {
+        if (mxResults && mxPicker && !mxPicker.contains(e.target)) mxResults.style.display = 'none';
+      });
+    }
     document.getElementById('ne-save').addEventListener('click', async () => {
       const mat = document.getElementById('ne-material')?.value.trim();
       const msg = document.getElementById('ne-msg');
@@ -1476,6 +1550,7 @@ function runNewEntry(processCode, machines, reasons) {
           || null;
         const newEntry = { RecordID: d.recordID, BatchRef: d.batchRef, Material: state.material, MachineName: machineName };
 
+        const warnings = json.warnings || [];
         document.getElementById('result-body').innerHTML = `
           <div style="padding:24px;max-width:480px">
             <div style="font-size:22px;color:var(--accent);margin-bottom:8px">✓</div>
@@ -1483,6 +1558,11 @@ function runNewEntry(processCode, machines, reasons) {
             <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
               Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete it now, or come back to it later using <strong>Complete Run</strong>.
             </div>
+            ${warnings.length ? `
+            <div style="background:rgba(217,119,6,0.1);border:1px solid rgba(217,119,6,0.3);border-radius:8px;padding:10px 12px;margin-bottom:16px;font-size:12px;color:#D97706">
+              <strong>⚠ Traceability warning${warnings.length>1?'s':''}:</strong> ${warnings.map(esc).join(' ')}<br>
+              This will block the SAP post at completion unless resolved first.
+            </div>` : ''}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn-submit" id="ne-complete">&#9654; Complete This Run</button>
               <button class="btn-secondary" onclick="labelPrint('${processCode}',${d.recordID},this)">🖨 Print Label</button>
@@ -4591,6 +4671,287 @@ async function pollFailedBackflushCount() {
   } catch { }
 }
 
+// ── BILLET STAGING — mix tub lifecycle (stage / return / expiry) ─────────────
+// Mix materials are not batch-managed in SAP — everything here (staging
+// status, Conditioning Time, Billet balance) is a Normanton-Nexus-only
+// concept with no SAP counterpart.
+
+const MX_BUCKET_LABELS = { '0-24': '0–24h', '24-48': '24–48h', '48-72': '48–72h', '72-96': '72–96h', expired: 'Expired (>96h)' };
+const MX_BUCKET_ORDER  = ['expired', '72-96', '48-72', '24-48', '0-24'];
+const MX_BUCKET_COLOR  = { expired: '#DC2626', '72-96': '#DC2626', '48-72': '#D97706', '24-48': '#D97706', '0-24': 'var(--accent)' };
+
+async function pollBilletStagingCount() {
+  try {
+    const json = await api('/mixing/staging/queue');
+    setSimpleBadge('billet-badge', (json.data || []).length, 'LIVE');
+  } catch { }
+}
+
+async function pollExpiredMixCount() {
+  try {
+    const json = await api('/mixing/expired');
+    setSimpleBadge('expired-mix-badge', (json.data || []).length, 'REVIEW');
+  } catch { }
+}
+
+// Shared badge styling helper — red count when >0, green check when clear,
+// falling back to `idleLabel` only while nothing has been polled yet.
+function setSimpleBadge(elId, count, idleLabel) {
+  const badge = document.getElementById(elId);
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.style.background  = 'rgba(220,38,38,0.12)';
+    badge.style.color       = '#DC2626';
+    badge.style.borderColor = 'rgba(220,38,38,0.3)';
+  } else {
+    badge.textContent = '✓';
+    badge.style.background  = 'rgba(5,150,105,0.10)';
+    badge.style.color       = 'var(--success)';
+    badge.style.borderColor = 'rgba(5,150,105,0.3)';
+  }
+}
+
+async function runBilletStaging() {
+  document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const [queueJson, stagedJson] = await Promise.all([
+      api('/mixing/staging/queue'),
+      api('/mixing/tubs/search?q='),
+    ]);
+    const rows   = queueJson.data || [];
+    const staged = (stagedJson.data || []).filter(r => r.IsStaged && !r.IsScrapped);
+    setSimpleBadge('billet-badge', rows.length, 'LIVE');
+
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${rows.length} awaiting staging`;
+    badge.classList.remove('hidden');
+
+    const byBucket = {};
+    for (const r of rows) (byBucket[r.Bucket] ||= []).push(r);
+
+    const queueSections = rows.length
+      ? MX_BUCKET_ORDER.filter(b => byBucket[b]?.length).map(bucket => {
+          const items = byBucket[bucket].map(r => {
+            const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
+            return `
+            <div class="bs-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--border)">
+              <div>
+                <div style="font-weight:600;font-size:13px">${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</div>
+                <div class="pn-batch-mono" style="font-size:11px;color:var(--text-muted);margin-top:2px">${Number(r.TubWeightKG).toFixed(3)} KG · Supplier tub ${esc(r.SupplierTubNo || '—')} · produced ${fmt(r.CompletedAt)} · ${Number(r.AgeHours).toFixed(1)}h old</div>
+              </div>
+              <button class="btn-submit bs-stage-btn" data-tid="${r.TubID}">Stage into Billet</button>
+            </div>`;
+          }).join('');
+          return `
+            <div style="margin-bottom:16px">
+              <div style="font-weight:700;font-size:13px;color:${MX_BUCKET_COLOR[bucket]};margin-bottom:6px">${MX_BUCKET_LABELS[bucket]} — ${byBucket[bucket].length}</div>
+              <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">${items}</div>
+            </div>`;
+        }).join('')
+      : '<div class="pn-empty" style="color:var(--accent);padding:12px 0">✓ Nothing awaiting staging.</div>';
+
+    const stagedRows = staged.length
+      ? staged.map(r => {
+          const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
+          return `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--border)">
+            <div>
+              <div style="font-weight:600;font-size:13px">${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</div>
+              <div class="pn-batch-mono" style="font-size:11px;color:var(--text-muted);margin-top:2px">${Number(r.StagedQuantityKG).toFixed(3)} KG in Billet · ${Number(r.ConditioningTimeHours || 0).toFixed(1)}h conditioning time</div>
+            </div>
+            <button class="btn-secondary bs-return-btn" data-tid="${r.TubID}" data-ref="${esc(mixRef)} Tub ${r.TubSeq}" data-max="${r.StagedQuantityKG}">Return to Conditioning</button>
+          </div>`;
+        }).join('')
+      : '<div class="pn-empty" style="padding:12px 0">No tubs currently staged.</div>';
+
+    document.getElementById('result-body').innerHTML = `
+      <div style="padding:16px 20px">
+        <div class="bm-section-title" style="margin-bottom:8px">Awaiting Staging</div>
+        ${queueSections}
+        <div class="bm-section-title" style="margin:20px 0 8px">Currently in Billet</div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px">${stagedRows}</div>
+        <div id="bs-msg" style="font-size:13px;margin-top:4px"></div>
+      </div>`;
+
+    document.querySelectorAll('.bs-stage-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = 'Staging…';
+        const msgEl = document.getElementById('bs-msg');
+        try {
+          await api(`/mixing/tubs/${btn.dataset.tid}/stage`, { method: 'PATCH' });
+          if (msgEl) { msgEl.style.color = 'var(--accent)'; msgEl.textContent = '✓ Tub staged into Billet.'; }
+          runBilletStaging();
+        } catch (err) {
+          if (msgEl) { msgEl.style.color = 'var(--error)'; msgEl.textContent = err.message; }
+          btn.disabled = false; btn.textContent = 'Stage into Billet';
+        }
+      });
+    });
+    document.querySelectorAll('.bs-return-btn').forEach(btn => {
+      btn.addEventListener('click', () => openReturnToConditioningModal(btn.dataset.tid, btn.dataset.ref, Number(btn.dataset.max)));
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
+}
+
+async function openReturnToConditioningModal(tubId, tubRef, maxKg) {
+  openModal(`<div class="ps-modal" style="max-width:420px">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Return to Conditioning</div>
+      <div class="ps-modal-sub">${esc(tubRef)} · currently ${Number(maxKg).toFixed(3)} KG in Billet</div></div>
+      <button class="ps-modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-field" style="margin-bottom:12px">
+        <label class="tf-label">Quantity to return (KG)</label>
+        <input class="tf-input" id="rc-qty" type="number" step="0.001" min="0.001" max="${maxKg}" value="${Number(maxKg).toFixed(3)}">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Notes (optional)</label>
+        <input class="tf-input" id="rc-notes" placeholder="Reason for the return…">
+      </div>
+      <div id="rc-result" style="margin-top:10px;font-size:13px"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn-submit" id="rc-submit">Return</button>
+    </div>
+  </div>`);
+
+  document.getElementById('rc-submit').addEventListener('click', async () => {
+    const btn = document.getElementById('rc-submit');
+    const result = document.getElementById('rc-result');
+    const qty = Number(document.getElementById('rc-qty')?.value);
+    if (!(qty > 0)) { result.style.color = 'var(--error)'; result.textContent = 'Enter a quantity greater than 0.'; return; }
+    btn.disabled = true; btn.textContent = 'Returning…';
+    try {
+      await api(`/mixing/tubs/${tubId}/return-to-conditioning`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quantityKG: qty, notes: document.getElementById('rc-notes')?.value.trim() || undefined }),
+      });
+      result.style.color = 'var(--accent)';
+      result.textContent = '✓ Returned to Conditioning.';
+      setTimeout(() => { closeModal(); runBilletStaging(); }, 1200);
+    } catch (err) {
+      result.style.color = 'var(--error)';
+      result.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Return';
+    }
+  });
+}
+
+// ── EXPIRED MIX BATCHES (supervisor) — scrap-approve or expiry-override ─────
+
+async function runExpiredMixBatches() {
+  document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const json = await api('/mixing/expired');
+    const rows = json.data || [];
+    setSimpleBadge('expired-mix-badge', rows.length, 'REVIEW');
+
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${rows.length} expired`;
+    badge.classList.remove('hidden');
+
+    if (!rows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="pn-empty" style="color:var(--accent)">✓ No expired, unstaged mix tubs.</div>';
+      return;
+    }
+
+    const cards = rows.map(r => {
+      const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
+      return `
+      <div style="background:var(--surface);border:1px solid rgba(220,38,38,0.3);border-radius:10px;padding:14px 16px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px">
+          <div>
+            <div style="font-weight:700;font-size:14px">${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</div>
+            <div class="pn-batch-mono" style="font-size:11px;margin-top:2px">${Number(r.TubWeightKG).toFixed(3)} KG · produced ${fmt(r.CompletedAt)}</div>
+          </div>
+          <span class="pn-status pn-status--cancelled">${Number(r.AgeHours).toFixed(1)}h old</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-submit em-scrap-btn" data-tid="${r.TubID}" data-ref="${esc(mixRef)} Tub ${r.TubSeq}" style="background:#DC2626;border-color:#DC2626">Approve Scrap</button>
+          <button class="btn-secondary em-override-btn" data-tid="${r.TubID}" data-ref="${esc(mixRef)} Tub ${r.TubSeq}">Override &amp; Stage</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    document.getElementById('result-body').innerHTML = `<div style="padding:16px 20px">${cards}</div>`;
+
+    document.querySelectorAll('.em-scrap-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const ok = await wConfirm({
+          title: 'Approve scrap?',
+          message: `${btn.dataset.ref} will be scrapped and posted to SAP as a real inventory write-off. This cannot be undone from here.`,
+          confirmText: 'Approve Scrap', variant: 'danger',
+        });
+        if (!ok) return;
+        btn.disabled = true; btn.textContent = 'Posting…';
+        try {
+          await api(`/mixing/tubs/${btn.dataset.tid}/expiry/scrap`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+          });
+          runExpiredMixBatches();
+        } catch (err) {
+          alert(err.message);
+          btn.disabled = false; btn.textContent = 'Approve Scrap';
+        }
+      });
+    });
+    document.querySelectorAll('.em-override-btn').forEach(btn => {
+      btn.addEventListener('click', () => openExpiryOverrideModal(btn.dataset.tid, btn.dataset.ref));
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
+}
+
+async function openExpiryOverrideModal(tubId, tubRef) {
+  openModal(`<div class="ps-modal" style="max-width:440px">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Override Expiry &amp; Stage</div>
+      <div class="ps-modal-sub">${esc(tubRef)}</div></div>
+      <button class="ps-modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+        This tub is past its 96-hour shelf life. Overriding moves it into Billet anyway, unblocking any Extrusion run linked to it — a reason is required for the audit trail.
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Reason</label>
+        <input class="tf-input" id="eo-reason" placeholder="Why is this override justified?">
+      </div>
+      <div id="eo-result" style="margin-top:10px;font-size:13px"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn-submit" id="eo-submit">Override &amp; Stage</button>
+    </div>
+  </div>`);
+
+  document.getElementById('eo-submit').addEventListener('click', async () => {
+    const btn = document.getElementById('eo-submit');
+    const result = document.getElementById('eo-result');
+    const reason = document.getElementById('eo-reason')?.value.trim();
+    if (!reason) { result.style.color = 'var(--error)'; result.textContent = 'A reason is required.'; return; }
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      await api(`/mixing/tubs/${tubId}/expiry/override`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }),
+      });
+      result.style.color = 'var(--accent)';
+      result.textContent = '✓ Staged into Billet.';
+      setTimeout(() => { closeModal(); runExpiredMixBatches(); }, 1200);
+    } catch (err) {
+      result.style.color = 'var(--error)';
+      result.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Override & Stage';
+    }
+  });
+}
+
 // ── OPEN RUNS (supervisor) — view and cancel runs that can't be completed ────
 
 async function runOpenRuns() {
@@ -4680,22 +5041,25 @@ async function runFailedBackflush() {
       return;
     }
 
-    const cards = rows.map(r => `
-      <div style="background:var(--surface);border:1px solid rgba(220,38,38,0.3);border-radius:10px;padding:14px 16px;margin-bottom:10px">
+    const cards = rows.map(r => {
+      const isBilletBlock = /^Blocked:/.test(r.ErrorMessage || '');
+      return `
+      <div style="background:var(--surface);border:1px solid ${isBilletBlock ? 'rgba(217,119,6,0.35)' : 'rgba(220,38,38,0.3)'};border-radius:10px;padding:14px 16px;margin-bottom:10px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px">
           <div>
             <div style="font-weight:700;font-size:14px">${esc(r.BatchRef)} · ${esc(PROCESS_LABELS[r.ProcessCode]||r.ProcessCode)}</div>
             <div class="pn-batch-mono" style="font-size:11px;margin-top:2px">${esc(r.Material)} · ${Number(r.Quantity).toFixed(3)} ${esc(r.UOM)} · ${fmt(r.CreatedAt)}</div>
           </div>
-          <span class="pn-status pn-status--cancelled">SAP Failed</span>
+          <span class="pn-status ${isBilletBlock ? 'pn-status--on-hold' : 'pn-status--cancelled'}">${isBilletBlock ? 'Billet Not Staged' : 'SAP Failed'}</span>
         </div>
-        <div style="background:var(--red-dim,rgba(254,226,226,0.6));border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px;font-family:'JetBrains Mono',monospace">
+        <div style="background:${isBilletBlock ? 'rgba(217,119,6,0.1)' : 'var(--red-dim,rgba(254,226,226,0.6))'};border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px;font-family:'JetBrains Mono',monospace">
           ${esc(r.ErrorMessage || 'No error message recorded')}
         </div>
         <button class="btn-submit fbf-retry-btn" data-pc="${esc(r.ProcessCode)}" data-rid="${r.RecordID}" data-ref="${esc(r.BatchRef)}">
           Retry / Edit &amp; Re-submit
         </button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     document.getElementById('result-body').innerHTML = `<div style="padding:16px 20px">${cards}</div>`;
 
@@ -4710,6 +5074,7 @@ async function runFailedBackflush() {
 async function openRetryModal(processCode, recordId, batchRef) {
   const pc = processCode.toUpperCase();
   const METRE_PCS = new Set(['EX','CO','BR','CL','TW']);
+  rtMxReplacement = null;
 
   // Load current record data
   const batchJson = await api(`/batch/${pc}/${recordId}`);
@@ -4792,12 +5157,28 @@ async function openRetryModal(processCode, recordId, batchRef) {
       <div class="tf-row">
         <div class="tf-field tf-field--wide"><label class="tf-label">Notes</label>
           <input class="tf-input" id="rt-notes" value="${esc(b.Notes||'')}" placeholder="Any comments…"></div>
-      </div>`;
-    collectBody = () => ({
-      material:    document.getElementById('rt-material')?.value.trim() || undefined,
-      lengthMetres:document.getElementById('rt-length')?.value          ? Number(document.getElementById('rt-length').value) : undefined,
-      notes:       document.getElementById('rt-notes')?.value.trim()   || undefined,
-    });
+      </div>
+      ${pc === 'EX' ? `
+      <div class="bm-section" style="margin-top:14px">
+        <div class="bm-section-title">Linked Mixing Tub</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+          If this failed because the linked mix tub wasn't staged, either stage it (Billet Staging tile) and retry as-is, or search below to replace which tub this run traces back to.
+        </div>
+        <input class="tf-input" id="rt-mx-search" type="text" placeholder="Search staged mix tubs to replace the link…" style="width:100%">
+        <div id="rt-mx-results" style="display:none;border:1px solid var(--border);border-radius:8px;margin-top:6px;max-height:200px;overflow-y:auto"></div>
+        <div id="rt-mx-selected" style="font-size:12px;color:var(--text-muted);margin-top:8px">No replacement tub selected — retry will use the existing link(s).</div>
+      </div>` : ''}`;
+    collectBody = () => {
+      const body = {
+        material:    document.getElementById('rt-material')?.value.trim() || undefined,
+        lengthMetres:document.getElementById('rt-length')?.value          ? Number(document.getElementById('rt-length').value) : undefined,
+        notes:       document.getElementById('rt-notes')?.value.trim()   || undefined,
+      };
+      if (pc === 'EX' && rtMxReplacement) {
+        body.parentBatches = [rtMxReplacement];
+      }
+      return body;
+    };
 
   } else if (pc === 'EW') {
     editFields = `
@@ -4860,6 +5241,41 @@ async function openRetryModal(processCode, recordId, batchRef) {
       <button class="btn-submit" id="rt-submit">${submitLabel}</button>
     </div>
   </div>`);
+
+  if (pc === 'EX') {
+    const rtMxSearch    = document.getElementById('rt-mx-search');
+    const rtMxResults   = document.getElementById('rt-mx-results');
+    const rtMxSelected  = document.getElementById('rt-mx-selected');
+    let rtMxSearchTimer = null;
+    rtMxSearch?.addEventListener('input', () => {
+      clearTimeout(rtMxSearchTimer);
+      rtMxSearchTimer = setTimeout(async () => {
+        const q = rtMxSearch.value.trim();
+        try {
+          const json = await api(`/mixing/tubs/search?q=${encodeURIComponent(q)}`);
+          const rows = json.data || [];
+          rtMxResults.innerHTML = rows.length ? rows.map(r => {
+            const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
+            const status = r.IsScrapped ? `<span style="color:var(--error)">Scrapped</span>`
+              : r.IsStaged ? `<span style="color:var(--accent)">Staged</span>`
+              : `<span style="color:#D97706">Not staged</span>`;
+            return `<div class="rt-mx-result" data-mid="${r.MixingID}" data-tid="${r.TubID}" data-ref="${esc(mixRef)} Tub ${r.TubSeq}" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px">
+              <strong>${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</strong> — ${status}
+            </div>`;
+          }).join('') : `<div style="padding:8px 10px;font-size:12px;color:var(--text-muted)">No matching tubs.</div>`;
+          rtMxResults.style.display = '';
+        } catch { rtMxResults.style.display = 'none'; }
+      }, 250);
+    });
+    rtMxResults?.addEventListener('click', e => {
+      const row = e.target.closest('.rt-mx-result');
+      if (!row) return;
+      rtMxReplacement = { processCode: 'MX', recordID: Number(row.dataset.mid), tubID: Number(row.dataset.tid) };
+      rtMxSelected.innerHTML = `Will replace linked mix with: <strong>${esc(row.dataset.ref)}</strong>`;
+      rtMxSearch.value = '';
+      rtMxResults.style.display = 'none';
+    });
+  }
 
   document.getElementById('rt-submit').addEventListener('click', async () => {
     const btn    = document.getElementById('rt-submit');
