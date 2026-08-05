@@ -50,6 +50,25 @@
  * than mere port reachability, with a post-restart stability window before
  * declaring success.
  *
+ * IMPORTANT — SapServer: once Normanton-Nexus itself is confirmed restarted
+ * and stable, this ALSO pulls + republishes + restarts the sibling SapServer
+ * repo (deploySapServer() below), via ITS OWN scripts/deploy.ps1 (stop the
+ * Task Scheduler task -> dotnet publish -> start it again) rather than a
+ * Windows Service restart — SapServer can't run as a Windows Service at all
+ * (the SAP GUI COM component needs an interactive session; see that repo's
+ * own CLAUDE.md). This assumes SapServer lives on the SAME machine as
+ * Normanton-Nexus (true for this on-prem, single-site setup) and reuses the
+ * SAME GitRef the admin scheduled THIS deployment with, since
+ * ScheduledDeployments only has one GitRef column — if the two repos ever
+ * need independently-chosen branches for a given deploy, that needs its own
+ * column instead of this assumption. If SapServer isn't checked out on this
+ * box at all (e.g. a dev/test host), the step is skipped with a log line
+ * rather than failing the deployment; once it IS present, a failure here
+ * fails the whole deployment (Normanton-Nexus having restarted fine doesn't
+ * matter if SapServer is now down or stuck on old code — see the
+ * architecture overview in the workspace root CLAUDE.md for why the two are
+ * one production system).
+ *
  * IMPORTANT — no execSync anywhere in this file: a real deployment once
  * froze permanently mid-run because execSync's `timeout` option is not
  * reliable on Windows for shell-wrapped commands (see restart-lib.cjs's
@@ -92,6 +111,14 @@ const ASKPASS_PATH    = path.join(REPO_DIR, 'deploy-askpass.cmd');
 const SSH_DEPLOY_KEY  = path.join(REPO_DIR, '.deploykey', 'id_ed25519');
 const REPO_HTTPS_URL  = 'https://x-access-token@github.com/TheMatthewWalker/Normanton-Nexus.git';
 
+// ── SapServer (sibling repo/service) ────────────────────────────────────
+const SAP_SERVER_DIR     = path.join(REPO_DIR, '..', 'SapServer');
+const SAP_TOKEN_PATH     = path.join(SAP_SERVER_DIR, '.deploykey', 'github_token');
+const SAP_ASKPASS_PATH   = path.join(SAP_SERVER_DIR, 'deploy-askpass.cmd');
+const SAP_SSH_DEPLOY_KEY = path.join(SAP_SERVER_DIR, '.deploykey', 'id_ed25519');
+const SAP_REPO_HTTPS_URL = 'https://x-access-token@github.com/TheMatthewWalker/SapServer.git';
+const SAP_DEPLOY_PS1     = path.join(SAP_SERVER_DIR, 'scripts', 'deploy.ps1');
+
 // Git must NEVER fall back to an interactive prompt — there is nothing and
 // no one able to answer one when this runs unattended under a service
 // account. Without this, a missing/misconfigured credential doesn't fail
@@ -103,6 +130,18 @@ const BASE_GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 // top-of-file comment) — NOT by execSync's timeout option, which proved
 // unreliable on Windows.
 const GIT_PULL_TIMEOUT_MS = 2 * 60 * 1000;
+
+// SapServer's own git pull — same reasoning as GIT_PULL_TIMEOUT_MS above.
+const SAP_GIT_PULL_TIMEOUT_MS = 2 * 60 * 1000;
+
+// scripts/deploy.ps1 does stop -> dotnet publish (self-contained win-x64,
+// the slow part) -> start. Generous on purpose — same rationale as
+// SERVICE_RESTART_TIMEOUT_MS below: runCommand()'s own timer is what
+// guarantees this can never hang the script even if it does eventually
+// time out, so there's no cost to giving a slow publish room to finish
+// rather than getting killed mid-build and leaving a half-written
+// publish/ directory behind.
+const SAP_DEPLOY_PS1_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Overall ceiling for the entire stop -> verify -> start -> verify ->
 // stability-monitor sequence below. Generous on purpose: this is a detached
@@ -126,6 +165,90 @@ const SVC_EVENT_TIMEOUT_MS     = 60 * 1000;    // wait this long for Windows to 
 // reported failure mode of "came up fine, then died a couple of minutes
 // later with nothing left running to notice."
 const STABILITY_CHECKS_MS = [30 * 1000, 60 * 1000, 120 * 1000];
+
+// Picks the same PAT -> SSH-key -> ambient-auth fallback order for any repo
+// (Normanton-Nexus itself, or SapServer below) — pulled out so both stay in
+// lockstep the same way restart-lib.cjs keeps restart.cjs and this script's
+// restart-verification logic from drifting apart. Returns the git args (as
+// a function of gitRef, since the HTTPS form embeds it differently than the
+// SSH/origin form) and the env to run them with.
+function resolveGitAuth(label, tokenPath, askpassPath, sshKeyPath, httpsUrl) {
+  if (fs.existsSync(tokenPath)) {
+    console.log(`[deploy-runner] ${label}: using fine-grained PAT (${tokenPath}) over HTTPS`);
+    return {
+      env: { ...BASE_GIT_ENV, GIT_ASKPASS: askpassPath },
+      buildArgs: gitRef => ['pull', '--ff-only', httpsUrl, gitRef],
+    };
+  }
+  if (fs.existsSync(sshKeyPath)) {
+    console.log(`[deploy-runner] ${label}: using SSH deploy key (${sshKeyPath})`);
+    return {
+      env: {
+        ...BASE_GIT_ENV,
+        GIT_SSH_COMMAND: `ssh -i "${sshKeyPath}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`,
+      },
+      buildArgs: gitRef => ['pull', '--ff-only', 'origin', gitRef],
+    };
+  }
+  console.warn(
+    `[deploy-runner] ${label}: no credentials found at ${tokenPath} or ${sshKeyPath} — falling back to ` +
+    `whatever auth (if any) this account already has (this is usually NOT the same account/agent ` +
+    `you tested "ssh -T git@github.com" or "git push" with interactively). Set up a fine-grained ` +
+    `GitHub token (Contents: Read-only, scoped to this repo only) at ${tokenPath} if this fails.`
+  );
+  // Still force non-interactive SSH even with no dedicated key, so a
+  // missing/rejected credential fails fast instead of hanging on a
+  // host-key or password prompt nothing can ever answer.
+  return {
+    env: { ...BASE_GIT_ENV, GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' },
+    buildArgs: gitRef => ['pull', '--ff-only', 'origin', gitRef],
+  };
+}
+
+// Pulls + republishes + restarts the sibling SapServer repo, once
+// Normanton-Nexus itself is confirmed back up and stable. See the
+// IMPORTANT — SapServer comment at the top of this file for the full
+// rationale (same machine assumption, shared GitRef, skip-vs-fail rules).
+// Returns { skipped, output }; throws on any real failure so the caller's
+// existing try/catch + markFailed() handles it exactly like the
+// Normanton-Nexus restart failures above it.
+async function deploySapServer(gitRef) {
+  if (!fs.existsSync(SAP_SERVER_DIR)) {
+    console.log(`[deploy-runner] SapServer directory not found at ${SAP_SERVER_DIR} — skipping SapServer deploy.`);
+    return { skipped: true, output: '' };
+  }
+
+  const auth = resolveGitAuth('SapServer', SAP_TOKEN_PATH, SAP_ASKPASS_PATH, SAP_SSH_DEPLOY_KEY, SAP_REPO_HTTPS_URL);
+  console.log(`[deploy-runner] pulling SapServer ${gitRef} (fast-forward only, ${SAP_GIT_PULL_TIMEOUT_MS / 1000}s timeout)…`);
+  const pullResult = await runCommand('git', auth.buildArgs(gitRef), {
+    cwd: SAP_SERVER_DIR, env: auth.env, timeoutMs: SAP_GIT_PULL_TIMEOUT_MS,
+  });
+  if (!pullResult.ok) {
+    const detail = pullResult.stdout + pullResult.stderr + (pullResult.error ? pullResult.error.message : 'git pull failed');
+    throw new Error(`SapServer git pull failed: ${detail}`);
+  }
+  console.log('[deploy-runner] SapServer git pull complete:\n' + pullResult.stdout);
+
+  // deploy.ps1 itself is #Requires -RunAsAdministrator — this script runs
+  // under the "Normanton Nexus" service's LocalSystem account, which does
+  // satisfy that check (LocalSystem's token includes the Administrators
+  // role), but it's worth confirming on the first real run since nothing in
+  // this dev environment can exercise the actual Task Scheduler / dotnet
+  // publish path.
+  console.log(`[deploy-runner] running SapServer scripts/deploy.ps1 (stop task -> publish -> start task, ${SAP_DEPLOY_PS1_TIMEOUT_MS / 1000}s timeout)…`);
+  const deployResult = await runCommand(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SAP_DEPLOY_PS1],
+    { cwd: SAP_SERVER_DIR, env: process.env, timeoutMs: SAP_DEPLOY_PS1_TIMEOUT_MS }
+  );
+  if (!deployResult.ok) {
+    const detail = deployResult.stdout + deployResult.stderr + (deployResult.error ? deployResult.error.message : 'deploy.ps1 failed');
+    throw new Error(`SapServer scripts/deploy.ps1 failed: ${detail}`);
+  }
+  console.log('[deploy-runner] SapServer scripts/deploy.ps1 complete:\n' + deployResult.stdout);
+
+  return { skipped: false, output: pullResult.stdout + '\n' + deployResult.stdout };
+}
 
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
@@ -191,39 +314,10 @@ async function main() {
   }
 
   // ── Work out how to authenticate the pull ───────────────────────────────
-  let gitArgs;
-  let gitEnv = BASE_GIT_ENV;
-
-  if (fs.existsSync(TOKEN_PATH)) {
-    console.log('[deploy-runner] using fine-grained PAT (.deploykey/github_token) over HTTPS');
-    gitEnv = { ...BASE_GIT_ENV, GIT_ASKPASS: ASKPASS_PATH };
-    gitArgs = ['pull', '--ff-only', REPO_HTTPS_URL, gitRef];
-  } else if (fs.existsSync(SSH_DEPLOY_KEY)) {
-    console.log('[deploy-runner] using SSH deploy key (.deploykey/id_ed25519)');
-    gitEnv = {
-      ...BASE_GIT_ENV,
-      GIT_SSH_COMMAND: `ssh -i "${SSH_DEPLOY_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`,
-    };
-    gitArgs = ['pull', '--ff-only', 'origin', gitRef];
-  } else {
-    console.warn(
-      `[deploy-runner] no credentials found at ${TOKEN_PATH} or ${SSH_DEPLOY_KEY} — falling back to ` +
-      `whatever auth (if any) this account already has (this is usually NOT the same account/agent ` +
-      `you tested "ssh -T git@github.com" or "git push" with interactively). Set up a fine-grained ` +
-      `GitHub token (Contents: Read-only, scoped to this repo only) at ${TOKEN_PATH} if this fails.`
-    );
-    // Still force non-interactive SSH even with no dedicated key, so a
-    // missing/rejected credential fails fast instead of hanging on a
-    // host-key or password prompt nothing can ever answer.
-    gitEnv = {
-      ...BASE_GIT_ENV,
-      GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
-    };
-    gitArgs = ['pull', '--ff-only', 'origin', gitRef];
-  }
+  const auth = resolveGitAuth('Normanton-Nexus', TOKEN_PATH, ASKPASS_PATH, SSH_DEPLOY_KEY, REPO_HTTPS_URL);
 
   console.log(`[deploy-runner] pulling ${gitRef} (fast-forward only, ${GIT_PULL_TIMEOUT_MS / 1000}s timeout)…`);
-  const pullResult = await runCommand('git', gitArgs, { cwd: REPO_DIR, env: gitEnv, timeoutMs: GIT_PULL_TIMEOUT_MS });
+  const pullResult = await runCommand('git', auth.buildArgs(gitRef), { cwd: REPO_DIR, env: auth.env, timeoutMs: GIT_PULL_TIMEOUT_MS });
   if (!pullResult.ok) {
     const detail = pullResult.stdout + pullResult.stderr + (pullResult.error ? pullResult.error.message : 'git pull failed');
     await markFailed(detail);
@@ -332,14 +426,31 @@ async function main() {
     clearTimeout(restartWatchdog);
     console.log(`[deploy-runner] service restarted and verified stable (pid=${fresh.pid}, bootId=${fresh.bootId}).`);
 
+    // Normanton-Nexus itself is confirmed up — now bring SapServer along
+    // with it. Runs OUTSIDE restartWatchdog (already cleared above): the
+    // git pull and deploy.ps1 calls below each enforce their own timeout via
+    // runCommand(), so no separate watchdog is needed for this part. Any
+    // failure here throws and is caught below, same as an NN restart
+    // failure — see the IMPORTANT — SapServer comment at the top of this
+    // file for why that's the right call.
+    const sapResult = await deploySapServer(gitRef);
+    console.log(sapResult.skipped
+      ? '[deploy-runner] SapServer step skipped (not checked out on this host).'
+      : '[deploy-runner] SapServer redeployed and restarted.');
+
     finished = true;
+    const combinedLog = gitOutput +
+      (sapResult.skipped
+        ? '\n\n[SapServer] skipped — not checked out on this host.'
+        : '\n\n[SapServer]\n' + sapResult.output);
     await pool.request()
       .input('id',  sql.Int, deploymentID)
-      .input('log', sql.NVarChar(sql.MAX), gitOutput.slice(0, 8000))
+      .input('log', sql.NVarChar(sql.MAX), combinedLog.slice(0, 8000))
       .query(`UPDATE kongsberg.dbo.ScheduledDeployments
               SET Status = 'completed', CompletedAt = GETDATE(), OutputLog = @log
               WHERE DeploymentID = @id`);
-    await audit('DEPLOY_COMPLETED', `Deployment #${deploymentID} completed (${gitRef})`);
+    await audit('DEPLOY_COMPLETED',
+      `Deployment #${deploymentID} completed (${gitRef})${sapResult.skipped ? '' : ' + SapServer redeployed'}`);
     await pool.close();
     process.exit(0);
 

@@ -7,8 +7,11 @@
  * needing to log into the server.
  *
  * A node-cron checker in server.js polls for due rows every minute and hands
- * them off to deploy-runner.cjs (git pull + Windows Service restart), which
- * runs as a detached process — see that file for why it has to be detached.
+ * them off to deploy-runner.cjs (git pull + Windows Service restart, then —
+ * once that's confirmed stable — a git pull + scripts/deploy.ps1 restart of
+ * the sibling SapServer repo too, see deploy-runner.cjs's own header for
+ * the details/assumptions), which runs as a detached process — see that
+ * file for why it has to be detached.
  *
  * TIMEZONE HANDLING — important, and the reason ScheduledAt is treated
  * specially throughout this file: kongsberg.dbo.ScheduledDeployments.ScheduledAt
