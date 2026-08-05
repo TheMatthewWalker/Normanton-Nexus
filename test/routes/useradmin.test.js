@@ -342,6 +342,57 @@ describe('POST /users/bulk-departments', () => {
   });
 });
 
+describe('POST /users/bulk-status', () => {
+  test('400s with no users selected', async () => {
+    const res = await request(appAsAdmin).post('/users/bulk-status').send({ isActive: true });
+    expect(res.status).toBe(400);
+  });
+
+  test('400s when no setting is provided to change', async () => {
+    const res = await request(appAsAdmin).post('/users/bulk-status').send({ userIDs: [1] });
+    expect(res.status).toBe(400);
+  });
+
+  test('an admin cannot bulk-edit a user with an equal or higher role — failed per-row, not whole-batch', async () => {
+    queueResults(
+      { recordset: [{ UserID: 1, Username: 'peer.admin', Role: 'admin' }, { UserID: 2, Username: 'j.smith', Role: 'operator' }] },
+    );
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] }); // UPDATE for user2 (allowed)
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] }); // audit(STATUS_BULK_UPDATE)
+
+    const res = await request(appAsAdmin).post('/users/bulk-status').send({ userIDs: [1, 2], isLocked: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ userID: 1, success: false, error: expect.stringMatching(/equal or higher role/) });
+    expect(res.body.results[1]).toMatchObject({ userID: 2, success: true });
+    expect(res.body.summary).toEqual({ total: 2, succeeded: 1, failed: 1 });
+  });
+
+  test('marks a nonexistent user as failed without attempting an update', async () => {
+    queueResults(
+      { recordset: [] }, // no matching users found
+      { recordset: [] }, // audit(STATUS_BULK_UPDATE)
+    );
+    const res = await request(appAsAdmin).post('/users/bulk-status').send({ userIDs: [999], isActive: true });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ userID: 999, error: 'User not found' });
+    expect(res.body.summary.failed).toBe(1);
+  });
+
+  test('a superadmin can update all three fields for a peer superadmin', async () => {
+    queueResults(
+      { recordset: [{ UserID: 5, Username: 'root2', Role: 'superadmin' }] },
+      { recordset: [] }, // UPDATE
+      { recordset: [] }, // audit(STATUS_BULK_UPDATE)
+    );
+    const res = await request(appAsSuperadmin).post('/users/bulk-status').send({
+      userIDs: [5], isActive: true, isLocked: false, shortIdleTimeout: true,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toEqual({ total: 1, succeeded: 1, failed: 0 });
+  });
+});
+
 describe('GET /audit', () => {
   test('400s on an unrecognised event filter', async () => {
     const res = await request(appAsAdmin).get('/audit?event=NOT_A_REAL_EVENT');

@@ -76,6 +76,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Set up Mass Apply Departments when that section is first opened
   document.querySelector('[data-section="mass-departments"]')
     .addEventListener('click', () => { setupMassDepartments(); }, { once: true });
+
+  // Set up Mass Update Status when that section is first opened
+  document.querySelector('[data-section="mass-status"]')
+    .addEventListener('click', () => { setupMassStatus(); }, { once: true });
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -1084,6 +1088,146 @@ async function submitMassDepartments() {
     // reflect the grant with authoritative data.
     await loadUsers();
     renderMassDeptUsersTable();
+  } catch (err) {
+    resultEl.style.color = 'var(--error)';
+    resultEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply to Selected Users';
+  }
+}
+
+// ── Mass Update Status ────────────────────────────────────────────────────────
+// Admin or superadmin. Sets Active/Locked/Session Idle Timeout on many users
+// at once (routes/useradmin.js's POST /users/bulk-status). Each of the three
+// selects defaults to "— No change —" (empty value) so a batch can touch
+// just one or two fields without disturbing the others — unlike the
+// single-user edit modal, which always has a definite value for all three.
+let massStatusSetup = false;
+let massStatusSelectedUserIDs = new Set();
+
+function setupMassStatus() {
+  if (massStatusSetup) return;
+  massStatusSetup = true;
+
+  document.getElementById('mass-status-search').addEventListener('input', () => renderMassStatusUsersTable());
+  document.getElementById('mass-status-select-all').addEventListener('change', e => {
+    massStatusVisibleUsers().forEach(u => {
+      if (e.target.checked) massStatusSelectedUserIDs.add(u.UserID);
+      else massStatusSelectedUserIDs.delete(u.UserID);
+    });
+    renderMassStatusUsersTable();
+  });
+  ['mass-status-active', 'mass-status-locked', 'mass-status-idle'].forEach(id => {
+    document.getElementById(id).addEventListener('change', updateMassStatusSummary);
+  });
+  document.getElementById('mass-status-apply-btn').addEventListener('click', submitMassStatus);
+
+  renderMassStatusUsersTable();
+}
+
+function massStatusVisibleUsers() {
+  const q = document.getElementById('mass-status-search').value.trim().toLowerCase();
+  if (!q) return allUsers;
+  return allUsers.filter(u => u.Username.toLowerCase().includes(q) || u.Email.toLowerCase().includes(q));
+}
+
+function renderMassStatusUsersTable() {
+  const tbody = document.getElementById('mass-status-users-tbody');
+  const users = massStatusVisibleUsers();
+
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No users found</td></tr>';
+    updateMassStatusSummary();
+    return;
+  }
+
+  tbody.innerHTML = users.map(u => {
+    const checked = massStatusSelectedUserIDs.has(u.UserID);
+    const statusBadge = u.IsLocked
+      ? '<span class="badge badge--locked">Locked</span>'
+      : u.IsActive
+        ? '<span class="badge badge--active">Active</span>'
+        : '<span class="badge badge--pending">Pending</span>';
+    const idleLabel = u.ShortIdleTimeout ? 'Short (5 min)' : 'Standard (30 min)';
+    return `
+      <tr>
+        <td><input type="checkbox" class="mass-status-user-check" data-user-id="${u.UserID}" ${checked ? 'checked' : ''} aria-label="Select ${esc(u.Username)}"></td>
+        <td><strong>${esc(u.Username)}</strong></td>
+        <td>${esc(u.FirstName || '—')} ${esc(u.LastName || '')}</td>
+        <td>${esc(u.Email)}</td>
+        <td><span class="badge badge--${esc(u.Role)}">${esc(u.Role)}</span></td>
+        <td>${statusBadge}</td>
+        <td style="font-size:12px;color:var(--text-dim)">${idleLabel}</td>
+      </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('.mass-status-user-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const id = Number(cb.dataset.userId);
+      if (cb.checked) massStatusSelectedUserIDs.add(id);
+      else massStatusSelectedUserIDs.delete(id);
+      updateMassStatusSummary();
+    });
+  });
+
+  // Reflect current selection state onto the header "select all" checkbox
+  const selectAll = document.getElementById('mass-status-select-all');
+  selectAll.checked = users.length > 0 && users.every(u => massStatusSelectedUserIDs.has(u.UserID));
+
+  updateMassStatusSummary();
+}
+
+function massStatusChanges() {
+  const parse = id => {
+    const v = document.getElementById(id).value;
+    return v === '' ? undefined : v === 'true';
+  };
+  return {
+    isActive:         parse('mass-status-active'),
+    isLocked:         parse('mass-status-locked'),
+    shortIdleTimeout: parse('mass-status-idle'),
+  };
+}
+
+function updateMassStatusSummary() {
+  const summaryEl = document.getElementById('mass-status-summary');
+  const btn       = document.getElementById('mass-status-apply-btn');
+  const userCount = massStatusSelectedUserIDs.size;
+  const changes   = massStatusChanges();
+  const fieldCount = Object.values(changes).filter(v => v !== undefined).length;
+  summaryEl.textContent = `${userCount} user${userCount !== 1 ? 's' : ''} selected, ${fieldCount} setting${fieldCount !== 1 ? 's' : ''} to change`;
+  btn.disabled = userCount === 0 || fieldCount === 0;
+}
+
+async function submitMassStatus() {
+  const userIDs = [...massStatusSelectedUserIDs];
+  const changes = massStatusChanges();
+  const fieldCount = Object.values(changes).filter(v => v !== undefined).length;
+  if (!userIDs.length || !fieldCount) return;
+
+  const parts = [];
+  if (changes.isActive !== undefined)         parts.push(changes.isActive ? 'Active' : 'Inactive');
+  if (changes.isLocked !== undefined)         parts.push(changes.isLocked ? 'Locked' : 'Unlocked');
+  if (changes.shortIdleTimeout !== undefined) parts.push(changes.shortIdleTimeout ? 'Short idle timeout' : 'Standard idle timeout');
+  if (!confirm(`Set ${parts.join(', ')} on ${userIDs.length} user(s)?`)) return;
+
+  const btn      = document.getElementById('mass-status-apply-btn');
+  const resultEl = document.getElementById('mass-status-result');
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  resultEl.textContent = '';
+
+  try {
+    const data = await api('/api/admin/users/bulk-status', 'POST', { userIDs, ...changes });
+    const { succeeded, failed } = data.summary;
+
+    resultEl.style.color = failed ? 'var(--error)' : 'var(--accent)';
+    resultEl.textContent = `✓ Updated ${succeeded} user(s)` + (failed ? `, ${failed} failed.` : '.');
+    showToast(`Mass status update: ${succeeded} updated`, failed ? 'error' : 'success');
+
+    await loadUsers();
+    renderMassStatusUsersTable();
   } catch (err) {
     resultEl.style.color = 'var(--error)';
     resultEl.textContent = err.message;

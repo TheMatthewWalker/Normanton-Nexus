@@ -18,6 +18,7 @@
  *   POST /users/:id/reject             — delete a pending registration
  *   POST /users/bulk-create            — mass-create accounts from an imported list (superadmin only)
  *   POST /users/bulk-departments       — grant one or more departments to many users at once
+ *   POST /users/bulk-status            — set active/locked/idle-timeout status on many users at once
  *   GET  /audit                        — audit log, optionally filtered by event type
  *
  * Permission definition endpoints (superadmin only):
@@ -692,6 +693,101 @@ router.post('/users/bulk-departments', async (req, res) => {
   }
 });
 
+// ── POST /users/bulk-status ─────────────────────────────────────────────────────
+// Admin or superadmin. Sets IsActive/IsLocked/ShortIdleTimeout on many users
+// at once — each of the three fields is only touched if present in the
+// body, so a batch can change just one or two of them and leave the rest
+// alone (unlike PUT /users/:id, which is a single-user full-row update
+// where every field is always supplied by the edit modal).
+// Body: { userIDs: [1,2,3], isActive?: bool, isLocked?: bool, shortIdleTimeout?: bool }
+// Same per-user role-escalation guard as PUT /users/:id: a non-superadmin
+// actor can't touch a user whose current role is equal to or higher than
+// their own — failed per-row here rather than rejecting the whole batch.
+router.post('/users/bulk-status', async (req, res) => {
+  const { userIDs, isActive, isLocked, shortIdleTimeout } = req.body;
+
+  if (!Array.isArray(userIDs) || !userIDs.length) {
+    return res.status(400).json({ success: false, error: 'Select at least one user.' });
+  }
+  if (userIDs.length > 500) {
+    return res.status(400).json({ success: false, error: 'Maximum 500 users per batch.' });
+  }
+  if (isActive === undefined && isLocked === undefined && shortIdleTimeout === undefined) {
+    return res.status(400).json({ success: false, error: 'Select at least one setting to change.' });
+  }
+
+  const ids = [...new Set(userIDs.map(id => parseInt(id, 10)))];
+  if (ids.some(id => !id || isNaN(id))) {
+    return res.status(400).json({ success: false, error: 'Invalid user ID in selection.' });
+  }
+
+  const actorRole  = req.session.user.role;
+  const actorLevel = ROLE_LEVEL[actorRole] ?? 0;
+
+  try {
+    const pool  = await sql.connect(sqlConfig);
+    const actor = req.session.user.username;
+
+    const userReq = pool.request();
+    ids.forEach((id, i) => userReq.input(`u${i}`, sql.Int, id));
+    const userResult = await userReq.query(`
+      SELECT UserID, Username, Role FROM kongsberg.dbo.PortalUsers
+      WHERE UserID IN (${ids.map((_, i) => `@u${i}`).join(',')})
+    `);
+    const userMap = new Map(userResult.recordset.map(r => [r.UserID, r]));
+
+    const results = [];
+    for (const userID of ids) {
+      const user = userMap.get(userID);
+      if (!user) {
+        results.push({ userID, username: null, success: false, error: 'User not found' });
+        continue;
+      }
+      if (actorRole !== 'superadmin' && (ROLE_LEVEL[user.Role] ?? 0) >= actorLevel) {
+        results.push({ userID, username: user.Username, success: false, error: 'Cannot edit a user with an equal or higher role.' });
+        continue;
+      }
+
+      const sets    = [];
+      const request = pool.request().input('userID', sql.Int, userID);
+      if (isActive !== undefined) {
+        sets.push('IsActive = @isActive');
+        request.input('isActive', sql.Bit, isActive ? 1 : 0);
+      }
+      if (isLocked !== undefined) {
+        sets.push('IsLocked = @isLocked');
+        request.input('isLocked', sql.Bit, isLocked ? 1 : 0);
+        // Unlocking also resets the failed-login counter, same as PUT /users/:id
+        if (!isLocked) sets.push('FailedLogins = 0');
+      }
+      if (shortIdleTimeout !== undefined) {
+        sets.push('ShortIdleTimeout = @shortIdleTimeout');
+        request.input('shortIdleTimeout', sql.Bit, shortIdleTimeout ? 1 : 0);
+      }
+
+      await request.query(`UPDATE kongsberg.dbo.PortalUsers SET ${sets.join(', ')} WHERE UserID = @userID`);
+      results.push({ userID, username: user.Username, success: true });
+    }
+
+    const succeeded = results.filter(r => r.success).length;
+    const failed    = results.length - succeeded;
+
+    const changes = [];
+    if (isActive !== undefined)         changes.push(`Active=${isActive}`);
+    if (isLocked !== undefined)         changes.push(`Locked=${isLocked}`);
+    if (shortIdleTimeout !== undefined) changes.push(`ShortIdleTimeout=${shortIdleTimeout}`);
+
+    await audit('STATUS_BULK_UPDATE', actor,
+      `Set [${changes.join(', ')}] on ${succeeded} user(s)${failed ? `, ${failed} failed` : ''}`, req);
+
+    res.json({ success: true, results, summary: { total: ids.length, succeeded, failed } });
+
+  } catch (err) {
+    console.error('[admin/users bulk-status]', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /audit ────────────────────────────────────────────────────────────────
 router.get('/audit', async (req, res) => {
   const { event } = req.query;
@@ -703,7 +799,7 @@ router.get('/audit', async (req, res) => {
     'RAW_SQL','RAW_SQL_BLOCKED','RAW_SQL_ERROR',
     'SAP_OK','SAP_ERROR',
     'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE','PERM_BULK_GRANT',
-    'BULK_CREATE','PASSWORD_CHANGE','DEPT_BULK_GRANT',
+    'BULK_CREATE','PASSWORD_CHANGE','DEPT_BULK_GRANT','STATUS_BULK_UPDATE',
   ];
 
   if (event && !VALID_EVENTS.includes(event)) {

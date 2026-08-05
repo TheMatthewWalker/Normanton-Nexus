@@ -89,6 +89,14 @@
           Mass Apply Departments
         </div>
 
+        <div class="nav-item" data-section="mass-status">
+          <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="4" width="12" height="6" rx="3" stroke="currentColor" stroke-width="1.2"/>
+            <circle cx="9.5" cy="7" r="1.8" fill="currentColor"/>
+          </svg>
+          Mass Update Status
+        </div>
+
         <!-- Bulk Create Users — shown only for superadmin -->
         <div class="nav-item" data-section="bulk-create" id="nav-bulk-create" style="display:none">
           <svg class="nav-icon" viewBox="0 0 14 14" fill="none">
@@ -291,6 +299,75 @@
         </div>
       </section>
 
+      <!-- ── MASS UPDATE STATUS ────────────────────────────────────────── -->
+      <section class="section" id="section-mass-status">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Mass Update Status</div>
+            <div class="section-sub">Set Active, Locked, or Session Idle Timeout for many users at once</div>
+          </div>
+          <div class="section-actions">
+            <input type="text" id="mass-status-search" class="search-input" placeholder="Search username or email…">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start">
+          <div class="table-wrap">
+            <table id="mass-status-users-table">
+              <thead>
+                <tr>
+                  <th style="width:34px"><input type="checkbox" id="mass-status-select-all" aria-label="Select all visible users"></th>
+                  <th>Username</th>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Idle Timeout</th>
+                </tr>
+              </thead>
+              <tbody id="mass-status-users-tbody">
+                <tr><td colspan="7" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div style="background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;padding:18px 20px;position:sticky;top:0">
+            <label class="modal-label">Changes to Apply</label>
+
+            <div class="modal-row">
+              <label class="modal-label">Active Status</label>
+              <select id="mass-status-active" class="modal-select">
+                <option value="">— No change —</option>
+                <option value="true">Set Active</option>
+                <option value="false">Set Inactive</option>
+              </select>
+            </div>
+
+            <div class="modal-row">
+              <label class="modal-label">Locked Status</label>
+              <select id="mass-status-locked" class="modal-select">
+                <option value="">— No change —</option>
+                <option value="true">Set Locked</option>
+                <option value="false">Set Unlocked</option>
+              </select>
+            </div>
+
+            <div class="modal-row">
+              <label class="modal-label">Session Idle Timeout</label>
+              <select id="mass-status-idle" class="modal-select">
+                <option value="">— No change —</option>
+                <option value="true">Short (5 min)</option>
+                <option value="false">Standard (30 min)</option>
+              </select>
+            </div>
+
+            <div id="mass-status-summary" style="font-size:12px;color:var(--text-dim);margin-top:12px">0 users selected</div>
+            <button type="button" class="btn-primary" id="mass-status-apply-btn" style="width:100%;margin-top:10px" disabled>Apply to Selected Users</button>
+            <div id="mass-status-result" style="font-size:13px;margin-top:10px"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- ── BULK CREATE USERS ─────────────────────────────────────────── -->
       <section class="section" id="section-bulk-create">
         <div class="section-header">
@@ -380,6 +457,7 @@
               <option value="PERM_DELETE">Permission deleted</option>
               <option value="PERM_BULK_GRANT">Mass permission grants</option>
               <option value="DEPT_BULK_GRANT">Mass department grants</option>
+              <option value="STATUS_BULK_UPDATE">Mass status updates</option>
               <option value="USERNAME_CHANGE">Username changes</option>
               <option value="PROFILE_CHANGE">Profile changes</option>
               <option value="IDLE_TIMEOUT_CHANGE">Idle timeout changes</option>
