@@ -68,6 +68,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (bulkCreateNav) {
     bulkCreateNav.addEventListener('click', () => { setupBulkCreate(); }, { once: true });
   }
+
+  // Set up Mass Apply Permissions when that section is first opened
+  document.querySelector('[data-section="mass-permissions"]')
+    .addEventListener('click', () => { setupMassPermissions(); }, { once: true });
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -668,8 +672,14 @@ function bulkParseYN(v) {
 function parseDelimited(text) {
   const lines = text.split(/\r\n|\n|\r/).filter(l => l.trim().length > 0);
   if (!lines.length) return { headers: [], rows: [] };
-  const delim = lines[0].includes('\t') ? '\t' : ',';
-  const headers = lines[0].split(delim).map(h => h.trim());
+  // Pick whichever candidate splits the header row into the most fields —
+  // handles a straight paste from Excel (tab-delimited), a plain CSV
+  // (comma), and Excel's "Save As CSV" output on European-locale systems
+  // (semicolon, since comma is the decimal separator there).
+  const delim = [';', '\t', ','].reduce((best, d) =>
+    lines[0].split(d).length > lines[0].split(best).length ? d : best
+  );
+  const headers = lines[0].split(delim).map(h => h.trim().replace(/^﻿/, ''));
   const rows = lines.slice(1).map(line => {
     const cells = line.split(delim);
     const obj = {};
@@ -797,6 +807,163 @@ async function submitBulkCreate() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Create Users';
+  }
+}
+
+// ── Mass Apply Permissions ─────────────────────────────────────────────────────
+// Admin or superadmin (routes/useradmin.js's POST /users/bulk-permissions has
+// no requireSuperadmin gate, same as the single-user grant endpoint it
+// reuses). Built on the already-loaded allUsers/allPermissions arrays rather
+// than fetching its own copies.
+let massPermSetup = false;
+let massPermSelectedUserIDs = new Set();
+
+function setupMassPermissions() {
+  if (massPermSetup) return;
+  massPermSetup = true;
+
+  document.getElementById('mass-perm-search').addEventListener('input', () => renderMassPermUsersTable());
+  document.getElementById('mass-perm-select-all').addEventListener('change', e => {
+    massPermVisibleUsers().forEach(u => {
+      if (e.target.checked) massPermSelectedUserIDs.add(u.UserID);
+      else massPermSelectedUserIDs.delete(u.UserID);
+    });
+    renderMassPermUsersTable();
+  });
+  document.getElementById('mass-perm-apply-btn').addEventListener('click', submitMassPermissions);
+
+  loadMassPermPermissions();
+  renderMassPermUsersTable();
+}
+
+async function loadMassPermPermissions() {
+  if (!allPermissions.length) {
+    try {
+      const data = await api('/api/admin/permissions');
+      allPermissions = data.permissions || [];
+    } catch {
+      allPermissions = [];
+    }
+  }
+  renderMassPermCodesGrid();
+}
+
+function renderMassPermCodesGrid() {
+  const el = document.getElementById('mass-perm-codes');
+  if (!allPermissions.length) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No permissions defined yet.</div>';
+    return;
+  }
+  el.innerHTML = allPermissions.map(p => `
+    <label class="dept-check" data-code="${esc(p.PermissionCode)}">
+      <input type="checkbox">
+      <span class="dept-check-name">${esc(p.PermissionCode)} <span style="color:var(--text-muted);font-weight:400">— ${esc(p.PermissionName)}</span></span>
+      <span class="dept-check-tick">✓</span>
+    </label>`).join('');
+
+  el.querySelectorAll('.dept-check').forEach(label => {
+    label.addEventListener('click', () => {
+      const cb = label.querySelector('input');
+      cb.checked = !cb.checked;
+      label.classList.toggle('checked', cb.checked);
+      updateMassPermSummary();
+    });
+  });
+}
+
+function getMassPermCheckedCodes() {
+  return [...document.querySelectorAll('#mass-perm-codes .dept-check.checked')].map(el => el.dataset.code);
+}
+
+function massPermVisibleUsers() {
+  const q = document.getElementById('mass-perm-search').value.trim().toLowerCase();
+  if (!q) return allUsers;
+  return allUsers.filter(u => u.Username.toLowerCase().includes(q) || u.Email.toLowerCase().includes(q));
+}
+
+function renderMassPermUsersTable() {
+  const tbody = document.getElementById('mass-perm-users-tbody');
+  const users = massPermVisibleUsers();
+
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="loading-cell">No users found</td></tr>';
+    updateMassPermSummary();
+    return;
+  }
+
+  tbody.innerHTML = users.map(u => {
+    const checked = massPermSelectedUserIDs.has(u.UserID);
+    const permTags = (u.permissions || [])
+      .map(p => `<span class="perm-code" style="font-size:9px;padding:2px 5px">${esc(p)}</span>`)
+      .join(' ');
+    return `
+      <tr>
+        <td><input type="checkbox" class="mass-perm-user-check" data-user-id="${u.UserID}" ${checked ? 'checked' : ''} aria-label="Select ${esc(u.Username)}"></td>
+        <td><strong>${esc(u.Username)}</strong></td>
+        <td>${esc(u.FirstName || '—')} ${esc(u.LastName || '')}</td>
+        <td>${esc(u.Email)}</td>
+        <td><span class="badge badge--${esc(u.Role)}">${esc(u.Role)}</span></td>
+        <td><div class="dept-tags">${permTags || '<span style="color:var(--text-muted);font-size:11px">None</span>'}</div></td>
+      </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('.mass-perm-user-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const id = Number(cb.dataset.userId);
+      if (cb.checked) massPermSelectedUserIDs.add(id);
+      else massPermSelectedUserIDs.delete(id);
+      updateMassPermSummary();
+    });
+  });
+
+  // Reflect current selection state onto the header "select all" checkbox
+  const selectAll = document.getElementById('mass-perm-select-all');
+  selectAll.checked = users.length > 0 && users.every(u => massPermSelectedUserIDs.has(u.UserID));
+
+  updateMassPermSummary();
+}
+
+function updateMassPermSummary() {
+  const summaryEl = document.getElementById('mass-perm-summary');
+  const btn       = document.getElementById('mass-perm-apply-btn');
+  const userCount = massPermSelectedUserIDs.size;
+  const codeCount = getMassPermCheckedCodes().length;
+  summaryEl.textContent = `${userCount} user${userCount !== 1 ? 's' : ''} selected, ${codeCount} permission${codeCount !== 1 ? 's' : ''} chosen`;
+  btn.disabled = userCount === 0 || codeCount === 0;
+}
+
+async function submitMassPermissions() {
+  const userIDs         = [...massPermSelectedUserIDs];
+  const permissionCodes = getMassPermCheckedCodes();
+  if (!userIDs.length || !permissionCodes.length) return;
+
+  if (!confirm(`Grant ${permissionCodes.join(', ')} to ${userIDs.length} user(s)?`)) return;
+
+  const btn      = document.getElementById('mass-perm-apply-btn');
+  const resultEl = document.getElementById('mass-perm-result');
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  resultEl.textContent = '';
+
+  try {
+    const data = await api('/api/admin/users/bulk-permissions', 'POST', { userIDs, permissionCodes });
+    const { granted, alreadyHad, failed } = data.summary;
+
+    resultEl.style.color = failed ? 'var(--error)' : 'var(--accent)';
+    resultEl.textContent = `✓ ${granted} new grant(s), ${alreadyHad} already held` + (failed ? `, ${failed} user(s) not found.` : '.');
+    showToast(`Mass apply: ${granted} new grant(s)`, failed ? 'error' : 'success');
+
+    // Refresh from the server so both this table and the main Users table
+    // reflect the grant with authoritative data, rather than patching the
+    // local cache by hand.
+    await loadUsers();
+    renderMassPermUsersTable();
+  } catch (err) {
+    resultEl.style.color = 'var(--error)';
+    resultEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply to Selected Users';
   }
 }
 

@@ -396,3 +396,55 @@ describe('user <-> permission grant/revoke — admin or superadmin', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('POST /users/bulk-permissions', () => {
+  test('400s with no users selected', async () => {
+    const res = await request(appAsAdmin).post('/users/bulk-permissions').send({ userIDs: [], permissionCodes: ['PROD_SUPER'] });
+    expect(res.status).toBe(400);
+  });
+
+  test('400s with no permissions selected', async () => {
+    const res = await request(appAsAdmin).post('/users/bulk-permissions').send({ userIDs: [1], permissionCodes: [] });
+    expect(res.status).toBe(400);
+  });
+
+  test('400s on an unknown permission code', async () => {
+    queueResults({ recordset: [] }); // permission existence check — none found
+    const res = await request(appAsAdmin).post('/users/bulk-permissions').send({ userIDs: [1], permissionCodes: ['NOPE'] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unknown permission code/);
+  });
+
+  test('grants to a new user, skips a user who already has it, and audits a summary', async () => {
+    queueResults(
+      { recordset: [{ PermissionCode: 'PROD_SUPER' }] },                              // permission exists
+      { recordset: [{ UserID: 1, Username: 'u1' }, { UserID: 2, Username: 'u2' }] },  // users exist
+    );
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] }); // INSERT for user1 — new grant
+    const dupErr = new Error('Violation of UNIQUE KEY constraint');
+    dupErr.number = 2627;
+    dbRequest.query.mockRejectedValueOnce(dupErr);             // INSERT for user2 — already had it
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] }); // audit(PERM_BULK_GRANT)
+
+    const res = await request(appAsAdmin).post('/users/bulk-permissions').send({
+      userIDs: [1, 2], permissionCodes: ['prod_super'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toEqual({ users: 2, granted: 1, alreadyHad: 1, failed: 0 });
+  });
+
+  test('marks a nonexistent user as failed without attempting a grant', async () => {
+    queueResults(
+      { recordset: [{ PermissionCode: 'PROD_SUPER' }] }, // permission exists
+      { recordset: [] },                                 // no matching users found
+      { recordset: [] },                                 // audit(PERM_BULK_GRANT)
+    );
+    const res = await request(appAsAdmin).post('/users/bulk-permissions').send({
+      userIDs: [999], permissionCodes: ['PROD_SUPER'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ userID: 999, error: 'User not found' });
+    expect(res.body.summary.failed).toBe(1);
+  });
+});

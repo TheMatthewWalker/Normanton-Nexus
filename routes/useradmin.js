@@ -29,6 +29,7 @@
  *   GET    /users/:id/permissions      — list permissions granted to a user
  *   POST   /users/:id/permissions      — grant a permission  { permissionCode }
  *   DELETE /users/:id/permissions/:code — revoke a permission
+ *   POST   /users/bulk-permissions     — grant one or more permissions to many users at once
  */
 
 import express from 'express';
@@ -605,7 +606,7 @@ router.get('/audit', async (req, res) => {
     'USERNAME_CHANGE','PROFILE_CHANGE','IDLE_TIMEOUT_CHANGE',
     'RAW_SQL','RAW_SQL_BLOCKED','RAW_SQL_ERROR',
     'SAP_OK','SAP_ERROR',
-    'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE',
+    'PERM_GRANT','PERM_REVOKE','PERM_CREATE','PERM_UPDATE','PERM_DELETE','PERM_BULK_GRANT',
     'BULK_CREATE','PASSWORD_CHANGE',
   ];
 
@@ -923,6 +924,113 @@ router.delete('/users/:id/permissions/:code', async (req, res) => {
 
   } catch (err) {
     console.error('[admin/users/permissions DELETE]', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /users/bulk-permissions ──────────────────────────────────────────────
+// Admin or superadmin. Grants one or more permission codes to many users at
+// once — e.g. rolling a new supervisor permission out to a whole shift.
+// Body: { userIDs: [1,2,3], permissionCodes: ['PROD_SUPER', 'LOG_PLANNING'] }
+// A (userID, code) pair the user already holds is silently skipped, not
+// treated as an error — same idempotent-grant spirit as the single-user
+// POST /users/:id/permissions endpoint's duplicate handling above.
+router.post('/users/bulk-permissions', async (req, res) => {
+  const { userIDs, permissionCodes } = req.body;
+
+  if (!Array.isArray(userIDs) || !userIDs.length) {
+    return res.status(400).json({ success: false, error: 'Select at least one user.' });
+  }
+  if (!Array.isArray(permissionCodes) || !permissionCodes.length) {
+    return res.status(400).json({ success: false, error: 'Select at least one permission.' });
+  }
+  if (userIDs.length > 500) {
+    return res.status(400).json({ success: false, error: 'Maximum 500 users per batch.' });
+  }
+
+  const ids = [...new Set(userIDs.map(id => parseInt(id, 10)))];
+  if (ids.some(id => !id || isNaN(id))) {
+    return res.status(400).json({ success: false, error: 'Invalid user ID in selection.' });
+  }
+
+  const codes = [...new Set(permissionCodes.map(c => String(c).trim().toUpperCase()))];
+  if (codes.some(c => !/^[A-Z0-9_]{2,50}$/.test(c))) {
+    return res.status(400).json({ success: false, error: 'Invalid permission code in selection.' });
+  }
+
+  try {
+    const pool  = await sql.connect(sqlConfig);
+    const actor = req.session.user.username;
+
+    // Verify every selected code actually exists
+    const permReq = pool.request();
+    codes.forEach((c, i) => permReq.input(`c${i}`, sql.NVarChar(50), c));
+    const permResult = await permReq.query(`
+      SELECT PermissionCode FROM kongsberg.dbo.PortalPermissions
+      WHERE PermissionCode IN (${codes.map((_, i) => `@c${i}`).join(',')})
+    `);
+    const validCodes   = new Set(permResult.recordset.map(r => r.PermissionCode));
+    const invalidCodes = codes.filter(c => !validCodes.has(c));
+    if (invalidCodes.length) {
+      return res.status(400).json({ success: false, error: `Unknown permission code(s): ${invalidCodes.join(', ')}` });
+    }
+
+    // Fetch usernames for every selected user in one round trip
+    const userReq = pool.request();
+    ids.forEach((id, i) => userReq.input(`u${i}`, sql.Int, id));
+    const userResult = await userReq.query(`
+      SELECT UserID, Username FROM kongsberg.dbo.PortalUsers
+      WHERE UserID IN (${ids.map((_, i) => `@u${i}`).join(',')})
+    `);
+    const userMap = new Map(userResult.recordset.map(r => [r.UserID, r.Username]));
+
+    const results = [];
+    for (const userID of ids) {
+      const username = userMap.get(userID);
+      if (!username) {
+        results.push({ userID, username: null, granted: 0, alreadyHad: 0, error: 'User not found' });
+        continue;
+      }
+
+      let granted = 0, alreadyHad = 0;
+      for (const code of codes) {
+        try {
+          await pool.request()
+            .input('userID',      sql.Int,          userID)
+            .input('code',        sql.NVarChar(50), code)
+            .input('grantedByID', sql.Int,          req.session.user.userID)
+            .query(`
+              INSERT INTO kongsberg.dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
+              VALUES (@userID, @code, @grantedByID)
+            `);
+          granted++;
+        } catch (dupErr) {
+          if (dupErr.number === 2627 || dupErr.message?.includes('UNIQUE') || dupErr.message?.includes('duplicate')) {
+            alreadyHad++;
+          } else {
+            throw dupErr;
+          }
+        }
+      }
+      results.push({ userID, username, granted, alreadyHad });
+    }
+
+    const totalGranted = results.reduce((s, r) => s + r.granted, 0);
+    const totalAlready = results.reduce((s, r) => s + r.alreadyHad, 0);
+    const totalFailed  = results.filter(r => r.error).length;
+
+    await audit('PERM_BULK_GRANT', actor,
+      `Granted [${codes.join(', ')}] to ${ids.length} user(s) — ${totalGranted} new grant(s), ${totalAlready} already held` +
+      `${totalFailed ? `, ${totalFailed} user(s) not found` : ''}`, req);
+
+    res.json({
+      success: true,
+      results,
+      summary: { users: ids.length, granted: totalGranted, alreadyHad: totalAlready, failed: totalFailed },
+    });
+
+  } catch (err) {
+    console.error('[admin/users bulk-permissions]', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
