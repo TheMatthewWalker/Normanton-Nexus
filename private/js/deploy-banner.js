@@ -11,10 +11,13 @@
  *                  so the banner stays up through the actual downtime
  *                  instead of vanishing the moment the cron checker flips
  *                  the row from pending to running.
- *   - 'failed'   — the deploy-runner failed (e.g. git pull couldn't
- *                  authenticate) and never restarted anything; shown for a
- *                  short grace period (server-side, last 10 minutes) so it
- *                  doesn't just silently disappear leaving people guessing.
+ *
+ * A failed deployment is deliberately NOT shown here — GET /api/deploy/next
+ * only ever returns 'pending'/'running' rows (see routes/deploy.js). It's
+ * not actionable by an ordinary user, so superadmins get an in-app
+ * notification instead (server.js's notifyDeployFailed()) rather than
+ * everyone getting a "maintenance failed" banner they can't do anything
+ * about.
  *
  * Everything below is wrapped in an IIFE so none of its names (poll, esc,
  * pollTimer, POLL_INTERVAL_MS, etc.) leak into the shared global scope —
@@ -67,11 +70,6 @@
 
     if (deployment.Status === 'running') {
       renderRunning();
-      return;
-    }
-
-    if (deployment.Status === 'failed') {
-      renderFailed();
       return;
     }
 
@@ -140,18 +138,6 @@
       '<span class="deploy-banner-icon">⏳</span>' +
       '<span class="deploy-banner-text"><strong>Maintenance restart in progress…</strong> ' +
       'The system will be back in a moment — please avoid submitting changes right now.</span>';
-  }
-
-  function renderFailed() {
-    const bar = getBar();
-    bar.classList.add('deploy-banner--imminent');
-    const detail = deployment.ErrorMessage
-      ? `<span class="deploy-banner-notes">${esc(String(deployment.ErrorMessage).slice(0, 160))}</span>`
-      : '';
-    bar.innerHTML =
-      '<span class="deploy-banner-icon">⚠</span>' +
-      `<span class="deploy-banner-text"><strong>Scheduled maintenance failed to complete.</strong> ` +
-      `The system was not restarted — an admin has been notified.${detail}</span>`;
   }
 
   function removeBanner() {

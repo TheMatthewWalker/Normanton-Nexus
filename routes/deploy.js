@@ -77,9 +77,13 @@ async function audit(eventType, actorUsername, detail, req) {
 // ── GET /next — any logged-in user, powers the countdown banner ────────────
 // Prioritises a 'running' deployment (the restart is actually happening right
 // now — the banner should show this unconditionally, not just within the
-// warning window), falls back to the next 'pending' one, and also surfaces a
-// 'failed' deployment for a short grace period afterwards so the banner
-// doesn't just silently vanish if the restart didn't actually go through.
+// warning window), falls back to the next 'pending' one. Deliberately does
+// NOT surface 'failed' deployments here (it used to, for a short grace
+// period) — a failed deploy isn't actionable by an ordinary user and just
+// reads as a scary "maintenance failed" banner nobody who sees it can do
+// anything about. server.js's cron checker instead sends superadmins (the
+// only ones who can act on it) an in-app notification via lib/notify.js —
+// see notifyDeployFailed() there.
 //
 // ScheduledAt is pulled out via CONVERT(..., 126) — ISO8601 with a 'T'
 // separator and NO timezone designator — so that when the browser parses it
@@ -95,8 +99,7 @@ router.get('/next', async (req, res) => {
         WarningMinutes, Notes, Status, ErrorMessage
       FROM kongsberg.dbo.ScheduledDeployments
       WHERE Status IN ('pending', 'running')
-         OR (Status = 'failed' AND CompletedAt >= DATEADD(minute, -10, GETDATE()))
-      ORDER BY CASE Status WHEN 'running' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END, ScheduledAt ASC
+      ORDER BY CASE Status WHEN 'running' THEN 0 ELSE 1 END, ScheduledAt ASC
     `);
     res.json({ success: true, deployment: result.recordset[0] || null });
   } catch (err) {

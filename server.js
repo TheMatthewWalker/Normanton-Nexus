@@ -15,6 +15,7 @@ import rateLimit              from 'express-rate-limit';
 import cron                   from 'node-cron';
 
 import configJS                 from './config.js';
+import { notify }               from './lib/notify.js';
 
 import mixingRoutes            from './routes/mixing.js';
 import shipmentMainRoutes      from './routes/shipmentmain.js';
@@ -239,8 +240,12 @@ function runSchtasks(args, timeoutMs = 15000) {
   });
 }
 
-// Scheduled deployment checker — every minute. Looks for due, pending rows
-// in ScheduledDeployments and hands each one off to deploy-runner.cjs via a
+// Scheduled deployment checker — every 15 seconds (a plain 1-minute cron
+// tick meant the actual restart could lag up to 60s behind the scheduled
+// time and the countdown banner hitting zero; node-cron's optional leading
+// seconds field lets this tick far more often without switching away from
+// node-cron for just this one job). Looks for due, pending rows in
+// ScheduledDeployments and hands each one off to deploy-runner.cjs via a
 // ONE-SHOT Task Scheduler task, NOT a direct child_process.spawn.
 //
 // WHY: a plain spawn(..., { detached: true }) used to be used here, on the
@@ -268,7 +273,7 @@ function runSchtasks(args, timeoutMs = 15000) {
 // process has no inherited stdio to redirect. It also deletes its own
 // one-shot task on every exit path (success or failure) — see
 // cleanupScheduledTask() there.
-cron.schedule('* * * * *', async () => {
+cron.schedule('*/15 * * * * *', async () => {
   try {
     const pool = await sql.connect(configJS.sqlConfig);
     const due = await pool.request().query(`
@@ -308,6 +313,7 @@ cron.schedule('* * * * *', async () => {
           .query(`UPDATE kongsberg.dbo.ScheduledDeployments
                   SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
                   WHERE DeploymentID = @id`);
+        await notifyDeployFailed(pool, row.DeploymentID, detail);
       }
     }
   } catch (err) {
@@ -326,16 +332,45 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('*/5 * * * *', async () => {
   try {
     const pool = await sql.connect(configJS.sqlConfig);
-    await pool.request().query(`
+    const stuck = await pool.request().query(`
       UPDATE kongsberg.dbo.ScheduledDeployments
       SET Status = 'failed', CompletedAt = GETDATE(),
           ErrorMessage = 'Stuck at running for over 20 minutes with no completion — deploy-runner.cjs likely crashed, was killed, or the host restarted mid-deployment. Check deploy-runner.log and confirm the service manually.'
+      OUTPUT INSERTED.DeploymentID
       WHERE Status = 'running' AND StartedAt <= DATEADD(minute, -20, GETDATE())
     `);
+    for (const row of stuck.recordset) {
+      await notifyDeployFailed(pool, row.DeploymentID,
+        'Stuck at running for over 20 minutes with no completion — check deploy-runner.log and confirm the service manually.');
+    }
   } catch (err) {
     console.error('[cron] stuck-deployment safety net failed', err);
   }
 });
+
+// A failed scheduled deployment used to also show a banner to every
+// logged-in user via GET /api/deploy/next — dropped in favour of this:
+// superadmins (the only ones who can schedule/cancel a deployment or act on
+// a failure anyway) get an in-app notification instead, everyone else just
+// sees the service come back up as normal with no scary "maintenance
+// failed" banner they have no ability to act on. Fire-and-forget, like
+// every other notify() call in this codebase — a notification failure must
+// never affect deployment bookkeeping.
+async function notifyDeployFailed(pool, deploymentID, detail) {
+  try {
+    await notify(pool, {
+      title:    `Scheduled Deployment #${deploymentID} Failed`,
+      body:     detail,
+      severity: 3,
+      category: 'system',
+      actionLabel: 'View Deployments',
+      actionURL:   '/private/admin.html',
+      target:   { type: 'role', value: 'superadmin' },
+    });
+  } catch (err) {
+    console.error('[cron] failed to create deployment-failure notification', err.message);
+  }
+}
 
 // ── Login page → landing page if already signed in ───────────────────────────
 // GET / is normally served as a static file (public/index.html, the login

@@ -206,10 +206,14 @@ const START_VERIFY_POLL_MS     = 3 * 1000;
 
 const SVC_EVENT_TIMEOUT_MS     = 60 * 1000;    // wait this long for Windows to even acknowledge stop/start
 
-// Re-checks after the new instance is first confirmed live — matches the
-// reported failure mode of "came up fine, then died a couple of minutes
-// later with nothing left running to notice."
-const STABILITY_CHECKS_MS = [30 * 1000, 60 * 1000, 120 * 1000];
+// Re-checks after the new instance is first confirmed live. Originally
+// [30s, 60s, 120s] to catch the reported failure mode of "came up fine,
+// then died a couple of minutes later with nothing left running to
+// notice" — in practice, a fresh instance that survives the first ~30s
+// doesn't die later on its own, so that long tail was just adding minutes
+// to every deployment for a case that doesn't actually happen. Shortened
+// to a total 60s window instead.
+const STABILITY_CHECKS_MS = [10 * 1000, 20 * 1000, 30 * 1000];
 
 // Picks the same PAT -> SSH-key -> ambient-auth fallback order for any repo
 // (Normanton-Nexus itself, or SapServer below) — pulled out so both stay in
@@ -310,6 +314,34 @@ async function cleanupScheduledTask(deploymentID) {
   }
 }
 
+// Superadmin-only in-app notification for a failed deployment — replaces
+// the old everyone-visible "failed" banner (GET /api/deploy/next no longer
+// returns 'failed' rows; see routes/deploy.js). A failed deploy isn't
+// actionable by an ordinary user, and only superadmins can schedule/cancel
+// one anyway. lib/notify.js is an ES module used throughout the main app;
+// this script is CommonJS and runs standalone via Task Scheduler rather
+// than being loaded by server.js, so it's reached via a dynamic import()
+// here rather than duplicating the fan-out logic. Best-effort: called from
+// inside markFailed()'s own try block, but still can't be allowed to throw
+// past it — the deployment record itself is already written by this point
+// and must not be put at risk by a notification failure.
+async function notifySuperadminsDeployFailed(pool, deploymentID, detail) {
+  try {
+    const { notify } = await import('./lib/notify.js');
+    await notify(pool, {
+      title:    `Scheduled Deployment #${deploymentID} Failed`,
+      body:     String(detail).slice(0, 4000),
+      severity: 3,
+      category: 'system',
+      actionLabel: 'View Deployments',
+      actionURL:   '/private/admin.html',
+      target:   { type: 'role', value: 'superadmin' },
+    });
+  } catch (err) {
+    console.error('[deploy-runner] failed to create deployment-failure notification:', err.message);
+  }
+}
+
 async function main() {
   const deploymentID = parseInt(process.argv[2], 10);
   if (!deploymentID) {
@@ -365,6 +397,7 @@ async function main() {
                 SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
                 WHERE DeploymentID = @id`);
       await audit('DEPLOY_FAILED', `Deployment #${deploymentID} failed: ${String(detail).slice(0, 400)}`);
+      await notifySuperadminsDeployFailed(pool, deploymentID, detail);
     } catch (err) {
       console.error('[deploy-runner] also failed to record failure:', err.message);
     } finally {
