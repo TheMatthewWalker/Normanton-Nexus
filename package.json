@@ -16,7 +16,13 @@
     "migrate:status:production_archive": "knex migrate:status --env production_archive --knexfile knexfile.cjs",
     "seed:kongsberg": "knex seed:run --env kongsberg --knexfile knexfile.cjs",
     "seed:production": "knex seed:run --env production --knexfile knexfile.cjs",
-    "seed:logistics": "knex seed:run --env logistics --knexfile knexfile.cjs"
+    "seed:logistics": "knex seed:run --env logistics --knexfile knexfile.cjs",
+    "migrate:kongsberg_live": "knex migrate:latest --env kongsberg_live --knexfile knexfile.cjs",
+    "migrate:production_live": "knex migrate:latest --env production_live --knexfile knexfile.cjs",
+    "migrate:logistics_live": "knex migrate:latest --env logistics_live --knexfile knexfile.cjs",
+    "migrate:status:kongsberg_live": "knex migrate:status --env kongsberg_live --knexfile knexfile.cjs",
+    "migrate:status:production_live": "knex migrate:status --env production_live --knexfile knexfile.cjs",
+    "migrate:status:logistics_live": "knex migrate:status --env logistics_live --knexfile knexfile.cjs"
   },
   "keywords": [],
   "author": "",

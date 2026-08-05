@@ -72,9 +72,63 @@ function dbConfig(databaseName, dir, hasSeeds) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// *_live environments — point at the actual live SQL Server 2005 box, using
+// the SAME server/login the running app itself already uses (config.json's
+// sqlConfig), not a duplicate copy of that password in .env. There's no
+// reason for the live credential to exist in two places.
+//
+// These are for baselining Knex against the already-existing live databases
+// (see migrations/README.md's "Using this against live" section) and then
+// running genuinely NEW migrations against them going forward — NOT for
+// re-running the existing 2026-08-04 initial-schema migrations, which would
+// fail immediately (every constraint/index they create already exists live
+// under the same name).
+//
+// Deliberately no `seeds` config here at all: seeding live would DELETE and
+// reinsert PortalUsers/Vendor/etc. with a stale point-in-time snapshot,
+// wiping real changes made since. `knex seed:run --env kongsberg_live`
+// falls back to Knex's default top-level ./seeds/ directory, which has
+// nothing directly in it to run — a deliberate safety net, not just an
+// omission.
+let liveConfig = null;
+try {
+  const fs = require('fs');
+  liveConfig = JSON.parse(fs.readFileSync('./config.json', 'utf8')).sqlConfig;
+} catch {
+  // config.json is git-ignored and won't exist on every checkout (e.g. a
+  // fresh clone that's only set up .env for the test server) — the *_live
+  // environments just won't be defined below in that case, rather than
+  // breaking every other environment in this file.
+}
+
+function liveDbConfig(databaseName, dir) {
+  return {
+    client: 'mssql',
+    connection: {
+      user: liveConfig.user,
+      password: liveConfig.password,
+      server: liveConfig.server,
+      database: databaseName,
+      options: { encrypt: false, trustServerCertificate: true },
+    },
+    migrations: {
+      directory: `./migrations/${dir}`,
+      tableName: 'knex_migrations',
+    },
+  };
+}
+
 module.exports = {
   kongsberg: dbConfig('Kongsberg', 'kongsberg', true),
   production: dbConfig('Production', 'production', true),
   logistics: dbConfig('Logistics', 'logistics', true),
   production_archive: dbConfig('production_archive', 'production_archive', false),
+  ...(liveConfig
+    ? {
+        kongsberg_live: liveDbConfig('Kongsberg', 'kongsberg'),
+        production_live: liveDbConfig('Production', 'production'),
+        logistics_live: liveDbConfig('Logistics', 'logistics'),
+      }
+    : {}),
 };

@@ -82,3 +82,73 @@ replaces that ad-hoc convention going forward.
 
 Reference/lookup **data** (not schema) is seeded separately — see
 `../seeds/README.md`.
+
+## Using this against the live databases (before the new server exists)
+
+`kongsberg_live` / `logistics_live` / `production_live` in `knexfile.cjs`
+point at the actual live SQL Server 2005 box, using the exact same
+server/login the running app itself already connects with (`config.json`'s
+`sqlConfig`) — not a duplicate copy of that password in `.env`. They only
+exist if `config.json` is present (git-ignored, same as `.env`), so they
+silently don't appear on a checkout that hasn't set that up.
+
+**Do not just run `npm run migrate:kongsberg_live` straight away.** The
+existing `20260804120000_initial_schema.cjs` / `20260804160000_initial_schema.cjs`
+migrations were extracted *from* the live databases — every table, default,
+unique/check constraint, index, and FK they create already exists there
+under the same name. Running them for real would fail on the very first
+`ALTER TABLE ... ADD CONSTRAINT` (`There is already an object named
+'DF_...'`), since only the `CREATE TABLE` statements have an `IF NOT EXISTS`
+guard.
+
+Instead, **baseline** each live database first — tell Knex the initial
+migration is already applied, without ever executing its DDL, so future new
+migrations layer on top cleanly:
+
+```powershell
+# 1. Hide the initial migration from Knex by renaming its extension so the
+#    loader doesn't pick it up (repeat per db; filename differs for production).
+Rename-Item migrations\kongsberg\20260804120000_initial_schema.cjs `
+            migrations\kongsberg\20260804120000_initial_schema.cjs.bak
+
+# 2. With no migration files visible, this only creates the (empty)
+#    knex_migrations / knex_migrations_lock tracking tables -- no DDL
+#    touches any real table.
+npm run migrate:kongsberg_live
+
+# 3. Confirm the tracking table's real column names before hand-writing the
+#    INSERT (don't assume -- verify). Use the same user/password from
+#    config.json's sqlConfig.
+sqlcmd -S GATEWAYHO -U <user> -P <password> -d Kongsberg -Q "SELECT * FROM knex_migrations"
+
+# 4. Record the initial migration as already applied (batch 1), matching
+#    the exact filename Knex expects -- no DDL runs, this is a plain INSERT.
+sqlcmd -S GATEWAYHO -U <user> -P <password> -d Kongsberg -Q "INSERT INTO knex_migrations (name, batch, migration_time) VALUES ('20260804120000_initial_schema.cjs', 1, GETUTCDATE())"
+
+# 5. Put the migration file back.
+Rename-Item migrations\kongsberg\20260804120000_initial_schema.cjs.bak `
+            migrations\kongsberg\20260804120000_initial_schema.cjs
+
+# 6. Confirm: should show the initial migration as already run, nothing pending.
+npm run migrate:status:kongsberg_live
+```
+
+Repeat for `logistics_live` (same filename,
+`20260804120000_initial_schema.cjs`) and `production_live`
+(`20260804160000_initial_schema.cjs`).
+
+After baselining, real schema work against live is:
+
+```bash
+npx knex migrate:make <description> --env kongsberg_live --knexfile knexfile.cjs
+# edit the new file in migrations/kongsberg/, then:
+npm run migrate:kongsberg_live
+```
+
+**Never run `npm run seed:*` against a `_live` environment** — the
+`*_live` environments have no `seeds` config at all for exactly this reason;
+seeding would `DELETE` and reinsert `PortalUsers`/`Vendor`/etc. with a stale
+point-in-time snapshot, wiping real changes made since. `production_archive`
+has no `_live` counterpart either, since that database doesn't exist live —
+if it's ever wanted there, `CREATE DATABASE production_archive` first, then
+migrate normally (no baseline needed, nothing to collide with).
