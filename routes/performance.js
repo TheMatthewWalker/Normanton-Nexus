@@ -3509,41 +3509,58 @@ router.put('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MR
 // create-po route) — divided by 10 to recover the 1-based LineNumber
 // GoodsReceiptRequest expects.
 //
-// Quantity is the operator-confirmed ReceivedQty (see
-// sql/migrate_order_shipment_received_qty.sql), not OrderQty — SapServer's
-// BDC now writes this into MSEG-ERFMG(01), overriding the XFULL default
-// that would otherwise book the full outstanding PO quantity regardless of
-// what actually arrived (see GoodsReceiptHelper.BuildGoodsReceiptRequest's
-// comment). That specific override combination hasn't been captured as a
-// real BDC recording against this SAP system yet — treat any
-// short/over-quantity posting through this path as unverified until
-// confirmed live, which is exactly what the Mark Received "skip SAP"
-// checkbox exists to guard against during that testing.
+// Quantity is ALWAYS the operator-confirmed ReceivedQty (see
+// sql/migrate_order_shipment_received_qty.sql), sent explicitly on every
+// call — deliberately never left out to fall back on SapServer's XFULL
+// default (which would book whatever SAP itself currently thinks is still
+// outstanding on the PO). Per the user: ReceivedQty is what the operator is
+// physically confirming arrived, and that must win even if the PO's
+// quantity was changed directly in SAP after the fact with nothing syncing
+// that change back into Nexus's OrderQty — the portal's confirmation is the
+// authority on what was delivered, not whatever SAP's own PO figure
+// happens to say at posting time. No cap against OrderQty either way — an
+// over-delivery (ReceivedQty > OrderQty) is a legitimate, expected
+// confirmation, not an error condition; see markShipmentReceived's
+// validation in performancesql.js (only rejects negative/non-numeric).
+//
+// EXCEPT for exactly 0: GoodsReceiptHelper.BuildGoodsReceiptRequest on the
+// SapServer side only writes MSEG-ERFMG(01) `if (body.Quantity is > 0)` —
+// a Quantity of 0 is treated there identically to "not supplied," which
+// would silently fall back to XFULL and book the FULL outstanding PO
+// quantity, the exact opposite of what "0 confirmed received" means. So a
+// confirmed 0 is caught here and never sent to SAP at all — nothing arrived
+// for this line, so there's genuinely nothing to post (same as the no-PO
+// case below).
 async function postGoodsReceiptToSap(order, shipment, callerUserId) {
-  // noPo distinguishes this from an operator-requested skip (skipSap) —
-  // both end up SapGrSkipped=1 in the DB, but only this one also carries an
-  // error explaining why, and the frontend/summary-message code below
-  // checks noPo specifically so "no PO on file" is never shown as if the
+  // noPo/zeroQty distinguish this from an operator-requested skip (skipSap)
+  // — all three end up SapGrSkipped=1 in the DB, but only these two also
+  // carry an error explaining why, and the frontend/summary-message code
+  // below checks them specifically so neither is ever shown as if the
   // testing checkbox had been ticked (see the Inbound Log SAP GR column and
   // markInboundShipmentReceived's post-receive summary in logistics.js).
   if (!order.PoNumber || !order.PoItemNumber) {
     return { success: false, skipped: true, noPo: true, error: 'No SAP PO number on file for this order line — nothing to post.' };
   }
+  if (Number(order.ReceivedQty) <= 0) {
+    return { success: false, skipped: true, zeroQty: true, error: 'Confirmed received quantity is 0 — nothing to post.' };
+  }
   const lineNumber = Math.round(Number(order.PoItemNumber) / 10);
   const today = new Date().toISOString().slice(0, 10);
   try {
+    const body = {
+      PurchaseOrder:          order.PoNumber,
+      LineNumber:             lineNumber,
+      Reference:              shipment.ShipmentReference || '',
+      TrackingNumber:         shipment.TrackingNumber || '',
+      AddressCode:            '',
+      ShipmentCompletionDate: (shipment.ReceivedAtUtc ? new Date(shipment.ReceivedAtUtc) : new Date()).toISOString().slice(0, 10),
+      PostingDate:            today,
+      Quantity:               Number(order.ReceivedQty),
+    };
+
     const sapResp = await axios.post(
       `${sapConfig.url}/api/purchasing/post-goods-receipt`,
-      {
-        PurchaseOrder:          order.PoNumber,
-        LineNumber:             lineNumber,
-        Reference:              shipment.ShipmentReference || '',
-        TrackingNumber:         shipment.TrackingNumber || '',
-        AddressCode:            '',
-        ShipmentCompletionDate: (shipment.ReceivedAtUtc ? new Date(shipment.ReceivedAtUtc) : new Date()).toISOString().slice(0, 10),
-        PostingDate:            today,
-        Quantity:               Number(order.ReceivedQty),
-      },
+      body,
       { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(callerUserId)}` } }
     );
     const sapBody = sapResp.data;

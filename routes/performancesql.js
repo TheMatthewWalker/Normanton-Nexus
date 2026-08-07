@@ -1582,12 +1582,19 @@ export async function listOrderSuggestionsTracked() {
 // logistics.js), so only one of the pair is ever sent per save.
 // poItemNumber is COALESCE-optional too, deliberately NOT part of the
 // direct-set "full state" group PoNumber/Notes/SupplierReference belong to —
-// there's no UI field for it (nobody types a PO item number by hand), it's
-// only ever known/set by the create-po route right after SAP hands back a
-// real PO, so every other caller (manual order entry, the Tracked Orders
-// Save button) simply never mentions it and this leaves whatever's already
-// stored untouched rather than needing every call site updated to carry it
-// through explicitly.
+// it's usually only known/set by the create-po route right after SAP hands
+// back a real PO, so most callers (manual order entry) simply never mention
+// it and this leaves whatever's already stored untouched rather than
+// needing every call site updated to carry it through explicitly. The
+// Tracked Orders Save button DOES now carry an (optional, usually blank)
+// os-po-item-input value through — for a manually-raised PO with no
+// auto-filled item number, letting an operator type SAP's PO item in by
+// hand (see private/js/logistics.js's osSaveOneTracked) so that order line
+// becomes eligible for Mark Received's SAP goods-receipt posting
+// (postGoodsReceiptToSap in routes/performance.js requires both
+// PoNumber AND PoItemNumber). COALESCE means leaving it blank on every
+// other save (qty/status/etc.) never wipes a value that's already set,
+// whichever caller set it.
 export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, poItemNumber, notes, supplierReference, orderQty, deliveryDate, readyToCollectDate }) {
   const pool = await getPool();
   await pool.request()
