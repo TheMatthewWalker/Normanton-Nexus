@@ -417,7 +417,7 @@ async function drawLabelPage(doc, data, isA4) {
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
          .text(isComplete ? 'OPERATORS' : 'OPERATOR', xR, yR, { lineBreak: false });
       yR += 9;
-      doc.font('Helvetica').fontSize(8).fillColor('#111827')
+      doc.font('Helvetica').fontSize(22).fillColor('#111827')
          .text(opList, xR, yR, { width: colW, lineBreak: false });
       yR += 11;
 
@@ -425,7 +425,7 @@ async function drawLabelPage(doc, data, isA4) {
         doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
            .text('MACHINE', xR, yR, { lineBreak: false });
         yR += 9;
-        doc.font('Helvetica-Bold').fontSize(9).fillColor('#111827')
+        doc.font('Helvetica-Bold').fontSize(22).fillColor('#111827')
            .text(data.machine, xR, yR, { width: colW, lineBreak: false });
         yR += 12;
       }
@@ -433,7 +433,7 @@ async function drawLabelPage(doc, data, isA4) {
       doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
          .text(isComplete ? 'COMPLETED' : 'CREATED', xR, yR, { lineBreak: false });
       yR += 9;
-      doc.font('Helvetica').fontSize(8).fillColor('#111827')
+      doc.font('Helvetica').fontSize(22).fillColor('#111827')
          .text(fmtLabel(isComplete ? data.completedAt : data.createdAt), xR, yR, { width: colW, lineBreak: false });
       yR += 11;
 
