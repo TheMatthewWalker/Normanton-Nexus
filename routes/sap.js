@@ -546,6 +546,46 @@ router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async
 
 
 // ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/delete-tr  (mounted at /api/sap in server.js)
+//
+// Proxies to SapServer's POST /api/warehouse/delete-tr endpoint — replicates
+// wm_open_tr.xlsm's ati_code.delete_tr (transaction LB02) for TRs that were
+// processed manually outside the portal (e.g. via LT01) and are now orphaned,
+// plus the bulk delete step of the TR Cleanup Assistant. requirePermission
+// ('LOG_SUPER') gated, same as /warehouse/batch-cleanup-transfer and
+// /warehouse/stock-adjustment above — deleting a TR in SAP is unrecoverable,
+// unlike the routine unrestricted /warehouse/create-lt04 proxy.
+//
+// Body: { TrNumber } — matches SapServer's DeleteTrRequest.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/delete-tr', requirePermission('LOG_SUPER'), async (req, res) => {
+    const params = req.body;
+
+    try {
+        const response = await axios.post(
+            `${sapConfig.url}/api/warehouse/delete-tr`,
+            params,
+            { timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Delete TR ${params.TrNumber || ''} succeeded`), req);
+        res.json({ success: true, data: body.data });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Delete TR ${params.TrNumber || ''} failed`, message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
 // GET /api/sap/warehouse/stock  (mounted at /api/sap in server.js)
 //
 // Proxies to SapServer's GET /api/warehouse/stock endpoint (LQUA via
@@ -592,17 +632,20 @@ router.get('/warehouse/stock', async (req, res) => {
 // endpoint — lists open Transfer Requirements (LTBK/LTBP, auto-created from
 // a 131 goods movement) ready to be turned into a confirmed TO via LT04.
 // Backs the Transfer Requirements (LT04) tile in Stock Management. Optional
-// mrpController query param narrows the list, same as the source Excel
-// macro's operators already filter by. Unrestricted to any logged-in user,
-// same as /warehouse/stock and /warehouse/transfer-order above — this is
-// routine operator use, not a supervisor-only correction path.
+// mrpController/material/storageLocation/createdBy query params narrow the
+// list — mrpController matches the source Excel macro's operators' existing
+// filter; the other three extend search beyond what the macro offered, since
+// OpenTransferRequirementRow already carried that data without exposing it
+// as a filter. Unrestricted to any logged-in user, same as /warehouse/stock
+// and /warehouse/transfer-order above — this is routine operator use, not a
+// supervisor-only correction path.
 // ---------------------------------------------------------------------------
 router.get('/warehouse/open-transfer-requirements', async (req, res) => {
-    const { mrpController } = req.query;
+    const { mrpController, material, storageLocation, createdBy } = req.query;
 
     try {
         const response = await axios.get(`${sapConfig.url}/api/warehouse/open-transfer-requirements`, {
-            params: { mrpController },
+            params: { mrpController, material, storageLocation, createdBy },
             timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
         });
 
@@ -616,6 +659,79 @@ router.get('/warehouse/open-transfer-requirements', async (req, res) => {
         const status  = err.response?.status  ?? 500;
         const message = err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Open transfer requirements query failed', message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
+// GET /api/sap/warehouse/bin-storage-types  (mounted at /api/sap in server.js)
+//
+// Proxies to SapServer's GET /api/warehouse/bin-storage-types endpoint —
+// looks up which storage type(s) a scanned/typed bin is registered under in
+// LAGP, so the destination storage type never has to be typed by hand
+// anywhere a bin is entered (LT04 scan flow + modal, Stock Management
+// single/mass transfer forms, the Transfer Orders tile). Unrestricted to any
+// logged-in user, same as the other read-only warehouse lookups.
+//
+// Deliberately NOT audited, unlike every other GET route in this file — this
+// fires on blur/Enter from up to 7 different form fields across the app, far
+// more often than a deliberate "query" action, and would flood
+// PortalAuditLog with no investigative value. This is intentional, not an
+// oversight.
+// ---------------------------------------------------------------------------
+router.get('/warehouse/bin-storage-types', async (req, res) => {
+    const { bin } = req.query;
+
+    try {
+        const response = await axios.get(`${sapConfig.url}/api/warehouse/bin-storage-types`, {
+            params: { bin },
+            timeout: 15000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+        });
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        res.json({ success: true, data: body.data });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
+// GET /api/sap/warehouse/tr-cleanup-candidates  (mounted at /api/sap in server.js)
+//
+// Proxies to SapServer's GET /api/warehouse/tr-cleanup-candidates endpoint —
+// an automated version of the judgment call wm_open_tr.xlsm's operators have
+// always made by eyeballing the macro's raw batch-stock/current-bin columns.
+// Read-only, so unrestricted to any logged-in user same as
+// open-transfer-requirements above; only the resulting bulk delete (via
+// /warehouse/delete-tr below) is supervisor-gated.
+// ---------------------------------------------------------------------------
+router.get('/warehouse/tr-cleanup-candidates', async (req, res) => {
+    try {
+        const response = await axios.get(`${sapConfig.url}/api/warehouse/tr-cleanup-candidates`, {
+            timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+        });
+
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'TR cleanup candidates query'), req);
+        res.json({ success: true, data: body.data });
+
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'TR cleanup candidates query failed', message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
         res.status(status).json({ success: false, error: message });

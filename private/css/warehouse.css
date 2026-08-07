@@ -1671,3 +1671,30 @@ body::before {
 }
 .wsm-progress-summary--ok   { color: var(--success); }
 .wsm-progress-summary--warn { color: var(--error); }
+
+/* ── TR Cleanup Assistant ──────────────────────────────────────────────────
+   Opt-in checkbox cards grouped by reason (SLoc 1710 / zero stock / already
+   transferred) — same card idiom as .wsm-disc-card, but a flex-wrap grid of
+   compact selectable cards rather than three fixed dashboard tiles. */
+.tr-cleanup-group { margin-bottom: 20px; }
+.tr-cleanup-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.tr-cleanup-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 220px;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+}
+.tr-cleanup-card:hover { border-color: var(--accent); }
+.tr-cleanup-card input[type="checkbox"] { margin-top: 2px; }
+.tr-cleanup-card--multi { border-color: rgba(217,119,6,0.4); background: rgba(217,119,6,0.06); }

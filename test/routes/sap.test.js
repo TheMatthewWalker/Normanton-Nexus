@@ -125,6 +125,100 @@ describe('POST /warehouse/stock-adjustment', () => {
   });
 });
 
+describe('GET /warehouse/open-transfer-requirements', () => {
+  test('forwards material, storageLocation and createdBy alongside mrpController', async () => {
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
+
+    await request(app)
+      .get('/warehouse/open-transfer-requirements')
+      .query({ mrpController: '101', material: '30005R', storageLocation: '1710', createdBy: 'jsmith' });
+
+    const [, options] = axiosMock.get.mock.calls[0];
+    expect(options.params).toEqual({
+      mrpController: '101', material: '30005R', storageLocation: '1710', createdBy: 'jsmith',
+    });
+  });
+});
+
+describe('GET /warehouse/bin-storage-types', () => {
+  test('proxies the bin query param and returns SapServer\'s data', async () => {
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['SA'] } });
+
+    const res = await request(app).get('/warehouse/bin-storage-types').query({ bin: '123' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: ['SA'] });
+    const [, options] = axiosMock.get.mock.calls[0];
+    expect(options.params).toEqual({ bin: '123' });
+  });
+
+  // Deliberately not audited (unlike every other GET route in this file) —
+  // fires far too often (blur/Enter on up to 7 form fields) to be worth
+  // logging every call. This test locks in that intentional deviation.
+  test('does not write an audit entry, unlike the other warehouse GET proxies', async () => {
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['SA'] } });
+
+    await request(app).get('/warehouse/bin-storage-types').query({ bin: '123' });
+
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /warehouse/tr-cleanup-candidates', () => {
+  test('returns SapServer\'s candidate list and audits success', async () => {
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ trNumber: '4500001111', reasons: ['sloc_1710'] }] } });
+
+    const res = await request(app).get('/warehouse/tr-cleanup-candidates');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // the audit insert
+  });
+
+  test('audits failure and maps the SapServer error through', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 500, data: { error: 'SAP unavailable' } };
+    axiosMock.get.mockRejectedValueOnce(sapError);
+
+    const res = await request(app).get('/warehouse/tr-cleanup-candidates');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('SAP unavailable');
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // the audit insert
+  });
+});
+
+describe('POST /warehouse/delete-tr', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/warehouse/delete-tr').send({ TrNumber: '4500001234' });
+    expect(res.status).toBe(403);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('proxies the delete for a LOG_SUPER user and audits success', async () => {
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: { type: 'S', message: 'Transfer requirement deleted' } } });
+
+    const res = await request(appLogSuper).post('/warehouse/delete-tr').send({ TrNumber: '4500001234' });
+
+    expect(res.status).toBe(200);
+    const [, body] = axiosMock.post.mock.calls[0];
+    expect(body).toEqual({ TrNumber: '4500001234' });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // the audit insert
+  });
+
+  test('audits failure and maps the SapServer error through', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 422, data: { error: 'RFC call failed' } };
+    axiosMock.post.mockRejectedValueOnce(sapError);
+
+    const res = await request(appLogSuper).post('/warehouse/delete-tr').send({ TrNumber: '4500001234' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('RFC call failed');
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // the audit insert
+  });
+});
+
 describe('POST /lips', () => {
   test('rejects an empty/missing deliveries array', async () => {
     const res = await request(app).post('/lips').send({});

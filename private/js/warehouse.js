@@ -349,7 +349,8 @@ function wsmSingleTransferHtml(row) {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">${isNegative ? 'Type' : 'Dest. Bin Type'} <span class="tf-req">*</span></label>
-          <input class="tf-input" id="wsm-desttype" type="text" placeholder="e.g. 001" required>
+          <input class="tf-input" id="wsm-desttype" type="text" placeholder="Auto from bin" required>
+          <div id="wsm-destchoice"></div>
         </div>
         <div class="tf-field">
           <label class="tf-label">${isNegative ? 'Bin' : 'Dest. Bin'} <span class="tf-req">*</span></label>
@@ -371,6 +372,11 @@ function wsmPrefillItem(label, value) {
 function wsmWireSingleTransfer(row) {
   const form = document.getElementById('wsm-single-form');
   if (!form) return;
+
+  wireBinTypeAutoLookup(document.getElementById('wsm-destbin'), document.getElementById('wsm-desttype'), {
+    choiceEl: document.getElementById('wsm-destchoice'),
+  });
+
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const submitBtn = document.getElementById('wsm-single-submit');
@@ -441,7 +447,8 @@ function wsmMassTransferHtml(rows) {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
-          <input class="tf-input" id="wsm-mass-shared-type" type="text" placeholder="e.g. 001">
+          <input class="tf-input" id="wsm-mass-shared-type" type="text" placeholder="Auto from bin">
+          <div id="wsm-mass-shared-choice"></div>
         </div>
         <div class="tf-field">
           <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
@@ -534,6 +541,17 @@ function wsmWireMassTransfer(rows) {
   }
   modeRadios.forEach(r => r.addEventListener('change', applyMode));
   applyMode();
+
+  wireBinTypeAutoLookup(document.getElementById('wsm-mass-shared-bin'), document.getElementById('wsm-mass-shared-type'), {
+    choiceEl: document.getElementById('wsm-mass-shared-choice'),
+  });
+  rows.forEach(row => {
+    const id = wsmRowId(row);
+    wireBinTypeAutoLookup(
+      document.querySelector(`.wsm-mass-destbin[data-id="${CSS.escape(id)}"]`),
+      document.querySelector(`.wsm-mass-desttype[data-id="${CSS.escape(id)}"]`)
+    ); // no choice container in the compact per-row cell — a 2+-match row just stays editable with no auto-fill
+  });
 
   document.getElementById('wsm-mass-submit').addEventListener('click', async () => {
     const mode       = document.querySelector('input[name="wsm-mass-mode"]:checked').value;
@@ -1785,7 +1803,8 @@ function showTransferForm() {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Bin Type <span class="tf-req">*</span></label>
-          <input class="tf-input" id="tf-bintype" type="text" placeholder="e.g. 001" required>
+          <input class="tf-input" id="tf-bintype" type="text" placeholder="Auto from bin" required>
+          <div id="tf-bintype-choice"></div>
         </div>
         <div class="tf-field">
           <label class="tf-label">Bin <span class="tf-req">*</span></label>
@@ -1797,7 +1816,8 @@ function showTransferForm() {
       <div class="tf-row">
         <div class="tf-field">
           <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
-          <input class="tf-input" id="tf-destbintype" type="text" placeholder="e.g. 001" required>
+          <input class="tf-input" id="tf-destbintype" type="text" placeholder="Auto from bin" required>
+          <div id="tf-destbintype-choice"></div>
         </div>
         <div class="tf-field">
           <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
@@ -1826,6 +1846,13 @@ function showTransferForm() {
         <button type="submit" class="btn-submit" id="tf-submit">Create Transfer Order</button>
       </div>
     </form>`;
+
+  wireBinTypeAutoLookup(document.getElementById('tf-bin'), document.getElementById('tf-bintype'), {
+    choiceEl: document.getElementById('tf-bintype-choice'),
+  });
+  wireBinTypeAutoLookup(document.getElementById('tf-destbin'), document.getElementById('tf-destbintype'), {
+    choiceEl: document.getElementById('tf-destbintype-choice'),
+  });
 }
 
 async function submitTransferForm(e) {
@@ -1949,98 +1976,552 @@ async function runStockTransfer(params) {
 
 
 
+// ── Bin → storage type auto-lookup (shared) ───────────────────────────────────
+//
+// Given a bin, looks up its storage type(s) in LAGP via SapServer so the
+// operator never has to type a storage type by hand next to a bin they've
+// already scanned/typed — wired into every "Bin Type"/"Bin" field pair in
+// this module: the LT04 modal and scan flow below, the Stock Management
+// single/mass transfer forms, and the standalone Transfer Orders tile.
+// Backed by GET /api/sap/warehouse/bin-storage-types (SapServer's LAGP
+// lookup by LGPLA only, no storage-type filter — usually exactly one hit).
+async function fetchBinStorageTypes(bin) {
+  const res  = await fetch(`/api/sap/warehouse/bin-storage-types?bin=${encodeURIComponent(bin)}`);
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'SAP call failed');
+  return json.data || [];
+}
+
+// wireBinTypeAutoLookup(binInputEl, typeInputEl, { choiceEl, onResolved })
+// Fires on blur + Enter (not every keystroke, to avoid one RFC call per
+// character typed). 1 match -> autofill + lock (readonly) typeInputEl.
+// 2+ matches -> render a radio choice into opts.choiceEl; selecting one
+// locks the field the same way. 0 matches (or a failed lookup) -> leave
+// typeInputEl exactly as a normal editable input, so manual entry always
+// still works.
+function wireBinTypeAutoLookup(binInputEl, typeInputEl, opts = {}) {
+  const { choiceEl, onResolved } = opts;
+  if (!binInputEl || !typeInputEl) return;
+
+  async function run() {
+    const bin = binInputEl.value.trim();
+    typeInputEl.readOnly = false;
+    if (choiceEl) choiceEl.innerHTML = '';
+    if (!bin) return;
+
+    let types;
+    try { types = await fetchBinStorageTypes(bin); }
+    catch (_) { return; } // fail silent -> manual fallback, same as 0 matches
+
+    if (types.length === 1) {
+      typeInputEl.value = types[0];
+      typeInputEl.readOnly = true;
+      onResolved?.(types[0]);
+    } else if (types.length > 1 && choiceEl) {
+      choiceEl.innerHTML = `<div class="tf-locked">Choose storage type</div>` +
+        types.map(t => `<label><input type="radio" name="bintype-${esc(binInputEl.id)}" value="${esc(t)}"> ${esc(t)}</label>`).join(' ');
+      choiceEl.querySelectorAll('input[type=radio]').forEach(r => r.addEventListener('change', () => {
+        typeInputEl.value = r.value;
+        typeInputEl.readOnly = true;
+        onResolved?.(r.value);
+      }));
+    }
+  }
+
+  binInputEl.addEventListener('blur', run);
+  binInputEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); run(); } });
+}
+
+
 // ── Transfer Requirements (LT04) ──────────────────────────────────────────────
 //
 // Lists open TRs (auto-created from a 131 goods movement when production
-// posts stock) and lets the operator turn one into a confirmed TO via LT04 —
-// replacing the manual LT04 entry they do today. Row click opens a modal to
-// enter the destination storage type/bin (no automatic bin determination,
-// matching how this warehouse has always run LT04 — see the Copilot
-// transcript this feature was built from); quantity is prefilled from the
-// TR's open quantity but editable. See SapServer's WarehouseHelpers.
-// BuildCreateLt04Request for the exact screen recording this replicates,
-// including the quality-block (LQUA BESTQ='Q') pre-check.
+// posts stock) and lets the operator turn one into a confirmed TO via LT04.
+// Three ways in: scan TR then scan bin for continuous fast processing (the
+// destination storage type is derived automatically from the bin via
+// wireBinTypeAutoLookup/fetchBinStorageTypes above — no manual entry, no
+// automatic bin CHOICE beyond what LAGP resolves to); click a row to open
+// the same modal this always had, now with storage type auto-derived too;
+// or check 2+ rows for a bulk LT04 to one shared bin or a bin per row.
+// Quantity is always prefilled from the TR's open quantity but editable.
+// Batch (LTBP-CHARG) is never operator-entered anywhere in this flow — a TR
+// is one-to-one with a batch, so it's simply read off the row. See
+// SapServer's WarehouseHelpers.BuildCreateLt04Request for the exact screen
+// recording LT04 replicates, including the quality-block (LQUA BESTQ='Q')
+// pre-check, and BuildDeleteTrRequest for the LB02 delete this tile also
+// exposes (LOG_SUPER-gated — see trReqDelete).
 let trReqRows = [];
+let trReqSelected = new Set(); // Set<trNumber> — TR number alone is unique, no composite id needed
+let trReqScan = { row: null }; // survives across bin-scan attempts for the current TR
 
 async function runTransferRequirements() {
   if (!await checkSession()) return;
   if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
+  trReqSelected = new Set();
   showResultPanel('Transfer Requirements (LT04)', 'Open TRs from production goods movements (LTBK/LTBP)');
   await trReqLoad();
 }
 
-async function trReqLoad(mrpController) {
+function trReqReadFilters() {
+  return {
+    mrpController:   document.getElementById('tr-req-mrp-filter')?.value || '',
+    material:        document.getElementById('tr-req-material-filter')?.value.trim() || '',
+    storageLocation: document.getElementById('tr-req-sloc-filter')?.value.trim() || '',
+    createdBy:       document.getElementById('tr-req-createdby-filter')?.value.trim() || '',
+  };
+}
+
+async function trReqFetchRows(filters = {}) {
+  const qs = new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([, v]) => v))).toString();
+  const res  = await fetch(`/api/sap/warehouse/open-transfer-requirements${qs ? `?${qs}` : ''}`);
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'SAP call failed');
+  return json.data || [];
+}
+
+async function trReqLoad(filters = {}) {
   document.getElementById('result-body').innerHTML =
     '<div class="sap-loading"><div class="spinner"></div>Loading open transfer requirements…</div>';
   try {
-    const qs = mrpController ? `?mrpController=${encodeURIComponent(mrpController)}` : '';
-    const res  = await fetch(`/api/sap/warehouse/open-transfer-requirements${qs}`);
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'SAP call failed');
-    trReqRows = json.data || [];
-    trReqRender(mrpController || '');
+    trReqRows = await trReqFetchRows(filters);
+    trReqRender(filters);
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
   }
 }
 
-function trReqRender(mrpFilter) {
+function trReqRender(filters = {}) {
+  // Drop selections for TRs that no longer appear (converted/deleted since last render).
+  trReqSelected = new Set([...trReqSelected].filter(tr => trReqRows.some(r => r.trNumber === tr)));
+
   const controllers = [...new Set(trReqRows.map(r => r.mrpController).filter(Boolean))].sort();
+  const canDelete = sessionPermissions.includes('LOG_SUPER');
+  const allChecked = trReqRows.length > 0 && trReqRows.every(r => trReqSelected.has(r.trNumber));
 
   const rows = trReqRows.map((r, i) => `
-    <tr class="admin-row tr-req-row" data-idx="${i}" style="cursor:pointer">
+    <tr class="admin-row tr-req-row" data-idx="${i}" data-tr="${esc(r.trNumber)}" style="cursor:pointer">
+      <td class="wsm-td-check"><input type="checkbox" class="tr-req-row-check" data-tr="${esc(r.trNumber)}"${trReqSelected.has(r.trNumber) ? ' checked' : ''}></td>
       <td><strong>${esc(r.trNumber)}</strong></td>
       <td>${esc(r.material)}</td>
       <td>${esc(r.storageLocation)}</td>
       <td style="text-align:right">${Number(r.quantity).toLocaleString()} ${esc(r.uom)}</td>
+      <td>${esc(r.batch || '—')}</td>
       <td>${esc(r.mrpController || '—')}</td>
       <td>${esc(r.documentText || '—')}</td>
       <td>${esc(r.materialDocument || '—')}</td>
       <td>${esc(r.createdBy || '—')}</td>
       <td>${esc(r.createdDate || '')} ${esc(r.createdTime || '')}</td>
+      ${canDelete ? `<td><button type="button" class="btn-secondary tr-req-delete-btn" data-tr="${esc(r.trNumber)}" title="Delete TR">🗑️</button></td>` : ''}
     </tr>`).join('');
 
   document.getElementById('result-hint').textContent =
     `LTBK/LTBP · WH 312 · ${trReqRows.length} open TR${trReqRows.length === 1 ? '' : 's'}`;
 
   document.getElementById('result-body').innerHTML = `
-    <div class="tf-actions" style="margin-bottom:12px;justify-content:flex-start;gap:10px">
-      <label class="tf-label" style="margin:0">MRP Controller</label>
-      <select class="tf-input" id="tr-req-mrp-filter" style="max-width:220px">
-        <option value="">All</option>
-        ${controllers.map(c => `<option value="${esc(c)}" ${c === mrpFilter ? 'selected' : ''}>${esc(c)}</option>`).join('')}
-      </select>
-      <button type="button" class="btn-secondary" id="tr-req-refresh">Refresh</button>
-    </div>
-    ${trReqRows.length ? `
-      <div style="overflow-x:auto">
-        <table class="pn-batch-table admin-table">
-          <thead><tr>
-            <th>TR</th><th>Material</th><th>SLoc</th><th>Qty</th><th>MRP Ctrl</th>
-            <th>Doc Text</th><th>Material Doc</th><th>Created By</th><th>Created</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+    <div class="wsm-layout">
+      <div class="wsm-list-panel">
+        ${trReqScanSectionHtml()}
+        <div class="tf-actions" style="margin-bottom:12px;justify-content:flex-start;gap:10px;flex-wrap:wrap">
+          <div class="wsm-filter-field"><label class="tf-label">MRP Controller</label>
+            <select class="tf-input" id="tr-req-mrp-filter" style="max-width:160px">
+              <option value="">All</option>
+              ${controllers.map(c => `<option value="${esc(c)}" ${c === filters.mrpController ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+            </select></div>
+          <div class="wsm-filter-field"><label class="tf-label">Material</label>
+            <input class="tf-input" id="tr-req-material-filter" type="text" value="${esc(filters.material || '')}" style="max-width:160px"></div>
+          <div class="wsm-filter-field"><label class="tf-label">Storage Loc.</label>
+            <input class="tf-input" id="tr-req-sloc-filter" type="text" value="${esc(filters.storageLocation || '')}" style="max-width:110px"></div>
+          <div class="wsm-filter-field"><label class="tf-label">Created By</label>
+            <input class="tf-input" id="tr-req-createdby-filter" type="text" value="${esc(filters.createdBy || '')}" style="max-width:110px"></div>
+          <button type="button" class="btn-submit" id="tr-req-search-btn">Search</button>
+          <button type="button" class="btn-secondary" id="tr-req-refresh">Refresh</button>
+          <button type="button" class="btn-secondary" id="tr-req-cleanup-btn" style="margin-left:auto">Cleanup Assistant</button>
+        </div>
+        ${trReqRows.length ? `
+          <div style="overflow-x:auto">
+            <table class="pn-batch-table admin-table">
+              <thead><tr>
+                <th class="wsm-td-check"><input type="checkbox" id="tr-req-select-all"${allChecked ? ' checked' : ''}></th>
+                <th>TR</th><th>Material</th><th>SLoc</th><th>Qty</th><th>Batch</th><th>MRP Ctrl</th>
+                <th>Doc Text</th><th>Material Doc</th><th>Created By</th><th>Created</th>${canDelete ? '<th></th>' : ''}
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          <div class="toolbar-hint" style="margin-top:8px">Click a row to confirm it via LT04, or check rows for a bulk action.</div>
+        ` : '<div class="sap-empty">No open transfer requirements match this search.</div>'}
       </div>
-      <div class="toolbar-hint" style="margin-top:8px">Click a row to confirm it via LT04.</div>
-    ` : '<div class="sap-empty">No open transfer requirements right now.</div>'}
+      <div class="wsm-transfer-panel" id="tr-req-bulk-panel"></div>
+    </div>
   `;
 
-  document.getElementById('tr-req-refresh').addEventListener('click', () => {
-    const mrp = document.getElementById('tr-req-mrp-filter').value;
-    trReqLoad(mrp);
+  trReqWireScanSection();
+
+  document.getElementById('tr-req-search-btn').addEventListener('click', () => trReqLoad(trReqReadFilters()));
+  document.getElementById('tr-req-refresh').addEventListener('click', () => trReqLoad(trReqReadFilters()));
+  document.getElementById('tr-req-cleanup-btn').addEventListener('click', () => runTrCleanupAssistant());
+  ['tr-req-material-filter', 'tr-req-sloc-filter', 'tr-req-createdby-filter'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); trReqLoad(trReqReadFilters()); } });
   });
-  document.getElementById('tr-req-mrp-filter').addEventListener('change', (e) => trReqLoad(e.target.value));
+  document.getElementById('tr-req-mrp-filter').addEventListener('change', () => trReqLoad(trReqReadFilters()));
+
+  const selectAll = document.getElementById('tr-req-select-all');
+  if (selectAll) selectAll.addEventListener('change', e => {
+    if (e.target.checked) trReqRows.forEach(r => trReqSelected.add(r.trNumber));
+    else trReqSelected.clear();
+    trReqRender(filters);
+  });
+
+  document.querySelectorAll('.tr-req-row-check').forEach(cb => {
+    cb.addEventListener('change', e => {
+      e.stopPropagation();
+      if (cb.checked) trReqSelected.add(cb.dataset.tr); else trReqSelected.delete(cb.dataset.tr);
+      trReqRender(filters);
+    });
+  });
+
+  document.querySelectorAll('.tr-req-delete-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const row = trReqRows.find(r => r.trNumber === btn.dataset.tr);
+      if (row) trReqDelete(row, filters);
+    });
+  });
 
   document.querySelectorAll('.tr-req-row').forEach(tr => {
-    tr.addEventListener('click', () => {
+    tr.addEventListener('click', e => {
+      if (e.target.closest('.wsm-td-check') || e.target.closest('.tr-req-delete-btn')) return;
       const row = trReqRows[Number(tr.dataset.idx)];
-      if (row) trReqOpenModal(row);
+      if (row) trReqOpenModal(row, filters);
     });
+  });
+
+  trReqRenderBulkPanel(filters);
+}
+
+// ── Bulk multi-select → LT04 (shared or per-row destination bin) ─────────────
+//
+// Mirrors the Stock Management mass-transfer panel (wsmMassTransferHtml/
+// wsmWireMassTransfer) structurally — same shared-vs-per-row radio toggle,
+// same sequential per-row POST loop with a progress banner — but posts to
+// create-lt04 (not transfer-order), since these are TRs, and never needs a
+// Pallet/Batch field since each row already carries its own batch. Kept as
+// a deliberate duplicate of the wsm pattern rather than a shared abstraction
+// — the field sets differ enough (this needs Batch off the row + a
+// destination only; wsm needs a full source/destination/quantity/stock-flags
+// set) that forcing a shared helper for two call sites adds indirection for
+// no real gain, same as showTransferForm/wsmSingleTransferHtml already
+// coexisting as separate, similar-but-distinct forms in this file.
+function trReqRenderBulkPanel(filters) {
+  const panel = document.getElementById('tr-req-bulk-panel');
+  if (!panel) return;
+  const rows = trReqRows.filter(r => trReqSelected.has(r.trNumber));
+
+  if (!rows.length) {
+    panel.innerHTML = `<div class="wsm-panel-empty">Select one or more rows to process a bulk LT04, or click a single row to confirm it directly.</div>`;
+    return;
+  }
+  if (rows.length === 1) {
+    panel.innerHTML = `<div class="wsm-panel-empty">Click TR ${esc(rows[0].trNumber)}'s row to confirm it via LT04, or check more rows for a bulk action.</div>`;
+    return;
+  }
+
+  panel.innerHTML = trReqMassHtml(rows);
+  trReqWireMass(rows, filters);
+}
+
+function trReqMassHtml(rows) {
+  const rowsHtml = rows.map(row => `
+    <tr data-tr="${esc(row.trNumber)}">
+      <td>${esc(row.trNumber)}<br><span class="wsm-mono">${esc(row.material)}</span></td>
+      <td class="wsm-mono">${esc(row.batch || '—')}</td>
+      <td><input class="tf-input tr-mass-qty" type="number" step="any" value="${esc(row.quantity)}" data-tr="${esc(row.trNumber)}"></td>
+      <td class="wsm-mass-dest-cell" data-tr="${esc(row.trNumber)}">
+        <input class="tf-input tr-mass-desttype" type="text" placeholder="Type" data-tr="${esc(row.trNumber)}">
+        <input class="tf-input tr-mass-destbin"  type="text" placeholder="Bin"  data-tr="${esc(row.trNumber)}">
+      </td>
+      <td class="wsm-mass-result" id="tr-mass-result-${esc(row.trNumber)}"></td>
+    </tr>`).join('');
+
+  return `
+    <div class="wsm-panel-title">Bulk LT04</div>
+    <div class="wsm-panel-sub">${rows.length} TRs selected</div>
+
+    <div class="wsm-mass-mode">
+      <label><input type="radio" name="tr-mass-mode" value="shared" checked> Shared destination</label>
+      <label><input type="radio" name="tr-mass-mode" value="perrow"> Per-row destination</label>
+    </div>
+
+    <div class="wsm-mass-shared" id="tr-mass-shared">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin Type</label>
+          <input class="tf-input" id="tr-mass-shared-type" type="text" placeholder="Auto from bin">
+          <div id="tr-mass-shared-choice"></div>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
+          <input class="tf-input" id="tr-mass-shared-bin" type="text" placeholder="e.g. B-02-03">
+        </div>
+      </div>
+    </div>
+
+    <div class="wsm-mass-table-wrap">
+      <table class="wsm-mass-table">
+        <thead><tr><th>TR / Material</th><th>Batch</th><th>Qty</th><th>Destination</th><th></th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+
+    <div class="tf-actions">
+      <div id="tr-mass-summary"></div>
+      <button type="button" class="btn-submit" id="tr-mass-submit">Confirm ${rows.length} via LT04</button>
+    </div>`;
+}
+
+function trReqWireMass(rows, filters) {
+  const modeRadios   = document.querySelectorAll('input[name="tr-mass-mode"]');
+  const sharedFields  = document.getElementById('tr-mass-shared');
+  const destCells     = document.querySelectorAll('.wsm-mass-dest-cell');
+
+  function applyMode() {
+    const mode = document.querySelector('input[name="tr-mass-mode"]:checked').value;
+    sharedFields.style.display = mode === 'shared' ? '' : 'none';
+    destCells.forEach(td => { td.style.display = mode === 'perrow' ? '' : 'none'; });
+  }
+  modeRadios.forEach(r => r.addEventListener('change', applyMode));
+  applyMode();
+
+  wireBinTypeAutoLookup(document.getElementById('tr-mass-shared-bin'), document.getElementById('tr-mass-shared-type'), {
+    choiceEl: document.getElementById('tr-mass-shared-choice'),
+  });
+  rows.forEach(row => {
+    wireBinTypeAutoLookup(
+      document.querySelector(`.tr-mass-destbin[data-tr="${CSS.escape(row.trNumber)}"]`),
+      document.querySelector(`.tr-mass-desttype[data-tr="${CSS.escape(row.trNumber)}"]`)
+    ); // no choice container in the compact per-row cell — a 2+-match row just stays editable with no auto-fill
+  });
+
+  document.getElementById('tr-mass-submit').addEventListener('click', async () => {
+    const mode      = document.querySelector('input[name="tr-mass-mode"]:checked').value;
+    const submitBtn = document.getElementById('tr-mass-submit');
+    const summaryEl = document.getElementById('tr-mass-summary');
+    submitBtn.disabled = true;
+    summaryEl.innerHTML = '';
+
+    let sharedType = '', sharedBin = '';
+    if (mode === 'shared') {
+      sharedType = document.getElementById('tr-mass-shared-type').value.trim();
+      sharedBin  = document.getElementById('tr-mass-shared-bin').value.trim();
+      if (!sharedType || !sharedBin) {
+        summaryEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Destination bin is required (storage type is derived automatically once resolved).</div>`;
+        submitBtn.disabled = false;
+        return;
+      }
+    }
+
+    let okCount = 0, failCount = 0;
+    const failMessages = [];
+    const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Confirming via LT04');
+    let done = 0;
+
+    for (const row of rows) {
+      const tr         = row.trNumber;
+      const qtyInput   = document.querySelector(`.tr-mass-qty[data-tr="${CSS.escape(tr)}"]`);
+      const resultCell = document.getElementById(`tr-mass-result-${tr}`);
+      const quantity   = parseFloat((qtyInput?.value || '').replace(',', '.'));
+
+      let destType = sharedType, destBin = sharedBin;
+      if (mode === 'perrow') {
+        destType = document.querySelector(`.tr-mass-desttype[data-tr="${CSS.escape(tr)}"]`)?.value.trim() || '';
+        destBin  = document.querySelector(`.tr-mass-destbin[data-tr="${CSS.escape(tr)}"]`)?.value.trim()  || '';
+      }
+
+      if (!quantity || quantity <= 0 || !destType || !destBin) {
+        failCount++;
+        failMessages.push('Missing qty/destination');
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing qty/destination</span>`;
+        progress.update(++done);
+        continue;
+      }
+
+      try {
+        const res = await fetch('/api/sap/warehouse/create-lt04', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            TrNumber: tr, Material: row.material, Quantity: quantity,
+            DestinationType: destType, DestinationBin: destBin, PalletOrBatch: row.batch,
+          }),
+        });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error || 'SAP call failed');
+        okCount++;
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(json.data?.message || 'Done')}</span>`;
+      } catch (err) {
+        failCount++;
+        failMessages.push(err.message);
+        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(err.message)}</span>`;
+      }
+      progress.update(++done);
+    }
+
+    progress.finish(okCount, failCount, failMessages);
+    if (okCount) {
+      submitBtn.textContent = 'Done — reselect rows to run again';
+      // Silent refresh only — deliberately does NOT re-render the panel, so
+      // the just-shown progress banner/breakdown stays visible, same
+      // convention wsmRefreshAfterTransfer follows for the Stock Management
+      // mass-transfer panel.
+      try { trReqRows = await trReqFetchRows(filters); } catch (_) {}
+    } else {
+      submitBtn.disabled = false;
+      submitBtn.textContent = `Confirm ${rows.length} via LT04`;
+    }
   });
 }
 
-function trReqOpenModal(row) {
+// ── Scan-first LT04 (scan TR, scan bin, done) ─────────────────────────────────
+//
+// Just the two steps the user asked for — no Pallet/Batch step, since a TR's
+// batch (LTBP-CHARG) is already known once the TR resolves. Once the bin
+// scan resolves to exactly one storage type, LT04 fires immediately with no
+// confirm click, so a stack of drums can be processed back-to-back.
+function trReqScanSectionHtml() {
+  return `
+    <div class="wsm-panel-title" style="margin-bottom:8px">Scan to Process</div>
+    <div class="tf-row">
+      <div class="tf-field">
+        <label class="tf-label">Scan TR</label>
+        <input class="tf-input" id="tr-req-scan-tr" type="text" placeholder="Scan or type TR number" autocomplete="off">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Scan Bin</label>
+        <input class="tf-input" id="tr-req-scan-bin" type="text" placeholder="Scan destination bin" autocomplete="off" disabled>
+      </div>
+    </div>
+    <div id="tr-req-scan-status"></div>
+    <div id="tr-req-scan-type-area"></div>`;
+}
+
+function trReqWireScanSection() {
+  const trInput  = document.getElementById('tr-req-scan-tr');
+  const binInput = document.getElementById('tr-req-scan-bin');
+  const statusEl = document.getElementById('tr-req-scan-status');
+  if (!trInput) return;
+  trInput.focus();
+
+  trInput.addEventListener('keydown', async e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const tr = trInput.value.trim();
+    if (!tr) return;
+
+    let row = trReqRows.find(r => r.trNumber === tr);
+    if (!row) {
+      // Not found in the already-loaded list — it may just be stale.
+      // Silently refresh trReqRows (no full re-render, so the scan inputs
+      // the operator is mid-interaction with stay attached to the DOM) and
+      // retry once before giving up.
+      statusEl.innerHTML = `<div class="sap-loading"><div class="spinner"></div>Checking…</div>`;
+      try { trReqRows = await trReqFetchRows(trReqReadFilters()); } catch (_) {}
+      row = trReqRows.find(r => r.trNumber === tr);
+    }
+
+    if (!row) {
+      statusEl.innerHTML = `<div class="sap-error tf-inline-error">✕ TR ${esc(tr)} not found in the open list.</div>`;
+      trInput.value = '';
+      trInput.focus();
+      return;
+    }
+
+    trReqScan.row = row;
+    statusEl.innerHTML = `<div class="tf-success">
+      <div><div class="tf-success-title">TR ${esc(row.trNumber)}</div>
+      <div class="tf-success-to">${esc(row.material)} · ${Number(row.quantity).toLocaleString()} ${esc(row.uom)} · Batch ${esc(row.batch || '—')}</div></div>
+    </div>`;
+    binInput.disabled = false;
+    binInput.value = '';
+    binInput.focus();
+  });
+
+  binInput.addEventListener('keydown', async e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    await trReqScanResolveBin();
+  });
+}
+
+async function trReqScanResolveBin() {
+  const binInput = document.getElementById('tr-req-scan-bin');
+  const typeArea = document.getElementById('tr-req-scan-type-area');
+  const bin = binInput.value.trim();
+  if (!bin || !trReqScan.row) return;
+
+  typeArea.innerHTML = '';
+  let types;
+  try { types = await fetchBinStorageTypes(bin); }
+  catch (err) { typeArea.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`; return; }
+
+  if (types.length === 1) {
+    await trReqScanSubmit(types[0], bin);
+  } else if (types.length > 1) {
+    typeArea.innerHTML = `<div class="tf-locked">Choose storage type for ${esc(bin)}</div>` +
+      types.map(t => `<label><input type="radio" name="tr-req-scan-type" value="${esc(t)}"> ${esc(t)}</label>`).join(' ');
+    typeArea.querySelectorAll('input[type=radio]').forEach(r =>
+      r.addEventListener('change', () => trReqScanSubmit(r.value, bin)));
+  } else {
+    typeArea.innerHTML = `
+      <div class="sap-error tf-inline-error">No storage type found for bin ${esc(bin)} — enter it manually.</div>
+      <div class="tf-row">
+        <input class="tf-input" id="tr-req-scan-manual-type" type="text" placeholder="Storage type">
+        <button type="button" class="btn-submit" id="tr-req-scan-manual-go">Confirm</button>
+      </div>`;
+    const go = () => trReqScanSubmit(document.getElementById('tr-req-scan-manual-type').value.trim(), bin);
+    document.getElementById('tr-req-scan-manual-go').addEventListener('click', go);
+    document.getElementById('tr-req-scan-manual-type').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  }
+}
+
+async function trReqScanSubmit(destType, destBin) {
+  const row = trReqScan.row;
+  const statusEl = document.getElementById('tr-req-scan-status');
+  if (!row || !destType) return;
+
+  statusEl.innerHTML = `<div class="sap-loading"><div class="spinner"></div>Sending to SAP…</div>`;
+  try {
+    const res = await fetch('/api/sap/warehouse/create-lt04', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        TrNumber: row.trNumber, Material: row.material, Quantity: row.quantity,
+        DestinationType: destType, DestinationBin: destBin, PalletOrBatch: row.batch,
+      }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+
+    statusEl.innerHTML = `<div class="tf-success">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+      <div><div class="tf-success-title">TR ${esc(row.trNumber)} Confirmed</div><div class="tf-success-to">${esc(json.data?.message || '')}</div></div>
+    </div>`;
+    document.getElementById('tr-req-scan-type-area').innerHTML = '';
+
+    // Give the operator a moment to see the confirmation, then reset for the
+    // next drum — same delay convention the row-click modal flow uses below.
+    setTimeout(() => {
+      trReqScan.row = null;
+      trReqLoad(trReqReadFilters());
+    }, 1200);
+
+  } catch (err) {
+    // Deliberately does NOT reset here — the TR stays scanned and the bin
+    // stays in the field so the operator can fix a bad bin and retry
+    // without rescanning the TR from scratch.
+    statusEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function trReqOpenModal(row, filters = {}) {
+  const canDelete = sessionPermissions.includes('LOG_SUPER');
   const overlay = document.getElementById('ps-modal-overlay');
   overlay.classList.remove('hidden');
   overlay.innerHTML = `<div class="ps-modal" style="max-width:520px;width:92vw">
@@ -2050,8 +2531,8 @@ function trReqOpenModal(row) {
     </div>
     <div class="ps-modal-body">
       <div class="tf-row">
-        <div class="tf-field"><label class="tf-label">Material</label><div>${esc(row.material)}</div></div>
-        <div class="tf-field"><label class="tf-label">Storage Location</label><div>${esc(row.storageLocation)}</div></div>
+        <div class="tf-field"><label class="tf-label">Material</label><div class="tf-prefill-value">${esc(row.material)}</div></div>
+        <div class="tf-field"><label class="tf-label">Storage Location</label><div class="tf-prefill-value">${esc(row.storageLocation)}</div></div>
       </div>
       <div class="tf-row">
         <div class="tf-field">
@@ -2059,15 +2540,16 @@ function trReqOpenModal(row) {
           <input class="tf-input" id="tr-req-qty" type="number" step="any" min="0.001" value="${row.quantity}">
         </div>
         <div class="tf-field">
-          <label class="tf-label">Pallet / Batch No. <span class="tf-req">*</span></label>
-          <input class="tf-input" id="tr-req-pnr" type="text" placeholder="Pallet or batch number" required>
+          <label class="tf-label">Pallet / Batch No.</label>
+          <div class="tf-prefill-value">${esc(row.batch || '—')}</div>
         </div>
       </div>
       <div class="tf-section-label">Destination Bin</div>
       <div class="tf-row">
         <div class="tf-field">
-          <label class="tf-label">Storage Type <span class="tf-req">*</span></label>
-          <input class="tf-input" id="tr-req-desttype" type="text" placeholder="e.g. 001" required>
+          <label class="tf-label">Storage Type</label>
+          <input class="tf-input" id="tr-req-desttype" type="text" placeholder="Auto from bin">
+          <div id="tr-req-destchoice"></div>
         </div>
         <div class="tf-field">
           <label class="tf-label">Bin <span class="tf-req">*</span></label>
@@ -2080,27 +2562,38 @@ function trReqOpenModal(row) {
       </div>
       <div class="tf-actions">
         <div id="tr-req-modal-result"></div>
-        <button type="button" class="btn-submit" id="tr-req-confirm-btn">Confirm LT04</button>
+        <div style="display:flex;gap:8px">
+          ${canDelete ? `<button type="button" class="btn-secondary" id="tr-req-modal-delete-btn">Delete TR</button>` : ''}
+          <button type="button" class="btn-submit" id="tr-req-confirm-btn">Confirm LT04</button>
+        </div>
       </div>
     </div>
   </div>`;
 
-  document.getElementById('tr-req-confirm-btn').addEventListener('click', () => trReqSubmit(row));
+  wireBinTypeAutoLookup(document.getElementById('tr-req-destbin'), document.getElementById('tr-req-desttype'), {
+    choiceEl: document.getElementById('tr-req-destchoice'),
+  });
+
+  document.getElementById('tr-req-confirm-btn').addEventListener('click', () => trReqSubmit(row, filters));
+  if (canDelete) {
+    document.getElementById('tr-req-modal-delete-btn').addEventListener('click', async () => {
+      closePickModal();
+      await trReqDelete(row, filters);
+    });
+  }
 }
 
-async function trReqSubmit(row) {
+async function trReqSubmit(row, filters = {}) {
   const btn      = document.getElementById('tr-req-confirm-btn');
   const resultEl = document.getElementById('tr-req-modal-result');
 
   const quantity        = parseFloat(String(document.getElementById('tr-req-qty').value).replace(',', '.'));
-  const palletOrBatch    = document.getElementById('tr-req-pnr').value.trim();
   const destinationType = document.getElementById('tr-req-desttype').value.trim();
   const destinationBin  = document.getElementById('tr-req-destbin').value.trim();
   const reference        = document.getElementById('tr-req-reference').value.trim();
 
   if (!quantity || quantity <= 0) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Enter a valid quantity.</div>`; return; }
-  if (!palletOrBatch)               { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Pallet/batch number is required.</div>`; return; }
-  if (!destinationType || !destinationBin) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Destination storage type and bin are both required.</div>`; return; }
+  if (!destinationType || !destinationBin) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Destination bin (and its storage type) are both required.</div>`; return; }
 
   btn.disabled = true;
   btn.textContent = 'Sending to SAP…';
@@ -2116,7 +2609,7 @@ async function trReqSubmit(row) {
         Quantity:        quantity,
         DestinationType: destinationType,
         DestinationBin:  destinationBin,
-        PalletOrBatch:   palletOrBatch,
+        PalletOrBatch:   row.batch,
         Reference:       reference || undefined,
       }),
     });
@@ -2132,7 +2625,7 @@ async function trReqSubmit(row) {
 
     setTimeout(() => {
       closePickModal();
-      trReqLoad();
+      trReqLoad(filters);
     }, 1200);
 
   } catch (err) {
@@ -2140,6 +2633,174 @@ async function trReqSubmit(row) {
     btn.disabled = false;
     btn.textContent = 'Confirm LT04';
   }
+}
+
+// ── Delete TR (LB02) — LOG_SUPER only ─────────────────────────────────────────
+//
+// For TRs processed manually outside the portal (e.g. via LT01) that are now
+// orphaned. Gated client-side by hiding the control entirely for non-
+// LOG_SUPER users (see the canDelete checks above); the real enforcement is
+// server-side (routes/sap.js's requirePermission('LOG_SUPER') on
+// /warehouse/delete-tr) — this is just UX, not the security boundary.
+async function trReqDelete(row, filters = {}) {
+  const ok = await wConfirm({
+    title: 'Delete Transfer Requirement',
+    message: `Delete TR ${row.trNumber} (${row.material}, ${row.quantity} ${row.uom})?\nThis cannot be undone in SAP.`,
+    confirmText: 'Delete',
+    variant: 'danger',
+  });
+  if (!ok) return;
+
+  try {
+    const res  = await fetch('/api/sap/warehouse/delete-tr', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ TrNumber: row.trNumber }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    trReqSelected.delete(row.trNumber);
+    await trReqLoad(filters);
+  } catch (err) {
+    await wConfirm({ title: 'Delete Failed', message: err.message, confirmText: 'OK', variant: '' });
+  }
+}
+
+// ── TR Cleanup Assistant ──────────────────────────────────────────────────────
+//
+// Automates the judgment call wm_open_tr.xlsm's operators have always made
+// by eyeballing the macro's raw batch-stock/current-bin columns: shows every
+// open TR flagged for one or more of three reasons (SLoc 1710 / zero
+// unrestricted stock / already transferred to a non-901 bin) as opt-in
+// cards, grouped by reason, with a per-group "select all". Nothing is
+// selected by default — the operator has to actively pick what to delete.
+// The bulk delete step reuses trReqDelete's underlying endpoint (LOG_SUPER-
+// gated) via a sequential loop driven by the same wsmShowProgressBanner/
+// wsmGroupErrors components the Stock Management mass-transfer panel uses.
+let trReqCleanup = { candidates: [], selected: new Set() };
+
+const TR_CLEANUP_REASONS = [
+  { key: 'sloc_1710',           label: 'Storage Location 1710' },
+  { key: 'no_stock',            label: 'Zero Unrestricted Stock' },
+  { key: 'already_transferred', label: 'Already Transferred' },
+];
+
+async function runTrCleanupAssistant() {
+  if (!await checkSession()) return;
+  showResultPanel('TR Cleanup Assistant', 'Unnecessary open TRs — SLoc 1710 / zero stock / already transferred');
+  document.getElementById('result-body').innerHTML =
+    '<div class="sap-loading"><div class="spinner"></div>Scanning for unnecessary TRs…</div>';
+  trReqCleanup = { candidates: [], selected: new Set() };
+
+  try {
+    const res  = await fetch('/api/sap/warehouse/tr-cleanup-candidates');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    trReqCleanup.candidates = json.data || [];
+    trReqCleanupRender();
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function trReqCleanupRender() {
+  const canDelete = sessionPermissions.includes('LOG_SUPER');
+
+  const groupsHtml = TR_CLEANUP_REASONS.map(g => {
+    const groupRows = trReqCleanup.candidates.filter(c => c.reasons.includes(g.key));
+    const cardsHtml = groupRows.map(c => {
+      const otherLabels = c.reasons
+        .filter(r => r !== g.key)
+        .map(r => TR_CLEANUP_REASONS.find(x => x.key === r)?.label || r);
+      return `
+        <label class="tr-cleanup-card${otherLabels.length ? ' tr-cleanup-card--multi' : ''}">
+          <input type="checkbox" class="tr-cleanup-check" data-tr="${esc(c.trNumber)}"${trReqCleanup.selected.has(c.trNumber) ? ' checked' : ''}>
+          <div>
+            <div><strong>${esc(c.trNumber)}</strong> — ${esc(c.material)}</div>
+            <div class="tf-muted">${esc(c.storageLocation)} · ${Number(c.quantity).toLocaleString()} ${esc(c.uom)} · Batch ${esc(c.batch || '—')}</div>
+            ${otherLabels.length ? `<div class="tf-locked">Also: ${esc(otherLabels.join(', '))}</div>` : ''}
+          </div>
+        </label>`;
+    }).join('');
+    return `
+      <div class="tr-cleanup-group">
+        <div class="tf-section-label">${esc(g.label)} (${groupRows.length})
+          ${groupRows.length ? `<button type="button" class="btn-secondary tr-cleanup-selectall" data-key="${g.key}">Select all</button>` : ''}
+        </div>
+        <div class="tr-cleanup-cards">${groupRows.length ? cardsHtml : '<div class="wsm-empty">None</div>'}</div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-actions" style="margin-bottom:12px;justify-content:flex-start;gap:10px">
+      <button type="button" class="btn-secondary" id="tr-cleanup-back-btn">← Back to list</button>
+      <button type="button" class="btn-secondary" id="tr-cleanup-refresh-btn">Rescan</button>
+    </div>
+    ${trReqCleanup.candidates.length ? groupsHtml : '<div class="sap-empty">No unnecessary TRs found.</div>'}
+    <div class="tf-actions">
+      <div id="tr-cleanup-summary"></div>
+      <button type="button" class="btn-submit" id="tr-cleanup-delete-btn" disabled>Delete selected (0)</button>
+    </div>`;
+
+  document.getElementById('tr-cleanup-back-btn').addEventListener('click', () => trReqLoad(trReqReadFilters()));
+  document.getElementById('tr-cleanup-refresh-btn').addEventListener('click', () => runTrCleanupAssistant());
+
+  document.querySelectorAll('.tr-cleanup-check').forEach(cb => cb.addEventListener('change', () => {
+    if (cb.checked) trReqCleanup.selected.add(cb.dataset.tr); else trReqCleanup.selected.delete(cb.dataset.tr);
+    trReqCleanupUpdateDeleteButton();
+  }));
+  document.querySelectorAll('.tr-cleanup-selectall').forEach(btn => btn.addEventListener('click', () => {
+    trReqCleanup.candidates.filter(c => c.reasons.includes(btn.dataset.key)).forEach(c => trReqCleanup.selected.add(c.trNumber));
+    trReqCleanupRender();
+  }));
+
+  document.getElementById('tr-cleanup-delete-btn').addEventListener('click', trReqCleanupDeleteSelected);
+  trReqCleanupUpdateDeleteButton();
+}
+
+function trReqCleanupUpdateDeleteButton() {
+  const btn = document.getElementById('tr-cleanup-delete-btn');
+  if (!btn) return;
+  const n = trReqCleanup.selected.size;
+  btn.textContent = `Delete selected (${n})`;
+  btn.disabled = n === 0 || !sessionPermissions.includes('LOG_SUPER');
+  if (!sessionPermissions.includes('LOG_SUPER')) btn.title = 'Requires LOG_SUPER';
+}
+
+async function trReqCleanupDeleteSelected() {
+  const trNumbers = [...trReqCleanup.selected];
+  if (!trNumbers.length) return;
+
+  const ok = await wConfirm({
+    title: 'Delete Selected TRs',
+    message: `Delete ${trNumbers.length} transfer requirement(s)?\nThis cannot be undone in SAP.`,
+    confirmText: 'Delete',
+    variant: 'danger',
+  });
+  if (!ok) return;
+
+  const summaryEl = document.getElementById('tr-cleanup-summary');
+  const progress  = wsmShowProgressBanner(summaryEl, trNumbers.length, 'Deleting TRs');
+  let okCount = 0, failCount = 0;
+  const failMessages = [];
+  let done = 0;
+
+  for (const tr of trNumbers) {
+    try {
+      const res  = await fetch('/api/sap/warehouse/delete-tr', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ TrNumber: tr }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'SAP call failed');
+      okCount++;
+    } catch (err) {
+      failCount++;
+      failMessages.push(err.message);
+    }
+    progress.update(++done);
+  }
+
+  progress.finish(okCount, failCount, failMessages);
+  setTimeout(() => runTrCleanupAssistant(), 1500);
 }
 
 
