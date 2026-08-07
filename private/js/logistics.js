@@ -112,6 +112,7 @@ function setupTiles() {
       if (fn === 'inTransitShipments')  runShipmentQueue('in-transit');
       if (fn === 'awaitingBooking')     runShipmentBooking();
       if (fn === 'customsDocs')         runCustomsDocuments();
+      if (fn === 'customsReport')       runCustomsReport();
       if (fn === 'completedShipments')  runCompletedShipments();
       if (fn === 'customerSpecifics')   runCustomerSpecifics();
       if (fn === 'shipmentSearch')      runShipmentSearch();
@@ -402,6 +403,319 @@ async function runCustomsDocuments() {
     renderCustomsDocuments();
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+
+// ── French VAT / DDP Customs Report ─────────────────────────────────────────
+// Uploads a Shipments-style xlsx (PicksheetNumber, ShipmentRef,
+// ActualCollectionDate, TotalWeight — same layout as the old AT_Customs.xlsm
+// workbook's Shipments tab), and downloads back the SAP-enriched
+// CUSTOMS-format report. Stateless: nothing from the upload is persisted —
+// routes/customsreport.js does the enrichment and streams the finished
+// .xlsx straight back in the same response.
+function runCustomsReport() {
+  showResultPanel('Monthly Customs Report', 'Upload the Shipments list to generate the SAP-enriched CUSTOMS report');
+
+  const canManageOverrides = sessionRole === 'superadmin' || userPermissions.includes('LOG_ADMIN');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="toolbar-hint" style="margin-bottom:10px">
+      Expected columns: <strong>PicksheetNumber</strong> (SAP delivery/goods-issue number), <strong>ShipmentRef</strong>,
+      <strong>ActualCollectionDate</strong>, <strong>TotalWeight</strong> (kg) — same layout as the Shipments tab of the old AT_Customs workbook.
+      Everything else (invoice, commodity, customer and VAT data, weight apportionment) is pulled from SAP automatically.
+    </div>
+    <input type="file" id="cr-file-input" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="margin-bottom:12px">
+    <div id="cr-status"></div>
+    ${canManageOverrides ? `
+      <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border,#E5E7EB)">
+        <button class="btn-secondary" id="cr-manage-overrides-btn" style="font-size:12px">Manage VAT / HS overrides</button>
+        <span class="toolbar-hint" style="margin-left:8px">Only needed when SAP has no VAT number for a customer, or a commodity code needs a description.</span>
+      </div>` : ''}
+  `;
+
+  document.getElementById('cr-file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const status = document.getElementById('cr-status');
+    status.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Generating report — this can take a moment while SAP is queried…</div>';
+
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await fetch('/api/customsreport/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+        body: buf,
+      });
+
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error?.message || json.error || `Report generation failed (${res.status}).`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `customs-report-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      status.innerHTML = '<div class="toolbar-hint">Report downloaded. Check the workbook\'s Warnings sheet (if present) for any delivery lines that need a manual look before sending this on.</div>';
+    } catch (err) {
+      status.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    }
+  });
+
+  if (canManageOverrides) {
+    document.getElementById('cr-manage-overrides-btn').addEventListener('click', runCustomsReportOverrides);
+  }
+}
+
+// ── Admin: VAT number / HS description overrides (LOG_ADMIN) ───────────────
+// Small fallback tables only consulted when SAP itself has nothing: KNA1-STCEG
+// for the VAT number, and (always, since SAP has no live source for it at all)
+// this table for HS/commodity code descriptions. See
+// sql/migrate_customs_report_tables.sql for the full rationale.
+async function runCustomsReportOverrides() {
+  showResultPanel('Customs Report: VAT / HS Overrides', 'Only consulted when SAP has nothing for that consignee/commodity code');
+  document.getElementById('result-body').innerHTML = `
+    <button class="btn-secondary" id="cr-back-btn" style="margin-bottom:16px;font-size:12px">← Back to Monthly Customs Report</button>
+    <div id="cr-vat-section" style="margin-bottom:28px"></div>
+    <div id="cr-hs-section"></div>
+  `;
+  document.getElementById('cr-back-btn').addEventListener('click', runCustomsReport);
+
+  try {
+    const [vatResp, hsResp] = await Promise.all([
+      fetch('/api/customs-report-admin/vat-overrides').then(r => r.json()),
+      fetch('/api/customs-report-admin/hs-descriptions').then(r => r.json()),
+    ]);
+    if (!vatResp.success) throw new Error(vatResp.error?.message || 'Failed to load VAT overrides');
+    if (!hsResp.success) throw new Error(hsResp.error?.message || 'Failed to load HS descriptions');
+    crRenderVatOverrides(vatResp.data);
+    crRenderHsDescriptions(hsResp.data);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function crRenderVatOverrides(overrides) {
+  const rows = overrides.map(o => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace">${esc(o.ConsigneeCode)}</td>
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(o.VatNumber)}</td>
+      <td>${esc(o.Notes || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary cr-vat-edit" data-id="${esc(String(o.OverrideId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary cr-vat-delete" data-id="${esc(String(o.OverrideId))}" data-label="${esc(o.ConsigneeCode)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('cr-vat-section').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="pn-section-hdr" style="margin:0">VAT Number Overrides</div>
+      <button class="btn-submit" id="cr-vat-add-btn">+ Add Override</button>
+    </div>
+    ${overrides.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Consignee Code</th><th>VAT Number</th><th>Notes</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No overrides yet — SAP\'s own VAT number (KNA1-STCEG) is used for every customer until one is added here.</div>'}
+  `;
+
+  document.getElementById('cr-vat-add-btn').addEventListener('click', () => crOpenVatModal(null));
+  document.querySelectorAll('.cr-vat-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const o = overrides.find(x => String(x.OverrideId) === btn.dataset.id);
+      if (o) crOpenVatModal(o);
+    });
+  });
+  document.querySelectorAll('.cr-vat-delete').forEach(btn => {
+    btn.addEventListener('click', () => crDeleteVatOverride(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function crOpenVatModal(override) {
+  const isEdit = !!override;
+  openModal(`<div class="ps-modal" style="max-width:460px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit VAT Override' : 'Add VAT Override'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Consignee Code</label>
+          <input class="tf-input" type="text" id="cr-vat-consignee" value="${esc(override?.ConsigneeCode || '')}" placeholder="e.g. 363533">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">VAT Number</label>
+          <input class="tf-input" type="text" id="cr-vat-number" value="${esc(override?.VatNumber || '')}" placeholder="e.g. SK2120170316">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="cr-vat-notes" value="${esc(override?.Notes || '')}" placeholder="Optional">
+        </div>
+      </div>
+      <div id="cr-vat-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="cr-vat-save-btn">${isEdit ? 'Save Changes' : 'Add Override'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('cr-vat-save-btn').addEventListener('click', async () => {
+    const body = {
+      consigneeCode: document.getElementById('cr-vat-consignee').value.trim(),
+      vatNumber: document.getElementById('cr-vat-number').value.trim(),
+      notes: document.getElementById('cr-vat-notes').value.trim() || null,
+    };
+    if (!body.consigneeCode || !body.vatNumber) {
+      document.getElementById('cr-vat-result').innerHTML = '<div class="sap-error">Consignee Code and VAT Number are both required.</div>';
+      return;
+    }
+    const btn = document.getElementById('cr-vat-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/customs-report-admin/vat-overrides/${override.OverrideId}` : '/api/customs-report-admin/vat-overrides', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runCustomsReportOverrides();
+    } catch (err) {
+      document.getElementById('cr-vat-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Override';
+    }
+  });
+}
+
+async function crDeleteVatOverride(overrideId, label) {
+  if (!confirm(`Delete the VAT override for consignee ${label}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/customs-report-admin/vat-overrides/${overrideId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runCustomsReportOverrides();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+function crRenderHsDescriptions(descriptions) {
+  const rows = descriptions.map(d => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace">${esc(d.CommodityCode)}</td>
+      <td>${esc(d.Description)}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary cr-hs-edit" data-id="${esc(String(d.HsCodeId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary cr-hs-delete" data-id="${esc(String(d.HsCodeId))}" data-label="${esc(d.CommodityCode)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('cr-hs-section').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="pn-section-hdr" style="margin:0">HS / Commodity Code Descriptions</div>
+      <button class="btn-submit" id="cr-hs-add-btn">+ Add Description</button>
+    </div>
+    ${descriptions.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Commodity Code</th><th>Description</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No descriptions yet — HS Description stays blank on the report until one is added here (SAP has no live source for this text).</div>'}
+  `;
+
+  document.getElementById('cr-hs-add-btn').addEventListener('click', () => crOpenHsModal(null));
+  document.querySelectorAll('.cr-hs-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = descriptions.find(x => String(x.HsCodeId) === btn.dataset.id);
+      if (d) crOpenHsModal(d);
+    });
+  });
+  document.querySelectorAll('.cr-hs-delete').forEach(btn => {
+    btn.addEventListener('click', () => crDeleteHsDescription(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function crOpenHsModal(description) {
+  const isEdit = !!description;
+  openModal(`<div class="ps-modal" style="max-width:460px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Description' : 'Add Description'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Commodity Code</label>
+          <input class="tf-input" type="text" id="cr-hs-code" value="${esc(description?.CommodityCode || '')}" placeholder="e.g. 39173900">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Description</label>
+          <input class="tf-input" type="text" id="cr-hs-description" value="${esc(description?.Description || '')}" placeholder="e.g. PTFE Hose with Stainless Steel Braiding">
+        </div>
+      </div>
+      <div id="cr-hs-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="cr-hs-save-btn">${isEdit ? 'Save Changes' : 'Add Description'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('cr-hs-save-btn').addEventListener('click', async () => {
+    const body = {
+      commodityCode: document.getElementById('cr-hs-code').value.trim(),
+      description: document.getElementById('cr-hs-description').value.trim(),
+    };
+    if (!body.commodityCode || !body.description) {
+      document.getElementById('cr-hs-result').innerHTML = '<div class="sap-error">Commodity Code and Description are both required.</div>';
+      return;
+    }
+    const btn = document.getElementById('cr-hs-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/customs-report-admin/hs-descriptions/${description.HsCodeId}` : '/api/customs-report-admin/hs-descriptions', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runCustomsReportOverrides();
+    } catch (err) {
+      document.getElementById('cr-hs-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Description';
+    }
+  });
+}
+
+async function crDeleteHsDescription(hsCodeId, label) {
+  if (!confirm(`Delete the description for commodity code ${label}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/customs-report-admin/hs-descriptions/${hsCodeId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runCustomsReportOverrides();
+  } catch (err) {
+    alert(err.message);
   }
 }
 
@@ -8347,7 +8661,7 @@ function osRenderTrackedList(tracked) {
       </td>
       <td>
         <input class="tf-input os-po-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.PoNumber || '')}" placeholder="PO number" style="padding:3px 6px;font-size:12px;width:100px">
-        ${t.PoItemNumber ? `<div style="font-size:10px;color:var(--text-secondary,#666)">item ${esc(t.PoItemNumber)}</div>` : ''}
+        <input class="tf-input os-po-item-input" data-id="${t.SuggestionId}" type="text" maxlength="5" value="${esc(t.PoItemNumber || '')}" placeholder="Item, e.g. 00010" title="SAP PO item number — auto-filled by Create PO in SAP, or type it here for a manually-raised PO so Mark Received can post its goods receipt" style="padding:3px 6px;font-size:11px;width:100px;margin-top:3px">
       </td>
       <td><input class="tf-input os-supplier-ref-input" data-id="${t.SuggestionId}" type="text" value="${esc(t.SupplierReference || '')}" placeholder="Supplier ref" style="padding:3px 6px;font-size:12px;width:100px"></td>
       <td>
@@ -8595,10 +8909,11 @@ function osCreatePoSelectionValid() {
 async function osSaveOneTracked(t) {
   const statusSelect = document.querySelector(`.os-status-select[data-id="${t.SuggestionId}"]`);
   const poInput = document.querySelector(`.os-po-input[data-id="${t.SuggestionId}"]`);
+  const poItemInput = document.querySelector(`.os-po-item-input[data-id="${t.SuggestionId}"]`);
   const supplierRefInput = document.querySelector(`.os-supplier-ref-input[data-id="${t.SuggestionId}"]`);
   const qtyInput = document.querySelector(`.os-qty-input[data-id="${t.SuggestionId}"]`);
   const dueDateInput = document.querySelector(`.os-due-date-input[data-id="${t.SuggestionId}"]`);
-  if (!statusSelect || !poInput || !supplierRefInput || !qtyInput || !dueDateInput) {
+  if (!statusSelect || !poInput || !poItemInput || !supplierRefInput || !qtyInput || !dueDateInput) {
     return { success: false, error: 'Row is not on screen (try expanding its group).' };
   }
   const qtyValue = Number(qtyInput.value);
@@ -8608,6 +8923,12 @@ async function osSaveOneTracked(t) {
   const body = {
     status: statusSelect.value,
     poNumber: poInput.value.trim() || null,
+    // COALESCE-optional server-side (see updateOrderSuggestionStatus's
+    // comment in performancesql.js) — sending blank never wipes an
+    // already-set item number (e.g. auto-filled by Create PO in SAP), it
+    // only ever sets a new one, so leaving this field empty on every other
+    // save (qty/status/etc.) is always safe.
+    poItemNumber: poItemInput.value.trim() || null,
     supplierReference: supplierRefInput.value.trim() || null,
     notes: t.Notes || null,
     orderQty: qtyValue,
@@ -9683,16 +10004,19 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // sql/migrate_order_suggestion_sap_gr.sql). A cancelled line never had
       // a GR attempted against it.
       //
-      // SapGrSkipped is true both when the operator ticked "Skip SAP
-      // posting" AND when the line had no real SAP PO to post against (see
-      // postGoodsReceiptToSap's noPo comment in performance.js) — those are
-      // very different situations, so SapGrError (only ever populated for
-      // the latter) is checked FIRST to tell them apart, rather than
-      // showing a plain "Skipped" for both.
+      // SapGrSkipped is true for three different reasons — the operator
+      // ticked "Skip SAP posting" (testing), the line had no real SAP PO to
+      // post against (postGoodsReceiptToSap's noPo case), or the confirmed
+      // Qty Received was 0 (its zeroQty case) — see that function's comment
+      // in performance.js. Only the DB columns persist (SapGrSkipped/
+      // SapGrError, no separate reason column), so a true testing-mode skip
+      // (SapGrError null) is distinguished from the other two generically —
+      // "Not posted" plus the specific reason in the tooltip — rather than
+      // guessing which of noPo/zeroQty it was from the error text.
       const sapGrCell = canReceive ? '' : `<td>${
         isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
         : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
-        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error" title="${esc(o.SapGrError)}">No PO on file</span>`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error" title="${esc(o.SapGrError)}">Not posted</span>`
         : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
         : o.SapGrError ? `<span class="sap-error" title="${esc(o.SapGrError)}">Failed</span>`
         : '-'
@@ -10068,23 +10392,27 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
     await refreshInboundShipmentDetail(shipmentId);
 
     // sapResults is a flat per-line array — {suggestionId, material,
-    // success?, documentNumber?, error?, skipped?, noPo?} — see
-    // markShipmentReceived's comment. The refresh above already redraws the
-    // Order Lines table with a per-line SAP GR column, so this is just a
-    // one-line heads-up if anything needs attention. noPo (no SAP PO item on
-    // file for that line) is checked separately from a real testing-mode
-    // skip — both come back skipped:true, but only noPo also carries an
-    // error, and conflating the two here is exactly what made an unticked
-    // "Skip SAP posting" checkbox look like it had fired.
+    // success?, documentNumber?, error?, skipped?, noPo?, zeroQty?} — see
+    // markShipmentReceived's/postGoodsReceiptToSap's comments. The refresh
+    // above already redraws the Order Lines table with a per-line SAP GR
+    // column, so this is just a one-line heads-up if anything needs
+    // attention. noPo (no SAP PO item on file) and zeroQty (confirmed
+    // received qty was 0 — nothing to post) are both checked separately
+    // from a real testing-mode skip — all three come back skipped:true, but
+    // only these two also carry an error, and conflating any of them here
+    // is exactly what made an unticked "Skip SAP posting" checkbox look
+    // like it had fired.
     const sapResults = json.data?.sapResults || [];
     const noPo = sapResults.filter(r => r.skipped && r.noPo);
-    const testSkipped = sapResults.filter(r => r.skipped && !r.noPo);
+    const zeroQty = sapResults.filter(r => r.skipped && r.zeroQty);
+    const testSkipped = sapResults.filter(r => r.skipped && !r.noPo && !r.zeroQty);
     const failed = sapResults.filter(r => r.success === false && !r.skipped);
     const newResult = document.getElementById('isd-result');
-    if (newResult && (noPo.length || testSkipped.length || failed.length)) {
+    if (newResult && (noPo.length || zeroQty.length || testSkipped.length || failed.length)) {
       const parts = [];
       if (testSkipped.length) parts.push(`<div class="toolbar-hint">SAP posting skipped for ${testSkipped.length} order line${testSkipped.length === 1 ? '' : 's'} (testing mode).</div>`);
       if (noPo.length) parts.push(`<div class="sap-error">${noPo.length} order line${noPo.length === 1 ? '' : 's'} had no SAP PO number/item on file — nothing was posted. Create the PO in SAP first, or post this line's goods receipt manually.</div>`);
+      if (zeroQty.length) parts.push(`<div class="toolbar-hint">${zeroQty.length} order line${zeroQty.length === 1 ? '' : 's'} confirmed at 0 received — nothing was posted to SAP for ${zeroQty.length === 1 ? 'it' : 'them'}.</div>`);
       if (failed.length) parts.push(`<div class="sap-error">${failed.length} order line${failed.length === 1 ? '' : 's'} failed to post to SAP — see the SAP GR column for details.</div>`);
       newResult.innerHTML = parts.join('');
     }

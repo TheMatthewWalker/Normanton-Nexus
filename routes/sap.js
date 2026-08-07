@@ -800,6 +800,64 @@ router.post('/kna1', async (req, res) => {
 
 
 // ---------------------------------------------------------------------------
+// POST /api/sap/vbrk
+// Billing document header: invoice currency (WAERK) and invoice date (FKDAT)
+// per invoice number.
+// ---------------------------------------------------------------------------
+router.post('/vbrk', async (req, res) => {
+    const { invoices } = req.body;
+    if (!Array.isArray(invoices) || !invoices.length)
+        return res.status(400).json({ success: false, error: 'invoices array is required.' });
+    try {
+        const response = await axios.post(
+            `${sapConfig.url}/api/customs/vbrk`,
+            { invoices },
+            { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `VBRK query (${invoices.length} invoices)`), req);
+        res.json({ success: true, data: body.data });
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'VBRK query failed', message), req);
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
+// POST /api/sap/consignment-price
+// Consignment-customer fallback pricing: customs sales price per
+// consignee/material pair, from SAP's standard pricing-condition tables
+// (A005/KONP), for delivery lines with no VBFA billing document (goods
+// shipped without a commercial invoice).
+// ---------------------------------------------------------------------------
+router.post('/consignment-price', async (req, res) => {
+    const { lines } = req.body;
+    if (!Array.isArray(lines) || !lines.length)
+        return res.status(400).json({ success: false, error: 'lines array is required.' });
+    try {
+        const response = await axios.post(
+            `${sapConfig.url}/api/customs/consignment-price`,
+            { lines },
+            { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Consignment price query (${lines.length} lines)`), req);
+        res.json({ success: true, data: body.data });
+    } catch (err) {
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Consignment price query failed', message), req);
+        res.status(status).json({ success: false, error: message });
+    }
+});
+
+
+// ---------------------------------------------------------------------------
 // POST /api/sap/picksheet-stock
 // Warehouse picksheet stock lookup: LQUA + ZPRODBATCH batches for a given
 // material list, including any delivery a batch is already tagged against

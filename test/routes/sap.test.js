@@ -143,3 +143,53 @@ describe('POST /lips', () => {
     expect(body.deliveries).toEqual(['80001234']);
   });
 });
+
+describe('POST /vbrk', () => {
+  test('rejects an empty/missing invoices array', async () => {
+    const res = await request(app).post('/vbrk').send({});
+    expect(res.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('proxies a non-empty invoices array to SapServer', async () => {
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: [{ invoiceNumber: '6123356', currency: 'EUR' }] } });
+
+    const res = await request(app).post('/vbrk').send({ invoices: ['6123356'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([{ invoiceNumber: '6123356', currency: 'EUR' }]);
+    const [url, body] = axiosMock.post.mock.calls[0];
+    expect(url).toContain('/api/customs/vbrk');
+    expect(body.invoices).toEqual(['6123356']);
+  });
+
+  test('maps a SapServer error response through with its status and message', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 502, data: { error: 'SAP unavailable' } };
+    axiosMock.post.mockRejectedValueOnce(sapError);
+
+    const res = await request(app).post('/vbrk').send({ invoices: ['6123356'] });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('SAP unavailable');
+  });
+});
+
+describe('POST /consignment-price', () => {
+  test('rejects an empty/missing lines array', async () => {
+    const res = await request(app).post('/consignment-price').send({});
+    expect(res.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('proxies a non-empty lines array to SapServer', async () => {
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: [] } });
+
+    const res = await request(app).post('/consignment-price').send({ lines: [{ customer: '363533', material: 'CP1166' }] });
+
+    expect(res.status).toBe(200);
+    const [url, body] = axiosMock.post.mock.calls[0];
+    expect(url).toContain('/api/customs/consignment-price');
+    expect(body.lines).toEqual([{ customer: '363533', material: 'CP1166' }]);
+  });
+});
