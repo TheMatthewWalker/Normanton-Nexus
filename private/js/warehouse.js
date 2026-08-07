@@ -676,7 +676,7 @@ async function wsmCreateTransferOrder(params) {
       res = await fetch('/api/sap/warehouse/consignment-mb1b', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          DeliveryNote: '', Header: 'Consignment Usage',
+          DeliveryNote: '', Header: 'Consignment',
           StorageLocation: params.StorageLocation, SpecialStockNumber: params.SpecialStockNumber,
           Material: params.Material, Quantity: params.Quantity,
           DestinationType: params.DestinationType, DestinationBin: params.DestinationBin,
