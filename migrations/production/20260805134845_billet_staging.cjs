@@ -148,9 +148,15 @@ ALTER TABLE prod.ProductionTrace DROP CONSTRAINT UQ_ProductionTrace`);
 IF NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = 'UQ_ProductionTrace' AND type = 'UQ')
 ALTER TABLE prod.ProductionTrace ADD CONSTRAINT UQ_ProductionTrace UNIQUE (ChildProcessCode, ChildRecordID, ParentProcessCode, ParentRecordID, ParentTubID)`);
 
+    // Plain (non-filtered) index — filtered indexes ("CREATE INDEX ... WHERE
+    // ...") require SQL Server 2008+; Production is SQL Server 2005
+    // (compatibility level 90, confirmed via SERVERPROPERTY against
+    // GATEWAYHO), which rejects that syntax outright. A few extra NULL
+    // entries (every non-MX-parent trace row) in this index is a fine
+    // trade-off for actually running on this server.
     await knex.raw(`
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Trace_ParentTub' AND object_id = OBJECT_ID('prod.ProductionTrace'))
-CREATE NONCLUSTERED INDEX IX_Trace_ParentTub ON prod.ProductionTrace (ParentProcessCode, ParentTubID) WHERE ParentTubID IS NOT NULL`);
+CREATE NONCLUSTERED INDEX IX_Trace_ParentTub ON prod.ProductionTrace (ParentProcessCode, ParentTubID)`);
 };
 
 /** @param {import('knex').Knex} knex */
