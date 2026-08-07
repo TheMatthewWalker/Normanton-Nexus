@@ -22,7 +22,9 @@
     "migrate:logistics_live": "knex migrate:latest --env logistics_live --knexfile knexfile.cjs",
     "migrate:status:kongsberg_live": "knex migrate:status --env kongsberg_live --knexfile knexfile.cjs",
     "migrate:status:production_live": "knex migrate:status --env production_live --knexfile knexfile.cjs",
-    "migrate:status:logistics_live": "knex migrate:status --env logistics_live --knexfile knexfile.cjs"
+    "migrate:status:logistics_live": "knex migrate:status --env logistics_live --knexfile knexfile.cjs",
+    "migrate:production_archive_live": "knex migrate:latest --env production_archive_live --knexfile knexfile.cjs",
+    "migrate:status:production_archive_live": "knex migrate:status --env production_archive_live --knexfile knexfile.cjs"
   },
   "keywords": [],
   "author": "",

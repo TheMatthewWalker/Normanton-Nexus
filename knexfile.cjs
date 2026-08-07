@@ -78,12 +78,14 @@ function dbConfig(databaseName, dir, hasSeeds) {
 // sqlConfig), not a duplicate copy of that password in .env. There's no
 // reason for the live credential to exist in two places.
 //
-// These are for baselining Knex against the already-existing live databases
-// (see migrations/README.md's "Using this against live" section) and then
-// running genuinely NEW migrations against them going forward — NOT for
-// re-running the existing 2026-08-04 initial-schema migrations, which would
-// fail immediately (every constraint/index they create already exists live
-// under the same name).
+// kongsberg_live/logistics_live/production_live need baselining first (see
+// migrations/README.md's "Using this against live" section) — those three
+// databases already exist live with this exact schema, so their initial
+// migrations would fail immediately if run for real (every constraint/index
+// already exists there under the same name). production_archive_live is
+// different: that database was created empty specifically for this, so its
+// migration runs fresh, same as it did on the test server — no baseline
+// needed, nothing there to collide with.
 //
 // Deliberately no `seeds` config here at all: seeding live would DELETE and
 // reinsert PortalUsers/Vendor/etc. with a stale point-in-time snapshot,
@@ -129,6 +131,7 @@ module.exports = {
         kongsberg_live: liveDbConfig('Kongsberg', 'kongsberg'),
         production_live: liveDbConfig('Production', 'production'),
         logistics_live: liveDbConfig('Logistics', 'logistics'),
+        production_archive_live: liveDbConfig('Production_Archive', 'production_archive'),
       }
     : {}),
 };

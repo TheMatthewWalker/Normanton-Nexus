@@ -148,7 +148,37 @@ npm run migrate:kongsberg_live
 **Never run `npm run seed:*` against a `_live` environment** — the
 `*_live` environments have no `seeds` config at all for exactly this reason;
 seeding would `DELETE` and reinsert `PortalUsers`/`Vendor`/etc. with a stale
-point-in-time snapshot, wiping real changes made since. `production_archive`
-has no `_live` counterpart either, since that database doesn't exist live —
-if it's ever wanted there, `CREATE DATABASE production_archive` first, then
-migrate normally (no baseline needed, nothing to collide with).
+point-in-time snapshot, wiping real changes made since.
+
+### `production_archive_live` is different — no baseline needed
+
+Unlike the three above, `Production_Archive` was created **empty** on the
+live server specifically for this migration, so there's nothing existing to
+collide with — no renaming dance, no manually-inserted baseline row. Just:
+
+```powershell
+npm run migrate:production_archive_live
+```
+
+This runs the same 27 `CREATE TABLE` statements (no defaults/uniques/checks/
+indexes/FKs — none of these legacy tables ever had any) that already ran
+clean against the test server. **Schema only** — no data has been moved from
+Kongsberg into these tables yet; that's a deliberately separate, much
+higher-stakes step (~558,000 rows across the 27 tables, dominated by `Coils`
+at ~190K) that hasn't been decided on yet (copy vs. move, when to delete the
+Kongsberg originals if ever).
+
+### The `datetime2` SQL Server 2005 incompatibility applies here too
+
+Same issue as the other three live environments: Knex's default migration-
+tracking table hardcodes a `datetime2` column (SQL Server 2008+ only), so
+the very first `migrate:production_archive_live` run will fail unless the
+tracking tables are pre-created with a compatible type first:
+
+```powershell
+sqlcmd -S GATEWAYHO -U <user> -P <password> -d Production_Archive -Q "CREATE TABLE knex_migrations (id INT IDENTITY(1,1) NOT NULL PRIMARY KEY, name NVARCHAR(255), batch INT, migration_time DATETIME); CREATE TABLE knex_migrations_lock ([index] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, is_locked INT);"
+```
+
+Knex only auto-creates these if they don't already exist, so once they're
+there with `DATETIME` instead of `DATETIME2`, `migrate:production_archive_live`
+runs normally.
