@@ -180,7 +180,6 @@ function openFunction(fn) {
     approveScrap:    ['Approve Scrap',     'Supervisor approval queue — review and post operator scrap entries to SAP'],
     postedScrap:     ['Posted Scrap',      'Approved and SAP-posted scrap summary by work centre and reason'],
     failedBackflush: ['Failed Backflush',  'Records saved locally but rejected by SAP'],
-    billetStaging:   ['Billet Staging',    'Move mixed tubs into the Billet room — 96h shelf-life age tracking'],
     expiredMixBatches: ['Expired Mix Batches', 'Supervisor queue — approve scrap or override expiry for tubs past 96h'],
     sapReversals:    ['SAP Reversals',     'Search by material document or batch ref — select and bulk-reverse postings'],
     scrapReversal:   ['Scrap Reversal',    'Search and reverse SAP scrap documents · alerts on missed reversals from reversed backflushes'],
@@ -222,7 +221,6 @@ function openFunction(fn) {
     approveScrap:    runApproveScrap,
     postedScrap:     runPostedScrap,
     failedBackflush: runFailedBackflush,
-    billetStaging:   runBilletStaging,
     expiredMixBatches: runExpiredMixBatches,
     sapReversals:    runSapReversals,
     scrapReversal:   runScrapReversal,
@@ -1341,13 +1339,25 @@ async function runMeterProcessEntry(processCode) {
     .sort((a, b) => (a.MachineName||'').localeCompare(b.MachineName||''));
   const reasons = reasonsJson.data || [];
 
+  // Billet Staging is Extrusion-specific — mix material only ever flows into
+  // Extrusion (see PROFIT_CENTRES / BR's own "doesn't consume mixed rubber
+  // directly" comment elsewhere in this file) — so this third option only
+  // ever appears for EX, never for CO/BR/CL/TW, which share this same
+  // chooser screen otherwise unchanged.
+  const isEx = processCode === 'EX';
+
   const body = document.getElementById('result-body');
   body.innerHTML = `
-    <div style="padding:24px;max-width:580px">
+    <div style="padding:24px;max-width:${isEx ? 840 : 580}px">
       <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">
         Choose how you want to record this ${esc(PROCESS_LABELS[processCode]||processCode)} run.
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div style="display:grid;grid-template-columns:repeat(${isEx ? 3 : 2},1fr);gap:14px">
+        ${isEx ? `
+        <button id="mp-mode-billet" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 16px;text-align:left;cursor:pointer;transition:border-color 0.15s">
+          <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">Billet Staging</div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.5">Stage mixed tubs into Billet, or scan a ticket to stage it instantly.</div>
+        </button>` : ''}
         <button id="mp-mode-new" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 16px;text-align:left;cursor:pointer;transition:border-color 0.15s">
           <div style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)">New Entry</div>
           <div style="font-size:12px;color:var(--text-muted);line-height:1.5">Log the start of a run — material, machine and traceability. Save and close without finishing yet.</div>
@@ -1359,13 +1369,15 @@ async function runMeterProcessEntry(processCode) {
       </div>
     </div>`;
 
-  document.getElementById('mp-mode-new').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
-  document.getElementById('mp-mode-new').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
-  document.getElementById('mp-mode-complete').addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
-  document.getElementById('mp-mode-complete').addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
+  ['mp-mode-new', 'mp-mode-complete', ...(isEx ? ['mp-mode-billet'] : [])].forEach(id => {
+    const btn = document.getElementById(id);
+    btn.addEventListener('mouseenter', e => { e.currentTarget.style.borderColor = 'var(--accent)'; });
+    btn.addEventListener('mouseleave', e => { e.currentTarget.style.borderColor = 'var(--border)'; });
+  });
 
   document.getElementById('mp-mode-new').addEventListener('click', () => runNewEntry(processCode, machines, reasons));
   document.getElementById('mp-mode-complete').addEventListener('click', () => runCompleteRun(processCode, machines, reasons));
+  if (isEx) document.getElementById('mp-mode-billet').addEventListener('click', () => runBilletStaging());
 }
 
 // ── New Entry flow ────────────────────────────────────────────────────────────
@@ -4674,11 +4686,15 @@ async function pollFailedBackflushCount() {
 // ── BILLET STAGING — mix tub lifecycle (stage / return / expiry) ─────────────
 // Mix materials are not batch-managed in SAP — everything here (staging
 // status, Conditioning Time, Billet balance) is a Normanton-Nexus-only
-// concept with no SAP counterpart.
-
-const MX_BUCKET_LABELS = { '0-24': '0–24h', '24-48': '24–48h', '48-72': '48–72h', '72-96': '72–96h', expired: 'Expired (>96h)' };
-const MX_BUCKET_ORDER  = ['expired', '72-96', '48-72', '24-48', '0-24'];
-const MX_BUCKET_COLOR  = { expired: '#DC2626', '72-96': '#DC2626', '48-72': '#D97706', '24-48': '#D97706', '0-24': 'var(--accent)' };
+// concept with no SAP counterpart. Expired (>96h) tubs are deliberately never
+// shown here — GET /mixing/staging/queue excludes them server-side; they
+// only ever surface on the supervisor "Expired Mix Batches" queue. Tubs
+// under the 24h minimum age still show (in "Too Young"), just not
+// actionable yet, so operators can see what's coming.
+const MX_BUCKET_LABELS = { '0-24': 'Too Young (<24h)', '24-48': '24–48h', '48-72': '48–72h', '72-96': '72–96h' };
+const MX_BUCKET_ORDER  = ['72-96', '48-72', '24-48', '0-24'];
+const MX_BUCKET_COLOR  = { '72-96': '#DC2626', '48-72': '#D97706', '24-48': '#D97706', '0-24': 'var(--text-muted)' };
+const MX_MIN_AGE_HOURS = 24;
 
 async function pollBilletStagingCount() {
   try {
@@ -4712,7 +4728,45 @@ function setSimpleBadge(elId, count, idleLabel) {
   }
 }
 
+// Builds one compact <details> bucket of tub rows. `renderAction(row)`
+// returns the inner HTML for that row's action slot (a Stage button, a
+// disabled placeholder, or nothing).
+function bsBucketHtml(label, colorVar, rows, renderAction) {
+  const items = rows.map(r => {
+    const mixRef = r.MixRef || `MX-${String(r.MixingID).padStart(8, '0')}`;
+    return `
+      <div class="bs-row">
+        <div class="bs-row-info">
+          <div class="bs-row-ref">${esc(mixRef)} · T${r.TubSeq} · ${esc(r.Material)}</div>
+          <div class="bs-row-meta">${Number(r.TubWeightKG).toFixed(1)} KG · ${Number(r.AgeHours).toFixed(1)}h old</div>
+        </div>
+        <div class="bs-row-action">${renderAction(r, mixRef)}</div>
+      </div>`;
+  }).join('');
+  return `
+    <details class="bs-bucket bs-bucket--details" open>
+      <summary class="bs-bucket-hdr">
+        <span class="bs-bucket-title" style="color:${colorVar}">${label}</span>
+        <span class="bs-bucket-count">${rows.length}</span>
+      </summary>
+      <div class="bs-bucket-rows">${items}</div>
+    </details>`;
+}
+
+function bsStageStatusMessage(r) {
+  if (r.IsScrapped) return { ok: false, text: 'Scrapped.' };
+  if (r.IsStaged)   return { ok: false, text: 'Already staged into Billet.' };
+  if (r.AgeHours > 96) return { ok: false, text: 'Expired (>96h) — needs supervisor review (Expired Mix Batches).' };
+  if (r.AgeHours < MX_MIN_AGE_HOURS) {
+    const remaining = Math.round((MX_MIN_AGE_HOURS - r.AgeHours) * 10) / 10;
+    return { ok: false, text: `Too young — available in ${remaining}h.` };
+  }
+  return { ok: true, text: 'Ready to stage.' };
+}
+
 async function runBilletStaging() {
+  document.getElementById('result-title').textContent = 'Billet Staging';
+  document.getElementById('result-hint').textContent  = 'Move mixed tubs into the Billet room — scan a ticket or pick from the list below';
   document.getElementById('result-body').innerHTML = '<div class="pn-loading"><div class="spinner"></div>Loading…</div>';
   try {
     const [queueJson, stagedJson] = await Promise.all([
@@ -4730,70 +4784,169 @@ async function runBilletStaging() {
     const byBucket = {};
     for (const r of rows) (byBucket[r.Bucket] ||= []).push(r);
 
-    const queueSections = rows.length
-      ? MX_BUCKET_ORDER.filter(b => byBucket[b]?.length).map(bucket => {
-          const items = byBucket[bucket].map(r => {
-            const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
-            return `
-            <div class="bs-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--border)">
-              <div>
-                <div style="font-weight:600;font-size:13px">${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</div>
-                <div class="pn-batch-mono" style="font-size:11px;color:var(--text-muted);margin-top:2px">${Number(r.TubWeightKG).toFixed(3)} KG · Supplier tub ${esc(r.SupplierTubNo || '—')} · produced ${fmt(r.CompletedAt)} · ${Number(r.AgeHours).toFixed(1)}h old</div>
-              </div>
-              <button class="btn-submit bs-stage-btn" data-tid="${r.TubID}">Stage into Billet</button>
-            </div>`;
-          }).join('');
-          return `
-            <div style="margin-bottom:16px">
-              <div style="font-weight:700;font-size:13px;color:${MX_BUCKET_COLOR[bucket]};margin-bottom:6px">${MX_BUCKET_LABELS[bucket]} — ${byBucket[bucket].length}</div>
-              <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">${items}</div>
-            </div>`;
-        }).join('')
-      : '<div class="pn-empty" style="color:var(--accent);padding:12px 0">✓ Nothing awaiting staging.</div>';
+    const stageActionHtml = (r, mixRef) => r.Bucket === '0-24'
+      ? `<button disabled title="Available in ${(MX_MIN_AGE_HOURS - r.AgeHours).toFixed(1)}h">Too young</button>`
+      : `<button class="bs-stage-btn" data-tid="${r.TubID}">Stage</button>`;
 
-    const stagedRows = staged.length
-      ? staged.map(r => {
-          const mixRef = r.MixRef || `MX${String(r.MixingID).padStart(8, '0')}`;
+    const queueSections = rows.length
+      ? MX_BUCKET_ORDER.filter(b => byBucket[b]?.length)
+          .map(b => bsBucketHtml(`${MX_BUCKET_LABELS[b]}`, MX_BUCKET_COLOR[b], byBucket[b], stageActionHtml))
+          .join('')
+      : '<div class="bs-search-empty">✓ Nothing awaiting staging.</div>';
+
+    const stagedHtml = staged.length
+      ? `<div class="bs-bucket-rows">${staged.map(r => {
+          const mixRef = r.MixRef || `MX-${String(r.MixingID).padStart(8, '0')}`;
           return `
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--border)">
-            <div>
-              <div style="font-weight:600;font-size:13px">${esc(mixRef)} · Tub ${r.TubSeq} · ${esc(r.Material)}</div>
-              <div class="pn-batch-mono" style="font-size:11px;color:var(--text-muted);margin-top:2px">${Number(r.StagedQuantityKG).toFixed(3)} KG in Billet · ${Number(r.ConditioningTimeHours || 0).toFixed(1)}h conditioning time</div>
+          <div class="bs-row">
+            <div class="bs-row-info">
+              <div class="bs-row-ref">${esc(mixRef)} · T${r.TubSeq} · ${esc(r.Material)}</div>
+              <div class="bs-row-meta">${Number(r.StagedQuantityKG).toFixed(1)} KG in Billet · ${Number(r.ConditioningTimeHours || 0).toFixed(1)}h conditioning</div>
             </div>
-            <button class="btn-secondary bs-return-btn" data-tid="${r.TubID}" data-ref="${esc(mixRef)} Tub ${r.TubSeq}" data-max="${r.StagedQuantityKG}">Return to Conditioning</button>
+            <div class="bs-row-action"><button class="bs-return-btn" data-tid="${r.TubID}" data-ref="${esc(mixRef)} Tub ${r.TubSeq}" data-max="${r.StagedQuantityKG}">Return</button></div>
           </div>`;
-        }).join('')
-      : '<div class="pn-empty" style="padding:12px 0">No tubs currently staged.</div>';
+        }).join('')}</div>`
+      : '<div class="bs-search-empty">No tubs currently staged.</div>';
 
     document.getElementById('result-body').innerHTML = `
-      <div style="padding:16px 20px">
-        <div class="bm-section-title" style="margin-bottom:8px">Awaiting Staging</div>
-        ${queueSections}
-        <div class="bm-section-title" style="margin:20px 0 8px">Currently in Billet</div>
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px">${stagedRows}</div>
-        <div id="bs-msg" style="font-size:13px;margin-top:4px"></div>
+      <div style="padding:16px 20px 4px">
+        <button class="btn-secondary" id="bs-back">&larr; Back</button>
+      </div>
+      <div style="padding:0 20px 16px" class="bs-layout">
+        <div>
+          <div class="bs-panel">
+            <div class="bs-panel-title">Scan Ticket</div>
+            <input class="bs-scan-input" id="bs-scan" type="text" placeholder="Scan or type ticket ref…" autocomplete="off">
+            <div id="bs-scan-result" class="bs-scan-result"></div>
+          </div>
+          <div class="bs-panel">
+            <div class="bs-panel-title">Search by Mix / Material</div>
+            <input class="bs-search-input" id="bs-search" type="text" placeholder="Mix ref, material, tub no…" autocomplete="off">
+            <div id="bs-search-results"></div>
+          </div>
+        </div>
+        <div>
+          <div class="bs-panel-title">Awaiting Staging</div>
+          <div class="bs-bucket-list">${queueSections}</div>
+          <div class="bs-panel-title" style="margin-top:16px">Currently in Billet</div>
+          <div class="bs-bucket-list">${stagedHtml}</div>
+        </div>
       </div>`;
 
     document.querySelectorAll('.bs-stage-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         btn.disabled = true; btn.textContent = 'Staging…';
-        const msgEl = document.getElementById('bs-msg');
         try {
           await api(`/mixing/tubs/${btn.dataset.tid}/stage`, { method: 'PATCH' });
-          if (msgEl) { msgEl.style.color = 'var(--accent)'; msgEl.textContent = '✓ Tub staged into Billet.'; }
           runBilletStaging();
         } catch (err) {
-          if (msgEl) { msgEl.style.color = 'var(--error)'; msgEl.textContent = err.message; }
-          btn.disabled = false; btn.textContent = 'Stage into Billet';
+          alert(err.message);
+          btn.disabled = false; btn.textContent = 'Stage';
         }
       });
     });
     document.querySelectorAll('.bs-return-btn').forEach(btn => {
       btn.addEventListener('click', () => openReturnToConditioningModal(btn.dataset.tid, btn.dataset.ref, Number(btn.dataset.max)));
     });
+
+    document.getElementById('bs-back').addEventListener('click', () => runMeterProcessEntry('EX'));
+
+    wireBilletScanInput();
+    wireBilletSearchInput();
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
   }
+}
+
+// Scan-to-stage — a barcode scanner types the ticket text then sends Enter,
+// same convention as other scan inputs in this app (e.g. warehouse.js's
+// wsmRunSearch binding). No submit button: on success the tub stages
+// immediately; either way the input clears and refocuses so the operator
+// can keep scanning tickets back-to-back without touching the mouse.
+function wireBilletScanInput() {
+  const input  = document.getElementById('bs-scan');
+  const result = document.getElementById('bs-scan-result');
+  if (!input) return;
+  input.focus();
+
+  input.addEventListener('keydown', async e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const ref = input.value.trim();
+    if (!ref) return;
+    input.disabled = true;
+    result.className = 'bs-scan-result';
+    result.textContent = 'Checking…';
+    try {
+      const json = await api('/mixing/tubs/stage-by-ref', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref }),
+      });
+      const d = json.data || {};
+      result.className = 'bs-scan-result bs-scan-result--ok';
+      result.textContent = `✓ ${d.mixRef || ref} Tub ${d.tubSeq ?? ''} staged into Billet.`;
+      runBilletStaging(); // full refresh — re-wires the scan input (and refocuses it) as part of re-rendering
+    } catch (err) {
+      result.className = 'bs-scan-result bs-scan-result--error';
+      result.textContent = err.message;
+      input.disabled = false;
+      input.value = '';
+      input.focus();
+    }
+  });
+}
+
+// Material search box — reuses GET /mixing/tubs/search (the same endpoint
+// already powering the Extrusion "New Entry" MX tub picker), just exposed
+// here as its own visible box. Explicitly states why a result isn't
+// stageable (already staged / expired / too young) rather than only
+// showing the ones that are.
+function wireBilletSearchInput() {
+  const input   = document.getElementById('bs-search');
+  const results = document.getElementById('bs-search-results');
+  if (!input) return;
+
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const q = input.value.trim();
+      if (!q) { results.innerHTML = ''; return; }
+      try {
+        const json = await api(`/mixing/tubs/search?q=${encodeURIComponent(q)}`);
+        const rows = json.data || [];
+        results.innerHTML = rows.length
+          ? `<div class="bs-search-results">${rows.map(r => {
+              const mixRef = r.MixRef || `MX-${String(r.MixingID).padStart(8, '0')}`;
+              const status = bsStageStatusMessage(r);
+              const action = status.ok
+                ? `<button class="bs-search-stage-btn" data-tid="${r.TubID}">Stage</button>`
+                : '';
+              return `
+              <div class="bs-row">
+                <div class="bs-row-info">
+                  <div class="bs-row-ref">${esc(mixRef)} · T${r.TubSeq} · ${esc(r.Material)}</div>
+                  <div class="bs-row-meta" style="color:${status.ok ? 'var(--success,#059669)' : 'var(--error)'}">${esc(status.text)}</div>
+                </div>
+                <div class="bs-row-action">${action}</div>
+              </div>`;
+            }).join('')}</div>`
+          : '<div class="bs-search-empty">No matching tubs.</div>';
+
+        results.querySelectorAll('.bs-search-stage-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true; btn.textContent = 'Staging…';
+            try {
+              await api(`/mixing/tubs/${btn.dataset.tid}/stage`, { method: 'PATCH' });
+              runBilletStaging();
+            } catch (err) {
+              alert(err.message);
+              btn.disabled = false; btn.textContent = 'Stage';
+            }
+          });
+        });
+      } catch { results.innerHTML = '<div class="bs-search-empty">Search failed.</div>'; }
+    }, 250);
+  });
 }
 
 async function openReturnToConditioningModal(tubId, tubRef, maxKg) {

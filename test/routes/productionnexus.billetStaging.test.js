@@ -75,13 +75,27 @@ describe('PATCH /mixing/tubs/:tubId/stage', () => {
 
   test('stages successfully and computes the Billet balance net of prior returns', async () => {
     queueResults(
-      { recordset: [{ MixingID: 1, TubWeightKG: 20, IsScrapped: false, IsStaged: false, IsReversed: false, Status: 1, AgeHours: 12.5, ExpiryOverrideAt: null, ReturnedKG: 5 }] },
+      { recordset: [{ MixingID: 1, TubWeightKG: 20, IsScrapped: false, IsStaged: false, IsReversed: false, Status: 1, AgeHours: 30, ExpiryOverrideAt: null, ReturnedKG: 5 }] },
       { recordset: [] }, // UPDATE MixingTubs
       { recordset: [] }, // writeEvent STAGED
     );
     const res = await request(app).patch('/mixing/tubs/1/stage');
     expect(res.status).toBe(200);
     expect(res.body.data.stagedQuantityKG).toBe(15); // 20 - 5
+  });
+
+  test('409s when the tub is younger than the 24h minimum age', async () => {
+    queueResults({ recordset: [{ MixingID: 1, TubWeightKG: 20, IsScrapped: false, IsStaged: false, IsReversed: false, Status: 1, AgeHours: 10, ExpiryOverrideAt: null, ReturnedKG: 0 }] });
+    const res = await request(app).patch('/mixing/tubs/1/stage');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/at least 24h/);
+  });
+
+  test('409s when the tub is already staged', async () => {
+    queueResults({ recordset: [{ MixingID: 1, TubWeightKG: 20, IsScrapped: false, IsStaged: true, IsReversed: false, Status: 1, AgeHours: 30, ExpiryOverrideAt: null, ReturnedKG: 0 }] });
+    const res = await request(app).patch('/mixing/tubs/1/stage');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already staged/);
   });
 
   // Expired but expiry-overridden — allowed through even though AgeHours > 96,
@@ -94,6 +108,62 @@ describe('PATCH /mixing/tubs/:tubId/stage', () => {
     );
     const res = await request(app).patch('/mixing/tubs/1/stage');
     expect(res.status).toBe(200);
+  });
+});
+
+// ── PATCH /mixing/tubs/stage-by-ref (scan-to-stage) ──────────────────────────
+// Parses the real printed/barcoded ticket ref ("MX-00000064-T1" — see
+// sql/create_production_database.sql's MixRef computed column plus
+// routes/labels.js's "-T{TubSeq}" suffix) and delegates to the exact same
+// stageTub() guards the manual button uses.
+
+describe('PATCH /mixing/tubs/stage-by-ref', () => {
+  test('400s on an unrecognised ticket format', async () => {
+    const res = await request(app).patch('/mixing/tubs/stage-by-ref').send({ ref: 'not-a-ticket' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unrecognised ticket format/);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('404s when no tub matches the parsed mix/tub sequence', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(app).patch('/mixing/tubs/stage-by-ref').send({ ref: 'MX-00000064-T1' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/Ticket not recognised/);
+  });
+
+  test('resolves a valid ref and stages the matching tub', async () => {
+    queueResults(
+      { recordset: [{ TubID: 7 }] }, // MixingID/TubSeq -> TubID lookup
+      { recordset: [{ MixingID: 64, TubSeq: 1, TubWeightKG: 20, IsScrapped: false, IsStaged: false, IsReversed: false, Status: 1, MixRef: 'MX-00000064', AgeHours: 30, ExpiryOverrideAt: null, ReturnedKG: 0 }] },
+      { recordset: [] }, // UPDATE MixingTubs
+      { recordset: [] }, // writeEvent STAGED
+    );
+    const res = await request(app).patch('/mixing/tubs/stage-by-ref').send({ ref: 'MX-00000064-T1' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.mixRef).toBe('MX-00000064');
+    expect(res.body.data.tubSeq).toBe(1);
+  });
+
+  test('surfaces the same 24h-minimum guard as the manual button', async () => {
+    queueResults(
+      { recordset: [{ TubID: 7 }] },
+      { recordset: [{ MixingID: 64, TubSeq: 1, TubWeightKG: 20, IsScrapped: false, IsStaged: false, IsReversed: false, Status: 1, MixRef: 'MX-00000064', AgeHours: 5, ExpiryOverrideAt: null, ReturnedKG: 0 }] },
+    );
+    const res = await request(app).patch('/mixing/tubs/stage-by-ref').send({ ref: 'mx-00000064-t1' }); // lower-case, still matches
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/at least 24h/);
+  });
+});
+
+// ── GET /mixing/staging/queue — expired exclusion ────────────────────────────
+
+describe('GET /mixing/staging/queue — expired tubs excluded', () => {
+  test('the query only ever asks for AgeHours <= 96 in its WHERE clause', async () => {
+    queueResults({ recordset: [] });
+    await request(app).get('/mixing/staging/queue');
+    const sql = dbRequest.query.mock.calls[0][0];
+    expect(sql).toMatch(/<=\s*96/);
   });
 });
 

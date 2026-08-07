@@ -2987,8 +2987,11 @@ const MX_AGE_BUCKET_SQL = `CASE
   END`;
 
 // Mixes produced but not (or no longer) staged into Billet, bucketed by age
-// and sorted oldest-first — powers the "Billet Staging" dashboard tile.
-// Naturally re-surfaces fully-returned tubs too (they're back at IsStaged=0).
+// and sorted oldest-first — powers the "Billet Staging" screen (reached via
+// the Extrusion tile's entry chooser). Naturally re-surfaces fully-returned
+// tubs too (they're back at IsStaged=0). Expired (>96h) tubs are deliberately
+// excluded here — they only ever surface on the supervisor "Expired Mix
+// Batches" queue (GET /mixing/expired), not this operator-facing list.
 router.get('/mixing/staging/queue', async (req, res) => {
   try {
     const pool = await getProductionPool();
@@ -3001,44 +3004,97 @@ router.get('/mixing/staging/queue', async (req, res) => {
       JOIN   prod.Mixing m ON m.MixingID = t.MixingID
       WHERE  t.IsStaged = 0 AND t.IsScrapped = 0 AND t.SAPSuccess = 1
         AND  m.IsReversed = 0 AND m.Status NOT IN (5, 6)
+        AND  ${MX_AGE_HOURS_SQL} <= 96
       ORDER BY m.CompletedAt ASC`);
     res.json({ success: true, data: r.recordset });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
+// Minimum age before a mix can be staged/used — mirrors the 96h maximum
+// (shelf-life expiry) but at the other end: material needs at least this
+// long to condition before it's fit for the next stage.
+const MX_MIN_AGE_HOURS = 24;
+
+// Shared staging logic — every path that can stage a tub (the manual
+// PATCH .../stage button and the scan-a-ticket PATCH .../stage-by-ref
+// endpoint below) goes through this, so every guard (including the 24h
+// minimum) is enforced identically everywhere, not re-implemented per
+// entry point. Returns { status, body } — never throws for an ordinary
+// validation failure, only for a genuine unexpected error (caller decides
+// how to map that).
+async function stageTub(pool, uid, tubId) {
+  const cur = await pool.request().input('id', sql.Int, tubId).query(`
+    SELECT t.MixingID, t.TubSeq, t.TubWeightKG, t.IsStaged, t.IsScrapped, t.ExpiryOverrideAt,
+           m.MixRef, m.IsReversed, m.Status,
+           ${MX_AGE_HOURS_SQL} AS AgeHours,
+           (SELECT ISNULL(SUM(QuantityKG), 0) FROM prod.MixingTubReturns WHERE TubID = t.TubID) AS ReturnedKG
+    FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+    WHERE t.TubID = @id`);
+  const t = cur.recordset[0];
+  if (!t) return { status: 404, body: { success: false, error: 'Tub not found.' } };
+  if (t.IsScrapped) return { status: 409, body: { success: false, error: 'This tub has been scrapped and cannot be staged.' } };
+  if (t.IsReversed || [5, 6].includes(t.Status))
+    return { status: 409, body: { success: false, error: 'The parent mix has been reversed or cancelled.' } };
+  if (t.IsStaged) return { status: 409, body: { success: false, error: 'This tub is already staged into Billet.' } };
+  if (t.AgeHours < MX_MIN_AGE_HOURS && !t.ExpiryOverrideAt) {
+    const remaining = Math.round((MX_MIN_AGE_HOURS - t.AgeHours) * 10) / 10;
+    return { status: 409, body: {
+      success: false,
+      error: `This tub is only ${t.AgeHours.toFixed(1)}h old — mixes need at least ${MX_MIN_AGE_HOURS}h before they can be staged (available in ${remaining}h).`,
+    } };
+  }
+  if (t.AgeHours > 96 && !t.ExpiryOverrideAt)
+    return { status: 409, body: { success: false, error: 'This tub is expired (>96h) and requires supervisor review — approve scrap or override expiry from the Expired Mix Batches queue.' } };
+
+  const balance = Math.round((Number(t.TubWeightKG) - Number(t.ReturnedKG)) * 1000) / 1000;
+  await pool.request()
+    .input('id', sql.Int, tubId).input('uid', sql.Int, uid).input('bal', sql.Decimal(10, 3), balance)
+    .input('hrs', sql.Decimal(6, 2), t.AgeHours)
+    .query(`UPDATE prod.MixingTubs
+            SET IsStaged=1, StagedAt=GETDATE(), ConditioningTimeHours=@hrs, StagedByUserID=@uid, StagedQuantityKG=@bal
+            WHERE TubID=@id`);
+
+  await writeEvent(pool, 'MX', t.MixingID, 'STAGED', `Tub ${tubId} staged into Billet (${t.AgeHours.toFixed(1)}h after production)`, 0, uid);
+
+  const mixRef = t.MixRef || `MX-${String(t.MixingID).padStart(8, '0')}`;
+  return { status: 200, body: { success: true, data: { tubId, mixRef, tubSeq: t.TubSeq, stagedQuantityKG: balance } } };
+}
+
 // Stage a tub into Billet — an ordinary operator action (see the plan's
 // open question on PROD_ENTRY enforcement; matches today's unenforced
 // convention for entry-level routes elsewhere in this file).
 router.patch('/mixing/tubs/:tubId/stage', async (req, res) => {
-  const tubId = Number(req.params.tubId);
   try {
     const pool = await getProductionPool();
-    const uid  = userId(req);
+    const { status, body } = await stageTub(pool, userId(req), Number(req.params.tubId));
+    res.status(status).json(body);
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
 
-    const cur = await pool.request().input('id', sql.Int, tubId).query(`
-      SELECT t.MixingID, t.TubWeightKG, t.IsStaged, t.IsScrapped, t.ExpiryOverrideAt,
-             m.IsReversed, m.Status,
-             ${MX_AGE_HOURS_SQL} AS AgeHours,
-             (SELECT ISNULL(SUM(QuantityKG), 0) FROM prod.MixingTubReturns WHERE TubID = t.TubID) AS ReturnedKG
-      FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
-      WHERE t.TubID = @id`);
-    const t = cur.recordset[0];
-    if (!t) return res.status(404).json({ success: false, error: 'Tub not found.' });
-    if (t.IsScrapped) return res.status(409).json({ success: false, error: 'This tub has been scrapped and cannot be staged.' });
-    if (t.IsReversed || [5, 6].includes(t.Status)) return res.status(409).json({ success: false, error: 'The parent mix has been reversed or cancelled.' });
-    if (t.AgeHours > 96 && !t.ExpiryOverrideAt)
-      return res.status(409).json({ success: false, error: 'This tub is expired (>96h) and requires supervisor review — approve scrap or override expiry from the Expired Mix Batches queue.' });
+// Scan-to-stage — parses the exact ref printed/barcoded on a tub's physical
+// ticket (prod.Mixing.MixRef, a persisted "MX-{8-digit MixingID}" computed
+// column, plus "-T{TubSeq}" appended by routes/labels.js's
+// fetchMixingTicketsData) back into a TubID, then runs it through the same
+// stageTub() guards as the manual button — scan errors read identically to
+// button errors.
+router.patch('/mixing/tubs/stage-by-ref', async (req, res) => {
+  const raw = String(req.body?.ref || '').trim();
+  const match = raw.match(/^MX-(\d+)-T(\d+)$/i);
+  if (!match)
+    return res.status(400).json({ success: false, error: `Unrecognised ticket format: "${raw}". Expected something like MX-00000064-T1.` });
 
-    const balance = Math.round((Number(t.TubWeightKG) - Number(t.ReturnedKG)) * 1000) / 1000;
-    await pool.request()
-      .input('id', sql.Int, tubId).input('uid', sql.Int, uid).input('bal', sql.Decimal(10, 3), balance)
-      .input('hrs', sql.Decimal(6, 2), t.AgeHours)
-      .query(`UPDATE prod.MixingTubs
-              SET IsStaged=1, StagedAt=GETDATE(), ConditioningTimeHours=@hrs, StagedByUserID=@uid, StagedQuantityKG=@bal
-              WHERE TubID=@id`);
+  try {
+    const pool = await getProductionPool();
+    const mixingId = Number(match[1]);
+    const tubSeq   = Number(match[2]);
 
-    await writeEvent(pool, 'MX', t.MixingID, 'STAGED', `Tub ${tubId} staged into Billet (${t.AgeHours.toFixed(1)}h after production)`, 0, uid);
-    res.json({ success: true, data: { tubId, stagedQuantityKG: balance } });
+    const tubRow = await pool.request().input('mid', sql.Int, mixingId).input('seq', sql.Int, tubSeq)
+      .query(`SELECT TubID FROM prod.MixingTubs WHERE MixingID = @mid AND TubSeq = @seq`);
+    if (!tubRow.recordset.length)
+      return res.status(404).json({ success: false, error: `Ticket not recognised — no tub matches ${raw}.` });
+
+    const { status, body } = await stageTub(pool, userId(req), tubRow.recordset[0].TubID);
+    res.status(status).json(body);
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
 

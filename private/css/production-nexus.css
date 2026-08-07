@@ -423,3 +423,96 @@
   .rpt-charts { grid-template-columns: 1fr; }
   .rpt-chart-card--wide { grid-column: auto; }
 }
+
+/* ── BILLET STAGING — compact collapsible buckets ─────────────────────────
+   Ported from warehouse.css's .pb-stock-material pattern (small bordered
+   <details> boxes, sized to their container rather than the full page) —
+   production-nexus.html doesn't load warehouse.css, so these are copied
+   rather than shared, matching this codebase's per-page-CSS convention. */
+
+.bs-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  gap: 20px;
+  max-width: 900px;
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .bs-layout { grid-template-columns: 1fr; }
+}
+
+.bs-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.bs-panel + .bs-panel { margin-top: 16px; }
+.bs-panel-title {
+  font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.bs-bucket-list { display: flex; flex-direction: column; gap: 10px; }
+
+.bs-bucket {
+  border: 1px solid var(--border2, var(--border));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.bs-bucket-hdr {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px;
+}
+.bs-bucket--details > summary.bs-bucket-hdr { list-style: none; cursor: pointer; user-select: none; }
+.bs-bucket--details > summary.bs-bucket-hdr::-webkit-details-marker { display: none; }
+.bs-bucket-hdr::before {
+  content: '▸'; font-size: 9px; color: var(--text-muted);
+  margin-right: 6px; display: inline-block; transition: transform 0.15s;
+}
+.bs-bucket--details[open] > summary.bs-bucket-hdr::before { transform: rotate(90deg); }
+
+.bs-bucket-title { font-size: 12px; font-weight: 700; }
+.bs-bucket-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted); white-space: nowrap;
+}
+
+.bs-bucket-rows { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.bs-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11px;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px;
+}
+.bs-row-info { min-width: 0; }
+.bs-row-ref { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+.bs-row-meta { color: var(--text-muted); margin-top: 1px; }
+.bs-row-action { flex-shrink: 0; }
+.bs-row-action button {
+  font-size: 10px; padding: 3px 8px; border-radius: 4px;
+  border: 1px solid var(--accent); background: var(--accent-dim); color: var(--accent);
+  cursor: pointer;
+}
+.bs-row-action button:disabled {
+  border-color: var(--border); background: var(--surface); color: var(--text-muted);
+  cursor: default;
+}
+
+.bs-scan-input, .bs-search-input {
+  width: 100%; font-size: 14px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.bs-scan-input:focus, .bs-search-input:focus { outline: none; border-color: var(--accent); }
+
+.bs-scan-result { margin-top: 8px; font-size: 12px; min-height: 16px; }
+.bs-scan-result--ok    { color: var(--success, #059669); }
+.bs-scan-result--error { color: var(--error); }
+
+.bs-search-results { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.bs-search-empty { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
