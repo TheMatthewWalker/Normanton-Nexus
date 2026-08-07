@@ -1621,8 +1621,8 @@ function siShowTransferPanel() {
 // via BAPI_GOODSMVT_CREATE (movement 711/712, or 717/718 for category 'S').
 // Per the user's own rule: a negative quantity needs topping up, a positive
 // quantity needs writing down — each row corrected by exactly the amount
-// it's currently off by. Unit is asked per row (not carried on the LQUA
-// stock row SapServer returns) rather than guessed at. StorageType/StorageBin
+// it's currently off by. Unit isn't sent — SAP derives it from the
+// material's base unit of measure automatically. StorageType/StorageBin
 // (WM storage type/bin — this stock lives inside warehouse management, not
 // just an IM storage location) are also sent, since SAP needs both to post
 // against a specific bin.
@@ -1650,7 +1650,6 @@ function siShowAdjustmentPanel() {
       <td class="wsm-mono">${esc(row.storageLocation)}${row.batch ? ` · ${esc(row.batch)}` : ''}</td>
       <td>${row.availableQty}</td>
       <td class="wsm-mono">${movementType}</td>
-      <td><input class="tf-input si-adjust-unit" type="text" placeholder="e.g. KG" data-id="${esc(id)}"></td>
       <td class="wsm-mass-result" id="si-adjust-result-${esc(id)}"></td>
     </tr>`;
   }).join('');
@@ -1667,7 +1666,7 @@ function siShowAdjustmentPanel() {
       </div>
       <div class="wsm-mass-table-wrap">
         <table class="wsm-mass-table">
-          <thead><tr><th>Material</th><th>Loc./Batch</th><th>Qty</th><th>Movement</th><th>Unit</th><th></th></tr></thead>
+          <thead><tr><th>Material</th><th>Loc./Batch</th><th>Qty</th><th>Movement</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
@@ -1687,15 +1686,6 @@ function siShowAdjustmentPanel() {
       return;
     }
 
-    const missingUnit = rows.some(row => {
-      const unitInput = document.querySelector(`.si-adjust-unit[data-id="${CSS.escape(wsmRowId(row))}"]`);
-      return !(unitInput?.value || '').trim();
-    });
-    if (missingUnit) {
-      summaryEl.innerHTML = `<div class="sap-error tf-inline-error">✕ A unit is required for every row.</div>`;
-      return;
-    }
-
     if (!await wConfirm({
       title: 'Post Stock Adjustment',
       message: `Post ${rows.length} stock adjustment(s) to zero out the selected holding-bin stock? This posts directly to SAP and can't be undone from here.`,
@@ -1712,13 +1702,11 @@ function siShowAdjustmentPanel() {
     for (const row of rows) {
       const id          = wsmRowId(row);
       const resultCell  = document.getElementById(`si-adjust-result-${id}`);
-      const unitInput   = document.querySelector(`.si-adjust-unit[data-id="${CSS.escape(id)}"]`);
-      const unit        = (unitInput?.value || '').trim();
       const movementType = siMovementTypeFor(row);
 
       const result = await siCreateStockAdjustment({
         Material: row.material, StorageLocation: row.storageLocation, Batch: row.batch || '',
-        MovementType: movementType, Quantity: Math.abs(row.availableQty), Unit: unit, Reference: reference,
+        MovementType: movementType, Quantity: Math.abs(row.availableQty), Reference: reference,
         // Stock sits inside warehouse management, so SAP needs the actual WM
         // storage type/bin, not just the IM storage location — these rows
         // are always the holding bin (999/TEMP) since that's what this card
