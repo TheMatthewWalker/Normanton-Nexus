@@ -2129,9 +2129,9 @@ function trReqRender(filters = {}) {
             </select></div>
           <div class="wsm-filter-field"><label class="tf-label">Material</label>
             <input class="tf-input" id="tr-req-material-filter" type="text" value="${esc(filters.material || '')}" style="max-width:160px"></div>
-          <div class="wsm-filter-field"><label class="tf-label">Storage Loc.</label>
-            <input class="tf-input" id="tr-req-sloc-filter" type="text" value="${esc(filters.storageLocation || '')}" style="max-width:110px"></div>
-          <div class="wsm-filter-field"><label class="tf-label">Created By</label>
+          ` //<div class="wsm-filter-field"><label class="tf-label">Storage Loc.</label>
+            //<input class="tf-input" id="tr-req-sloc-filter" type="text" value="${esc(filters.storageLocation || '')}" style="max-width:110px"></div>
+          `<div class="wsm-filter-field"><label class="tf-label">Created By</label>
             <input class="tf-input" id="tr-req-createdby-filter" type="text" value="${esc(filters.createdBy || '')}" style="max-width:110px"></div>
           <button type="button" class="btn-submit" id="tr-req-search-btn">Search</button>
           <button type="button" class="btn-secondary" id="tr-req-refresh">Refresh</button>
