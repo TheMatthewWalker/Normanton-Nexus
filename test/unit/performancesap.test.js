@@ -28,7 +28,7 @@ beforeEach(() => {
 
 function decodeAuthToken(mockCall) {
   const token = mockCall.headers.Authorization.replace('Bearer ', '');
-  return jwt.verify(token, process.env.SAP_SERVER_SECRET, { issuer: 'sql2005-bridge', audience: 'sap-server' });
+  return jwt.verify(token, process.env.SAP_SERVER_SECRET, { issuer: 'normanton-nexus', audience: 'sap-server' });
 }
 
 describe('auth token issuance', () => {

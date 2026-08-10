@@ -20,7 +20,7 @@ export function makeSapToken() {
     return jwt.sign(
         { userId: 0 },
         sapServerSecret,
-        { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' }
+        { issuer: 'normanton-nexus', audience: 'sap-server', expiresIn: '60s' }
     );
 }
 
@@ -70,7 +70,7 @@ router.post('/token', async (req, res) => {
     };
     const token = jwt.sign(payload, sapServerSecret, {
       expiresIn: '8h',
-      issuer:    'sql2005-bridge',
+      issuer:    'normanton-nexus',
       audience:  'sap-server',
     });
     await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'Issued SAP token'), req);

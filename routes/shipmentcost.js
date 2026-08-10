@@ -19,7 +19,7 @@ const sapAgent = fs.existsSync(certPath)
 // clicked Post to SAP, not a fixed service account.
 function makeSapToken(userId) {
     return jwt.sign({ userId: userId ?? 0 }, sapServerSecret,
-        { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' });
+        { issuer: 'normanton-nexus', audience: 'sap-server', expiresIn: '60s' });
 }
 
 // SapServer's ApiResponse.Fail() puts the generic error under body.error.message

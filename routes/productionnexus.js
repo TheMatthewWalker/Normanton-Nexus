@@ -19,7 +19,7 @@ function makeSapToken() {
     // TODO: include user info in token if needed for SAP logging; currently just a placeholder
     { userId: 0 },
     sapServerSecret,
-    { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' }
+    { issuer: 'normanton-nexus', audience: 'sap-server', expiresIn: '60s' }
   );
 }
 

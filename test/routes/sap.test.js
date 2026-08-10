@@ -43,7 +43,7 @@ describe('POST /token', () => {
 
     expect(res.status).toBe(200);
     const decoded = jwt.verify(res.body.token, process.env.SAP_SERVER_SECRET, {
-      issuer: 'sql2005-bridge',
+      issuer: 'normanton-nexus',
       audience: 'sap-server',
     });
     expect(decoded).toMatchObject({

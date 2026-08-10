@@ -17,7 +17,7 @@ function makeSapTokenForUser(req) {
       },
       sapServerSecret,
       {
-        issuer: 'sql2005-bridge',
+        issuer: 'normanton-nexus',
         audience: 'sap-server',
         expiresIn: '60s'
       }
@@ -34,7 +34,7 @@ function makeSapTokenForUser(req) {
     },
     sapServerSecret,
     {
-      issuer: 'sql2005-bridge',
+      issuer: 'normanton-nexus',
       audience: 'sap-server',
       expiresIn: '60s'
     }
