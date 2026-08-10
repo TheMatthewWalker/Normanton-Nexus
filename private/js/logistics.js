@@ -10104,6 +10104,10 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <input type="checkbox" id="isd-undo-skip-sap">
         <span>Skip SAP reversal (testing only / already reversed by hand) — force-clears the portal record without calling SAP</span>
       </label>` : ''}` : ''}
+      ${s.IsManual ? `
+      <div class="tf-section-label">Cargo Items</div>
+      <div class="toolbar-hint">Not linked to SAP or any tracked order — record what's actually on this shipment for your own tracking.</div>
+      <div id="isd-manual-items"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>` : ''}
       <div class="tf-section-label">Documents</div>
       <div class="toolbar-hint">Purchase orders assigned to this shipment are filed here automatically. Upload shipping documents or the supplier invoice too — everything lands in the same folder.</div>
       <div id="isd-documents"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
@@ -10117,6 +10121,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
     loadForwarderOptionsInto('isd-haulier', s.ForwarderID);
     renderAssociatedCosts(shipmentId, s);
     renderShipmentDocuments(shipmentId);
+    if (s.IsManual) renderManualInboundItems(shipmentId);
 
     document.getElementById('isd-doc-upload-btn').addEventListener('click', () => document.getElementById('isd-doc-file-input').click());
     document.getElementById('isd-doc-file-input').addEventListener('change', async () => {
@@ -10203,6 +10208,88 @@ async function renderShipmentDocuments(shipmentId) {
             <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
           </tr>`).join('')}</tbody>
         </table></div>`;
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Cargo Items (Manual Inbound Shipment detail) ────────────────────────────
+// Lets an operator record material + quantity actually on a manual inbound
+// shipment (one with no PurchaseOrderSuggestion lines to check against) so
+// there's still something to track it against on arrival. Added one row at
+// a time against an already-created shipment, same as Associated Costs
+// below, rather than batched into the create-shipment modal. See
+// routes/performance.js's /order-suggestions/shipments/:shipmentId/manual-items.
+async function renderManualInboundItems(shipmentId) {
+  const container = document.getElementById('isd-manual-items');
+  if (!container) return;
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/manual-items`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load cargo items');
+    const items = json.data || [];
+
+    const rows = items.map(i => `
+      <tr class="admin-row">
+        <td><strong>${esc(i.Material || '-')}</strong></td>
+        <td>${esc(i.Description || '-')}</td>
+        <td>${Number(i.Quantity).toLocaleString()}${i.UnitOfMeasure ? ' ' + esc(i.UnitOfMeasure) : ''}</td>
+        <td><button type="button" class="btn-secondary isd-item-delete" data-item-id="${i.ItemId}" style="padding:2px 8px;font-size:11px">Remove</button></td>
+      </tr>`).join('');
+
+    container.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Description</th><th>Quantity</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cargo items yet</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="tf-row" style="margin-top:10px;align-items:flex-end">
+        <div class="tf-field"><label class="tf-label">Material</label><input class="tf-input" type="text" id="isd-item-material" placeholder="e.g. T1700-16" style="width:120px"></div>
+        <div class="tf-field"><label class="tf-label">Description</label><input class="tf-input" type="text" id="isd-item-desc" placeholder="Optional if material given"></div>
+        <div class="tf-field"><label class="tf-label">Quantity</label><input class="tf-input" type="number" step="0.001" min="0" id="isd-item-qty" style="width:90px"></div>
+        <div class="tf-field"><label class="tf-label">Unit</label><input class="tf-input" type="text" id="isd-item-uom" placeholder="e.g. M" style="width:60px"></div>
+        <div class="tf-field"><button type="button" class="btn-secondary" id="isd-item-add-btn">+ Add Item</button></div>
+      </div>
+      <div id="isd-item-result" style="margin-top:8px"></div>`;
+
+    document.getElementById('isd-item-add-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('isd-item-add-btn');
+      const result = document.getElementById('isd-item-result');
+      const material = document.getElementById('isd-item-material').value.trim();
+      const description = document.getElementById('isd-item-desc').value.trim();
+      const quantity = document.getElementById('isd-item-qty').value;
+      const unitOfMeasure = document.getElementById('isd-item-uom').value.trim();
+      if (!material && !description) { result.innerHTML = '<div class="sap-error">Enter a material or a description.</div>'; return; }
+      if (!quantity || Number(quantity) <= 0) { result.innerHTML = '<div class="sap-error">Enter a quantity greater than 0.</div>'; return; }
+      btn.disabled = true; btn.textContent = 'Adding…';
+      try {
+        const res2 = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/manual-items`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ material, description, quantity: Number(quantity), unitOfMeasure }),
+        });
+        const json2 = await res2.json();
+        if (!json2.success) throw new Error(json2.error?.message || 'Failed to add item');
+        renderManualInboundItems(shipmentId);
+      } catch (err) {
+        result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = '+ Add Item';
+      }
+    });
+
+    document.querySelectorAll('.isd-item-delete').forEach(b => {
+      b.addEventListener('click', async () => {
+        try {
+          const res2 = await fetch(`/api/performance/order-suggestions/manual-items/${b.dataset.itemId}`, { method: 'DELETE' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error?.message || 'Failed to remove item');
+          renderManualInboundItems(shipmentId);
+        } catch (err) {
+          document.getElementById('isd-item-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+        }
+      });
+    });
   } catch (err) {
     container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }

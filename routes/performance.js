@@ -700,11 +700,15 @@ async function ensureShipmentImportFolder(shipment, supplierName) {
 // A shipment record (from db.getOrderShipmentWithOrders) plus the single
 // supplier name derived from its first linked order — shared by all three
 // document routes below so the folder-path derivation only lives in one
-// place.
+// place. A Manual Inbound Shipment has no linked orders to derive a vendor
+// name from, but it does capture a supplier/origin name at creation time
+// (OriginName, from the Destinations lookup — see createManualOrderShipment
+// in performancesql.js) — fall back to that rather than filing under
+// "Unknown Supplier" just because the shipment is manual.
 async function loadShipmentForImportDocs(shipmentId) {
   const record = await db.getOrderShipmentWithOrders(shipmentId);
   if (!record) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
-  const supplierName = record.orders?.[0]?.VendorName || '';
+  const supplierName = record.orders?.[0]?.VendorName || record.OriginName || '';
   return { record, supplierName };
 }
 
@@ -3481,6 +3485,43 @@ router.get('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MR
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Manual Inbound Shipment cargo items — the equivalent of Manual Outbound
+// Shipment's manual-cargo lines (routes/shipmentmain.js), but for the
+// inbound side: material + quantity an operator wants tracked as actually
+// on a manual shipment, even though nothing came through the tracked-order
+// flow. addManualInboundItem (performancesql.js) rejects a non-manual
+// shipment itself, so the 400 for that case comes from there.
+router.get('/order-suggestions/shipments/:shipmentId/manual-items', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const data = await db.getManualInboundItems(req.params.shipmentId);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/order-suggestions/shipments/:shipmentId/manual-items', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { material, description, quantity, unitOfMeasure } = req.body;
+    await db.addManualInboundItem(req.params.shipmentId, {
+      material, description, quantity, unitOfMeasure,
+      createdBy: req.session?.user?.username || null,
+    });
+    res.status(201).json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.delete('/order-suggestions/manual-items/:itemId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.removeManualInboundItem(req.params.itemId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
   }
 });
 

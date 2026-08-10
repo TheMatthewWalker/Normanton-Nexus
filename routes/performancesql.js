@@ -1768,7 +1768,9 @@ export async function getOrderShipmentWithOrders(shipmentId) {
       ORDER BY p.Material
     `);
 
-  return { ...shipment, orders };
+  const manualItems = await getManualInboundItems(shipmentId);
+
+  return { ...shipment, orders, manualItems };
 }
 
 // ShipmentReference is intentionally excluded here — it's auto-generated at
@@ -1852,6 +1854,66 @@ export async function createManualOrderShipment({
     .query('UPDATE dbo.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
 
   return { shipmentId, shipmentReference };
+}
+
+// ── Manual Inbound Shipment cargo items — lets an operator record what's
+// actually on a manual shipment (material + quantity) even though nothing
+// came through the PurchaseOrderSuggestion/tracked-order flow, so there's
+// still something to check against on arrival. Same "flag on the header,
+// separate child rows" shape as Manual Outbound Shipment's ManualCargoItem
+// (routes/shipmentmain.js) — see
+// migrations/kongsberg/20260810120000_add_manual_inbound_items.cjs.
+export async function getManualInboundItems(shipmentId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query(`
+      SELECT ItemId, ShipmentId, Material, Description, Quantity, UnitOfMeasure, CreatedAtUtc, CreatedBy
+      FROM dbo.ManualInboundItem
+      WHERE ShipmentId = @shipmentId AND Removed = 0
+      ORDER BY ItemId ASC
+    `);
+  return recordset;
+}
+
+export async function addManualInboundItem(shipmentId, { material, description, quantity, unitOfMeasure, createdBy }) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .query('SELECT IsManual FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+  const shipment = recordset[0];
+  if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
+  if (!shipment.IsManual) { const err = new Error('Cargo items can only be added to a manual shipment.'); err.statusCode = 400; throw err; }
+
+  const qty = Number(quantity);
+  if (!(qty > 0)) { const err = new Error('Quantity must be greater than 0.'); err.statusCode = 400; throw err; }
+  const materialTrimmed = String(material || '').trim() || null;
+  const descriptionTrimmed = String(description || '').trim() || null;
+  if (!materialTrimmed && !descriptionTrimmed) { const err = new Error('Enter a material or a description.'); err.statusCode = 400; throw err; }
+
+  await pool.request()
+    .input('shipmentId', sql.Int, shipmentId)
+    .input('material', sql.NVarChar(18), materialTrimmed)
+    .input('description', sql.NVarChar(200), descriptionTrimmed)
+    .input('quantity', sql.Decimal(15, 3), qty)
+    .input('unitOfMeasure', sql.NVarChar(10), String(unitOfMeasure || '').trim() || null)
+    .input('createdBy', sql.NVarChar(100), createdBy || null)
+    .query(`
+      INSERT INTO dbo.ManualInboundItem (ShipmentId, Material, Description, Quantity, UnitOfMeasure, CreatedBy)
+      VALUES (@shipmentId, @material, @description, @quantity, @unitOfMeasure, @createdBy)
+    `);
+}
+
+export async function removeManualInboundItem(itemId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('itemId', sql.Int, itemId)
+    .query('SELECT ItemId FROM dbo.ManualInboundItem WHERE ItemId = @itemId AND Removed = 0');
+  if (!recordset[0]) { const err = new Error('Item not found.'); err.statusCode = 404; throw err; }
+
+  await pool.request()
+    .input('itemId', sql.Int, itemId)
+    .query('UPDATE dbo.ManualInboundItem SET Removed = 1 WHERE ItemId = @itemId');
 }
 
 // shipmentId may be null to unassign (e.g. an order was linked to the wrong

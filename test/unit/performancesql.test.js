@@ -18,9 +18,11 @@ jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 let createDemandAdjustment;
 let markShipmentReceived;
 let undoShipmentReceived;
+let addManualInboundItem;
+let removeManualInboundItem;
 
 beforeAll(async () => {
-  ({ createDemandAdjustment, markShipmentReceived, undoShipmentReceived } = await import('../../routes/performancesql.js'));
+  ({ createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem, removeManualInboundItem } = await import('../../routes/performancesql.js'));
 });
 
 beforeEach(() => {
@@ -337,5 +339,84 @@ describe('undoShipmentReceived', () => {
     expect(result.stillPostedCount).toBe(1);
     expect(result.shipmentUndone).toBe(false);
     expect(result.sapResults).toEqual([{ suggestionId: 1, material: 'MAT1', success: false, error: 'SapServer unreachable' }]);
+  });
+});
+
+// Manual Inbound Shipment cargo items (dbo.ManualInboundItem) — lets an
+// operator record material + quantity actually on a manual shipment. Query
+// order inside addManualInboundItem: (1) IsManual lookup, (2) INSERT.
+describe('addManualInboundItem', () => {
+  test('rejects with a 404 when the shipment does not exist', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+
+    await expect(addManualInboundItem(999, { material: 'T1700-16', quantity: 103 })).rejects.toMatchObject({
+      statusCode: 404,
+      message: expect.stringContaining('Shipment not found'),
+    });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects with a 400 when the shipment is not manual, before inserting anything', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ IsManual: false }] });
+
+    await expect(addManualInboundItem(1, { material: 'T1700-16', quantity: 103 })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('manual shipment'),
+    });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects with a 400 when quantity is not greater than 0', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ IsManual: true }] });
+
+    await expect(addManualInboundItem(1, { material: 'T1700-16', quantity: 0 })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('Quantity'),
+    });
+  });
+
+  test('rejects with a 400 when neither material nor description is given', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ IsManual: true }] });
+
+    await expect(addManualInboundItem(1, { quantity: 103 })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('material or a description'),
+    });
+  });
+
+  test('inserts the item on a manual shipment with valid material + quantity', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ IsManual: true }] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    await addManualInboundItem(1, { material: 'T1700-16', quantity: '103', unitOfMeasure: 'M', createdBy: 'tester' });
+
+    expect(dbRequest.query).toHaveBeenCalledTimes(2);
+    const inputCalls = (name) => dbRequest.input.mock.calls.filter(call => call[0] === name).map(call => call[2]);
+    expect(inputCalls('material')).toContain('T1700-16');
+    expect(inputCalls('quantity')).toContain(103);
+    expect(inputCalls('unitOfMeasure')).toContain('M');
+  });
+});
+
+describe('removeManualInboundItem', () => {
+  test('rejects with a 404 when the item does not exist (or was already removed)', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+
+    await expect(removeManualInboundItem(999)).rejects.toMatchObject({
+      statusCode: 404,
+      message: expect.stringContaining('Item not found'),
+    });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('soft-deletes an existing item', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ ItemId: 1 }] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    await removeManualInboundItem(1);
+
+    expect(dbRequest.query).toHaveBeenCalledTimes(2);
   });
 });
