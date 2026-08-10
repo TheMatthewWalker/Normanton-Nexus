@@ -158,15 +158,44 @@ export function digits(v) {
   return stripped;
 }
 
-// SAP internal date format (YYYYMMDD) → JS Date, or null.
+// SAP date, in either format RFC_READ_TABLE hands back depending on the field
+// and how it's read — DD.MM.YYYY (the calling session's display format; this
+// is what live ERDAT/BLDAT-type character output actually comes back as) or
+// the raw internal YYYYMMDD (kept as a fallback in case a different field/call
+// ever returns that instead) — → JS Date, or null.
 export function parseSapDate(s) {
   const str = String(s ?? '').trim();
-  if (!/^\d{8}$/.test(str)) return null;
-  const year = Number(str.slice(0, 4));
-  const month = Number(str.slice(4, 6));
-  const day = Number(str.slice(6, 8));
+  if (!str) return null;
+
+  let year, month, day;
+  const dotted = str.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (dotted) {
+    [, day, month, year] = dotted;
+  } else if (/^\d{8}$/.test(str)) {
+    year = str.slice(0, 4);
+    month = str.slice(4, 6);
+    day = str.slice(6, 8);
+  } else {
+    return null;
+  }
+
+  year = Number(year); month = Number(month); day = Number(day);
   if (!year || !month || !day) return null;
   return new Date(year, month - 1, day);
+}
+
+// SAP's RFC_READ_TABLE returns numeric fields (KCMENG, RFWRT, KBETR, KPEIN, ...)
+// as character strings in the calling session's display format — European-style
+// grouping, e.g. "2.748,000" for 2748 — not plain machine-parseable numbers.
+// Number("2.748,000") is NaN, which every call site here previously folded
+// into `|| 0`, silently zeroing out quantity/value/weight everywhere. Strip the
+// "." thousands separators, then swap the "," decimal separator for a ".".
+export function parseSapNumber(s) {
+  const str = String(s ?? '').trim();
+  if (!str) return 0;
+  const normalized = str.replace(/\./g, '').replace(',', '.');
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : 0;
 }
 
 // ── 1. Parse the uploaded Shipments-sheet columns A:D ───────────────────────
@@ -337,10 +366,10 @@ async function buildCustomsReportRows(shipmentRows, sapData) {
       deliveryNumber:  deliveryKey,
       itemNumber:      itemKey,
       material:        String(lipsRow.materialNumber || '').trim(),
-      quantity:        Number(lipsRow.quantity) || 0,
+      quantity:        parseSapNumber(lipsRow.quantity),
       invoiceNumber:   vbfaRow ? digits(vbfaRow.invoiceNumber) : '',
       currency:        vbrkRow?.currency?.trim() || '',
-      salesValue:      vbfaRow ? Number(vbfaRow.statisticalValue) || 0 : null,
+      salesValue:      vbfaRow ? parseSapNumber(vbfaRow.statisticalValue) : null,
       commodityCode:   marcRow?.commodityCode?.trim() || '',
       countryOfOrigin: marcRow?.countryOfOrigin?.trim() || '',
       incoterms:       likpRow?.incoterms?.trim() || '',
@@ -369,8 +398,8 @@ async function buildCustomsReportRows(shipmentRows, sapData) {
     for (const row of consignmentCandidates) {
       const price = priceByPair.get(pairKey(row));
       if (price) {
-        const rate = Number(price.rate) || 0;
-        const pricingUnit = Number(price.pricingUnit) || 1;
+        const rate = parseSapNumber(price.rate);
+        const pricingUnit = parseSapNumber(price.pricingUnit) || 1;
         row.invoiceNumber = row.deliveryNumber; // placeholder — no real invoice for consignment shipments
         row.currency = price.currency?.trim() || '';
         row.salesValue = Math.round((rate / pricingUnit) * row.quantity * 100) / 100;

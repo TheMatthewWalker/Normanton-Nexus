@@ -7,6 +7,14 @@
 // than through the full upload/SAP-enrichment route. digits()/parseSapDate()
 // are the small ID-normalization/date-parsing helpers the row-assembly logic
 // leans on to match IDs across differently-padded SAP table outputs.
+// parseSapNumber() locks in a real production bug: RFC_READ_TABLE returns
+// numeric fields (KCMENG, RFWRT, KBETR, KPEIN, ...) in the calling session's
+// display format — European-style grouping, e.g. "2.748,000" — not a plain
+// machine-parseable number. Number("2.748,000") is NaN; every call site that
+// used to do `Number(x) || 0` silently zeroed out quantity/value, which in
+// turn zeroed weight apportionment's totalQty and blanked every line's
+// weight too. Confirmed against a real SapServer response the user pasted:
+// {"quantity": "2.748,000"} for a live LIPS query.
 
 import { describe, test, expect, jest } from '@jest/globals';
 import { createMockSql } from '../helpers/mockPool.js';
@@ -20,9 +28,10 @@ jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 let apportionWeights;
 let digits;
 let parseSapDate;
+let parseSapNumber;
 
 beforeAll(async () => {
-  ({ apportionWeights, digits, parseSapDate } = await import('../../routes/customsreport.js'));
+  ({ apportionWeights, digits, parseSapDate, parseSapNumber } = await import('../../routes/customsreport.js'));
 });
 
 describe('apportionWeights', () => {
@@ -119,7 +128,14 @@ describe('digits', () => {
 });
 
 describe('parseSapDate', () => {
-  test('parses a valid YYYYMMDD string', () => {
+  test('parses the DD.MM.YYYY format RFC_READ_TABLE actually returns for character-mode date fields', () => {
+    const d = parseSapDate('15.05.2026');
+    expect(d.getFullYear()).toBe(2026);
+    expect(d.getMonth()).toBe(4); // 0-indexed
+    expect(d.getDate()).toBe(15);
+  });
+
+  test('also parses a valid YYYYMMDD string (fallback format)', () => {
     const d = parseSapDate('20260515');
     expect(d.getFullYear()).toBe(2026);
     expect(d.getMonth()).toBe(4); // 0-indexed
@@ -128,6 +144,7 @@ describe('parseSapDate', () => {
 
   test('returns null for a blank/zero date (SAP\'s "no date" convention)', () => {
     expect(parseSapDate('00000000')).toBeNull();
+    expect(parseSapDate('00.00.0000')).toBeNull();
     expect(parseSapDate('')).toBeNull();
     expect(parseSapDate(null)).toBeNull();
   });
@@ -135,5 +152,30 @@ describe('parseSapDate', () => {
   test('returns null for a malformed string', () => {
     expect(parseSapDate('not-a-date')).toBeNull();
     expect(parseSapDate('2026-05-15')).toBeNull();
+  });
+});
+
+describe('parseSapNumber', () => {
+  test('parses a European-grouped SAP quantity (real LIPS response format)', () => {
+    expect(parseSapNumber('2.748,000')).toBe(2748);
+    expect(parseSapNumber('1.915,000')).toBe(1915);
+  });
+
+  test('parses a plain integer string with no separators', () => {
+    expect(parseSapNumber('594')).toBe(594);
+  });
+
+  test('parses a European-grouped value with a fractional remainder', () => {
+    expect(parseSapNumber('1.234,56')).toBe(1234.56);
+  });
+
+  test('returns 0 for blank/null/undefined rather than NaN', () => {
+    expect(parseSapNumber('')).toBe(0);
+    expect(parseSapNumber(null)).toBe(0);
+    expect(parseSapNumber(undefined)).toBe(0);
+  });
+
+  test('returns 0 for a genuinely non-numeric value rather than NaN propagating into a report cell', () => {
+    expect(parseSapNumber('n/a')).toBe(0);
   });
 });

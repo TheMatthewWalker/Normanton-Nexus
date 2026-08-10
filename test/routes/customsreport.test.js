@@ -141,10 +141,15 @@ describe('POST /generate — SAP failure modes', () => {
 
 describe('POST /generate — happy path', () => {
   test('builds a CUSTOMS-format report row from a fully-enriched delivery', async () => {
+    // Quantity/statisticalValue/invoiceDate deliberately use SAP's real
+    // RFC_READ_TABLE output format (European-grouped numbers, DD.MM.YYYY
+    // dates — confirmed against a live response) rather than plain values,
+    // so this test exercises the actual parsing bug that shipped and was
+    // then fixed (parseSapNumber/parseSapDate), not just the happy case.
     mockSapFetch({
-      '/api/customs/lips': [{ deliveryNumber: '0082892007', itemNumber: '000010', materialNumber: 'CP1166', quantity: '2200' }],
+      '/api/customs/lips': [{ deliveryNumber: '0082892007', itemNumber: '000010', materialNumber: 'CP1166', quantity: '2.200,000' }],
       '/api/customs/likp': [{ deliveryNumber: '0082892007', incoterms: 'DDP', consigneeCode: '0000363533' }],
-      '/api/customs/vbfa': [{ deliveryNumber: '0082892007', itemNumber: '000010', invoiceNumber: '0006123356', invoiceItem: '000010', statisticalValue: '594', invoiceDate: '20260510' }],
+      '/api/customs/vbfa': [{ deliveryNumber: '0082892007', itemNumber: '000010', invoiceNumber: '0006123356', invoiceItem: '000010', statisticalValue: '594,00', invoiceDate: '10.05.2026' }],
       '/api/customs/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
       '/api/customs/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
       '/api/customs/vbrk': [{ invoiceNumber: '0006123356', currency: 'EUR' }],
@@ -190,10 +195,14 @@ describe('POST /generate — happy path', () => {
   });
 
   test('splits weight across two line items of the same delivery by quantity share', async () => {
+    // Quantities in SAP's real European-grouped format (e.g. "1.113,000")
+    // rather than plain digits — this is the exact scenario that shipped
+    // broken: NaN quantities summed to a zero totalQty, blanking weight on
+    // every line.
     mockSapFetch({
       '/api/customs/lips': [
-        { deliveryNumber: '0082888744', itemNumber: '000010', materialNumber: 'TSSV16-6B01', quantity: '113' },
-        { deliveryNumber: '0082888744', itemNumber: '000020', materialNumber: 'TCEV9-5B01', quantity: '217' },
+        { deliveryNumber: '0082888744', itemNumber: '000010', materialNumber: 'TSSV16-6B01', quantity: '113,000' },
+        { deliveryNumber: '0082888744', itemNumber: '000020', materialNumber: 'TCEV9-5B01', quantity: '217,000' },
       ],
       '/api/customs/likp': [{ deliveryNumber: '0082888744', incoterms: 'DDP', consigneeCode: '0000363771' }],
     });
@@ -236,7 +245,7 @@ describe('POST /generate — consignment (no-invoice) fallback', () => {
       '/api/customs/vbfa': [], // no billing document — consignment shipment
       '/api/customs/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
       '/api/customs/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
-      '/api/customs/consignment-price': [{ customerCode: '0000363533', materialNumber: 'CP1166', rate: '12.50', currency: 'EUR', pricingUnit: '1' }],
+      '/api/customs/consignment-price': [{ customerCode: '0000363533', materialNumber: 'CP1166', rate: '12,50', currency: 'EUR', pricingUnit: '1' }],
     });
 
     const buffer = await buildShipmentsUpload([['82900001', '15000', new Date(2026, 4, 20), 20]]);
