@@ -1,12 +1,15 @@
 // routes/customsreport.js parses an uploaded Shipments-style xlsx, enriches
-// it via SapServer's customs endpoints (proxied through this app's own
-// /api/sap/* routes, called over loopback fetch — mocked here as global.fetch,
-// not axios), resolves VAT/HS fallback lookups via mssql, apportions weight,
-// and streams back a finished .xlsx. Covers: missing-file/missing-column
-// 400s, permission gating, the happy path (parsed back from the returned
-// buffer), a delivery absent from SAP surfacing as a Warnings-sheet row
-// instead of failing the whole request, the zero-LIPS 422, and the
-// consignment (no-invoice) pricing fallback.
+// it via direct axios calls to SapServer's /api/customs/* endpoints (own
+// makeSapToken/sapAgent boilerplate, same pattern as routes/consignment.js —
+// NOT a loopback fetch to this app's own /api/sap/* proxy routes, which
+// don't work: this app only listens on 443/80, nothing on process.env.PORT),
+// resolves VAT/HS fallback lookups via mssql, apportions weight, and streams
+// back a finished .xlsx. Covers: missing-file/missing-column 400s,
+// permission gating, the happy path (parsed back from the returned buffer),
+// a delivery absent from SAP surfacing as a Warnings-sheet row instead of
+// failing the whole request, the zero-LIPS 422 (including a failed-round
+// reason in the message, not just "no data"), and the consignment
+// (no-invoice) pricing fallback.
 
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals';
 import request from 'supertest';
@@ -17,6 +20,9 @@ import { operatorUser } from '../helpers/fixtures/users.js';
 
 const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
 jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
+
+const axiosMock = { get: jest.fn(), post: jest.fn() };
+jest.unstable_mockModule('axios', () => ({ default: axiosMock }));
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const customsUser = { ...operatorUser, permissions: ['LOG_CUSTOMS_REPORT'] };
@@ -31,16 +37,12 @@ beforeAll(async () => {
   appNoPermission = buildTestApp(customsReportRouter, { sessionUser: operatorUser });
 });
 
-const originalFetch = global.fetch;
-afterAll(() => { global.fetch = originalFetch; });
-
 beforeEach(() => {
   resetMockSql({ pool, request: dbRequest, connect });
-  dbRequest.query.mockResolvedValue({ recordset: [] }); // VAT/HS lookups default to "nothing found"
-  global.fetch = jest.fn(async (url) => {
-    const path = typeof url === 'string' ? new URL(url).pathname : url.pathname;
-    return { json: async () => ({ success: true, data: [] }) };
-  });
+  dbRequest.query.mockResolvedValue({ recordset: [] }); // VAT/HS lookups + audit inserts default to "nothing found" / succeed
+  axiosMock.get.mockReset();
+  axiosMock.post.mockReset();
+  axiosMock.post.mockImplementation(async () => ({ data: { success: true, data: [] } }));
 });
 
 // supertest/superagent has no built-in parser for the xlsx MIME type, so a
@@ -70,10 +72,10 @@ async function buildShipmentsUpload(rows) {
 }
 
 function mockSapFetch(responsesByPath) {
-  global.fetch = jest.fn(async (url) => {
-    const path = typeof url === 'string' ? new URL(url).pathname : url.pathname;
-    const data = responsesByPath[path] || [];
-    return { json: async () => ({ success: true, data }) };
+  axiosMock.post.mockImplementation(async (url) => {
+    const match = Object.keys(responsesByPath).find(p => url.endsWith(p));
+    const data = match ? responsesByPath[match] : [];
+    return { data: { success: true, data } };
   });
 }
 
@@ -122,17 +124,30 @@ describe('POST /generate — SAP failure modes', () => {
     expect(res.status).toBe(422);
     expect(res.body.error.message).toMatch(/no delivery line items/i);
   });
+
+  // Locks in the fix for a real production bug: a hard failure of the LIPS/
+  // LIKP call (network error, auth failure, SapServer down) used to be
+  // indistinguishable from "SAP genuinely has no data for these deliveries"
+  // — both collapsed into the same generic 422, hiding the real cause. The
+  // message must now include why the round failed.
+  test('422 message includes the underlying failure reason when the SAP call itself errors, not just "no data"', async () => {
+    axiosMock.post.mockRejectedValue(new Error('Request failed with status code 401'));
+    const buffer = await buildShipmentsUpload([['82892007', '14781', new Date(2026, 4, 15), 45]]);
+    const res = await request(app).post('/generate').set('Content-Type', XLSX_TYPE).send(Buffer.from(buffer));
+    expect(res.status).toBe(422);
+    expect(res.body.error.message).toMatch(/LIPS query failed: Request failed with status code 401/);
+  });
 });
 
 describe('POST /generate — happy path', () => {
   test('builds a CUSTOMS-format report row from a fully-enriched delivery', async () => {
     mockSapFetch({
-      '/api/sap/lips': [{ deliveryNumber: '0082892007', itemNumber: '000010', materialNumber: 'CP1166', quantity: '2200' }],
-      '/api/sap/likp': [{ deliveryNumber: '0082892007', incoterms: 'DDP', consigneeCode: '0000363533' }],
-      '/api/sap/vbfa': [{ deliveryNumber: '0082892007', itemNumber: '000010', invoiceNumber: '0006123356', invoiceItem: '000010', statisticalValue: '594', invoiceDate: '20260510' }],
-      '/api/sap/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
-      '/api/sap/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
-      '/api/sap/vbrk': [{ invoiceNumber: '0006123356', currency: 'EUR' }],
+      '/api/customs/lips': [{ deliveryNumber: '0082892007', itemNumber: '000010', materialNumber: 'CP1166', quantity: '2200' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082892007', incoterms: 'DDP', consigneeCode: '0000363533' }],
+      '/api/customs/vbfa': [{ deliveryNumber: '0082892007', itemNumber: '000010', invoiceNumber: '0006123356', invoiceItem: '000010', statisticalValue: '594', invoiceDate: '20260510' }],
+      '/api/customs/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
+      '/api/customs/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
+      '/api/customs/vbrk': [{ invoiceNumber: '0006123356', currency: 'EUR' }],
     });
     dbRequest.query.mockResolvedValue({ recordset: [{ Description: 'PTFE Hose with Stainless Steel Braiding' }] });
 
@@ -176,11 +191,11 @@ describe('POST /generate — happy path', () => {
 
   test('splits weight across two line items of the same delivery by quantity share', async () => {
     mockSapFetch({
-      '/api/sap/lips': [
+      '/api/customs/lips': [
         { deliveryNumber: '0082888744', itemNumber: '000010', materialNumber: 'TSSV16-6B01', quantity: '113' },
         { deliveryNumber: '0082888744', itemNumber: '000020', materialNumber: 'TCEV9-5B01', quantity: '217' },
       ],
-      '/api/sap/likp': [{ deliveryNumber: '0082888744', incoterms: 'DDP', consigneeCode: '0000363771' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082888744', incoterms: 'DDP', consigneeCode: '0000363771' }],
     });
 
     const buffer = await buildShipmentsUpload([['82888744', '14875', new Date(2026, 4, 22), 127]]);
@@ -195,8 +210,8 @@ describe('POST /generate — happy path', () => {
 
   test('a delivery in the upload with no SAP match is warned about, not silently dropped', async () => {
     mockSapFetch({
-      '/api/sap/lips': [{ deliveryNumber: '0082892007', itemNumber: '000010', materialNumber: 'CP1166', quantity: '2200' }],
-      '/api/sap/likp': [{ deliveryNumber: '0082892007', incoterms: 'DDP', consigneeCode: '0000363533' }],
+      '/api/customs/lips': [{ deliveryNumber: '0082892007', itemNumber: '000010', materialNumber: 'CP1166', quantity: '2200' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082892007', incoterms: 'DDP', consigneeCode: '0000363533' }],
     });
 
     const buffer = await buildShipmentsUpload([
@@ -216,12 +231,12 @@ describe('POST /generate — happy path', () => {
 describe('POST /generate — consignment (no-invoice) fallback', () => {
   test('uses the delivery number as invoice number and prices from A005/KONP when VBFA has nothing', async () => {
     mockSapFetch({
-      '/api/sap/lips': [{ deliveryNumber: '0082900001', itemNumber: '000010', materialNumber: 'CP1166', quantity: '100' }],
-      '/api/sap/likp': [{ deliveryNumber: '0082900001', incoterms: 'DDP', consigneeCode: '0000363533' }],
-      '/api/sap/vbfa': [], // no billing document — consignment shipment
-      '/api/sap/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
-      '/api/sap/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
-      '/api/sap/consignment-price': [{ customerCode: '0000363533', materialNumber: 'CP1166', rate: '12.50', currency: 'EUR', pricingUnit: '1' }],
+      '/api/customs/lips': [{ deliveryNumber: '0082900001', itemNumber: '000010', materialNumber: 'CP1166', quantity: '100' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082900001', incoterms: 'DDP', consigneeCode: '0000363533' }],
+      '/api/customs/vbfa': [], // no billing document — consignment shipment
+      '/api/customs/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
+      '/api/customs/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
+      '/api/customs/consignment-price': [{ customerCode: '0000363533', materialNumber: 'CP1166', rate: '12.50', currency: 'EUR', pricingUnit: '1' }],
     });
 
     const buffer = await buildShipmentsUpload([['82900001', '15000', new Date(2026, 4, 20), 20]]);
@@ -238,10 +253,10 @@ describe('POST /generate — consignment (no-invoice) fallback', () => {
 
   test('warns (but does not fail) when neither an invoice nor a consignment price is found', async () => {
     mockSapFetch({
-      '/api/sap/lips': [{ deliveryNumber: '0082900002', itemNumber: '000010', materialNumber: 'CP1166', quantity: '50' }],
-      '/api/sap/likp': [{ deliveryNumber: '0082900002', incoterms: 'DDP', consigneeCode: '0000363533' }],
-      '/api/sap/vbfa': [],
-      '/api/sap/consignment-price': [], // no condition record either
+      '/api/customs/lips': [{ deliveryNumber: '0082900002', itemNumber: '000010', materialNumber: 'CP1166', quantity: '50' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082900002', incoterms: 'DDP', consigneeCode: '0000363533' }],
+      '/api/customs/vbfa': [],
+      '/api/customs/consignment-price': [], // no condition record either
     });
 
     const buffer = await buildShipmentsUpload([['82900002', '15001', new Date(2026, 4, 21), 5]]);

@@ -1,5 +1,11 @@
 import express from 'express';
 import ExcelJS  from 'exceljs';
+import axios    from 'axios';
+import https    from 'https';
+import fs       from 'fs';
+import jwt      from 'jsonwebtoken';
+import sql      from 'mssql';
+import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import { lookupVatOverride, lookupHsDescription } from './customsreportadmin.js';
 
@@ -21,9 +27,78 @@ import { lookupVatOverride, lookupHsDescription } from './customsreportadmin.js'
 // being sent on) — see the per-condition table in the implementation plan.
 // The one case that IS a hard failure: zero delivery lines found in SAP at
 // all, since there's nothing to build a report from.
+//
+// Calls SapServer's /api/customs/* endpoints DIRECTLY (own makeSapToken/
+// sapAgent/audit boilerplate below, same as consignment.js/staging.js/
+// productionnexus.js/deliverymain.js/quality.js — each SAP-calling route
+// file in this repo owns its own rather than sharing one across files) —
+// deliberately NOT via a loopback fetch to this app's own /api/sap/* proxy
+// routes the way routes/shipmentmain.js's fetchSapCustomsData does. This app
+// only ever listens on 443 (HTTPS) and 80 (redirect-only) — see server.js —
+// there is no listener on process.env.PORT/3000, so a loopback call there
+// fails to connect every time; the failure was getting swallowed by the
+// per-round try/catch below and misreported as "no SAP data found".
 // ---------------------------------------------------------------------------
 
 const router = express.Router();
+
+// ── SAP caller ────────────────────────────────────────────────────────────
+const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
+const sapAgent = fs.existsSync(certPath)
+  ? new https.Agent({ ca: fs.readFileSync(certPath), rejectUnauthorized: true })
+  : null;
+
+function makeSapToken() {
+  return jwt.sign(
+    { userId: 0 },
+    sapServerSecret,
+    { issuer: 'sql2005-bridge', audience: 'sap-server', expiresIn: '60s' }
+  );
+}
+
+async function audit(eventType, username, detail, req) {
+  try {
+    const pool = await sql.connect(sqlConfig);
+    const ip = req?.ip || req?.socket?.remoteAddress || null;
+    await pool.request()
+      .input('username',  sql.NVarChar(80),  username || null)
+      .input('eventType', sql.NVarChar(50),  eventType)
+      .input('detail',    sql.NVarChar(500), detail || null)
+      .input('ip',        sql.NVarChar(45),  ip)
+      .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+              VALUES (@username, @eventType, @detail, @ip)`);
+  } catch (err) {
+    console.error('[customsreport audit]', err.message);
+  }
+}
+
+function actor(req) {
+  return req.session?.user?.username || 'unknown';
+}
+
+// POSTs directly to SapServer (mirrors routes/sap.js's own proxy calls) —
+// returns the parsed array on success, or [] with a pushed warning on any
+// failure (network error, non-2xx, or a body-level success:false). Never
+// throws — callers decide what "nothing came back" means for that round.
+async function sapPostArray(sapPath, body, label, warnings) {
+  try {
+    const response = await axios.post(
+      `${sapConfig.url}${sapPath}`,
+      body,
+      { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+    );
+    const json = response.data;
+    if (!json?.success) {
+      warnings.push(`${label} query failed: ${json?.error?.message ?? json?.error ?? 'unknown error'}`);
+      return [];
+    }
+    return Array.isArray(json.data) ? json.data : [];
+  } catch (err) {
+    const message = err.response?.data?.error?.message ?? err.response?.data?.error ?? err.message;
+    warnings.push(`${label} query failed: ${message}`);
+    return [];
+  }
+}
 
 // ── Small helpers ─────────────────────────────────────────────────────────
 
@@ -94,12 +169,6 @@ export function parseSapDate(s) {
   return new Date(year, month - 1, day);
 }
 
-function unwrapSapArray(body) {
-  if (Array.isArray(body)) return body;
-  if (body?.success && Array.isArray(body.data)) return body.data;
-  return [];
-}
-
 // ── 1. Parse the uploaded Shipments-sheet columns A:D ───────────────────────
 
 const REQUIRED_HEADERS = ['PicksheetNumber', 'ShipmentRef', 'ActualCollectionDate', 'TotalWeight'];
@@ -146,7 +215,7 @@ async function parseShipmentsUpload(buffer) {
   return rows;
 }
 
-// ── 2. SAP enrichment (3 rounds, loopback to this app's own /api/sap/* proxies) ──
+// ── 2. SAP enrichment (3 rounds, straight to SapServer's /api/customs/* endpoints) ──
 //
 // Deliberately does NOT throw on a single round's failure or on empty
 // intermediate results the way routes/shipmentmain.js's fetchSapCustomsData
@@ -155,53 +224,35 @@ async function parseShipmentsUpload(buffer) {
 // being sent on, so partial SAP data degrades individual lines rather than
 // aborting the run. The one true hard-failure case is zero LIPS rows
 // returned across the whole uploaded batch, since there's nothing at all to
-// build a report from.
+// build a report from — and that error includes any warnings already
+// collected, so a round that failed outright (network/auth/SapServer error)
+// is never silently indistinguishable from "SAP genuinely has no data".
 
-async function fetchCustomsReportSapData(deliveryNumbers, req) {
-  const trustedOrigin = `http://127.0.0.1:${process.env.PORT || 3000}`;
-  const headers = { 'Content-Type': 'application/json', ...(req.headers.cookie ? { Cookie: req.headers.cookie } : {}) };
-
-  const sapPost = (path, body) => fetch(new URL(path, trustedOrigin), {
-    method: 'POST', headers, body: JSON.stringify(body),
-  }).then(r => r.json());
-
+async function fetchCustomsReportSapData(deliveryNumbers) {
   const warnings = [];
-
-  const safeSapArray = async (path, body, label) => {
-    try {
-      const json = await sapPost(path, body);
-      if (json?.success === false) {
-        warnings.push(`${label} query failed: ${json.error || 'unknown error'}`);
-        return [];
-      }
-      return unwrapSapArray(json);
-    } catch (err) {
-      warnings.push(`${label} query failed: ${err.message}`);
-      return [];
-    }
-  };
 
   // Round 1 — parallel: LIPS (line items) + LIKP (header: incoterms, consignee)
   const [lipsData, likpData] = await Promise.all([
-    safeSapArray('/api/sap/lips', { deliveries: deliveryNumbers }, 'LIPS'),
-    safeSapArray('/api/sap/likp', { deliveries: deliveryNumbers }, 'LIKP'),
+    sapPostArray('/api/customs/lips', { deliveries: deliveryNumbers }, 'LIPS', warnings),
+    sapPostArray('/api/customs/likp', { deliveries: deliveryNumbers }, 'LIKP', warnings),
   ]);
 
   if (!lipsData.length) {
-    const err = new Error('SAP returned no delivery line items (LIPS) for any of the uploaded delivery numbers. Verify the delivery numbers exist in SAP with plant 3012 and quantity > 0.');
+    const reason = warnings.length ? ` (${warnings.join('; ')})` : '';
+    const err = new Error(`SAP returned no delivery line items (LIPS) for any of the uploaded delivery numbers${reason}. Verify the delivery numbers exist in SAP with plant 3012 and quantity > 0.`);
     err.statusCode = 422;
     throw err;
   }
 
-  // Round 2 — parallel: VBFA (invoice/stat value) + MARC (commodity/origin) + KNA1 (name/country/VAT)
+  // Round 2 — parallel: VBFA (invoice/stat value/date) + MARC (commodity/origin) + KNA1 (name/country/VAT)
   const lineItems = lipsData.map(r => ({ delivery: r.deliveryNumber, item: r.itemNumber }));
   const materials = [...new Set(lipsData.map(r => String(r.materialNumber || '').trim()).filter(Boolean))];
   const customers = [...new Set(likpData.map(r => String(r.consigneeCode || '').trim()).filter(Boolean))];
 
   const [vbfaData, marcData, kna1Data] = await Promise.all([
-    lineItems.length ? safeSapArray('/api/sap/vbfa', { lines: lineItems }, 'VBFA') : [],
-    materials.length ? safeSapArray('/api/sap/marc', { materials }, 'MARC') : [],
-    customers.length ? safeSapArray('/api/sap/kna1', { customers }, 'KNA1') : [],
+    lineItems.length ? sapPostArray('/api/customs/vbfa', { lines: lineItems }, 'VBFA', warnings) : [],
+    materials.length ? sapPostArray('/api/customs/marc', { materials }, 'MARC', warnings) : [],
+    customers.length ? sapPostArray('/api/customs/kna1', { customers }, 'KNA1', warnings) : [],
   ]);
 
   // Round 3 — VBRK (currency), keyed by invoice numbers found in round 2.
@@ -209,7 +260,7 @@ async function fetchCustomsReportSapData(deliveryNumbers, req) {
   // that's the field the source workbook macro's own VBFA_Lookup routine
   // actually reads for it, confirmed against its real field list.
   const invoices = [...new Set(vbfaData.map(r => String(r.invoiceNumber || '').trim()).filter(Boolean))];
-  const vbrkData = invoices.length ? await safeSapArray('/api/sap/vbrk', { invoices }, 'VBRK') : [];
+  const vbrkData = invoices.length ? await sapPostArray('/api/customs/vbrk', { invoices }, 'VBRK', warnings) : [];
 
   return { lipsData, likpData, vbfaData, marcData, kna1Data, vbrkData, warnings };
 }
@@ -217,27 +268,25 @@ async function fetchCustomsReportSapData(deliveryNumbers, req) {
 // Consignment-customer fallback: for report lines with no VBFA invoice (goods
 // shipped without a commercial invoice), look up a customs sales price via
 // SAP's pricing-condition tables instead. Only called for the (consignee,
-// material) pairs that actually need it.
-async function fetchConsignmentPrices(pairs, req) {
+// material) pairs that actually need it. Failures here are silent by design
+// (an empty array — the caller already has a real warning-producing path for
+// "no consignment price found") since this is itself a fallback within a
+// fallback; a hard failure of the whole request over this one lookup would
+// be disproportionate.
+async function fetchConsignmentPrices(pairs) {
   if (!pairs.length) return [];
-  const trustedOrigin = `http://127.0.0.1:${process.env.PORT || 3000}`;
-  const headers = { 'Content-Type': 'application/json', ...(req.headers.cookie ? { Cookie: req.headers.cookie } : {}) };
-
-  try {
-    const json = await fetch(new URL('/api/sap/consignment-price', trustedOrigin), {
-      method: 'POST', headers,
-      body: JSON.stringify({ lines: pairs.map(p => ({ customer: p.consigneeCode, material: p.material })) }),
-    }).then(r => r.json());
-    if (json?.success === false) return [];
-    return unwrapSapArray(json);
-  } catch {
-    return [];
-  }
+  const discard = [];
+  return sapPostArray(
+    '/api/customs/consignment-price',
+    { lines: pairs.map(p => ({ customer: p.consigneeCode, material: p.material })) },
+    'Consignment price',
+    discard
+  );
 }
 
 // ── 3. Assemble CUSTOMS-shaped rows ─────────────────────────────────────────
 
-async function buildCustomsReportRows(shipmentRows, sapData, req) {
+async function buildCustomsReportRows(shipmentRows, sapData) {
   const { lipsData, likpData, vbfaData, marcData, kna1Data, vbrkData } = sapData;
   const warnings = [...sapData.warnings];
 
@@ -314,7 +363,7 @@ async function buildCustomsReportRows(shipmentRows, sapData, req) {
   if (consignmentCandidates.length) {
     const pairKey = r => `${r.consigneeCode}||${r.material}`;
     const uniquePairs = [...new Map(consignmentCandidates.map(r => [pairKey(r), { consigneeCode: r.consigneeCode, material: r.material }])).values()];
-    const priceRows = await fetchConsignmentPrices(uniquePairs, req);
+    const priceRows = await fetchConsignmentPrices(uniquePairs);
     const priceByPair = new Map(priceRows.map(p => [`${digits(p.customerCode)}||${String(p.materialNumber || '').trim()}`, p]));
 
     for (const row of consignmentCandidates) {
@@ -497,8 +546,8 @@ router.post('/generate',
       }
 
       const deliveryNumbers = shipmentRows.map(r => r.picksheetNumber);
-      const sapData = await fetchCustomsReportSapData(deliveryNumbers, req);
-      const { rows, warnings } = await buildCustomsReportRows(shipmentRows, sapData, req);
+      const sapData = await fetchCustomsReportSapData(deliveryNumbers);
+      const { rows, warnings } = await buildCustomsReportRows(shipmentRows, sapData);
 
       const weightByDelivery = new Map();
       for (const s of shipmentRows) {
@@ -512,8 +561,11 @@ router.post('/generate',
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.end(buffer);
+
+      await audit('SAP_OK', actor(req), `Customs report generated: ${shipmentRows.length} shipment row(s), ${rows.length} line(s), ${warnings.length} warning(s)`, req);
     } catch (err) {
       console.error('[customsreport/generate]', err.message);
+      await audit('SAP_ERROR', actor(req), `Customs report generation failed: ${err.message}`, req);
       if (!res.headersSent) {
         res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
       }
