@@ -3054,7 +3054,13 @@ async function stageTub(pool, uid, tubId) {
             SET IsStaged=1, StagedAt=GETDATE(), ConditioningTimeHours=@hrs, StagedByUserID=@uid, StagedQuantityKG=@bal
             WHERE TubID=@id`);
 
-  await writeEvent(pool, 'MX', t.MixingID, 'STAGED', `Tub ${tubId} staged into Billet (${t.AgeHours.toFixed(1)}h after production)`, 0, uid);
+  // EventType is constrained by CK_EventLog_EventType to a fixed enum
+  // (NOTE/FIREWALL/REVERSAL/SAP_FAIL/SAP_POST/SCRAP/OPERATOR_ADD/
+  // OPERATOR_REMOVE/CANCELLED/ON_HOLD/COMPLETED/STARTED) that predates this
+  // feature and has no "STAGED" value — use NOTE, same as every other
+  // event kind not covered by that enum, and keep the specific meaning in
+  // the message text itself.
+  await writeEvent(pool, 'MX', t.MixingID, 'NOTE', `Tub ${tubId} staged into Billet (${t.AgeHours.toFixed(1)}h after production)`, 0, uid);
 
   const mixRef = t.MixRef || `MX-${String(t.MixingID).padStart(8, '0')}`;
   return { status: 200, body: { success: true, data: { tubId, mixRef, tubSeq: t.TubSeq, stagedQuantityKG: balance } } };
@@ -3129,7 +3135,7 @@ router.post('/mixing/tubs/:tubId/return-to-conditioning', async (req, res) => {
       .input('staged', sql.Bit, newBalance > 0 ? 1 : 0)
       .query(`UPDATE prod.MixingTubs SET StagedQuantityKG=@bal, IsStaged=@staged WHERE TubID=@id`);
 
-    await writeEvent(pool, 'MX', t.MixingID, 'COND_RETURN', `${quantityKG} KG returned to Conditioning from tub ${tubId}${notes ? ` — ${notes}` : ''}`, 0, uid);
+    await writeEvent(pool, 'MX', t.MixingID, 'NOTE', `${quantityKG} KG returned to Conditioning from tub ${tubId}${notes ? ` — ${notes}` : ''}`, 0, uid);
     res.json({ success: true, data: { tubId, stagedQuantityKG: newBalance, isStaged: newBalance > 0 } });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
@@ -3282,7 +3288,7 @@ router.post('/mixing/tubs/:tubId/expiry/override', requirePermission('PROD_SUPER
                   ExpiryOverrideAt=GETDATE(), ExpiryOverrideByUserID=@uid, ExpiryOverrideReason=@reason
               WHERE TubID=@id`);
 
-    await writeEvent(pool, 'MX', t.MixingID, 'EXPIRY_OVERRIDE', `Expiry overridden by supervisor for tub ${tubId} (${t.AgeHours.toFixed(1)}h) — ${reason}`, 1, uid);
+    await writeEvent(pool, 'MX', t.MixingID, 'NOTE', `Expiry overridden by supervisor for tub ${tubId} (${t.AgeHours.toFixed(1)}h) — ${reason}`, 1, uid);
     res.json({ success: true, data: { tubId, stagedQuantityKG: balance } });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });
