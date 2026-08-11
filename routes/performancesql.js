@@ -1754,7 +1754,7 @@ export async function getOrderShipmentWithOrders(shipmentId) {
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
       SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.ReceivedQty, p.Status, p.SupplierReference, p.PoNumber, p.PoItemNumber,
-             p.SapMaterialDocument, p.SapGrError, p.SapGrSkipped
+             p.Notes, p.SapMaterialDocument, p.SapGrError, p.SapGrSkipped
       FROM log.PurchaseOrderSuggestion p
       JOIN log.Vendor v ON v.VendorId = p.VendorId
       LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material

@@ -113,7 +113,6 @@ function setupTiles() {
       if (fn === 'awaitingBooking')     runShipmentBooking();
       if (fn === 'customsDocs')         runCustomsDocuments();
       if (fn === 'customsReport')       runCustomsReport();
-      if (fn === 'completedShipments')  runCompletedShipments();
       if (fn === 'customerSpecifics')   runCustomerSpecifics();
       if (fn === 'shipmentSearch')      runShipmentSearch();
       if (fn === 'updatePalletData')    runUpdatePalletData();
@@ -124,6 +123,7 @@ function setupTiles() {
       if (fn === 'costCentres')         runCostCentres();
       if (fn === 'glAccounts')          runGlAccounts();
       if (fn === 'forwarderModeMapping')runForwarderModeMapping();
+      if (fn === 'materialRequestUnits')runMaterialRequestUnits();
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'haulierOtif')         runHaulierOtif();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
@@ -3135,15 +3135,17 @@ function renderShipmentDetailModal(shipment, deliveries) {
   const customsComplete = Boolean(shipment.customsComplete);
   const customsRequired = Boolean(shipment.customsRequired);
 
+  const canEdit = hasPlanning();
+
   let badgeClass, badgeText, toggleHtml;
   if (customsComplete) {
     badgeClass = 'sd-badge--complete'; badgeText = 'Complete'; toggleHtml = '';
   } else if (customsRequired) {
     badgeClass = 'sd-badge--required'; badgeText = 'Required';
-    toggleHtml = `<button class="btn-secondary" id="sd-customs-toggle" data-target="false">Set Not Required</button>`;
+    toggleHtml = canEdit ? `<button class="btn-secondary" id="sd-customs-toggle" data-target="false">Set Not Required</button>` : '';
   } else {
     badgeClass = 'sd-badge--none'; badgeText = 'Not Required';
-    toggleHtml = `<button class="btn-secondary" id="sd-customs-toggle" data-target="true">Set Required</button>`;
+    toggleHtml = canEdit ? `<button class="btn-secondary" id="sd-customs-toggle" data-target="true">Set Required</button>` : '';
   }
 
   const plannedRaw = shipment.plannedCollection || shipment.plannedDelivery;
@@ -3181,13 +3183,13 @@ function renderShipmentDetailModal(shipment, deliveries) {
         <div class="sd-section">
           <div class="sd-section-title">Haulier</div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
-          <div class="sd-haulier-row">
+          ${canEdit ? `<div class="sd-haulier-row">
             <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
             <button class="btn-secondary" id="sd-forwarder-save">Save</button>
             <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
-          </div>
+          </div>` : ''}
         </div>
-        <div class="sd-section">
+        ${canEdit ? `<div class="sd-section">
           <div class="sd-section-title">Actions</div>
           <div class="sd-actions">
             <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
@@ -3195,7 +3197,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
             ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
             <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
           </div>
-        </div>
+        </div>` : ''}
       </div>
       <div class="sd-section" style="margin-bottom:16px">
         <div class="sd-section-title">Associated Costs</div>
@@ -3206,15 +3208,15 @@ function renderShipmentDetailModal(shipment, deliveries) {
     </div>
     <div class="ps-modal-actions">
       <button class="btn-secondary" onclick="openShipmentEventLog(${shipment.shipmentID}, '${esc(shipmentRef)}')">Event Log</button>
-      ${hasPlanning() ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
+      ${canEdit ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`;
 
   renderShipmentAssociatedCosts(shipment.shipmentID);
 
-  // Load hauliers
-  loadApprovedForwarders().then(forwarders => {
+  // Load hauliers (edit UI only — canEdit gates the select/save row's existence)
+  if (canEdit) loadApprovedForwarders().then(forwarders => {
     const sel = document.getElementById('sd-forwarder-select');
     if (!sel) return;
     sel.innerHTML = `<option value="">Select haulier…</option>` +
@@ -3244,8 +3246,9 @@ function renderShipmentDetailModal(shipment, deliveries) {
     });
   }
 
-  // Haulier save
-  document.getElementById('sd-forwarder-save').addEventListener('click', async () => {
+  // Haulier save (canEdit-gated — element doesn't exist for a view-only user)
+  const forwarderSaveBtn = document.getElementById('sd-forwarder-save');
+  if (forwarderSaveBtn) forwarderSaveBtn.addEventListener('click', async () => {
     const sel = document.getElementById('sd-forwarder-select');
     const result = document.getElementById('sd-forwarder-result');
     result.textContent = 'Saving…';
@@ -3260,8 +3263,9 @@ function renderShipmentDetailModal(shipment, deliveries) {
     } catch (err) { result.textContent = err.message; }
   });
 
-  // Packing list
-  document.getElementById('sd-packing-list-btn').addEventListener('click', async () => {
+  // Packing list (canEdit-gated)
+  const packingListBtn = document.getElementById('sd-packing-list-btn');
+  if (packingListBtn) packingListBtn.addEventListener('click', async () => {
     if (!await wConfirmLg({ title: 'Generate Packing List', message: 'This will overwrite any existing packing list files for this shipment. Continue?', confirmText: 'Generate', variant: '' })) return;
     const result = document.getElementById('sd-packing-list-result');
     result.textContent = 'Generating…';
@@ -3288,8 +3292,9 @@ function renderShipmentDetailModal(shipment, deliveries) {
     });
   }
 
-  // Modify deliveries → wide panel
-  document.getElementById('sd-deliveries-btn').addEventListener('click', () => {
+  // Modify deliveries → wide panel (canEdit-gated)
+  const deliveriesBtn = document.getElementById('sd-deliveries-btn');
+  if (deliveriesBtn) deliveriesBtn.addEventListener('click', () => {
     openShipmentDeliveriesPanel(shipment.shipmentID, shipment, deliveries);
   });
 }
@@ -3313,6 +3318,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
 async function renderShipmentAssociatedCosts(shipmentId) {
   const container = document.getElementById('sd-costs');
   if (!container) return;
+  const canEdit = hasPlanning();
   try {
     const res = await fetch(`/api/shipmentcost/shipment/${shipmentId}`);
     const json = await res.json();
@@ -3326,7 +3332,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         <td>${l.migoStatus
           ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>`
           : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
-        <td style="white-space:nowrap">${l.migoStatus
+        <td style="white-space:nowrap">${!canEdit ? '' : l.migoStatus
           ? `<button type="button" class="btn-secondary sd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
           : `<button type="button" class="btn-secondary sd-cost-edit" data-cost-id="${l.costID}" data-amount="${esc(String(l.expectedCost))}" style="padding:2px 8px;font-size:11px">Edit</button>
              <button type="button" class="btn-secondary sd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
@@ -3339,7 +3345,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
           <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
         </table>
       </div>
-      <div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
+      ${canEdit ? `<div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
         <div class="tf-field">
           <label class="tf-label">GL Account</label>
           <select class="tf-input" id="sd-cost-element" style="min-width:220px"></select>
@@ -3359,8 +3365,10 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         <div class="tf-field">
           <button type="button" class="btn-secondary" id="sd-cost-add-btn">+ Add Cost</button>
         </div>
-      </div>
+      </div>` : ''}
       <div id="sd-cost-result" style="margin-top:8px"></div>`;
+
+    if (!canEdit) return;
 
     // GL Account options — outbound CostElements only, same restriction the
     // display join above already applies. Reuses Material Group Mapping's
@@ -3697,25 +3705,6 @@ function esc(str) { if (str == null) return ''; return String(str).replace(/&/g,
 
 
 // ── Stub functions for tiles pending full implementation ──────────────────────
-
-async function runCompletedShipments() {
-  showResultPanel('Completed Shipments', 'Delivered and closed shipments');
-  try {
-    const res  = await fetch('/api/shipmentmain?status=delivered');
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to load');
-    const rows = json.data || [];
-    if (!rows.length) { document.getElementById('result-body').innerHTML = '<div class="sap-error">No completed shipments found.</div>'; return; }
-    currentResult = rows;
-    const cols = ['shipmentID', 'shipmentRef', 'destinationName', 'forwarderName', 'plannedDelivery', 'status'];
-    document.getElementById('result-body').innerHTML = renderSimpleTable(rows, cols);
-    document.getElementById('result-row-badge').textContent = `${rows.length} rows`;
-    document.getElementById('result-row-badge').classList.remove('hidden');
-    document.getElementById('btn-export-csv').classList.remove('hidden');
-  } catch (err) {
-    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
-  }
-}
 
 function runCustomerSpecifics() {
   showResultPanel('Customer Specifics', 'Customer-specific packaging and logistics requirements');
@@ -4493,6 +4482,365 @@ async function mgmDeleteMapping(mappingId, label) {
     runMaterialGroupMapping();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ── Admin: Material Request Units ───────────────────────────────────────────────
+// log.MaterialRequestUnits (routes/materialRequestUnits.js) — lets Staging
+// Post's request form offer Production a "1 Spool" / "3 Tubs" style unit
+// picker instead of a raw KG figure. One row per (Material, Unit), holding
+// how many KG one of that unit is — see the migration file for the full
+// writeup. Manual add/edit/delete here, plus a CSV bulk importer (mirrors
+// warehouse.js's Bulk CSV Import pattern) for mass-loading conversions.
+
+let mruPendingCSVRecords = [];
+
+async function runMaterialRequestUnits() {
+  showResultPanel('Material Request Units', 'Click a row to edit · Add for a new material/unit conversion, or bulk upload a CSV');
+  try {
+    const res = await fetch('/api/material-request-units');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load material request units');
+    mruRenderList(json.data);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+function mruRenderList(rows) {
+  document.getElementById('result-row-badge').textContent = `${rows.length} conversion${rows.length !== 1 ? 's' : ''}`;
+  document.getElementById('result-row-badge').classList.remove('hidden');
+
+  const tableRows = rows.map(r => `
+    <tr class="admin-row">
+      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(r.Material)}</td>
+      <td>${esc(r.Unit)}</td>
+      <td>${Number(r.ConversionQty).toLocaleString()} KG</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary mru-edit" data-id="${esc(String(r.RequestUnitId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+        <button class="btn-secondary mru-delete" data-id="${esc(String(r.RequestUnitId))}" data-label="${esc(r.Material)} / ${esc(r.Unit)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+      <button class="btn-secondary" id="mru-bulk-btn">Bulk Upload CSV</button>
+      <button class="btn-submit" id="mru-add-btn">+ Add Conversion</button>
+    </div>
+    ${rows.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Unit</th><th>Conversion Qty</th><th></th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No conversions yet — add one, or bulk upload a CSV, so Staging Post can offer this material\'s units.</div>'}
+  `;
+
+  document.getElementById('mru-add-btn').addEventListener('click', () => mruOpenModal(null));
+  document.getElementById('mru-bulk-btn').addEventListener('click', mruShowCSVUpload);
+  document.querySelectorAll('.mru-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = rows.find(x => String(x.RequestUnitId) === btn.dataset.id);
+      if (r) mruOpenModal(r);
+    });
+  });
+  document.querySelectorAll('.mru-delete').forEach(btn => {
+    btn.addEventListener('click', () => mruDeleteRow(btn.dataset.id, btn.dataset.label));
+  });
+}
+
+function mruOpenModal(row) {
+  const isEdit = !!row;
+
+  openModal(`<div class="ps-modal" style="max-width:460px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Conversion' : 'Add Conversion'}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Material</label>
+          <input class="tf-input" type="text" id="mru-material" maxlength="18" style="text-transform:uppercase" value="${esc(row?.Material || '')}" placeholder="e.g. 30007R">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Unit</label>
+          <input class="tf-input" type="text" id="mru-unit" maxlength="20" value="${esc(row?.Unit || '')}" placeholder="e.g. Spool">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Conversion Qty (KG per 1 Unit)</label>
+          <input class="tf-input" type="number" step="0.001" min="0.001" id="mru-conversion-qty" value="${row?.ConversionQty ?? ''}" placeholder="e.g. 20">
+        </div>
+      </div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">e.g. Material 30007R / Unit "Spool" / Conversion Qty 20 means 1 spool ordered of 30007R converts to 20 KG for Stores to issue against.</div>
+      <div id="mru-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="mru-save-btn">${isEdit ? 'Save Changes' : 'Add Conversion'}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('mru-save-btn').addEventListener('click', async () => {
+    const body = {
+      material: document.getElementById('mru-material').value.trim().toUpperCase(),
+      unit: document.getElementById('mru-unit').value.trim(),
+      conversionQty: Number(document.getElementById('mru-conversion-qty').value),
+    };
+    if (!body.material) {
+      document.getElementById('mru-result').innerHTML = '<div class="sap-error">Material is required.</div>';
+      return;
+    }
+    if (!body.unit) {
+      document.getElementById('mru-result').innerHTML = '<div class="sap-error">Unit is required.</div>';
+      return;
+    }
+    if (!(body.conversionQty > 0)) {
+      document.getElementById('mru-result').innerHTML = '<div class="sap-error">Conversion Qty must be greater than zero.</div>';
+      return;
+    }
+    const btn = document.getElementById('mru-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(isEdit ? `/api/material-request-units/${row.RequestUnitId}` : '/api/material-request-units', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      runMaterialRequestUnits();
+    } catch (err) {
+      document.getElementById('mru-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Conversion';
+    }
+  });
+}
+
+async function mruDeleteRow(id, label) {
+  if (!confirm(`Delete the conversion for ${label}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/material-request-units/${id}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    runMaterialRequestUnits();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Bulk CSV upload ──────────────────────────────────────────────────────────
+function mruShowCSVUpload() {
+  mruPendingCSVRecords = [];
+  document.getElementById('result-hint').textContent = 'Upload material/unit/conversion-qty conversions in bulk from a CSV file — re-uploading updates existing Material+Unit rows';
+  document.getElementById('result-body').innerHTML = `
+    <div class="transfer-form">
+      <div class="tf-section-label">Expected Format</div>
+      <div style="margin-bottom:16px">
+        <code style="display:block;background:var(--surface2,#1e1e2e);border:1px solid var(--border,#333);
+          border-radius:6px;padding:10px 14px;font-size:13px;color:var(--text-muted,#aaa);line-height:1.6">
+          material,unit,conversionQty<br>
+          30007R,Spool,20
+        </code>
+        <button type="button" onclick="mruDownloadCSVTemplate()"
+          style="margin-top:8px;background:none;border:none;color:var(--accent,#7c3aed);
+            cursor:pointer;font-size:13px;text-decoration:underline;padding:0">
+          Download blank template
+        </button>
+      </div>
+
+      <div class="tf-section-label">Select File</div>
+      <div id="mru-csv-drop-zone" style="border:2px dashed var(--border,#444);border-radius:8px;
+        padding:32px;text-align:center;cursor:pointer;color:var(--text-muted,#888);
+        transition:border-color .2s"
+        onclick="document.getElementById('mru-csv-file-input').click()"
+        ondragover="event.preventDefault();this.style.borderColor='var(--accent,#7c3aed)'"
+        ondragleave="this.style.borderColor=''"
+        ondrop="mruHandleCSVDrop(event)">
+        Drop CSV here or click to browse
+        <input type="file" id="mru-csv-file-input" accept=".csv,.txt"
+          style="display:none" onchange="mruHandleCSVFile(this)">
+      </div>
+
+      <div id="mru-csv-preview" style="margin-top:20px"></div>
+      <div style="margin-top:16px">
+        <button type="button" class="btn-secondary" onclick="runMaterialRequestUnits()">&larr; Back to list</button>
+      </div>
+    </div>`;
+}
+
+function mruDownloadCSVTemplate() {
+  const csv = 'material,unit,conversionQty\r\n30007R,Spool,20\r\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'material-request-units-template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function mruHandleCSVDrop(e) {
+  e.preventDefault();
+  document.getElementById('mru-csv-drop-zone').style.borderColor = '';
+  const file = e.dataTransfer?.files?.[0];
+  if (file) mruParseCSVFile(file);
+}
+
+function mruHandleCSVFile(input) {
+  const file = input.files?.[0];
+  if (file) mruParseCSVFile(file);
+  input.value = '';
+}
+
+function mruParseCSVFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => mruRenderCSVPreview(e.target.result);
+  reader.readAsText(file);
+}
+
+function mruParseCSVLine(line) {
+  // Basic CSV parser — handles quoted fields, same idiom as warehouse.js's
+  // Bulk CSV Import.
+  const fields = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (ch === ',' && !inQuote) {
+      fields.push(cur.trim()); cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  fields.push(cur.trim());
+  return fields;
+}
+
+function mruRenderCSVPreview(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) {
+    document.getElementById('mru-csv-preview').innerHTML =
+      '<div class="sap-error">✕ File must have a header row and at least one data row</div>';
+    return;
+  }
+
+  const EXPECTED_HEADERS = ['material', 'unit', 'conversionqty'];
+  const headers = mruParseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
+  const missing = EXPECTED_HEADERS.filter(h => !headers.includes(h));
+  if (missing.length) {
+    document.getElementById('mru-csv-preview').innerHTML =
+      `<div class="sap-error">✕ Missing columns: ${esc(missing.join(', '))}</div>`;
+    return;
+  }
+
+  const idx = {};
+  EXPECTED_HEADERS.forEach(h => { idx[h] = headers.indexOf(h); });
+
+  const records = [], rowErrors = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = mruParseCSVLine(lines[i]);
+    const raw = {
+      material: cols[idx.material] ?? '',
+      unit: cols[idx.unit] ?? '',
+      conversionQty: cols[idx.conversionqty] ?? '',
+    };
+
+    const errs = [];
+    if (!raw.material) errs.push('material is required');
+    if (!raw.unit) errs.push('unit is required');
+    if (!(Number(raw.conversionQty) > 0)) errs.push('conversionQty must be a number greater than zero');
+
+    if (errs.length) {
+      rowErrors.push({ row: i, errors: errs, raw });
+    } else {
+      records.push({
+        material: raw.material.toUpperCase(),
+        unit: raw.unit,
+        conversionQty: Number(raw.conversionQty),
+      });
+    }
+  }
+
+  mruPendingCSVRecords = records;
+
+  const previewEl = document.getElementById('mru-csv-preview');
+  let html = `<div class="tf-section-label" style="margin-top:0">
+    Preview — ${records.length} valid row${records.length !== 1 ? 's' : ''}, ${rowErrors.length} error${rowErrors.length !== 1 ? 's' : ''}
+  </div>`;
+
+  if (rowErrors.length) {
+    html += `<div class="sap-error" style="margin-bottom:12px">
+      ${rowErrors.map(e => `Row ${e.row}: ${esc(e.errors.join(', '))}`).join('<br>')}
+    </div>`;
+  }
+
+  if (records.length) {
+    html += `<div style="overflow-x:auto;margin-bottom:16px">
+      <table class="pn-batch-table">
+        <thead><tr><th>Material</th><th>Unit</th><th>Conversion Qty (KG)</th></tr></thead>
+        <tbody>
+          ${records.map(r => `<tr>
+            <td>${esc(r.material)}</td>
+            <td>${esc(r.unit)}</td>
+            <td>${r.conversionQty}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="tf-actions" style="padding-top:0">
+      <div id="mru-csv-submit-result"></div>
+      <button type="button" class="btn-submit" id="mru-csv-submit-btn" onclick="mruSubmitCSVBulk()">
+        Import ${records.length} conversion${records.length !== 1 ? 's' : ''}
+      </button>
+    </div>`;
+  }
+
+  previewEl.innerHTML = html;
+}
+
+async function mruSubmitCSVBulk() {
+  if (!mruPendingCSVRecords.length) return;
+
+  const btn = document.getElementById('mru-csv-submit-btn');
+  const resultEl = document.getElementById('mru-csv-submit-result');
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  resultEl.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/material-request-units/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records: mruPendingCSVRecords }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Bulk import failed');
+
+    const errLines = (json.errors || []).map(e =>
+      `${esc(e.material || '')} / ${esc(e.unit || '')}: ${esc(e.error)}`
+    ).join('<br>');
+
+    resultEl.innerHTML = `
+      <div class="tf-success" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <div class="tf-success-title">Import Complete</div>
+        <div style="font-size:13px;color:var(--text-muted,#aaa)">
+          ${json.inserted} added &nbsp;·&nbsp; ${json.updated} updated
+          ${errLines ? `<br><span style="color:var(--danger,#ef4444)">${errLines}</span>` : ''}
+        </div>
+      </div>`;
+    mruPendingCSVRecords = [];
+    btn.textContent = 'Import complete';
+    setTimeout(runMaterialRequestUnits, 1200);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = 'Retry import';
   }
 }
 
@@ -10005,22 +10353,44 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // a GR attempted against it.
       //
       // SapGrSkipped is true for three different reasons — the operator
-      // ticked "Skip SAP posting" (testing), the line had no real SAP PO to
-      // post against (postGoodsReceiptToSap's noPo case), or the confirmed
-      // Qty Received was 0 (its zeroQty case) — see that function's comment
-      // in performance.js. Only the DB columns persist (SapGrSkipped/
-      // SapGrError, no separate reason column), so a true testing-mode skip
-      // (SapGrError null) is distinguished from the other two generically —
-      // "Not posted" plus the specific reason in the tooltip — rather than
-      // guessing which of noPo/zeroQty it was from the error text.
+      // ticked "Skip SAP posting" (testing), the line had no real SAP PO/
+      // item to post against (postGoodsReceiptToSap's noPo case — split
+      // into a "no PO number" and a "PO number set but no item number"
+      // message there), or the confirmed Qty Received was 0 (its zeroQty
+      // case) — see that function's comment in performance.js. Only the DB
+      // columns persist (SapGrSkipped/SapGrError, no separate reason
+      // column), so a true testing-mode skip (SapGrError null) is
+      // distinguished from the other two generically. The reason text is
+      // shown inline, not just in a title tooltip — a missing PO item
+      // number is exactly the kind of thing that's easy to miss on hover
+      // and needs to be obvious enough to actually go fix (see the PO Item
+      // column below, editable for exactly this reason).
       const sapGrCell = canReceive ? '' : `<td>${
         isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
         : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
-        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error" title="${esc(o.SapGrError)}">Not posted</span>`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
         : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
-        : o.SapGrError ? `<span class="sap-error" title="${esc(o.SapGrError)}">Failed</span>`
+        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
         : '-'
       }</td>`;
+
+      // PO Item is always editable, not just once a GR has actually been
+      // skipped for it — filling it in before Mark Received is the normal
+      // path for a manually-raised PO (see os-po-item-input's equivalent on
+      // Tracked Orders); this is the same field, just reachable from the
+      // Inbound Log too. The current Status/PoNumber/SupplierReference/Notes
+      // ride along as data attributes so isd-po-item-save can send the full
+      // row state on PUT — updateOrderSuggestionStatus (performancesql.js)
+      // sets Status/PoNumber/Notes/SupplierReference directly (not COALESCE),
+      // so omitting them would wipe whatever was already there.
+      const poItemCell = `<td>
+        <input class="tf-input isd-po-item-input" type="text" maxlength="5"
+               data-suggestion-id="${o.SuggestionId}" data-status="${esc(o.Status)}"
+               data-po-number="${esc(o.PoNumber || '')}" data-supplier-ref="${esc(o.SupplierReference || '')}"
+               data-notes="${esc(o.Notes || '')}"
+               value="${esc(o.PoItemNumber || '')}" placeholder="e.g. 00010" style="width:70px;padding:3px 6px;font-size:11px">
+        <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>
+      </td>`;
 
       return `
       <tr class="admin-row">
@@ -10030,6 +10400,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <td>${qtyReceivedCell}</td>
         <td>${esc(o.Status)}</td>
         <td>${esc(o.PoNumber || '-')}</td>
+        ${poItemCell}
         <td>${esc(o.SupplierReference || '-')}</td>
         ${sapGrCell}
       </tr>`;
@@ -10090,7 +10461,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       ${canReceive ? '<div class="toolbar-hint">Qty Received defaults to what was ordered — adjust any line before Mark Received to confirm a short or over delivery. Only the confirmed quantity is posted as goods receipt in SAP.</div>' : ''}
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>PO Item</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
       </div>
@@ -10122,6 +10493,38 @@ async function refreshInboundShipmentDetail(shipmentId) {
     renderAssociatedCosts(shipmentId, s);
     renderShipmentDocuments(shipmentId);
     if (s.IsManual) renderManualInboundItems(shipmentId);
+
+    // PO Item save — sends the full current row state (see poItemCell's
+    // comment above for why) so this single-field edit can't wipe
+    // Status/PoNumber/SupplierReference/Notes on save.
+    document.querySelectorAll('.isd-po-item-save').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const suggestionId = btn.dataset.suggestionId;
+        const input = document.querySelector(`.isd-po-item-input[data-suggestion-id="${suggestionId}"]`);
+        const resultDiv = document.getElementById('isd-result');
+        if (resultDiv) resultDiv.innerHTML = '';
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          const res2 = await fetch(`/api/performance/order-suggestions/${suggestionId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              status: input.dataset.status,
+              poNumber: input.dataset.poNumber || null,
+              poItemNumber: input.value.trim() || null,
+              supplierReference: input.dataset.supplierRef || null,
+              notes: input.dataset.notes || null,
+            }),
+          });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error?.message || 'Failed to save PO item number');
+          await refreshInboundShipmentDetail(shipmentId);
+        } catch (err) {
+          if (resultDiv) resultDiv.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
+          btn.disabled = false; btn.textContent = 'Save';
+        }
+      });
+    });
 
     document.getElementById('isd-doc-upload-btn').addEventListener('click', () => document.getElementById('isd-doc-file-input').click());
     document.getElementById('isd-doc-file-input').addEventListener('change', async () => {
@@ -10233,7 +10636,7 @@ async function renderManualInboundItems(shipmentId) {
       <tr class="admin-row">
         <td><strong>${esc(i.Material || '-')}</strong></td>
         <td>${esc(i.Description || '-')}</td>
-        <td>${Number(i.Quantity).toLocaleString()}${i.UnitOfMeasure ? ' ' + esc(i.UnitOfMeasure) : ''}</td>
+        <td>${Number(i.Quantity).toLocaleString()}</td>
         <td><button type="button" class="btn-secondary isd-item-delete" data-item-id="${i.ItemId}" style="padding:2px 8px;font-size:11px">Remove</button></td>
       </tr>`).join('');
 
@@ -10248,7 +10651,6 @@ async function renderManualInboundItems(shipmentId) {
         <div class="tf-field"><label class="tf-label">Material</label><input class="tf-input" type="text" id="isd-item-material" placeholder="e.g. T1700-16" style="width:120px"></div>
         <div class="tf-field"><label class="tf-label">Description</label><input class="tf-input" type="text" id="isd-item-desc" placeholder="Optional if material given"></div>
         <div class="tf-field"><label class="tf-label">Quantity</label><input class="tf-input" type="number" step="0.001" min="0" id="isd-item-qty" style="width:90px"></div>
-        <div class="tf-field"><label class="tf-label">Unit</label><input class="tf-input" type="text" id="isd-item-uom" placeholder="e.g. M" style="width:60px"></div>
         <div class="tf-field"><button type="button" class="btn-secondary" id="isd-item-add-btn">+ Add Item</button></div>
       </div>
       <div id="isd-item-result" style="margin-top:8px"></div>`;
@@ -10259,7 +10661,6 @@ async function renderManualInboundItems(shipmentId) {
       const material = document.getElementById('isd-item-material').value.trim();
       const description = document.getElementById('isd-item-desc').value.trim();
       const quantity = document.getElementById('isd-item-qty').value;
-      const unitOfMeasure = document.getElementById('isd-item-uom').value.trim();
       if (!material && !description) { result.innerHTML = '<div class="sap-error">Enter a material or a description.</div>'; return; }
       if (!quantity || Number(quantity) <= 0) { result.innerHTML = '<div class="sap-error">Enter a quantity greater than 0.</div>'; return; }
       btn.disabled = true; btn.textContent = 'Adding…';
@@ -10267,7 +10668,7 @@ async function renderManualInboundItems(shipmentId) {
         const res2 = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/manual-items`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ material, description, quantity: Number(quantity), unitOfMeasure }),
+          body: JSON.stringify({ material, description, quantity: Number(quantity) }),
         });
         const json2 = await res2.json();
         if (!json2.success) throw new Error(json2.error?.message || 'Failed to add item');

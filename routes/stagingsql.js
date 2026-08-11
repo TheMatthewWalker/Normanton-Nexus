@@ -24,6 +24,7 @@ export const WITHIN_TOLERANCE_PCT = 0.10;
 
 const REQUEST_COLUMNS = `
   RequestId, Material, MaterialText, Uom, QuantityRequested, QuantityDelivered,
+  RequestUnit, RequestUnitQty,
   Location, RequestedBatch, DueAtUtc, Notes, Status,
   RequestedBy, RequestedAtUtc, CompletedBy, CompletedAtUtc,
   CancelledBy, CancelledAtUtc, UpdatedAtUtc
@@ -36,15 +37,23 @@ const REQUEST_COLUMNS = `
 // production floor staff won't hold. This is the same read-only data with no
 // gate beyond being logged in, so Staging Post's request form (used by any
 // production operator) has its own way to look a material up.
+//
+// `by` restricts which column is matched — the request form's main search
+// box only searches `material` (part number) by default, with a separate
+// optional box for `description`, so a shift worker typing a part number
+// never gets swamped with unrelated hits whose description happens to share
+// a word. Defaults to 'material' rather than searching both, matching that
+// UI split.
 
-export async function searchMaterials(search) {
+export async function searchMaterials(search, by = 'material') {
+  const column = by === 'description' ? 'MaterialText' : 'Material';
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('search', sql.VarChar(42), `%${search}%`)
     .query(`
       SELECT TOP 30 Material AS material, MaterialText AS materialText, Uom AS uom
       FROM log.TurnsValClassSnapshot
-      WHERE Material LIKE @search OR MaterialText LIKE @search
+      WHERE ${column} LIKE @search
       ORDER BY Material
     `);
   return recordset;
@@ -123,7 +132,7 @@ export async function listCompletedStagingRequests({ from, to } = {}) {
 
 export async function createStagingRequest({
   material, materialText, uom, quantityRequested, location, requestedBatch,
-  dueAtUtc, notes, requestedBy,
+  dueAtUtc, notes, requestedBy, requestUnit, requestUnitQty,
 }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
@@ -131,6 +140,8 @@ export async function createStagingRequest({
     .input('materialText',      sql.NVarChar(80),  materialText || null)
     .input('uom',                sql.NVarChar(3),   uom || null)
     .input('quantityRequested',   sql.Decimal(15, 3), quantityRequested)
+    .input('requestUnit',          sql.NVarChar(20),  requestUnit || null)
+    .input('requestUnitQty',        sql.Decimal(15, 3), requestUnitQty ?? null)
     .input('location',             sql.NVarChar(100), location)
     .input('requestedBatch',        sql.NVarChar(10),  requestedBatch || null)
     .input('dueAtUtc',                sql.DateTime,      dueAtUtc)
@@ -138,9 +149,9 @@ export async function createStagingRequest({
     .input('requestedBy',               sql.NVarChar(100), requestedBy)
     .query(`
       INSERT INTO log.StagingRequest
-        (Material, MaterialText, Uom, QuantityRequested, Location, RequestedBatch, DueAtUtc, Notes, RequestedBy)
+        (Material, MaterialText, Uom, QuantityRequested, RequestUnit, RequestUnitQty, Location, RequestedBatch, DueAtUtc, Notes, RequestedBy)
       OUTPUT INSERTED.RequestId
-      VALUES (@material, @materialText, @uom, @quantityRequested, @location, @requestedBatch, @dueAtUtc, @notes, @requestedBy)
+      VALUES (@material, @materialText, @uom, @quantityRequested, @requestUnit, @requestUnitQty, @location, @requestedBatch, @dueAtUtc, @notes, @requestedBy)
     `);
   return recordset[0].RequestId;
 }

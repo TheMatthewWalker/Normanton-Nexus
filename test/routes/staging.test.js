@@ -47,6 +47,11 @@ jest.unstable_mockModule('../../lib/redrumReversal.js', () => ({
   maybeReverseBatchManagedReturn: maybeReverseBatchManagedReturnMock,
 }));
 
+const getConversionQtyMock = jest.fn();
+jest.unstable_mockModule('../../routes/materialRequestUnits.js', () => ({
+  getConversionQty: getConversionQtyMock,
+}));
+
 const logSuperUser = { ...operatorUser, permissions: ['LOG_SUPER'] };
 
 let stagingRouter;
@@ -65,6 +70,7 @@ beforeEach(() => {
   axiosMock.get.mockReset();
   axiosMock.post.mockReset();
   maybeReverseBatchManagedReturnMock.mockReset();
+  getConversionQtyMock.mockReset();
   dbRequest.query.mockResolvedValue({ recordset: [] }); // audit()/notify() default to succeeding
 });
 
@@ -83,6 +89,27 @@ describe('GET /materials', () => {
     db.searchMaterials.mockResolvedValueOnce([{ Material: '30005R' }]);
     const res = await request(app).get('/materials?search=3000');
     expect(res.body.data).toEqual([{ Material: '30005R' }]);
+  });
+
+  // The request form's main search box only ever matches part numbers; the
+  // separate description box is the only way to search MaterialText — see
+  // stagingsql.js's searchMaterials(search, by).
+  test('defaults to a material-only search when `by` is omitted', async () => {
+    db.searchMaterials.mockResolvedValueOnce([]);
+    await request(app).get('/materials?search=drum');
+    expect(db.searchMaterials).toHaveBeenCalledWith('drum', 'material');
+  });
+
+  test('searches by description when by=description', async () => {
+    db.searchMaterials.mockResolvedValueOnce([]);
+    await request(app).get('/materials?search=drum&by=description');
+    expect(db.searchMaterials).toHaveBeenCalledWith('drum', 'description');
+  });
+
+  test('an unrecognised `by` value still falls back to material', async () => {
+    db.searchMaterials.mockResolvedValueOnce([]);
+    await request(app).get('/materials?search=drum&by=bogus');
+    expect(db.searchMaterials).toHaveBeenCalledWith('drum', 'material');
   });
 });
 
@@ -140,6 +167,66 @@ describe('POST /requests — validation', () => {
     const res = await request(app).post('/requests').send(validBody());
     expect(res.status).toBe(200);
     expect(res.body.data.requestId).toBe(123);
+  });
+});
+
+// Unit-based requests ("1 Spool") — the KG figure sent to
+// db.createStagingRequest must always come from the server-side
+// log.MaterialRequestUnits lookup (getConversionQty), never from a
+// client-supplied quantityRequested, since the unit dropdown's conversion
+// factor is only ever a client-side preview.
+describe('POST /requests — unit conversion', () => {
+  const unitBody = () => ({
+    material: '30007R',
+    requestUnit: 'Spool',
+    requestUnitQty: 1,
+    location: 'Extrusion',
+    dueAtUtc: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+  });
+
+  test('converts requestUnitQty to KG via getConversionQty and ignores any client-sent quantityRequested', async () => {
+    getConversionQtyMock.mockResolvedValueOnce(20);
+    db.createStagingRequest.mockResolvedValueOnce(456);
+
+    const res = await request(app).post('/requests').send({ ...unitBody(), quantityRequested: 999999 });
+
+    expect(res.status).toBe(200);
+    expect(getConversionQtyMock).toHaveBeenCalledWith('30007R', 'Spool');
+    expect(db.createStagingRequest).toHaveBeenCalledWith(expect.objectContaining({
+      quantityRequested: 20, requestUnit: 'Spool', requestUnitQty: 1,
+    }));
+  });
+
+  test('multiplies conversionQty by requestUnitQty for quantities greater than 1', async () => {
+    getConversionQtyMock.mockResolvedValueOnce(20);
+    db.createStagingRequest.mockResolvedValueOnce(457);
+
+    const res = await request(app).post('/requests').send({ ...unitBody(), requestUnitQty: 3 });
+
+    expect(res.status).toBe(200);
+    expect(db.createStagingRequest).toHaveBeenCalledWith(expect.objectContaining({ quantityRequested: 60 }));
+  });
+
+  test('400s when requestUnitQty is zero/negative', async () => {
+    const res = await request(app).post('/requests').send({ ...unitBody(), requestUnitQty: 0 });
+    expect(res.status).toBe(400);
+    expect(getConversionQtyMock).not.toHaveBeenCalled();
+    expect(db.createStagingRequest).not.toHaveBeenCalled();
+  });
+
+  test('400s with the conversion lookup\'s own message when no conversion is configured', async () => {
+    getConversionQtyMock.mockRejectedValueOnce(new Error('No conversion configured for Spool of 30007R.'));
+    const res = await request(app).post('/requests').send(unitBody());
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/No conversion configured/);
+    expect(db.createStagingRequest).not.toHaveBeenCalled();
+  });
+
+  test('does not require quantityRequested when a requestUnit is supplied', async () => {
+    getConversionQtyMock.mockResolvedValueOnce(20);
+    db.createStagingRequest.mockResolvedValueOnce(458);
+    const res = await request(app).post('/requests').send(unitBody()); // no quantityRequested at all
+    expect(res.status).toBe(200);
   });
 });
 

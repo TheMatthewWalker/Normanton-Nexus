@@ -53,9 +53,11 @@
     <!-- TILE GRID — grouped by section -->
     <div class="tile-section" id="tile-section">
 
-      <!-- Shipment Creation — visible to LOG_VIEW, write actions require LOG_PLANNING -->
+      <!-- Transport Management — formerly split across "Shipment Creation" and
+           "Shipment Monitoring"; merged into a single LOG_VIEW section (write
+           actions still require LOG_PLANNING), renamed to Transport Management. -->
       <div class="pn-section" data-permission="LOG_VIEW">
-        <div class="pn-section-hdr">Shipment Creation</div>
+        <div class="pn-section-hdr">Transport Management</div>
         <div class="tile-grid">
 
           <div class="sap-tile sap-tile--live" data-fn="openDeliveries">
@@ -102,35 +104,6 @@
             <div class="tile-desc">Customer-specific packaging rules, notes and requirements</div>
           </div>
 
-        </div>
-      </div>
-
-      <!-- French VAT Reporting — LOG_CUSTOMS_REPORT (dedicated permission: separate from
-           general Logistics access since this report carries customer VAT numbers and
-           sales values) -->
-      <div class="pn-section" data-permission="LOG_CUSTOMS_REPORT">
-        <div class="pn-section-hdr">French VAT Reporting</div>
-        <div class="tile-grid">
-
-          <div class="sap-tile sap-tile--live" data-fn="customsReport">
-            <div class="tile-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/>
-              </svg>
-            </div>
-            <span class="tile-badge tile-badge--live">LIVE</span>
-            <div class="tile-title">Monthly Customs Report</div>
-            <div class="tile-desc">Upload the Shipments list, download the SAP-enriched CUSTOMS report for DDP France import-VAT reclaim</div>
-          </div>
-
-        </div>
-      </div>
-
-      <!-- Shipment Monitoring — LOG_VIEW -->
-      <div class="pn-section" data-permission="LOG_VIEW">
-        <div class="pn-section-hdr">Transport Management</div>
-        <div class="tile-grid">
-
           <div class="sap-tile sap-tile--live" data-fn="awaitingCollection">
             <div class="tile-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -151,17 +124,6 @@
             <span class="tile-badge tile-badge--live">LIVE</span>
             <div class="tile-title">In Transit</div>
             <div class="tile-desc">Outbound shipments collected and not yet delivered</div>
-          </div>
-
-          <div class="sap-tile sap-tile--live" data-fn="completedShipments">
-            <div class="tile-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-              </svg>
-            </div>
-            <span class="tile-badge tile-badge--live">LIVE</span>
-            <div class="tile-title">Completed Shipments</div>
-            <div class="tile-desc">Delivered and closed shipment history</div>
           </div>
 
           <div class="sap-tile sap-tile--live" data-fn="shipmentSearch">
@@ -279,10 +241,25 @@
            access they had before this section existed (see
            sql/migrate_log_reports_permission.sql), and LOG_REPORTS is a
            new, narrower way in for someone who should see reports but not
-           change data. -->
+           change data. Monthly Customs Report additionally carries its own
+           data-permission="LOG_CUSTOMS_REPORT" on the tile itself — it holds
+           customer VAT numbers and sales values, so it stays hidden from
+           LOG_ADMIN/LOG_MRP/LOG_REPORTS holders who lack that dedicated
+           permission even though the section itself is visible to them. -->
       <div class="pn-section" data-permission="LOG_ADMIN,LOG_MRP,LOG_REPORTS">
         <div class="pn-section-hdr">Reports</div>
         <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="customsReport" data-permission="LOG_CUSTOMS_REPORT">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Monthly Customs Report (French VAT)</div>
+            <div class="tile-desc">Upload the Shipments list, download the SAP-enriched CUSTOMS report for DDP France import-VAT reclaim</div>
+          </div>
 
           <div class="sap-tile sap-tile--live" data-fn="freightSpend">
             <div class="tile-icon">
@@ -433,6 +410,17 @@
             <span class="tile-badge tile-badge--live" style="background:rgba(217,119,6,0.12);color:#D97706;border-color:rgba(217,119,6,0.3)">ADMIN</span>
             <div class="tile-title">Forwarder Mode Mapping</div>
             <div class="tile-desc">Maps a forwarder's type to the Mode of Transport stored on cost lines when a shipment is booked</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="materialRequestUnits">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live" style="background:rgba(217,119,6,0.12);color:#D97706;border-color:rgba(217,119,6,0.3)">ADMIN</span>
+            <div class="tile-title">Material Request Units</div>
+            <div class="tile-desc">Spool/tub/etc. to KG conversions per material — feeds Staging Post's request-in-your-own-units dropdown</div>
           </div>
 
         </div>

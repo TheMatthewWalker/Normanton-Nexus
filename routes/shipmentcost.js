@@ -7,7 +7,7 @@ import fs     from 'fs';
 import { sapConfig, sapServerSecret, getNexusOperationsPool } from '../config.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 import { lookupMaterialGroup } from './materialgroups.js';
-import { requireAnyPermission } from '../middleware/auth.js';
+import { requireAnyPermission, requirePermission } from '../middleware/auth.js';
 
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
 const sapAgent = fs.existsSync(certPath)
@@ -76,7 +76,7 @@ router.get('/id/:costId', async (req, res) => {
 // edited/reposted). Lets a wrong amount be corrected in place instead of
 // deleting and re-adding, which the Associated Costs tile on the Search
 // Shipment modal previously had no way to do at all.
-router.patch('/:costId', async (req, res) => {
+router.patch('/:costId', requirePermission('LOG_PLANNING'), async (req, res) => {
     try {
         const { expectedCost } = req.body;
         const amount = Number(expectedCost);
@@ -105,7 +105,7 @@ router.patch('/:costId', async (req, res) => {
 // DELETE for the inbound side; used by the Associated Costs tile on the
 // Search Shipment modal. Blocked once migoStatus=1 (already posted — use
 // POST /:costId/reverse instead).
-router.delete('/:costId', async (req, res) => {
+router.delete('/:costId', requirePermission('LOG_PLANNING'), async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
@@ -167,7 +167,7 @@ router.get('/costtype/:costType', async (req, res) => {
 // caller to hit this with hand-entered form data rather than values the
 // server itself computed — shipmentID/costElement/costCenter/expectedCost
 // previously went straight into the INSERT with no checks at all.
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('LOG_PLANNING'), async (req, res) => {
     try {
         const {
             shipmentID, costType, costElement, costCenter,
@@ -597,7 +597,7 @@ router.get('/analytics', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPO
 // materialgroups.js's lookupMaterialGroup(costElement, modeOfTransport) —
 // see sql/migrate_material_group_mapping.sql. GlAccount/CostCenterOrOrder
 // come straight from the cost line's costElement/costCenter, same as before.
-router.post('/post-migo', async (req, res) => {
+router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) => {
     const { costIDs } = req.body;
     if (!Array.isArray(costIDs) || !costIDs.length)
         return res.status(400).json({ success: false, error: 'costIDs array is required.' });
@@ -839,7 +839,7 @@ router.post('/post-migo', async (req, res) => {
 // the existing MBST BDC (see PurchasingController.cs). On a successful
 // reversal (SAP message type "S"), clears migoStatus/materialDocument so the
 // line drops back into Unprocessed Costs for correction and re-posting.
-router.post('/:costId/reverse', async (req, res) => {
+router.post('/:costId/reverse', requirePermission('LOG_PLANNING'), async (req, res) => {
     try {
         const pool = await getPool();
         const costId = Number(req.params.costId);

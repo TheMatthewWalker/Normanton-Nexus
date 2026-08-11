@@ -21,6 +21,7 @@ import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
 import { notify } from '../lib/notify.js';
 import * as db from './stagingsql.js';
+import { getConversionQty } from './materialRequestUnits.js';
 
 const router = express.Router();
 
@@ -128,9 +129,9 @@ const NEEDED_BY_GRACE_MINUTES = 5;
 
 router.get('/materials', async (req, res) => {
   try {
-    const { search } = req.query;
+    const { search, by } = req.query;
     if (!search || !String(search).trim()) return res.json({ success: true, data: [] });
-    const data = await db.searchMaterials(search);
+    const data = await db.searchMaterials(search, by === 'description' ? 'description' : 'material');
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -192,14 +193,32 @@ router.get('/requests/:id', async (req, res) => {
 
 router.post('/requests', async (req, res) => {
   try {
-    const { material, materialText, uom, quantityRequested, location, requestedBatch, dueAtUtc, notes } = req.body;
+    const { material, materialText, uom, location, requestedBatch, dueAtUtc, notes, requestUnit, requestUnitQty } = req.body;
+    let { quantityRequested } = req.body;
 
     if (!material || !String(material).trim()) {
       return res.status(400).json({ success: false, error: { message: 'material is required.' } });
     }
-    if (!(Number(quantityRequested) > 0)) {
+
+    // Unit-based requests ("1 Spool") are converted to the base KG figure
+    // server-side from log.MaterialRequestUnits — never trust a
+    // client-computed KG number, so a stale/tampered unit dropdown can't
+    // slip Stores/SAP a wrong quantity. Materials with no configured units
+    // fall back to the pre-existing direct-quantity path.
+    if (requestUnit) {
+      if (!(Number(requestUnitQty) > 0)) {
+        return res.status(400).json({ success: false, error: { message: 'requestUnitQty must be greater than zero.' } });
+      }
+      try {
+        const conversionQty = await getConversionQty(material, requestUnit);
+        quantityRequested = Number(requestUnitQty) * conversionQty;
+      } catch (conversionErr) {
+        return res.status(400).json({ success: false, error: { message: conversionErr.message } });
+      }
+    } else if (!(Number(quantityRequested) > 0)) {
       return res.status(400).json({ success: false, error: { message: 'quantityRequested must be greater than zero.' } });
     }
+
     if (!location || !String(location).trim()) {
       return res.status(400).json({ success: false, error: { message: 'location is required.' } });
     }
@@ -218,6 +237,7 @@ router.post('/requests', async (req, res) => {
     const requestedBy = actor(req);
     const requestId = await db.createStagingRequest({
       material, materialText, uom, quantityRequested, location, requestedBatch, dueAtUtc: due, notes, requestedBy,
+      requestUnit: requestUnit || null, requestUnitQty: requestUnit ? Number(requestUnitQty) : null,
     });
     await audit('STAGING_REQUEST_CREATED', requestedBy, `Request #${requestId} — ${quantityRequested} of ${material} to ${location}`, req);
 

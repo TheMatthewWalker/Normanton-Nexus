@@ -396,14 +396,19 @@ async function buildCustomsReportRows(shipmentRows, sapData) {
     const priceByPair = new Map(priceRows.map(p => [`${digits(p.customerCode)}||${String(p.materialNumber || '').trim()}`, p]));
 
     for (const row of consignmentCandidates) {
+      // No real invoice exists for a consignment shipment — the delivery
+      // number itself is used as the placeholder Invoice Number regardless
+      // of whether a customs price is found below, matching the workbook
+      // macro's own behavior.
+      row.invoiceNumber = row.deliveryNumber;
+      row.invoiceDate = null;
+
       const price = priceByPair.get(pairKey(row));
       if (price) {
         const rate = parseSapNumber(price.rate);
         const pricingUnit = parseSapNumber(price.pricingUnit) || 1;
-        row.invoiceNumber = row.deliveryNumber; // placeholder — no real invoice for consignment shipments
         row.currency = price.currency?.trim() || '';
         row.salesValue = Math.round((rate / pricingUnit) * row.quantity * 100) / 100;
-        row.invoiceDate = null;
       } else {
         warnings.push(`Delivery ${row.deliveryNumber} / Material ${row.material}: no invoice and no consignment price found in SAP.`);
       }
