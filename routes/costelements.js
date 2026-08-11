@@ -1,17 +1,17 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.CostElements');
+            .query('SELECT * FROM log.CostElements');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -24,7 +24,7 @@ router.get('/id/:elementId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('elementId', sql.BigInt, req.params.elementId)
-            .query('SELECT * FROM Logistics.dbo.CostElements WHERE elementID = @elementId');
+            .query('SELECT * FROM log.CostElements WHERE elementID = @elementId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -54,7 +54,7 @@ router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
             .input('elementDescription', sql.NVarChar(200), String(elementDescription).trim())
             .input('direction',          sql.NVarChar(10),  direction || null)
             .input('tier',               sql.NVarChar(10),  tier || null)
-            .query(`INSERT INTO Logistics.dbo.CostElements (elementCode, elementDescription, direction, tier)
+            .query(`INSERT INTO log.CostElements (elementCode, elementDescription, direction, tier)
                     OUTPUT INSERTED.elementID
                     VALUES (@elementCode, @elementDescription, @direction, @tier)`);
 
@@ -82,7 +82,7 @@ router.put('/:elementId', requirePermission('LOG_ADMIN'), async (req, res) => {
             .input('elementDescription', sql.NVarChar(200), String(elementDescription).trim())
             .input('direction',          sql.NVarChar(10),  direction || null)
             .input('tier',               sql.NVarChar(10),  tier || null)
-            .query(`UPDATE Logistics.dbo.CostElements
+            .query(`UPDATE log.CostElements
                     SET elementCode = @elementCode, elementDescription = @elementDescription,
                         direction = @direction, tier = @tier
                     WHERE elementID = @elementId;
@@ -102,7 +102,7 @@ router.delete('/:elementId', requirePermission('LOG_ADMIN'), async (req, res) =>
     try {
         const pool = await getPool();
         await pool.request().input('elementId', sql.BigInt, req.params.elementId)
-            .query('DELETE FROM Logistics.dbo.CostElements WHERE elementID = @elementId');
+            .query('DELETE FROM log.CostElements WHERE elementID = @elementId');
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: { message: err.message } });

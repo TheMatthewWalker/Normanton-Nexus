@@ -4,12 +4,12 @@ import axios from 'axios';
 import fsp from 'fs/promises';
 import fs from 'fs';
 import path from 'path';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import { getShipmentContext, getShipmentFolderInfo, writeShipmentEvent } from './shipmentmain.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Validate required KN env vars on startup ──────────────────────────────────
 const KN_API_URL      = process.env.KN_API_URL;
@@ -230,7 +230,7 @@ router.post('/shipment/:shipmentId', async (req, res) => {
         // Fetch shipment header
         const shipmentResult = await pool.request()
             .input('shipmentId', sql.BigInt, shipmentId)
-            .query('USE Logistics SELECT * FROM dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+            .query('SELECT * FROM dbo.ShipmentMain WHERE shipmentID = @shipmentId');
 
         if (shipmentResult.recordset.length === 0) {
             return res.status(404).json({ error: `Shipment ${shipmentId} not found.` });
@@ -240,7 +240,7 @@ router.post('/shipment/:shipmentId', async (req, res) => {
         if (shipment.IsManual) {
             const cargoResult = await pool.request()
                 .input('shipmentId', sql.BigInt, shipmentId)
-                .query('USE Logistics SELECT * FROM dbo.ManualCargoItem WHERE ShipmentID = @shipmentId AND Removed = 0');
+                .query('SELECT * FROM dbo.ManualCargoItem WHERE ShipmentID = @shipmentId AND Removed = 0');
 
             if (cargoResult.recordset.length === 0) {
                 return res.status(422).json({ error: `No cargo lines found for manual shipment ${shipmentId}.` });
@@ -251,7 +251,6 @@ router.post('/shipment/:shipmentId', async (req, res) => {
             const palletsResult = await pool.request()
                 .input('shipmentId', sql.BigInt, shipmentId)
                 .query(`
-                    USE Logistics
                     SELECT pm.*
                     FROM dbo.PalletMain pm
                     INNER JOIN dbo.DeliveryLink dl ON dl.palletID = pm.palletID

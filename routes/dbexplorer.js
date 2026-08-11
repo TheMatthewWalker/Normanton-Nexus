@@ -3,16 +3,16 @@
  * Kongsberg Portal — DB Explorer (superadmin-only SSMS-lite schema browser)
  *
  * Lets a superadmin browse every database on the SQL Server instance this
- * app connects to (kongsberg, Production, Logistics, plus anything else the
- * login can see — SQL Server's own sys.databases filtering already hides
- * databases the login has no access to, so nothing extra is needed there):
- * list databases -> list tables in a database -> list columns / keys &
- * constraints for a table -> optionally preview the first N rows.
+ * app connects to (Nexus, NexusOperations, NexusArchive, plus anything else
+ * the login can see — SQL Server's own sys.databases filtering already
+ * hides databases the login has no access to, so nothing extra is needed
+ * there): list databases -> list tables in a database -> list columns /
+ * keys & constraints for a table -> optionally preview the first N rows.
  *
  * All of this is one instance, several databases (confirmed against
- * config.js's sqlConfig / getProductionPool / getLogisticsPool — same
- * `server`, different `database`), so a single connection to the default
- * `kongsberg` database is enough: SQL Server allows querying another
+ * config.js's getNexusPool / getNexusOperationsPool / getNexusArchivePool —
+ * same `server`, different `database`), so a single connection to the
+ * default `Nexus` database is enough: SQL Server allows querying another
  * database's system catalog views with a three-part name, e.g.
  * `[Production].sys.tables`, as long as the login has visibility into that
  * database. No per-database connection pool is needed.
@@ -37,7 +37,7 @@
 
 import express from 'express';
 import sql from 'mssql';
-import { auditQuery, sqlConfig } from '../config.js';
+import { auditQuery, getNexusPool } from '../config.js';
 
 const router = express.Router();
 
@@ -83,7 +83,7 @@ async function verifyTable(pool, dbBracket, schema, table) {
 // ── GET /api/admin/dbexplorer/databases ─────────────────────────────────────
 router.get('/databases', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const { recordset } = await pool.request().query(`
       SELECT
         name,
@@ -105,7 +105,7 @@ router.get('/databases', async (req, res) => {
 // ── GET /api/admin/dbexplorer/:database/tables ──────────────────────────────
 router.get('/:database/tables', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const dbName = await verifyDatabase(pool, req.params.database);
     if (!dbName) return res.status(404).json({ success: false, error: 'Database not found.' });
     const db = bracket(dbName);
@@ -131,7 +131,7 @@ router.get('/:database/tables', async (req, res) => {
 // ── GET /api/admin/dbexplorer/:database/:schema/:table/columns ─────────────
 router.get('/:database/:schema/:table/columns', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const dbName = await verifyDatabase(pool, req.params.database);
     if (!dbName) return res.status(404).json({ success: false, error: 'Database not found.' });
     const db = bracket(dbName);
@@ -180,7 +180,7 @@ router.get('/:database/:schema/:table/columns', async (req, res) => {
 // referencing this table FROM elsewhere, check constraints, and indexes.
 router.get('/:database/:schema/:table/constraints', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const dbName = await verifyDatabase(pool, req.params.database);
     if (!dbName) return res.status(404).json({ success: false, error: 'Database not found.' });
     const db = bracket(dbName);
@@ -319,7 +319,7 @@ router.get('/:database/:schema/:table/constraints', async (req, res) => {
 router.get('/:database/:schema/:table/preview', async (req, res) => {
   const username = req.session?.user?.username || null;
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const dbName = await verifyDatabase(pool, req.params.database);
     if (!dbName) return res.status(404).json({ success: false, error: 'Database not found.' });
     const db = bracket(dbName);

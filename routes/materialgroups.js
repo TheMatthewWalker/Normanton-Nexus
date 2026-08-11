@@ -1,9 +1,9 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
-// ── SAP Material Group lookup (dbo.MaterialGroupMapping) ──────────────────
+// ── SAP Material Group lookup (log.MaterialGroupMapping) ──────────────────
 // See sql/migrate_material_group_mapping.sql for the full writeup on why
 // this table exists: routes/shipmentcost.js's post-migo used to build the
 // PO item's MaterialGroup as free text (`${modeOfTransport} Freight`),
@@ -19,14 +19,14 @@ import { requirePermission } from '../middleware/auth.js';
 // they're both part of the same Node process.
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 router.get('/', requirePermission('LOG_ADMIN'), async (req, res) => {
   try {
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
       SELECT MappingId, CostElement, ModeOfTransport, MaterialGroup, Description, CreatedAtUtc, UpdatedAtUtc
-      FROM dbo.MaterialGroupMapping
+      FROM log.MaterialGroupMapping
       ORDER BY CostElement, ModeOfTransport
     `);
     res.json({ success: true, data: recordset });
@@ -52,7 +52,7 @@ router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
       .input('materialGroup',   sql.NVarChar(9),   String(materialGroup).trim())
       .input('description',     sql.NVarChar(200), description || null)
       .query(`
-        INSERT INTO dbo.MaterialGroupMapping (CostElement, ModeOfTransport, MaterialGroup, Description)
+        INSERT INTO log.MaterialGroupMapping (CostElement, ModeOfTransport, MaterialGroup, Description)
         OUTPUT INSERTED.MappingId
         VALUES (@costElement, @modeOfTransport, @materialGroup, @description)
       `);
@@ -88,7 +88,7 @@ router.put('/:mappingId', requirePermission('LOG_ADMIN'), async (req, res) => {
       .input('materialGroup',   sql.NVarChar(9),   String(materialGroup).trim())
       .input('description',     sql.NVarChar(200), description || null)
       .query(`
-        UPDATE dbo.MaterialGroupMapping SET
+        UPDATE log.MaterialGroupMapping SET
           CostElement = @costElement, ModeOfTransport = @modeOfTransport,
           MaterialGroup = @materialGroup, Description = @description,
           UpdatedAtUtc = GETUTCDATE()
@@ -108,7 +108,7 @@ router.delete('/:mappingId', requirePermission('LOG_ADMIN'), async (req, res) =>
   try {
     const pool = await getPool();
     await pool.request().input('mappingId', sql.Int, req.params.mappingId)
-      .query('DELETE FROM dbo.MaterialGroupMapping WHERE MappingId = @mappingId');
+      .query('DELETE FROM log.MaterialGroupMapping WHERE MappingId = @mappingId');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -132,7 +132,7 @@ export async function lookupMaterialGroup(costElement, modeOfTransport) {
     .input('modeOfTransport', sql.NVarChar(20), modeOfTransport || null)
     .query(`
       SELECT TOP 1 MaterialGroup, ModeOfTransport
-      FROM dbo.MaterialGroupMapping
+      FROM log.MaterialGroupMapping
       WHERE CostElement = @costElement
         AND (ModeOfTransport = @modeOfTransport OR ModeOfTransport IS NULL)
       ORDER BY CASE WHEN ModeOfTransport IS NULL THEN 1 ELSE 0 END

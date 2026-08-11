@@ -1,10 +1,10 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Lookup transit days for a destination ──
 // Query: ?country=UK&postcode=LS12
@@ -19,7 +19,7 @@ router.get('/lookup', async (req, res) => {
             .input('country', sql.NVarChar, country)
             .input('prefix',  sql.NVarChar, prefix)
             .query(`SELECT TOP 1 transitDays
-                    FROM Logistics.dbo.DeliveryRoutes
+                    FROM log.DeliveryRoutes
                     WHERE countryCode = @country
                       AND (postcodePrefix = @prefix OR postcodePrefix IS NULL)
                     ORDER BY CASE WHEN postcodePrefix = @prefix THEN 0 ELSE 1 END ASC`);
@@ -34,7 +34,7 @@ router.get('/', async (req, res) => {
     try {
         const pool   = await getPool();
         const result = await pool.request()
-            .query(`SELECT * FROM Logistics.dbo.DeliveryRoutes
+            .query(`SELECT * FROM log.DeliveryRoutes
                     ORDER BY countryCode ASC, ISNULL(postcodePrefix, 'ZZZZZ') ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -50,7 +50,7 @@ router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
             .input('countryCode',    sql.NVarChar, String(countryCode).toUpperCase())
             .input('postcodePrefix', sql.NVarChar, postcodePrefix ? String(postcodePrefix).toUpperCase() : null)
             .input('transitDays',    sql.Int,      parseInt(transitDays, 10))
-            .query(`INSERT INTO Logistics.dbo.DeliveryRoutes (countryCode, postcodePrefix, transitDays)
+            .query(`INSERT INTO log.DeliveryRoutes (countryCode, postcodePrefix, transitDays)
                     VALUES (@countryCode, @postcodePrefix, @transitDays);
                     SELECT SCOPE_IDENTITY() AS routeID`);
         res.status(201).json({ success: true, routeID: result.recordset[0].routeID });
@@ -67,7 +67,7 @@ router.put('/:routeId', requirePermission('LOG_ADMIN'), async (req, res) => {
             .input('countryCode',    sql.NVarChar, String(countryCode).toUpperCase())
             .input('postcodePrefix', sql.NVarChar, postcodePrefix ? String(postcodePrefix).toUpperCase() : null)
             .input('transitDays',    sql.Int,      parseInt(transitDays, 10))
-            .query(`UPDATE Logistics.dbo.DeliveryRoutes
+            .query(`UPDATE log.DeliveryRoutes
                     SET countryCode = @countryCode, postcodePrefix = @postcodePrefix, transitDays = @transitDays
                     WHERE routeID = @routeId`);
         res.json({ success: true });
@@ -80,7 +80,7 @@ router.delete('/:routeId', requirePermission('LOG_ADMIN'), async (req, res) => {
         const pool = await getPool();
         await pool.request()
             .input('routeId', sql.Int, req.params.routeId)
-            .query('DELETE FROM Logistics.dbo.DeliveryRoutes WHERE routeID = @routeId');
+            .query('DELETE FROM log.DeliveryRoutes WHERE routeID = @routeId');
         res.json({ success: true });
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });

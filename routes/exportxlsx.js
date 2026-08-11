@@ -24,7 +24,7 @@
 import express  from 'express';
 import sql      from 'mssql';
 import ExcelJS  from 'exceljs';
-import { sqlConfig } from '../config.js';
+import { resolveLegacyTablePool } from '../lib/legacyTableRouting.js';
 
 const router = express.Router();
 
@@ -118,11 +118,13 @@ function writeSheet(ws, rows) {
 }
 
 /** Run a parameterised SELECT against a single table with an optional filter */
-async function fetchTable(pool, tableName, filter, limit = 10000) {
+async function fetchTable(tableName, filter, limit = 10000) {
+  const { getPool, schema } = resolveLegacyTablePool(tableName);
+  const pool = await getPool();
   let result;
   if (!filter) {
     result = await pool.request()
-      .query(`SELECT TOP ${limit} * FROM dbo.${tableName}`);
+      .query(`SELECT TOP ${limit} * FROM ${schema}.${tableName}`);
   } else {
     let sqlVal;
     switch (filter.mode) {
@@ -133,14 +135,17 @@ async function fetchTable(pool, tableName, filter, limit = 10000) {
     const op = filter.mode === 'exact' ? '=' : 'LIKE';
     result = await pool.request()
       .input('val', sql.NVarChar(500), sqlVal)
-      .query(`SELECT TOP ${limit} * FROM dbo.${tableName} WHERE ${filter.col} ${op} @val`);
+      .query(`SELECT TOP ${limit} * FROM ${schema}.${tableName} WHERE ${filter.col} ${op} @val`);
   }
   return result.recordset || [];
 }
 
 /** Fetch related rows for a sub-table given a list of FK values */
-async function fetchRelated(pool, tableName, fkCol, fkValues) {
+async function fetchRelated(tableName, fkCol, fkValues) {
   if (!fkValues || fkValues.length === 0) return [];
+
+  const { getPool, schema } = resolveLegacyTablePool(tableName);
+  const pool = await getPool();
 
   // De-duplicate values
   const unique = [...new Set(fkValues.map(v => String(v ?? '')).filter(Boolean))];
@@ -158,7 +163,7 @@ async function fetchRelated(pool, tableName, fkCol, fkValues) {
     chunk.forEach((v, j) => req.input(`v${j}`, sql.NVarChar(256), v));
 
     const result = await req.query(
-      `SELECT TOP 10000 * FROM dbo.${tableName} WHERE ${fkCol} IN (${paramNames})`
+      `SELECT TOP 10000 * FROM ${schema}.${tableName} WHERE ${fkCol} IN (${paramNames})`
     );
     allRows.push(...(result.recordset || []));
   }
@@ -194,17 +199,20 @@ router.post('/', async (req, res) => {
   );
 
   try {
-    const pool = await sql.connect(sqlConfig);
-
     // 1. Fetch main table data
-    const mainRows = await fetchTable(pool, tableName, filter || null);
+    const mainRows = await fetchTable(tableName, filter || null);
 
     // 2. For each relation, collect all unique PK values from the main rows
     //    then fetch the matching child rows in one IN query per sub-table
+    //    (each relation resolves its own pool -- a relation can live in a
+    //    different database than the main table, e.g. main table in
+    //    NexusArchive with no relations, or ShipmentMain in NexusOperations
+    //    with ShipmentLink also in NexusOperations; fetchRelated handles it
+    //    either way)
     const relatedData = [];
     for (const rel of safeRelations) {
       const pkValues = mainRows.map(r => r[rel.pkCol]).filter(v => v != null);
-      const rows     = await fetchRelated(pool, rel.table, rel.fkCol, pkValues);
+      const rows     = await fetchRelated(rel.table, rel.fkCol, pkValues);
       relatedData.push({ rel, rows });
     }
 

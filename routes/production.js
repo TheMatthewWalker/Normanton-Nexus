@@ -12,10 +12,14 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusArchivePool, getNexusOperationsPool } from '../config.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+// Every route here queries exactly one legacy table -- almost all of them
+// (Batches/Mixing/Extrusion/Convo/Ewald/Firewall/etc.) live in NexusArchive;
+// only the Staging routes below override this with getNexusOperationsPool()
+// since Staging/StagingItems moved to NexusOperations' .log schema instead.
+const getPool = getNexusArchivePool;
 
 // ─────────────────────────────────────────────────────────────
 // BATCHES
@@ -362,9 +366,9 @@ router.get('/firewall/:sapBatch/messages', async (req, res) => {
 /** GET /api/production/staging — top 500 */
 router.get('/staging', async (req, res) => {
   try {
-    const pool = await getPool();
+    const pool = await getNexusOperationsPool();
     const result = await pool.request()
-      .query('SELECT TOP 500 * FROM dbo.Staging');
+      .query('SELECT TOP 500 * FROM log.Staging');
     res.json(result.recordset);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -372,10 +376,10 @@ router.get('/staging', async (req, res) => {
 /** GET /api/production/staging/:stagingId */
 router.get('/staging/:stagingId', async (req, res) => {
   try {
-    const pool = await getPool();
+    const pool = await getNexusOperationsPool();
     const result = await pool.request()
       .input('stagingId', sql.BigInt, req.params.stagingId)
-      .query('SELECT * FROM dbo.Staging WHERE StagingID = @stagingId');
+      .query('SELECT * FROM log.Staging WHERE StagingID = @stagingId');
     res.json(result.recordset);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -383,10 +387,10 @@ router.get('/staging/:stagingId', async (req, res) => {
 /** GET /api/production/staging/:stagingId/items */
 router.get('/staging/:stagingId/items', async (req, res) => {
   try {
-    const pool = await getPool();
+    const pool = await getNexusOperationsPool();
     const result = await pool.request()
       .input('stagingId', sql.BigInt, req.params.stagingId)
-      .query('SELECT * FROM dbo.StagingItems WHERE StagingID = @stagingId');
+      .query('SELECT * FROM log.StagingItems WHERE StagingID = @stagingId');
     res.json(result.recordset);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

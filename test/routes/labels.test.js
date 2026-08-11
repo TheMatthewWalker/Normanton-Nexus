@@ -24,9 +24,9 @@ jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 // whatever machine runs it.
 const printersConfigMock = [];
 jest.unstable_mockModule('../../config.js', () => ({
-  getProductionPool: jest.fn(() => Promise.resolve(pool)),
+  getNexusOperationsPool: jest.fn(() => Promise.resolve(pool)),
+  getNexusPool: jest.fn(() => Promise.resolve(pool)),
   printersConfig: printersConfigMock,
-  sqlConfig: {},
 }));
 
 let labelsRouter;

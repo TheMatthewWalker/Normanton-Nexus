@@ -1,10 +1,12 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 // ── Customs Report reference/fallback tables ────────────────────────────
-// (dbo.CustomsVatNumberOverrides, dbo.CustomsHsCodeDescriptions)
+// (log.CustomsVatNumberOverrides, log.CustomsHsCodeDescriptions — Logistics
+// admin/reference data, hence NexusOperations rather than Nexus, which is
+// reserved for portal auth/session/permissions/scheduling.)
 // See sql/migrate_customs_report_tables.sql for the full writeup. Both
 // tables back the French VAT / DDP Customs Report tile (routes/customsreport.js):
 // the report tries live SAP data first (KNA1-STCEG for VAT number) and only
@@ -19,7 +21,7 @@ import { requirePermission } from '../middleware/auth.js';
 // routes/materialgroups.js's exported lookupMaterialGroup().
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── VAT number overrides ─────────────────────────────────────────────────
 
@@ -28,7 +30,7 @@ router.get('/vat-overrides', requirePermission('LOG_ADMIN'), async (req, res) =>
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
       SELECT OverrideId, ConsigneeCode, VatNumber, Notes, CreatedAtUtc, UpdatedAtUtc
-      FROM dbo.CustomsVatNumberOverrides
+      FROM log.CustomsVatNumberOverrides
       ORDER BY ConsigneeCode
     `);
     res.json({ success: true, data: recordset });
@@ -54,7 +56,7 @@ router.post('/vat-overrides', requirePermission('LOG_ADMIN'), async (req, res) =
       .input('notes',         sql.NVarChar(200), notes || null)
       .input('createdBy',     sql.NVarChar(100), req.session?.user?.username || null)
       .query(`
-        INSERT INTO dbo.CustomsVatNumberOverrides (ConsigneeCode, VatNumber, Notes, CreatedBy)
+        INSERT INTO log.CustomsVatNumberOverrides (ConsigneeCode, VatNumber, Notes, CreatedBy)
         OUTPUT INSERTED.OverrideId
         VALUES (@consigneeCode, @vatNumber, @notes, @createdBy)
       `);
@@ -85,7 +87,7 @@ router.put('/vat-overrides/:overrideId', requirePermission('LOG_ADMIN'), async (
       .input('vatNumber',     sql.NVarChar(20),  String(vatNumber).trim())
       .input('notes',         sql.NVarChar(200), notes || null)
       .query(`
-        UPDATE dbo.CustomsVatNumberOverrides SET
+        UPDATE log.CustomsVatNumberOverrides SET
           ConsigneeCode = @consigneeCode, VatNumber = @vatNumber, Notes = @notes,
           UpdatedAtUtc = GETUTCDATE()
         WHERE OverrideId = @overrideId
@@ -104,7 +106,7 @@ router.delete('/vat-overrides/:overrideId', requirePermission('LOG_ADMIN'), asyn
   try {
     const pool = await getPool();
     await pool.request().input('overrideId', sql.Int, req.params.overrideId)
-      .query('DELETE FROM dbo.CustomsVatNumberOverrides WHERE OverrideId = @overrideId');
+      .query('DELETE FROM log.CustomsVatNumberOverrides WHERE OverrideId = @overrideId');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -118,7 +120,7 @@ router.get('/hs-descriptions', requirePermission('LOG_ADMIN'), async (req, res) 
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
       SELECT HsCodeId, CommodityCode, Description, CreatedAtUtc, UpdatedAtUtc
-      FROM dbo.CustomsHsCodeDescriptions
+      FROM log.CustomsHsCodeDescriptions
       ORDER BY CommodityCode
     `);
     res.json({ success: true, data: recordset });
@@ -143,7 +145,7 @@ router.post('/hs-descriptions', requirePermission('LOG_ADMIN'), async (req, res)
       .input('description',   sql.NVarChar(400), String(description).trim())
       .input('createdBy',     sql.NVarChar(100), req.session?.user?.username || null)
       .query(`
-        INSERT INTO dbo.CustomsHsCodeDescriptions (CommodityCode, Description, CreatedBy)
+        INSERT INTO log.CustomsHsCodeDescriptions (CommodityCode, Description, CreatedBy)
         OUTPUT INSERTED.HsCodeId
         VALUES (@commodityCode, @description, @createdBy)
       `);
@@ -173,7 +175,7 @@ router.put('/hs-descriptions/:hsCodeId', requirePermission('LOG_ADMIN'), async (
       .input('commodityCode', sql.NVarChar(10),  String(commodityCode).trim())
       .input('description',   sql.NVarChar(400), String(description).trim())
       .query(`
-        UPDATE dbo.CustomsHsCodeDescriptions SET
+        UPDATE log.CustomsHsCodeDescriptions SET
           CommodityCode = @commodityCode, Description = @description,
           UpdatedAtUtc = GETUTCDATE()
         WHERE HsCodeId = @hsCodeId
@@ -192,7 +194,7 @@ router.delete('/hs-descriptions/:hsCodeId', requirePermission('LOG_ADMIN'), asyn
   try {
     const pool = await getPool();
     await pool.request().input('hsCodeId', sql.Int, req.params.hsCodeId)
-      .query('DELETE FROM dbo.CustomsHsCodeDescriptions WHERE HsCodeId = @hsCodeId');
+      .query('DELETE FROM log.CustomsHsCodeDescriptions WHERE HsCodeId = @hsCodeId');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -211,7 +213,7 @@ export async function lookupVatOverride(consigneeCode) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('consigneeCode', sql.NVarChar(10), String(consigneeCode).trim())
-    .query('SELECT VatNumber FROM dbo.CustomsVatNumberOverrides WHERE ConsigneeCode = @consigneeCode');
+    .query('SELECT VatNumber FROM log.CustomsVatNumberOverrides WHERE ConsigneeCode = @consigneeCode');
   return recordset.length ? recordset[0].VatNumber : null;
 }
 
@@ -220,7 +222,7 @@ export async function lookupHsDescription(commodityCode) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('commodityCode', sql.NVarChar(10), String(commodityCode).trim())
-    .query('SELECT Description FROM dbo.CustomsHsCodeDescriptions WHERE CommodityCode = @commodityCode');
+    .query('SELECT Description FROM log.CustomsHsCodeDescriptions WHERE CommodityCode = @commodityCode');
   return recordset.length ? recordset[0].Description : null;
 }
 

@@ -6,14 +6,14 @@ import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
-import { sqlConfig, stampDbChange } from '../config.js';
+import { stampDbChange, getNexusOperationsPool } from '../config.js';
 
 import { requirePermission, requireAnyPermission } from '../middleware/auth.js';
 import { lookupModeOfTransport } from './forwardermodemapping.js';
 import e from 'express';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 const APP_CONFIG = loadAppConfig();
 
 
@@ -652,7 +652,7 @@ function createSimplePdfBuffer(title, lines, fontBase = 'Helvetica') {
 
 
 async function getShipmentById(poolOrTx, shipmentId) {
-  const result = await poolOrTx.request().input('shipmentId', sql.BigInt, shipmentId).query('SELECT * FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+  const result = await poolOrTx.request().input('shipmentId', sql.BigInt, shipmentId).query('SELECT * FROM log.ShipmentMain WHERE shipmentID = @shipmentId');
   return result.recordset[0] || null;
 }
 
@@ -664,7 +664,7 @@ async function getShipmentContext(shipmentId) {
   if (shipment.forwarderID) {
     const forwarderResult = await pool.request()
       .input('forwarderId', sql.BigInt, shipment.forwarderID)
-      .query('SELECT TOP 1 forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = @forwarderId');
+      .query('SELECT TOP 1 forwarderName FROM log.Forwarders WHERE forwarderID = @forwarderId');
     shipment.forwarderName = forwarderResult.recordset[0]?.forwarderName || '';
   } else {
     shipment.forwarderName = '';
@@ -678,7 +678,7 @@ async function getShipmentContext(shipmentId) {
   if (shipment.IsManual) {
     const cargoResult = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
       SELECT CargoID, Description, PackageCount, Weight, Length, Width, Height, Volume
-      FROM Logistics.dbo.ManualCargoItem
+      FROM log.ManualCargoItem
       WHERE ShipmentID = @shipmentId AND Removed = 0
       ORDER BY CargoID ASC`);
     return { shipment, deliveries: [], pallets: [], manualCargo: cargoResult.recordset };
@@ -691,15 +691,15 @@ async function getShipmentContext(shipmentId) {
       d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry,
     STUFF((
       SELECT '; ' + e.address
-      FROM Logistics.dbo.Email e
+      FROM log.Email e
       WHERE e.ID = dm.customerID
       FOR XML PATH('')
     ), 1, 2, '') AS destinationEmail
-    FROM Logistics.dbo.ShipmentLink sl
-      INNER JOIN Logistics.dbo.DeliveryMain dm ON dm.deliveryID = sl.deliveryID
-      LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
+    FROM log.ShipmentLink sl
+      INNER JOIN log.DeliveryMain dm ON dm.deliveryID = sl.deliveryID
+      LEFT JOIN log.Destinations d ON dm.customerID = d.destinationID
     WHERE sl.shipmentID = @shipmentId ORDER BY dm.deliveryID ASC`);
-  const pallets = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`SELECT sl.deliveryID, pm.palletID, pm.palletType, pm.palletFinish, CAST(ISNULL(pm.packagingWeight, 0) AS decimal(18,3)) AS packagingWeight, CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, CAST(ISNULL(pm.palletVolume, 0) AS decimal(18,3)) AS palletVolume, pm.palletLength, pm.palletWidth, pm.palletHeight, pm.palletLocation FROM Logistics.dbo.ShipmentLink sl INNER JOIN Logistics.dbo.DeliveryLink dl ON dl.deliveryID = sl.deliveryID INNER JOIN Logistics.dbo.PalletMain pm ON pm.palletID = dl.palletID WHERE sl.shipmentID = @shipmentId AND ISNULL(pm.palletRemoved, 0) = 0 ORDER BY sl.deliveryID ASC, pm.palletID ASC`);
+  const pallets = await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`SELECT sl.deliveryID, pm.palletID, pm.palletType, pm.palletFinish, CAST(ISNULL(pm.packagingWeight, 0) AS decimal(18,3)) AS packagingWeight, CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS grossWeight, CAST(ISNULL(pm.palletVolume, 0) AS decimal(18,3)) AS palletVolume, pm.palletLength, pm.palletWidth, pm.palletHeight, pm.palletLocation FROM log.ShipmentLink sl INNER JOIN log.DeliveryLink dl ON dl.deliveryID = sl.deliveryID INNER JOIN log.PalletMain pm ON pm.palletID = dl.palletID WHERE sl.shipmentID = @shipmentId AND ISNULL(pm.palletRemoved, 0) = 0 ORDER BY sl.deliveryID ASC, pm.palletID ASC`);
   return { shipment, deliveries: deliveries.recordset, pallets: pallets.recordset, manualCargo: [] };
 }
 
@@ -1187,7 +1187,7 @@ async function writeShipmentEvent(pool, shipmentId, category, description) {
     .input('shipmentId',  sql.BigInt,        shipmentId)
     .input('category',    sql.NVarChar(50),  category)
     .input('description', sql.NVarChar(500), description)
-    .query(`INSERT INTO Logistics.dbo.ShipmentEvents (shipmentID, eventCategory, eventDescription)
+    .query(`INSERT INTO log.ShipmentEvents (shipmentID, eventCategory, eventDescription)
             VALUES (@shipmentId, @category, @description)`);
 }
 
@@ -1208,7 +1208,7 @@ async function syncShipmentAggregateData(shipmentId) {
   // this function's contract — "the totals you get back are freshly synced"
   // — true for manual shipments too.
   const manualCheck = await pool.request().input('shipmentId', sql.BigInt, shipmentId)
-    .query('SELECT IsManual FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+    .query('SELECT IsManual FROM log.ShipmentMain WHERE shipmentID = @shipmentId');
   if (manualCheck.recordset[0]?.IsManual) {
     await recalcManualShipmentTotals(pool, shipmentId);
     return getShipmentContext(shipmentId);
@@ -1219,7 +1219,7 @@ async function syncShipmentAggregateData(shipmentId) {
   try {
     const deliveryResult = await tx.request()
       .input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT deliveryID FROM Logistics.dbo.ShipmentLink WHERE shipmentID = @shipmentId');
+      .query('SELECT deliveryID FROM log.ShipmentLink WHERE shipmentID = @shipmentId');
     const palletResult = await tx.request()
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
@@ -1229,9 +1229,9 @@ async function syncShipmentAggregateData(shipmentId) {
           CAST(ISNULL(pm.packagingWeight, 0) AS decimal(18,3)) AS packagingWeight,
           CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
           CAST(ISNULL(pm.palletVolume, 0) AS decimal(18,3)) AS palletVolume
-        FROM Logistics.dbo.ShipmentLink sl
-        INNER JOIN Logistics.dbo.DeliveryLink dl ON dl.deliveryID = sl.deliveryID
-        INNER JOIN Logistics.dbo.PalletMain pm ON pm.palletID = dl.palletID
+        FROM log.ShipmentLink sl
+        INNER JOIN log.DeliveryLink dl ON dl.deliveryID = sl.deliveryID
+        INNER JOIN log.PalletMain pm ON pm.palletID = dl.palletID
         WHERE sl.shipmentID = @shipmentId
           AND ISNULL(pm.palletRemoved, 0) = 0
         ORDER BY sl.deliveryID ASC, pm.palletID ASC`);
@@ -1272,7 +1272,7 @@ async function syncShipmentAggregateData(shipmentId) {
         .input('netWeight', sql.Decimal(18, 3), round3(totals.netWeight))
         .input('deliveryVolume', sql.Decimal(18, 3), round3(totals.deliveryVolume))
         .query(`
-          UPDATE Logistics.dbo.DeliveryMain
+          UPDATE log.DeliveryMain
           SET
             palletCount = @palletCount,
             grossWeight = @grossWeight,
@@ -1288,7 +1288,7 @@ async function syncShipmentAggregateData(shipmentId) {
       .input('netWeight', sql.Decimal(18, 3), round3(shipmentNetWeight))
       .input('shipmentVolume', sql.Decimal(18, 3), round3(shipmentVolume))
       .query(`
-        UPDATE Logistics.dbo.ShipmentMain
+        UPDATE log.ShipmentMain
         SET
           palletCount = @palletCount,
           grossWeight = @grossWeight,
@@ -1580,7 +1580,7 @@ async function sendSmtpMessage({ from, to, cc, bcc, message }) {
 router.get('/', async (req, res) => {
   try { 
     const pool = await getPool(); 
-    const result = await pool.request().query('SELECT * FROM Logistics.dbo.ShipmentMain'); 
+    const result = await pool.request().query('SELECT * FROM log.ShipmentMain'); 
     res.json(result.recordset); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1601,10 +1601,10 @@ router.get('/queue/:mode', async (req, res) => {
         CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
         CAST(ISNULL(sm.deliveryStatus, 0) AS bit) AS deliveryStatus,
         CASE WHEN ISNULL(sm.plannedDelivery, '1900-01-01') > '1900-01-01' THEN sm.plannedDelivery ELSE sm.plannedCollection END AS plannedMovement
-      FROM Logistics.dbo.ShipmentMain sm
+      FROM log.ShipmentMain sm
       OUTER APPLY (
         SELECT TOP 1 f.forwarderName, f.forwarderMode
-        FROM Logistics.dbo.Forwarders f
+        FROM log.Forwarders f
         WHERE f.forwarderID = sm.forwarderID
       ) fa
       WHERE ${whereClause}
@@ -1620,7 +1620,7 @@ router.get('/queue/:mode', async (req, res) => {
 
 // ── Haulier On-Time Performance report ────────────────────────────────────────
 // Combines outbound (ShipmentMain.plannedDelivery vs actualDelivery) and
-// inbound (dbo.PurchaseOrderShipment.ExpectedEta vs ReceivedAtUtc) legs —
+// inbound (log.PurchaseOrderShipment.ExpectedEta vs ReceivedAtUtc) legs —
 // same UNION ALL shape as shipmentcost.js's /analytics, since a haulier's
 // on-time record should reflect both directions, not just outbound. Only
 // counts shipments that actually have both a planned and an actual/received
@@ -1643,10 +1643,10 @@ const OTIF_OUTBOUND = `
            sm.destinationName    AS place,
            sm.actualDelivery     AS periodDate,
            CASE WHEN DATEADD(day, DATEDIFF(day, 0, sm.actualDelivery), 0) <= DATEADD(day, DATEDIFF(day, 0, sm.plannedDelivery), 0) THEN 1 ELSE 0 END AS isOnTime
-    FROM Logistics.dbo.ShipmentMain sm
+    FROM log.ShipmentMain sm
     OUTER APPLY (
         SELECT TOP 1 f.forwarderName
-        FROM Logistics.dbo.Forwarders f
+        FROM log.Forwarders f
         WHERE f.forwarderID = sm.forwarderID
     ) fa
     WHERE sm.actualDelivery IS NOT NULL AND sm.plannedDelivery IS NOT NULL
@@ -1657,13 +1657,13 @@ const OTIF_INBOUND = `
            d.destinationName    AS place,
            ps.ReceivedAtUtc     AS periodDate,
            CASE WHEN DATEADD(day, DATEDIFF(day, 0, ps.ReceivedAtUtc), 0) <= DATEADD(day, DATEDIFF(day, 0, ps.ExpectedEta), 0) THEN 1 ELSE 0 END AS isOnTime
-    FROM dbo.PurchaseOrderShipment ps
+    FROM log.PurchaseOrderShipment ps
     OUTER APPLY (
         SELECT TOP 1 f.forwarderName
-        FROM Logistics.dbo.Forwarders f
+        FROM log.Forwarders f
         WHERE f.forwarderID = ps.ForwarderID
     ) fa
-    LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = ps.OriginDestinationID
+    LEFT JOIN log.Destinations d ON d.destinationID = ps.OriginDestinationID
     WHERE ps.ReceivedAtUtc IS NOT NULL AND ps.ExpectedEta IS NOT NULL
       AND ps.CancelledAtUtc IS NULL`;
 const OTIF_COMBINED = `(${OTIF_OUTBOUND} UNION ALL ${OTIF_INBOUND}) o`;
@@ -1748,7 +1748,7 @@ router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (re
       const result = await pool.request()
         .input('shipmentId', sql.BigInt, shipmentId)
         .query(`
-          UPDATE Logistics.dbo.ShipmentMain
+          UPDATE log.ShipmentMain
           SET collectionStatus = 1, actualCollection = GETDATE()
           WHERE shipmentID = @shipmentId
             AND ISNULL(shipmentCancelled, 0) = 0
@@ -1783,8 +1783,8 @@ router.post('/loading-list', async (req, res) => {
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
         SELECT sm.*, fa.forwarderName
-        FROM Logistics.dbo.ShipmentMain sm
-        OUTER APPLY (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) fa
+        FROM log.ShipmentMain sm
+        OUTER APPLY (SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = sm.forwarderID) fa
         WHERE sm.shipmentID = @shipmentId AND ISNULL(sm.shipmentCancelled, 0) = 0`);
     if (!shipResult.recordset.length) continue;
 
@@ -1794,9 +1794,9 @@ router.post('/loading-list', async (req, res) => {
         SELECT pm.palletID, pm.palletType, pm.palletLocation,
           CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS grossWeight,
           pm.palletLength, pm.palletWidth, pm.palletHeight
-        FROM Logistics.dbo.ShipmentLink sl
-        INNER JOIN Logistics.dbo.DeliveryLink dl ON dl.deliveryID = sl.deliveryID
-        INNER JOIN Logistics.dbo.PalletMain   pm ON pm.palletID   = dl.palletID
+        FROM log.ShipmentLink sl
+        INNER JOIN log.DeliveryLink dl ON dl.deliveryID = sl.deliveryID
+        INNER JOIN log.PalletMain   pm ON pm.palletID   = dl.palletID
         WHERE sl.shipmentID = @shipmentId AND ISNULL(pm.palletRemoved, 0) = 0
         ORDER BY pm.palletLocation ASC, pm.palletID ASC`);
 
@@ -1829,7 +1829,7 @@ router.post('/update-planned-collection', requirePermission('LOG_PLANNING'), asy
   const inClause = createInClause(request, shipmentIds, 'sid');
   request.input('date', sql.DateTime, parsed);
   await request.query(`
-    UPDATE Logistics.dbo.ShipmentMain SET plannedCollection = @date
+    UPDATE log.ShipmentMain SET plannedCollection = @date
     WHERE shipmentID IN (${inClause}) AND ISNULL(shipmentCancelled, 0) = 0`);
   stampDbChange(req.session?.user?.username, 'ShipmentMain');
   res.json({ success: true });
@@ -1865,14 +1865,14 @@ router.post('/cancel', requirePermission('LOG_PLANNING'), async (req, res) => {
     const deleteRequest = tx.request();
     const deleteClause = createInClause(deleteRequest, shipmentIds, 'deleteShipmentId');
     await deleteRequest.query(`
-      DELETE FROM Logistics.dbo.ShipmentLink
+      DELETE FROM log.ShipmentLink
       WHERE shipmentID IN (${deleteClause})
     `);
 
     const updateRequest = tx.request();
     const updateClause = createInClause(updateRequest, shipmentIds, 'updateShipmentId');
     const result = await updateRequest.query(`
-      UPDATE Logistics.dbo.ShipmentMain
+      UPDATE log.ShipmentMain
       SET shipmentCancelled = 1
       WHERE shipmentID IN (${updateClause})
         AND ISNULL(shipmentCancelled, 0) = 0;
@@ -1896,7 +1896,7 @@ router.post('/:shipmentId/mark-collected', requirePermission('LOG_PLANNING'), as
     const result = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
       .query(`
-        UPDATE Logistics.dbo.ShipmentMain
+        UPDATE log.ShipmentMain
         SET collectionStatus = 1, actualCollection = GETDATE()
         WHERE shipmentID = @shipmentId
           AND ISNULL(shipmentCancelled, 0) = 0
@@ -1927,7 +1927,7 @@ router.post('/:shipmentId/mark-delivered', requirePermission('LOG_PLANNING'), as
       .input('shipmentId',    sql.BigInt,   shipmentId)
       .input('actualDelivery', sql.DateTime, actualDelivery)
       .query(`
-        UPDATE Logistics.dbo.ShipmentMain
+        UPDATE log.ShipmentMain
         SET deliveryStatus = 1, actualDelivery = COALESCE(@actualDelivery, GETDATE())
         WHERE shipmentID = @shipmentId
           AND ISNULL(shipmentCancelled, 0) = 0
@@ -1971,7 +1971,7 @@ router.post('/mark-delivered-bulk', requirePermission('LOG_PLANNING'), async (re
         .input('shipmentId',     sql.BigInt,   shipmentId)
         .input('actualDelivery', sql.DateTime, actualDelivery)
         .query(`
-          UPDATE Logistics.dbo.ShipmentMain
+          UPDATE log.ShipmentMain
           SET deliveryStatus = 1, actualDelivery = COALESCE(@actualDelivery, GETDATE())
           WHERE shipmentID = @shipmentId
             AND ISNULL(shipmentCancelled, 0) = 0
@@ -2017,7 +2017,7 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
           .input('plannedDelivery',   sql.DateTime, item.plannedDelivery  ? new Date(item.plannedDelivery) : null)
           .input('forwarderID', sql.BigInt, Number.isFinite(item.forwarderID) ? item.forwarderID : null)
           .query(`
-            UPDATE Logistics.dbo.ShipmentMain
+            UPDATE log.ShipmentMain
             SET
               bookingStatus     = 1,
               trackingNumber    = COALESCE(NULLIF(@trackingNumber, ''), trackingNumber),
@@ -2036,7 +2036,7 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
       const request = tx.request();
       const inClause = createInClause(request, shipmentIds, 'shipmentId');
       const result = await request.query(`
-        UPDATE Logistics.dbo.ShipmentMain
+        UPDATE log.ShipmentMain
         SET bookingStatus = 1
         WHERE shipmentID IN (${inClause})
           AND ISNULL(shipmentCancelled, 0) = 0
@@ -2056,7 +2056,7 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
 
       // Translate the booked forwarder's own mode/type (Forwarders.forwarderMode,
       // e.g. "Road") into the canonical ModeOfTransport value via
-      // dbo.ForwarderModeMapping — previously these INSERTs didn't set
+      // log.ForwarderModeMapping — previously these INSERTs didn't set
       // modeOfTransport at all, so every outbound cost line (manual and
       // SAP-driven shipments alike) ended up with it NULL, and
       // lookupMaterialGroup (routes/materialgroups.js) could never use a
@@ -2076,7 +2076,7 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
             .input('actualCost',      sql.Decimal(18,2), 0)
             .input('migoStatus',      sql.Bit,           0)
             .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport)
-            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+            .query(`INSERT INTO log.ShipmentCost
                       (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus, modeOfTransport)
                     VALUES
                       (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus, @modeOfTransport)`);
@@ -2095,7 +2095,7 @@ router.post('/mark-booked', requirePermission('LOG_PLANNING'), async (req, res) 
             .input('actualCost',      sql.Decimal(18,2), 0)
             .input('migoStatus',      sql.Bit,           0)
             .input('modeOfTransport', sql.NVarChar(20),  modeOfTransport)
-            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+            .query(`INSERT INTO log.ShipmentCost
                       (shipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus, modeOfTransport)
                     VALUES
                       (@shipmentID, @costType, @costElement, @costCenter, @expectedCost, @actualCost, @migoStatus, @modeOfTransport)`);
@@ -2141,7 +2141,7 @@ router.post('/unbook', requirePermission('LOG_PLANNING'), async (req, res) => {
       const result = await tx.request()
         .input('shipmentId', sql.BigInt, shipmentId)
         .query(`
-          UPDATE Logistics.dbo.ShipmentMain
+          UPDATE log.ShipmentMain
           SET bookingStatus = 0, plannedCollection = NULL, trackingNumber = NULL
           WHERE shipmentID = @shipmentId
             AND ISNULL(shipmentCancelled, 0) = 0
@@ -2155,7 +2155,7 @@ router.post('/unbook', requirePermission('LOG_PLANNING'), async (req, res) => {
       await tx.request()
         .input('shipmentId', sql.BigInt, shipmentId)
         .query(`
-          DELETE FROM Logistics.dbo.ShipmentCost
+          DELETE FROM log.ShipmentCost
           WHERE shipmentID = @shipmentId AND ISNULL(migoStatus, 0) = 0
         `);
 
@@ -2195,13 +2195,13 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
         d.destinationName, d.destinationStreet, d.destinationCity, d.destinationPostCode, d.destinationCountry, d.defaultIncoterms,
         STUFF((
           SELECT '; ' + e.address
-          FROM Logistics.dbo.Email e
+          FROM log.Email e
           WHERE e.ID = dm.customerID
           FOR XML PATH('')
         ), 1, 2, '') AS destinationEmail
-      FROM Logistics.dbo.DeliveryMain dm 
-        LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = dm.customerID 
-        LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID 
+      FROM log.DeliveryMain dm 
+        LEFT JOIN log.Destinations d ON d.destinationID = dm.customerID 
+        LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID 
       WHERE dm.deliveryID IN (${inClause}) AND dm.completionStatus = 1
         AND ISNULL(dm.deliveryCancelled, 0) = 0
         AND ISNULL(dm.pendingPackagingData, 0) = 0
@@ -2250,11 +2250,11 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
       customsComplete: toBool(req.body.customsComplete),
       shipmentCancelled: toBool(req.body.shipmentCancelled),
     };
-    const insertResult = await tx.request().input('originID', sql.BigInt, settings.originID).input('originName', sql.NVarChar, settings.originName).input('originStreet', sql.NVarChar, settings.originStreet).input('originCity', sql.NVarChar, settings.originCity).input('originPostCode', sql.NVarChar, settings.originPostCode).input('originCountry', sql.NVarChar, settings.originCountry).input('destinationID', sql.BigInt, shipmentDraft.destinationID).input('destinationName', sql.NVarChar, shipmentDraft.destinationName).input('destinationStreet', sql.NVarChar, shipmentDraft.destinationStreet).input('destinationCity', sql.NVarChar, shipmentDraft.destinationCity).input('destinationPostCode', sql.NVarChar, shipmentDraft.destinationPostCode).input('destinationCountry', sql.NVarChar, shipmentDraft.destinationCountry).input('netWeight', sql.Decimal(18, 3), totals.netWeight).input('grossWeight', sql.Decimal(18, 3), totals.grossWeight).input('palletCount', sql.Decimal(18, 3), totals.palletCount).input('shipmentVolume', sql.Decimal(18, 3), totals.shipmentVolume).input('plannedCollection', sql.DateTime, shipmentDraft.plannedCollection).input('actualCollection', sql.DateTime, shipmentDraft.actualCollection).input('collectionStatus', sql.Bit, shipmentDraft.collectionStatus).input('forwarderID', sql.BigInt, shipmentDraft.forwarderID).input('trackingNumber', sql.NVarChar, shipmentDraft.trackingNumber || null).input('incoTerms', sql.NVarChar, shipmentDraft.incoTerms || null).input('customsRequired', sql.Bit, shipmentDraft.customsRequired).input('customsComplete', sql.Bit, shipmentDraft.customsComplete).input('shipmentCancelled', sql.Bit, shipmentDraft.shipmentCancelled).query(`INSERT INTO Logistics.dbo.ShipmentMain (originID, originName, originStreet, originCity, originPostCode, originCountry, destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, netWeight, grossWeight, palletCount, shipmentVolume, plannedCollection, actualCollection, collectionStatus, forwarderID, trackingNumber, incoTerms, customsRequired, customsComplete, shipmentCancelled) VALUES (@originID, @originName, @originStreet, @originCity, @originPostCode, @originCountry, @destinationID, @destinationName, @destinationStreet, @destinationCity, @destinationPostCode, @destinationCountry, @netWeight, @grossWeight, @palletCount, @shipmentVolume, @plannedCollection, @actualCollection, @collectionStatus, @forwarderID, @trackingNumber, @incoTerms, @customsRequired, @customsComplete, @shipmentCancelled); SELECT SCOPE_IDENTITY() AS shipmentID;`);
+    const insertResult = await tx.request().input('originID', sql.BigInt, settings.originID).input('originName', sql.NVarChar, settings.originName).input('originStreet', sql.NVarChar, settings.originStreet).input('originCity', sql.NVarChar, settings.originCity).input('originPostCode', sql.NVarChar, settings.originPostCode).input('originCountry', sql.NVarChar, settings.originCountry).input('destinationID', sql.BigInt, shipmentDraft.destinationID).input('destinationName', sql.NVarChar, shipmentDraft.destinationName).input('destinationStreet', sql.NVarChar, shipmentDraft.destinationStreet).input('destinationCity', sql.NVarChar, shipmentDraft.destinationCity).input('destinationPostCode', sql.NVarChar, shipmentDraft.destinationPostCode).input('destinationCountry', sql.NVarChar, shipmentDraft.destinationCountry).input('netWeight', sql.Decimal(18, 3), totals.netWeight).input('grossWeight', sql.Decimal(18, 3), totals.grossWeight).input('palletCount', sql.Decimal(18, 3), totals.palletCount).input('shipmentVolume', sql.Decimal(18, 3), totals.shipmentVolume).input('plannedCollection', sql.DateTime, shipmentDraft.plannedCollection).input('actualCollection', sql.DateTime, shipmentDraft.actualCollection).input('collectionStatus', sql.Bit, shipmentDraft.collectionStatus).input('forwarderID', sql.BigInt, shipmentDraft.forwarderID).input('trackingNumber', sql.NVarChar, shipmentDraft.trackingNumber || null).input('incoTerms', sql.NVarChar, shipmentDraft.incoTerms || null).input('customsRequired', sql.Bit, shipmentDraft.customsRequired).input('customsComplete', sql.Bit, shipmentDraft.customsComplete).input('shipmentCancelled', sql.Bit, shipmentDraft.shipmentCancelled).query(`INSERT INTO log.ShipmentMain (originID, originName, originStreet, originCity, originPostCode, originCountry, destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, netWeight, grossWeight, palletCount, shipmentVolume, plannedCollection, actualCollection, collectionStatus, forwarderID, trackingNumber, incoTerms, customsRequired, customsComplete, shipmentCancelled) VALUES (@originID, @originName, @originStreet, @originCity, @originPostCode, @originCountry, @destinationID, @destinationName, @destinationStreet, @destinationCity, @destinationPostCode, @destinationCountry, @netWeight, @grossWeight, @palletCount, @shipmentVolume, @plannedCollection, @actualCollection, @collectionStatus, @forwarderID, @trackingNumber, @incoTerms, @customsRequired, @customsComplete, @shipmentCancelled); SELECT SCOPE_IDENTITY() AS shipmentID;`);
     const shipmentID = Number(insertResult.recordset[0].shipmentID);
     
     for (const deliveryID of deliveryIDs) 
-      await tx.request().input('shipmentID', sql.BigInt, shipmentID).input('deliveryID', sql.BigInt, deliveryID).query('INSERT INTO Logistics.dbo.ShipmentLink (shipmentID, deliveryID) VALUES (@shipmentID, @deliveryID)');
+      await tx.request().input('shipmentID', sql.BigInt, shipmentID).input('deliveryID', sql.BigInt, deliveryID).query('INSERT INTO log.ShipmentLink (shipmentID, deliveryID) VALUES (@shipmentID, @deliveryID)');
     
     await tx.commit();
     const username = req.session?.user?.username || 'unknown';
@@ -2315,7 +2315,7 @@ router.post('/create-manual', requirePermission('LOG_PLANNING'), async (req, res
     const pool = await getPool();
     const destResult = await pool.request()
       .input('destinationId', sql.BigInt, destinationID)
-      .query('SELECT destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, defaultIncoterms FROM Logistics.dbo.Destinations WHERE destinationID = @destinationId');
+      .query('SELECT destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, defaultIncoterms FROM log.Destinations WHERE destinationID = @destinationId');
     const dest = destResult.recordset[0];
     if (!dest) return res.status(400).json({ success: false, error: 'Destination not found.' });
 
@@ -2342,7 +2342,7 @@ router.post('/create-manual', requirePermission('LOG_PLANNING'), async (req, res
       .input('incoTerms', sql.NVarChar, shipmentDraft.incoTerms || null)
       .input('customsRequired', sql.Bit, shipmentDraft.customsRequired)
       .input('customsComplete', sql.Bit, shipmentDraft.customsComplete)
-      .query(`INSERT INTO Logistics.dbo.ShipmentMain
+      .query(`INSERT INTO log.ShipmentMain
                 (originID, originName, originStreet, originCity, originPostCode, originCountry,
                  destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry,
                  netWeight, grossWeight, palletCount, shipmentVolume,
@@ -2375,17 +2375,17 @@ router.post('/create-manual', requirePermission('LOG_PLANNING'), async (req, res
 // separate tare/net concept to enter by hand the way SAP delivery data has.
 async function recalcManualShipmentTotals(pool, shipmentId) {
   await pool.request().input('shipmentId', sql.BigInt, shipmentId).query(`
-    UPDATE Logistics.dbo.ShipmentMain SET
+    UPDATE log.ShipmentMain SET
       grossWeight = t.totalWeight,
       netWeight = t.totalWeight,
       palletCount = t.totalPackages,
       shipmentVolume = t.totalVolume
-    FROM Logistics.dbo.ShipmentMain sm
+    FROM log.ShipmentMain sm
     CROSS APPLY (
       SELECT ISNULL(SUM(Weight), 0) AS totalWeight,
              ISNULL(SUM(PackageCount), 0) AS totalPackages,
              ISNULL(SUM(Volume), 0) AS totalVolume
-      FROM Logistics.dbo.ManualCargoItem
+      FROM log.ManualCargoItem
       WHERE ShipmentID = sm.shipmentID AND Removed = 0
     ) t
     WHERE sm.shipmentID = @shipmentId`);
@@ -2399,7 +2399,7 @@ router.get('/:shipmentId/manual-cargo', requirePermission('LOG_PLANNING'), async
     const result = await pool.request()
       .input('shipmentId', sql.BigInt, req.params.shipmentId)
       .query(`SELECT CargoID, ShipmentID, Description, PackageCount, Weight, Length, Width, Height, Volume, CreatedAtUtc, CreatedBy
-              FROM Logistics.dbo.ManualCargoItem
+              FROM log.ManualCargoItem
               WHERE ShipmentID = @shipmentId AND Removed = 0
               ORDER BY CargoID ASC`);
     res.json({ success: true, data: result.recordset });
@@ -2414,7 +2414,7 @@ router.post('/:shipmentId/manual-cargo', requirePermission('LOG_PLANNING'), asyn
     const pool = await getPool();
 
     const shipmentResult = await pool.request().input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT IsManual FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+      .query('SELECT IsManual FROM log.ShipmentMain WHERE shipmentID = @shipmentId');
     const shipmentRow = shipmentResult.recordset[0];
     if (!shipmentRow) return res.status(404).json({ success: false, error: 'Shipment not found.' });
     if (!shipmentRow.IsManual) return res.status(400).json({ success: false, error: 'Cargo lines can only be added to a manual shipment.' });
@@ -2448,7 +2448,7 @@ router.post('/:shipmentId/manual-cargo', requirePermission('LOG_PLANNING'), asyn
       .input('height', sql.Decimal(18, 2), height)
       .input('volume', sql.Decimal(18, 3), volume)
       .input('createdBy', sql.NVarChar, username)
-      .query(`INSERT INTO Logistics.dbo.ManualCargoItem (ShipmentID, Description, PackageCount, Weight, Length, Width, Height, Volume, CreatedBy)
+      .query(`INSERT INTO log.ManualCargoItem (ShipmentID, Description, PackageCount, Weight, Length, Width, Height, Volume, CreatedBy)
               VALUES (@shipmentId, @description, @packageCount, @weight, @length, @width, @height, @volume, @createdBy)`);
 
     await recalcManualShipmentTotals(pool, shipmentId);
@@ -2463,7 +2463,7 @@ router.patch('/manual-cargo/:cargoId', requirePermission('LOG_PLANNING'), async 
     const cargoId = req.params.cargoId;
     const pool = await getPool();
     const currentResult = await pool.request().input('cargoId', sql.Int, cargoId)
-      .query('SELECT ShipmentID, Description, PackageCount, Weight, Length, Width, Height FROM Logistics.dbo.ManualCargoItem WHERE CargoID = @cargoId');
+      .query('SELECT ShipmentID, Description, PackageCount, Weight, Length, Width, Height FROM log.ManualCargoItem WHERE CargoID = @cargoId');
     const current = currentResult.recordset[0];
     if (!current) return res.status(404).json({ success: false, error: 'Cargo line not found.' });
 
@@ -2490,7 +2490,7 @@ router.patch('/manual-cargo/:cargoId', requirePermission('LOG_PLANNING'), async 
       .input('width', sql.Decimal(18, 2), width)
       .input('height', sql.Decimal(18, 2), height)
       .input('volume', sql.Decimal(18, 3), volume)
-      .query(`UPDATE Logistics.dbo.ManualCargoItem
+      .query(`UPDATE log.ManualCargoItem
               SET Description = @description, PackageCount = @packageCount, Weight = @weight,
                   Length = @length, Width = @width, Height = @height, Volume = @volume
               WHERE CargoID = @cargoId`);
@@ -2507,12 +2507,12 @@ router.delete('/manual-cargo/:cargoId', requirePermission('LOG_PLANNING'), async
     const cargoId = req.params.cargoId;
     const pool = await getPool();
     const existingResult = await pool.request().input('cargoId', sql.Int, cargoId)
-      .query('SELECT ShipmentID FROM Logistics.dbo.ManualCargoItem WHERE CargoID = @cargoId');
+      .query('SELECT ShipmentID FROM log.ManualCargoItem WHERE CargoID = @cargoId');
     const existing = existingResult.recordset[0];
     if (!existing) return res.status(404).json({ success: false, error: 'Cargo line not found.' });
 
     await pool.request().input('cargoId', sql.Int, cargoId)
-      .query('UPDATE Logistics.dbo.ManualCargoItem SET Removed = 1 WHERE CargoID = @cargoId');
+      .query('UPDATE log.ManualCargoItem SET Removed = 1 WHERE CargoID = @cargoId');
 
     await recalcManualShipmentTotals(pool, existing.ShipmentID);
     res.json({ success: true });
@@ -2701,7 +2701,7 @@ router.post('/customs/create', requirePermission('LOG_PLANNING'), async (req, re
         .input('shipmentId', sql.BigInt, shipment.shipmentID)
         .input('customsId', sql.NVarChar, correlationId)
         .query(`
-          UPDATE Logistics.dbo.ShipmentMain
+          UPDATE log.ShipmentMain
           SET
             customsID = @customsId,
             customsComplete = 1
@@ -2772,9 +2772,9 @@ router.get('/:shipmentId/details', async (req, res) => {
           CAST(ISNULL(sm.customsComplete,  0) AS bit) AS customsComplete,
           CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
           fa.forwarderName
-        FROM Logistics.dbo.ShipmentMain sm
+        FROM log.ShipmentMain sm
         OUTER APPLY (
-          SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID
+          SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = sm.forwarderID
         ) fa
         WHERE sm.shipmentID = @shipmentId`);
 
@@ -2791,9 +2791,9 @@ router.get('/:shipmentId/details', async (req, res) => {
           CAST(ISNULL(dm.palletCount,    0) AS decimal(18,3)) AS palletCount,
           CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
           d.destinationName
-        FROM Logistics.dbo.ShipmentLink sl
-        INNER JOIN Logistics.dbo.DeliveryMain dm ON dm.deliveryID = sl.deliveryID
-        LEFT  JOIN Logistics.dbo.Destinations d  ON d.destinationID = dm.customerID
+        FROM log.ShipmentLink sl
+        INNER JOIN log.DeliveryMain dm ON dm.deliveryID = sl.deliveryID
+        LEFT  JOIN log.Destinations d  ON d.destinationID = dm.customerID
         WHERE sl.shipmentID = @shipmentId
         ORDER BY dm.deliveryID ASC`);
 
@@ -2810,7 +2810,7 @@ router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'),
 
     const check = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT customsComplete FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId');
+      .query('SELECT customsComplete FROM log.ShipmentMain WHERE shipmentID = @shipmentId');
 
     if (!check.recordset.length)
       return res.status(404).json({ success: false, error: 'Shipment not found.' });
@@ -2820,7 +2820,7 @@ router.patch('/:shipmentId/customs-required', requirePermission('LOG_PLANNING'),
     await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
       .input('required', sql.Bit, toBool(req.body.required) ? 1 : 0)
-      .query(`UPDATE Logistics.dbo.ShipmentMain SET customsRequired = @required
+      .query(`UPDATE log.ShipmentMain SET customsRequired = @required
               WHERE shipmentID = @shipmentId AND ISNULL(customsComplete, 0) = 0`);
     stampDbChange(req.session?.user?.username, 'ShipmentMain');
     res.json({ success: true });
@@ -2848,7 +2848,7 @@ router.patch('/customs-required/bulk', requirePermission('LOG_PLANNING'), async 
     const blockedRequest = pool.request();
     const blockedClause = createInClause(blockedRequest, shipmentIds, 'bsid');
     const blockedRes = await blockedRequest.query(`
-      SELECT shipmentID FROM Logistics.dbo.ShipmentMain
+      SELECT shipmentID FROM log.ShipmentMain
       WHERE shipmentID IN (${blockedClause}) AND ISNULL(customsComplete, 0) = 1`);
     const skipped = blockedRes.recordset.map(r => r.shipmentID);
 
@@ -2856,7 +2856,7 @@ router.patch('/customs-required/bulk', requirePermission('LOG_PLANNING'), async 
     const updateClause = createInClause(updateRequest, shipmentIds, 'usid');
     updateRequest.input('required', sql.Bit, required);
     const result = await updateRequest.query(`
-      UPDATE Logistics.dbo.ShipmentMain
+      UPDATE log.ShipmentMain
       SET customsRequired = @required
       WHERE shipmentID IN (${updateClause})
         AND ISNULL(customsComplete, 0) = 0;
@@ -2882,16 +2882,16 @@ router.delete('/:shipmentId/deliveries/:deliveryId', requirePermission('LOG_PLAN
     await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
       .input('deliveryId', sql.BigInt, deliveryId)
-      .query('DELETE FROM Logistics.dbo.ShipmentLink WHERE shipmentID = @shipmentId AND deliveryID = @deliveryId');
+      .query('DELETE FROM log.ShipmentLink WHERE shipmentID = @shipmentId AND deliveryID = @deliveryId');
 
     const remaining = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT COUNT(*) AS cnt FROM Logistics.dbo.ShipmentLink WHERE shipmentID = @shipmentId');
+      .query('SELECT COUNT(*) AS cnt FROM log.ShipmentLink WHERE shipmentID = @shipmentId');
 
     if (remaining.recordset[0].cnt === 0) {
       await pool.request()
         .input('shipmentId', sql.BigInt, shipmentId)
-        .query('UPDATE Logistics.dbo.ShipmentMain SET shipmentCancelled = 1 WHERE shipmentID = @shipmentId');
+        .query('UPDATE log.ShipmentMain SET shipmentCancelled = 1 WHERE shipmentID = @shipmentId');
       return res.json({ success: true, data: { cancelled: true } });
     }
 
@@ -2913,7 +2913,7 @@ router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async 
 
     const shipmentResult = await pool.request()
       .input('shipmentId', sql.BigInt, shipmentId)
-      .query('SELECT destinationID, incoTerms FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0');
+      .query('SELECT destinationID, incoTerms FROM log.ShipmentMain WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0');
 
     if (!shipmentResult.recordset.length)
       return res.status(404).json({ success: false, error: 'Shipment not found or cancelled.' });
@@ -2924,9 +2924,9 @@ router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async 
     const inClause = createInClause(req2, deliveryIDs, 'deliveryId');
     const available = await req2.query(`
       SELECT dm.deliveryID, dm.customerID, dm.incoterms, d.defaultIncoterms
-      FROM Logistics.dbo.DeliveryMain dm
-      LEFT JOIN Logistics.dbo.Destinations d ON d.destinationID = dm.customerID
-      LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+      FROM log.DeliveryMain dm
+      LEFT JOIN log.Destinations d ON d.destinationID = dm.customerID
+      LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
       WHERE dm.deliveryID IN (${inClause})
         AND dm.completionStatus = 1
         AND ISNULL(dm.deliveryCancelled, 0) = 0
@@ -2962,7 +2962,7 @@ router.post('/:shipmentId/deliveries', requirePermission('LOG_PLANNING'), async 
       await pool.request()
         .input('shipmentId', sql.BigInt, shipmentId)
         .input('deliveryId', sql.BigInt, deliveryId)
-        .query('INSERT INTO Logistics.dbo.ShipmentLink (shipmentID, deliveryID) VALUES (@shipmentId, @deliveryId)');
+        .query('INSERT INTO log.ShipmentLink (shipmentID, deliveryID) VALUES (@shipmentId, @deliveryId)');
     }
 
     await syncShipmentAggregateData(shipmentId);
@@ -3011,7 +3011,7 @@ router.patch('/:shipmentId/status-dates', requirePermission('LOG_PLANNING'), asy
     if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
 
     await request.query(
-      `UPDATE Logistics.dbo.ShipmentMain SET ${sets.join(', ')} WHERE shipmentID = @shipmentId`
+      `UPDATE log.ShipmentMain SET ${sets.join(', ')} WHERE shipmentID = @shipmentId`
     );
 
     const username = req.session?.user?.username || 'unknown';
@@ -3034,7 +3034,7 @@ router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async 
     await pool.request()
       .input('shipmentId',  sql.BigInt, shipmentId)
       .input('forwarderId', sql.BigInt, forwarderID)
-      .query(`UPDATE Logistics.dbo.ShipmentMain SET forwarderID = @forwarderId
+      .query(`UPDATE log.ShipmentMain SET forwarderID = @forwarderId
               WHERE shipmentID = @shipmentId AND ISNULL(shipmentCancelled, 0) = 0`);
 
     res.json({ success: true });
@@ -3047,8 +3047,8 @@ router.patch('/:shipmentId/forwarder', requirePermission('LOG_PLANNING'), async 
 //               dateField (plannedCollection|actualCollection|plannedDelivery|actualDelivery),
 //               dateFrom, dateTo
 //
-// Runs two separate queries (outbound against Logistics.dbo.ShipmentMain,
-// inbound against dbo.PurchaseOrderShipment) rather than one SQL UNION ALL —
+// Runs two separate queries (outbound against log.ShipmentMain,
+// inbound against log.PurchaseOrderShipment) rather than one SQL UNION ALL —
 // the two tables' ID spaces can numerically collide (see other direction-
 // tagged code in this app) and their column types/shapes differ enough
 // (incoTerms, booking/collection/delivery bit flags, delivery numbers) that
@@ -3096,7 +3096,7 @@ router.get('/search', async (req, res) => {
     if (forwarder?.trim()) {
       outReq.input('forwarder', sql.NVarChar, `%${forwarder.trim()}%`);
       outWhere.push(`EXISTS (
-        SELECT 1 FROM Logistics.dbo.Forwarders f
+        SELECT 1 FROM log.Forwarders f
         WHERE f.forwarderID = sm.forwarderID AND f.forwarderName LIKE @forwarder
       )`);
     }
@@ -3109,7 +3109,7 @@ router.get('/search', async (req, res) => {
       if (!isNaN(dn)) {
         outReq.input('deliveryNumber', sql.BigInt, dn);
         outWhere.push(`EXISTS (
-          SELECT 1 FROM Logistics.dbo.ShipmentLink sl
+          SELECT 1 FROM log.ShipmentLink sl
           WHERE sl.shipmentID = sm.shipmentID AND sl.deliveryID = @deliveryNumber
         )`);
       }
@@ -3138,8 +3138,8 @@ router.get('/search', async (req, res) => {
       inWhere.push(`(
         ISNULL(ps.OriginName, '') LIKE @customer
         OR EXISTS (
-          SELECT 1 FROM dbo.PurchaseOrderSuggestion p2
-          JOIN dbo.Vendor v ON v.VendorId = p2.VendorId
+          SELECT 1 FROM log.PurchaseOrderSuggestion p2
+          JOIN log.Vendor v ON v.VendorId = p2.VendorId
           WHERE p2.ShipmentId = ps.ShipmentId AND v.VendorName LIKE @customer
         )
       )`);
@@ -3147,7 +3147,7 @@ router.get('/search', async (req, res) => {
     if (forwarder?.trim()) {
       inReq.input('forwarder', sql.NVarChar, `%${forwarder.trim()}%`);
       inWhere.push(`(
-        EXISTS (SELECT 1 FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = ps.ForwarderID AND f.forwarderName LIKE @forwarder)
+        EXISTS (SELECT 1 FROM log.Forwarders f WHERE f.forwarderID = ps.ForwarderID AND f.forwarderName LIKE @forwarder)
         OR ps.Haulier LIKE @forwarder
       )`);
     }
@@ -3192,8 +3192,8 @@ router.get('/search', async (req, res) => {
           CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
           CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
           CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
-          (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
-        FROM Logistics.dbo.ShipmentMain sm
+          (SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = sm.forwarderID) AS forwarderName
+        FROM log.ShipmentMain sm
         WHERE ${outWhere.join(' AND ')}
         ORDER BY sm.shipmentID DESC`);
 
@@ -3225,15 +3225,15 @@ router.get('/search', async (req, res) => {
         SELECT
           ps.ShipmentId, ps.ShipmentReference, ps.DispatchDate, ps.ExpectedEta,
           ps.Haulier, ps.ForwarderID, ps.TrackingNumber, ps.ReceivedAtUtc, ps.IsManual, ps.OriginName,
-          (SELECT TOP 1 f.forwarderName FROM Logistics.dbo.Forwarders f WHERE f.forwarderID = ps.ForwarderID) AS forwarderNameLookup,
+          (SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = ps.ForwarderID) AS forwarderNameLookup,
           STUFF((
             SELECT DISTINCT ', ' + v.VendorName
-            FROM dbo.PurchaseOrderSuggestion p2
-            JOIN dbo.Vendor v ON v.VendorId = p2.VendorId
+            FROM log.PurchaseOrderSuggestion p2
+            JOIN log.Vendor v ON v.VendorId = p2.VendorId
             WHERE p2.ShipmentId = ps.ShipmentId
             FOR XML PATH('')
           ), 1, 2, '') AS Suppliers
-        FROM dbo.PurchaseOrderShipment ps
+        FROM log.PurchaseOrderShipment ps
         WHERE ${inWhere.join(' AND ')}
         ORDER BY ps.CreatedAtUtc DESC`);
 
@@ -3277,7 +3277,7 @@ router.get('/:shipmentId/events', async (req, res) => {
     const result = await pool.request()
       .input('shipmentId', sql.BigInt, req.params.shipmentId)
       .query(`SELECT EventID, shipmentID, eventCategory, eventDescription, timeStamp
-              FROM Logistics.dbo.ShipmentEvents
+              FROM log.ShipmentEvents
               WHERE shipmentID = @shipmentId
               ORDER BY timeStamp DESC`);
     res.json({ success: true, data: result.recordset });
@@ -3290,7 +3290,7 @@ router.get('/:shipmentId/events', async (req, res) => {
 router.get('/id/:shipmentId', async (req, res) => {
   try { 
     const pool = await getPool(); 
-    const result = await pool.request().input('shipmentId', sql.BigInt, req.params.shipmentId).query('SELECT * FROM Logistics.dbo.ShipmentMain WHERE shipmentID = @shipmentId'); 
+    const result = await pool.request().input('shipmentId', sql.BigInt, req.params.shipmentId).query('SELECT * FROM log.ShipmentMain WHERE shipmentID = @shipmentId'); 
     res.json(result.recordset); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3299,7 +3299,7 @@ router.get('/id/:shipmentId', async (req, res) => {
 router.get('/forwarder/:forwarderId', async (req, res) => {
   try { 
     const pool = await getPool(); 
-    const result = await pool.request().input('forwarderId', sql.BigInt, req.params.forwarderId).query('SELECT * FROM Logistics.dbo.ShipmentMain WHERE forwarderID = @forwarderId'); 
+    const result = await pool.request().input('forwarderId', sql.BigInt, req.params.forwarderId).query('SELECT * FROM log.ShipmentMain WHERE forwarderID = @forwarderId'); 
     res.json(result.recordset); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3308,7 +3308,7 @@ router.get('/forwarder/:forwarderId', async (req, res) => {
 router.get('/destination/:destinationId', async (req, res) => {
   try { 
     const pool = await getPool(); 
-    const result = await pool.request().input('destinationId', sql.BigInt, req.params.destinationId).query('SELECT * FROM Logistics.dbo.ShipmentMain WHERE destinationID = @destinationId'); 
+    const result = await pool.request().input('destinationId', sql.BigInt, req.params.destinationId).query('SELECT * FROM log.ShipmentMain WHERE destinationID = @destinationId'); 
     res.json(result.recordset); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3318,7 +3318,7 @@ router.get('/daterange', async (req, res) => {
   try { 
     const { dateFrom, dateTo } = req.query; 
     const pool = await getPool(); 
-    const result = await pool.request().input('dateFrom', sql.DateTime, new Date(dateFrom)).input('dateTo', sql.DateTime, new Date(dateTo)).query('SELECT * FROM Logistics.dbo.ShipmentMain WHERE plannedCollection BETWEEN @dateFrom AND @dateTo'); 
+    const result = await pool.request().input('dateFrom', sql.DateTime, new Date(dateFrom)).input('dateTo', sql.DateTime, new Date(dateTo)).query('SELECT * FROM log.ShipmentMain WHERE plannedCollection BETWEEN @dateFrom AND @dateTo'); 
     res.json(result.recordset); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3328,7 +3328,7 @@ router.post('/', async (req, res) => {
   try {
     const { originID, originName, originStreet, originCity, originPostCode, originCountry, destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, netWeight, grossWeight, palletCount, shipmentVolume, plannedCollection, actualCollection, collectionStatus, forwarderID, trackingNumber, incoTerms, customsRequired, customsComplete, shipmentCancelled } = req.body;
     const pool = await getPool();
-    const result = await pool.request().input('originID', sql.BigInt, originID).input('originName', sql.NVarChar, originName).input('originStreet', sql.NVarChar, originStreet).input('originCity', sql.NVarChar, originCity).input('originPostCode', sql.NVarChar, originPostCode).input('originCountry', sql.NVarChar, originCountry).input('destinationID', sql.BigInt, destinationID).input('destinationName', sql.NVarChar, destinationName).input('destinationStreet', sql.NVarChar, destinationStreet).input('destinationCity', sql.NVarChar, destinationCity).input('destinationPostCode', sql.NVarChar, destinationPostCode).input('destinationCountry', sql.NVarChar, destinationCountry).input('netWeight', sql.Decimal, netWeight).input('grossWeight', sql.Decimal, grossWeight).input('palletCount', sql.BigInt, palletCount).input('shipmentVolume', sql.Decimal, shipmentVolume).input('plannedCollection', sql.DateTime, plannedCollection ? new Date(plannedCollection) : null).input('actualCollection', sql.DateTime, actualCollection ? new Date(actualCollection) : null).input('collectionStatus', sql.Bit, collectionStatus).input('forwarderID', sql.BigInt, forwarderID).input('trackingNumber', sql.NVarChar, trackingNumber).input('incoTerms', sql.NVarChar, incoTerms).input('customsRequired', sql.Bit, customsRequired).input('customsComplete', sql.Bit, customsComplete).input('shipmentCancelled', sql.Bit, shipmentCancelled).query(`INSERT INTO Logistics.dbo.ShipmentMain (originID, originName, originStreet, originCity, originPostCode, originCountry, destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, netWeight, grossWeight, palletCount, shipmentVolume, plannedCollection, actualCollection, collectionStatus, forwarderID, trackingNumber, incoTerms, customsRequired, customsComplete, shipmentCancelled) VALUES (@originID, @originName, @originStreet, @originCity, @originPostCode, @originCountry, @destinationID, @destinationName, @destinationStreet, @destinationCity, @destinationPostCode, @destinationCountry, @netWeight, @grossWeight, @palletCount, @shipmentVolume, @plannedCollection, @actualCollection, @collectionStatus, @forwarderID, @trackingNumber, @incoTerms, @customsRequired, @customsComplete, @shipmentCancelled); SELECT SCOPE_IDENTITY() AS shipmentID;`);
+    const result = await pool.request().input('originID', sql.BigInt, originID).input('originName', sql.NVarChar, originName).input('originStreet', sql.NVarChar, originStreet).input('originCity', sql.NVarChar, originCity).input('originPostCode', sql.NVarChar, originPostCode).input('originCountry', sql.NVarChar, originCountry).input('destinationID', sql.BigInt, destinationID).input('destinationName', sql.NVarChar, destinationName).input('destinationStreet', sql.NVarChar, destinationStreet).input('destinationCity', sql.NVarChar, destinationCity).input('destinationPostCode', sql.NVarChar, destinationPostCode).input('destinationCountry', sql.NVarChar, destinationCountry).input('netWeight', sql.Decimal, netWeight).input('grossWeight', sql.Decimal, grossWeight).input('palletCount', sql.BigInt, palletCount).input('shipmentVolume', sql.Decimal, shipmentVolume).input('plannedCollection', sql.DateTime, plannedCollection ? new Date(plannedCollection) : null).input('actualCollection', sql.DateTime, actualCollection ? new Date(actualCollection) : null).input('collectionStatus', sql.Bit, collectionStatus).input('forwarderID', sql.BigInt, forwarderID).input('trackingNumber', sql.NVarChar, trackingNumber).input('incoTerms', sql.NVarChar, incoTerms).input('customsRequired', sql.Bit, customsRequired).input('customsComplete', sql.Bit, customsComplete).input('shipmentCancelled', sql.Bit, shipmentCancelled).query(`INSERT INTO log.ShipmentMain (originID, originName, originStreet, originCity, originPostCode, originCountry, destinationID, destinationName, destinationStreet, destinationCity, destinationPostCode, destinationCountry, netWeight, grossWeight, palletCount, shipmentVolume, plannedCollection, actualCollection, collectionStatus, forwarderID, trackingNumber, incoTerms, customsRequired, customsComplete, shipmentCancelled) VALUES (@originID, @originName, @originStreet, @originCity, @originPostCode, @originCountry, @destinationID, @destinationName, @destinationStreet, @destinationCity, @destinationPostCode, @destinationCountry, @netWeight, @grossWeight, @palletCount, @shipmentVolume, @plannedCollection, @actualCollection, @collectionStatus, @forwarderID, @trackingNumber, @incoTerms, @customsRequired, @customsComplete, @shipmentCancelled); SELECT SCOPE_IDENTITY() AS shipmentID;`);
     res.status(201).json({ message: 'Record created successfully', shipmentID: result.recordset[0].shipmentID });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

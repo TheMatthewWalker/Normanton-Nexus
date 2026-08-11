@@ -13,5 +13,8 @@ deploy-runner.log
 
 # Contains real bcrypt password hashes, AES-encrypted SAP credentials, and
 # staff PII for every PortalUsers account — deliberately not committed. See
-# seeds/README.md.
+# seeds/README.md. seeds/kongsberg/ is the pre-rename copy of the same file
+# (kept on disk pending the deferred old-folder cleanup — see
+# migrations/README.md) — still sensitive, so still ignored under both names.
+seeds/nexus/001_reference_data.cjs
 seeds/kongsberg/001_reference_data.cjs

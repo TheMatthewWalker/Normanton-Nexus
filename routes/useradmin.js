@@ -37,7 +37,7 @@
 import express from 'express';
 import sql     from 'mssql';
 import bcrypt  from 'bcrypt';
-import { sqlConfig } from '../config.js';
+import { getNexusPool } from '../config.js';
 
 const router = express.Router();
 
@@ -48,7 +48,7 @@ const VALID_DEPTS = ['production','logistics','warehouse','finance','sales','qua
 // ── Audit helper ──────────────────────────────────────────────────────────────
 async function audit(eventType, actorUsername, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip   = req.ip || req.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  actorUsername || null)
@@ -56,7 +56,7 @@ async function audit(eventType, actorUsername, detail, req) {
       .input('detail',    sql.NVarChar(500), detail || null)
       .input('ip',        sql.NVarChar(45),  ip)
       .query(`
-        INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+        INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
         VALUES (@username, @eventType, @detail, @ip)
       `);
   } catch (err) {
@@ -67,10 +67,10 @@ async function audit(eventType, actorUsername, detail, req) {
 // ── GET /pending ──────────────────────────────────────────────────────────────
 router.get('/pending', async (req, res) => {
   try {
-    const pool   = await sql.connect(sqlConfig);
+    const pool   = await getNexusPool();
     const result = await pool.request().query(`
       SELECT UserID, Username, FirstName, LastName, Email, CreatedAt
-      FROM kongsberg.dbo.PortalUsers
+      FROM dbo.PortalUsers
       WHERE IsActive = 0
       ORDER BY CreatedAt ASC
     `);
@@ -84,7 +84,7 @@ router.get('/pending', async (req, res) => {
 // ── GET /users ────────────────────────────────────────────────────────────────
 router.get('/users', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     const [usersResult, deptsResult, permsResult] = await Promise.all([
       pool.request().query(`
@@ -92,14 +92,14 @@ router.get('/users', async (req, res) => {
           UserID, Username, FirstName, LastName, Email, Role,
           IsActive, IsLocked, FailedLogins, ShortIdleTimeout,
           CreatedAt, LastLogin, Notes
-        FROM kongsberg.dbo.PortalUsers
+        FROM dbo.PortalUsers
         ORDER BY CreatedAt DESC
       `),
       pool.request().query(`
-        SELECT UserID, Department FROM kongsberg.dbo.PortalUserDepartments
+        SELECT UserID, Department FROM dbo.PortalUserDepartments
       `),
       pool.request().query(`
-        SELECT UserID, PermissionCode FROM kongsberg.dbo.PortalUserPermissions
+        SELECT UserID, PermissionCode FROM dbo.PortalUserPermissions
       `).catch(() => ({ recordset: [] })),
     ]);
 
@@ -175,12 +175,12 @@ router.put('/users/:id', async (req, res) => {
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     const current = await pool.request()
       .input('userID', sql.Int, userID)
       .query(`SELECT Username, FirstName, LastName, Email, Role, IsActive, IsLocked, ShortIdleTimeout
-              FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID`);
+              FROM dbo.PortalUsers WHERE UserID = @userID`);
 
     if (!current.recordset[0]) {
       return res.status(404).json({ success: false, error: 'User not found' });
@@ -208,7 +208,7 @@ router.put('/users/:id', async (req, res) => {
       const taken = await pool.request()
         .input('u',      sql.NVarChar(80), newUsername)
         .input('userID', sql.Int,          userID)
-        .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers
+        .query(`SELECT 1 FROM dbo.PortalUsers
                 WHERE Username = @u AND UserID != @userID`);
       if (taken.recordset.length) {
         return res.status(409).json({ success: false, error: 'That username is already taken.' });
@@ -220,7 +220,7 @@ router.put('/users/:id', async (req, res) => {
       const taken = await pool.request()
         .input('e',      sql.NVarChar(160), newEmail)
         .input('userID', sql.Int,           userID)
-        .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers
+        .query(`SELECT 1 FROM dbo.PortalUsers
                 WHERE Email = @e AND UserID != @userID`);
       if (taken.recordset.length) {
         return res.status(409).json({ success: false, error: 'That email address is already in use.' });
@@ -240,7 +240,7 @@ router.put('/users/:id', async (req, res) => {
       .input('email',     sql.NVarChar(160), newEmail  ?? prev.Email)
       .input('shortTimeout', sql.Bit,        shortIdleTimeout !== undefined ? (shortIdleTimeout ? 1 : 0) : prev.ShortIdleTimeout)
       .query(`
-        UPDATE kongsberg.dbo.PortalUsers
+        UPDATE dbo.PortalUsers
         SET Role       = @role,
             IsActive   = @isActive,
             IsLocked   = @isLocked,
@@ -261,21 +261,21 @@ router.put('/users/:id', async (req, res) => {
       await pool.request()
         .input('old', sql.NVarChar(80), oldUsername)
         .input('new', sql.NVarChar(80), newUsername)
-        .query(`UPDATE kongsberg.dbo.PortalAuditLog
+        .query(`UPDATE dbo.PortalAuditLog
                 SET Username = @new WHERE Username = @old`);
 
       // ApprovedBy field on other user records
       await pool.request()
         .input('old', sql.NVarChar(80), oldUsername)
         .input('new', sql.NVarChar(80), newUsername)
-        .query(`UPDATE kongsberg.dbo.PortalUsers
+        .query(`UPDATE dbo.PortalUsers
                 SET ApprovedBy = @new WHERE ApprovedBy = @old`);
 
       // GrantedBy in department assignments
       await pool.request()
         .input('old', sql.NVarChar(80), oldUsername)
         .input('new', sql.NVarChar(80), newUsername)
-        .query(`UPDATE kongsberg.dbo.PortalUserDepartments
+        .query(`UPDATE dbo.PortalUserDepartments
                 SET GrantedBy = @new WHERE GrantedBy = @old`);
     }
 
@@ -283,14 +283,14 @@ router.put('/users/:id', async (req, res) => {
     if (Array.isArray(departments)) {
       await pool.request()
         .input('userID', sql.Int, userID)
-        .query('DELETE FROM kongsberg.dbo.PortalUserDepartments WHERE UserID = @userID');
+        .query('DELETE FROM dbo.PortalUserDepartments WHERE UserID = @userID');
 
       for (const dept of departments) {
         await pool.request()
           .input('userID',    sql.Int,         userID)
           .input('dept',      sql.NVarChar(50), dept)
           .input('grantedBy', sql.NVarChar(80), req.session.user.username)
-          .query(`INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+          .query(`INSERT INTO dbo.PortalUserDepartments (UserID, Department, GrantedBy)
                   VALUES (@userID, @dept, @grantedBy)`);
       }
     }
@@ -358,7 +358,7 @@ router.post('/users/:id/approve', async (req, res) => {
   }
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     const result = await pool.request()
@@ -366,7 +366,7 @@ router.post('/users/:id/approve', async (req, res) => {
       .input('role',       sql.NVarChar(20), role)
       .input('approvedBy', sql.NVarChar(80), actor)
       .query(`
-        UPDATE kongsberg.dbo.PortalUsers
+        UPDATE dbo.PortalUsers
         SET IsActive   = 1,
             Role       = @role,
             ApprovedBy = @approvedBy,
@@ -386,7 +386,7 @@ router.post('/users/:id/approve', async (req, res) => {
         .input('dept',      sql.NVarChar(50), dept)
         .input('grantedBy', sql.NVarChar(80), actor)
         .query(`
-          INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+          INSERT INTO dbo.PortalUserDepartments (UserID, Department, GrantedBy)
           VALUES (@userID, @dept, @grantedBy)
         `);
     }
@@ -410,13 +410,13 @@ router.post('/users/:id/reject', async (req, res) => {
   }
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     const result = await pool.request()
       .input('userID', sql.Int, userID)
       .query(`
-        DELETE FROM kongsberg.dbo.PortalUsers
+        DELETE FROM dbo.PortalUsers
         OUTPUT DELETED.Username
         WHERE UserID = @userID AND IsActive = 0
       `);
@@ -476,7 +476,7 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
   const seenEmails    = new Set();
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     for (let i = 0; i < rows.length; i++) {
       const raw    = rows[i] || {};
@@ -510,7 +510,7 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
       const taken = await pool.request()
         .input('u', sql.NVarChar(80),  username)
         .input('e', sql.NVarChar(160), email)
-        .query(`SELECT Username, Email FROM kongsberg.dbo.PortalUsers WHERE Username = @u OR Email = @e`);
+        .query(`SELECT Username, Email FROM dbo.PortalUsers WHERE Username = @u OR Email = @e`);
       if (taken.recordset.length) {
         fail(taken.recordset[0].Username === username ? 'Username already exists.' : 'Email already registered.');
         continue;
@@ -519,7 +519,7 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
       if (permissionCode) {
         const permExists = await pool.request()
           .input('code', sql.NVarChar(50), permissionCode)
-          .query(`SELECT 1 FROM kongsberg.dbo.PortalPermissions WHERE PermissionCode = @code`);
+          .query(`SELECT 1 FROM dbo.PortalPermissions WHERE PermissionCode = @code`);
         if (!permExists.recordset.length) { fail(`Permission code "${permissionCode}" does not exist.`); continue; }
       }
 
@@ -546,7 +546,7 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
           .input('isLocked',    sql.Bit,           isLocked ? 1 : 0)
           .input('approvedBy',  sql.NVarChar(80),  approved ? actor : null)
           .query(`
-            INSERT INTO kongsberg.dbo.PortalUsers
+            INSERT INTO dbo.PortalUsers
               (Username, FirstName, LastName, Email, PasswordHash, Role,
                IsActive, IsLocked, MustChangePassword, ApprovedBy, ApprovedAt)
             OUTPUT INSERTED.UserID
@@ -562,7 +562,7 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
             .input('userID',    sql.Int,          newUserID)
             .input('dept',      sql.NVarChar(50), department)
             .input('grantedBy', sql.NVarChar(80), actor)
-            .query(`INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+            .query(`INSERT INTO dbo.PortalUserDepartments (UserID, Department, GrantedBy)
                     VALUES (@userID, @dept, @grantedBy)`);
         }
 
@@ -571,7 +571,7 @@ router.post('/users/bulk-create', requireSuperadmin, async (req, res) => {
             .input('userID',       sql.Int,          newUserID)
             .input('code',         sql.NVarChar(50), permissionCode)
             .input('grantedByID',  sql.Int,          actorID)
-            .query(`INSERT INTO kongsberg.dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
+            .query(`INSERT INTO dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
                     VALUES (@userID, @code, @grantedByID)`);
         }
 
@@ -630,14 +630,14 @@ router.post('/users/bulk-departments', async (req, res) => {
   }
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     // Fetch usernames for every selected user in one round trip
     const userReq = pool.request();
     ids.forEach((id, i) => userReq.input(`u${i}`, sql.Int, id));
     const userResult = await userReq.query(`
-      SELECT UserID, Username FROM kongsberg.dbo.PortalUsers
+      SELECT UserID, Username FROM dbo.PortalUsers
       WHERE UserID IN (${ids.map((_, i) => `@u${i}`).join(',')})
     `);
     const userMap = new Map(userResult.recordset.map(r => [r.UserID, r.Username]));
@@ -658,7 +658,7 @@ router.post('/users/bulk-departments', async (req, res) => {
             .input('dept',      sql.NVarChar(50), dept)
             .input('grantedBy', sql.NVarChar(80), actor)
             .query(`
-              INSERT INTO kongsberg.dbo.PortalUserDepartments (UserID, Department, GrantedBy)
+              INSERT INTO dbo.PortalUserDepartments (UserID, Department, GrantedBy)
               VALUES (@userID, @dept, @grantedBy)
             `);
           granted++;
@@ -725,13 +725,13 @@ router.post('/users/bulk-status', async (req, res) => {
   const actorLevel = ROLE_LEVEL[actorRole] ?? 0;
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     const userReq = pool.request();
     ids.forEach((id, i) => userReq.input(`u${i}`, sql.Int, id));
     const userResult = await userReq.query(`
-      SELECT UserID, Username, Role FROM kongsberg.dbo.PortalUsers
+      SELECT UserID, Username, Role FROM dbo.PortalUsers
       WHERE UserID IN (${ids.map((_, i) => `@u${i}`).join(',')})
     `);
     const userMap = new Map(userResult.recordset.map(r => [r.UserID, r]));
@@ -765,7 +765,7 @@ router.post('/users/bulk-status', async (req, res) => {
         request.input('shortIdleTimeout', sql.Bit, shortIdleTimeout ? 1 : 0);
       }
 
-      await request.query(`UPDATE kongsberg.dbo.PortalUsers SET ${sets.join(', ')} WHERE UserID = @userID`);
+      await request.query(`UPDATE dbo.PortalUsers SET ${sets.join(', ')} WHERE UserID = @userID`);
       results.push({ userID, username: user.Username, success: true });
     }
 
@@ -807,7 +807,7 @@ router.get('/audit', async (req, res) => {
   }
 
   try {
-    const pool    = await sql.connect(sqlConfig);
+    const pool    = await getNexusPool();
     const request = pool.request();
 
     let whereClause = '';
@@ -819,7 +819,7 @@ router.get('/audit', async (req, res) => {
     const result = await request.query(`
       SELECT TOP 500
         LogID, EventTime, Username, EventType, Detail, IPAddress
-      FROM kongsberg.dbo.PortalAuditLog
+      FROM dbo.PortalAuditLog
       ${whereClause}
       ORDER BY EventTime DESC
     `);
@@ -844,10 +844,10 @@ function requireSuperadmin(req, res, next) {
 // ── GET /permissions ──────────────────────────────────────────────────────────
 router.get('/permissions', async (req, res) => {
   try {
-    const pool   = await sql.connect(sqlConfig);
+    const pool   = await getNexusPool();
     const result = await pool.request().query(`
       SELECT PermissionCode, PermissionName, Description, Category, CreatedAt
-      FROM kongsberg.dbo.PortalPermissions
+      FROM dbo.PortalPermissions
       ORDER BY Category, PermissionCode
     `);
     res.json({ success: true, permissions: result.recordset });
@@ -871,11 +871,11 @@ router.post('/permissions', requireSuperadmin, async (req, res) => {
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     const exists = await pool.request()
       .input('code', sql.NVarChar(50), codeClean)
-      .query(`SELECT 1 FROM kongsberg.dbo.PortalPermissions WHERE PermissionCode = @code`);
+      .query(`SELECT 1 FROM dbo.PortalPermissions WHERE PermissionCode = @code`);
 
     if (exists.recordset.length) {
       return res.status(409).json({ success: false, error: 'Permission code already exists.' });
@@ -887,7 +887,7 @@ router.post('/permissions', requireSuperadmin, async (req, res) => {
       .input('description', sql.NVarChar(500), description?.trim() || null)
       .input('category',    sql.NVarChar(50),  category.trim())
       .query(`
-        INSERT INTO kongsberg.dbo.PortalPermissions (PermissionCode, PermissionName, Description, Category)
+        INSERT INTO dbo.PortalPermissions (PermissionCode, PermissionName, Description, Category)
         VALUES (@code, @name, @description, @category)
       `);
 
@@ -912,11 +912,11 @@ router.put('/permissions/:code', requireSuperadmin, async (req, res) => {
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     const current = await pool.request()
       .input('code', sql.NVarChar(50), code)
-      .query(`SELECT PermissionName, Description, Category FROM kongsberg.dbo.PortalPermissions WHERE PermissionCode = @code`);
+      .query(`SELECT PermissionName, Description, Category FROM dbo.PortalPermissions WHERE PermissionCode = @code`);
 
     if (!current.recordset[0]) {
       return res.status(404).json({ success: false, error: 'Permission not found.' });
@@ -929,7 +929,7 @@ router.put('/permissions/:code', requireSuperadmin, async (req, res) => {
       .input('description', sql.NVarChar(500), description?.trim()    ?? prev.Description)
       .input('category',    sql.NVarChar(50),  category?.trim()       ?? prev.Category)
       .query(`
-        UPDATE kongsberg.dbo.PortalPermissions
+        UPDATE dbo.PortalPermissions
         SET PermissionName = @name, Description = @description, Category = @category
         WHERE PermissionCode = @code
       `);
@@ -950,17 +950,17 @@ router.delete('/permissions/:code', requireSuperadmin, async (req, res) => {
   const code = req.params.code.toUpperCase();
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     // Remove from all users first (FK constraint)
     await pool.request()
       .input('code', sql.NVarChar(50), code)
-      .query(`DELETE FROM kongsberg.dbo.PortalUserPermissions WHERE PermissionCode = @code`);
+      .query(`DELETE FROM dbo.PortalUserPermissions WHERE PermissionCode = @code`);
 
     const result = await pool.request()
       .input('code', sql.NVarChar(50), code)
       .query(`
-        DELETE FROM kongsberg.dbo.PortalPermissions
+        DELETE FROM dbo.PortalPermissions
         OUTPUT DELETED.PermissionCode
         WHERE PermissionCode = @code
       `);
@@ -992,13 +992,13 @@ router.get('/users/:id/permissions', async (req, res) => {
   }
 
   try {
-    const pool   = await sql.connect(sqlConfig);
+    const pool   = await getNexusPool();
     const result = await pool.request()
       .input('userID', sql.Int, userID)
       .query(`
         SELECT up.PermissionCode, p.PermissionName, p.Category, up.GrantedAt
-        FROM kongsberg.dbo.PortalUserPermissions up
-        JOIN kongsberg.dbo.PortalPermissions p ON p.PermissionCode = up.PermissionCode
+        FROM dbo.PortalUserPermissions up
+        JOIN dbo.PortalPermissions p ON p.PermissionCode = up.PermissionCode
         WHERE up.UserID = @userID
         ORDER BY p.Category, up.PermissionCode
       `);
@@ -1026,13 +1026,13 @@ router.post('/users/:id/permissions', async (req, res) => {
   const code = permissionCode.trim().toUpperCase();
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     // Verify permission code exists
     const permExists = await pool.request()
       .input('code', sql.NVarChar(50), code)
-      .query(`SELECT 1 FROM kongsberg.dbo.PortalPermissions WHERE PermissionCode = @code`);
+      .query(`SELECT 1 FROM dbo.PortalPermissions WHERE PermissionCode = @code`);
 
     if (!permExists.recordset.length) {
       return res.status(404).json({ success: false, error: 'Permission code does not exist.' });
@@ -1041,7 +1041,7 @@ router.post('/users/:id/permissions', async (req, res) => {
     // Verify user exists
     const userExists = await pool.request()
       .input('userID', sql.Int, userID)
-      .query(`SELECT Username FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID`);
+      .query(`SELECT Username FROM dbo.PortalUsers WHERE UserID = @userID`);
 
     if (!userExists.recordset[0]) {
       return res.status(404).json({ success: false, error: 'User not found.' });
@@ -1053,7 +1053,7 @@ router.post('/users/:id/permissions', async (req, res) => {
         .input('code',          sql.NVarChar(50), code)
         .input('grantedByID',   sql.Int,          req.session.user.userID)
         .query(`
-          INSERT INTO kongsberg.dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
+          INSERT INTO dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
           VALUES (@userID, @code, @grantedByID)
         `);
     } catch (dupErr) {
@@ -1085,12 +1085,12 @@ router.delete('/users/:id/permissions/:code', async (req, res) => {
   const code = req.params.code.toUpperCase();
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     const userResult = await pool.request()
       .input('userID', sql.Int, userID)
-      .query(`SELECT Username FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID`);
+      .query(`SELECT Username FROM dbo.PortalUsers WHERE UserID = @userID`);
 
     if (!userResult.recordset[0]) {
       return res.status(404).json({ success: false, error: 'User not found.' });
@@ -1100,7 +1100,7 @@ router.delete('/users/:id/permissions/:code', async (req, res) => {
       .input('userID', sql.Int,         userID)
       .input('code',   sql.NVarChar(50), code)
       .query(`
-        DELETE FROM kongsberg.dbo.PortalUserPermissions
+        DELETE FROM dbo.PortalUserPermissions
         OUTPUT DELETED.PermissionCode
         WHERE UserID = @userID AND PermissionCode = @code
       `);
@@ -1151,14 +1151,14 @@ router.post('/users/bulk-permissions', async (req, res) => {
   }
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     // Verify every selected code actually exists
     const permReq = pool.request();
     codes.forEach((c, i) => permReq.input(`c${i}`, sql.NVarChar(50), c));
     const permResult = await permReq.query(`
-      SELECT PermissionCode FROM kongsberg.dbo.PortalPermissions
+      SELECT PermissionCode FROM dbo.PortalPermissions
       WHERE PermissionCode IN (${codes.map((_, i) => `@c${i}`).join(',')})
     `);
     const validCodes   = new Set(permResult.recordset.map(r => r.PermissionCode));
@@ -1171,7 +1171,7 @@ router.post('/users/bulk-permissions', async (req, res) => {
     const userReq = pool.request();
     ids.forEach((id, i) => userReq.input(`u${i}`, sql.Int, id));
     const userResult = await userReq.query(`
-      SELECT UserID, Username FROM kongsberg.dbo.PortalUsers
+      SELECT UserID, Username FROM dbo.PortalUsers
       WHERE UserID IN (${ids.map((_, i) => `@u${i}`).join(',')})
     `);
     const userMap = new Map(userResult.recordset.map(r => [r.UserID, r.Username]));
@@ -1192,7 +1192,7 @@ router.post('/users/bulk-permissions', async (req, res) => {
             .input('code',        sql.NVarChar(50), code)
             .input('grantedByID', sql.Int,          req.session.user.userID)
             .query(`
-              INSERT INTO kongsberg.dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
+              INSERT INTO dbo.PortalUserPermissions (UserID, PermissionCode, GrantedByUserID)
               VALUES (@userID, @code, @grantedByID)
             `);
           granted++;

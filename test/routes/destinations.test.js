@@ -1,4 +1,4 @@
-// routes/destinations.js manages Logistics.dbo.Destinations. Real logic
+// routes/destinations.js manages log.Destinations. Real logic
 // worth testing: GET /'s optional ?search= typeahead mode (TOP 200 + LIKE,
 // vs. the unfiltered full-list default), bulk delete/update's dynamically
 // built parameterized IN-clause, the field whitelist on PATCH /bulk, and
@@ -42,7 +42,7 @@ describe('GET /', () => {
     queueResults({ recordset: [] });
     await request(app).get('/');
     const sql = dbRequest.query.mock.calls[0][0];
-    expect(sql).toBe('SELECT * FROM Logistics.dbo.Destinations  ORDER BY destinationName');
+    expect(sql).toBe('SELECT * FROM log.Destinations  ORDER BY destinationName');
   });
 
   test('?search= switches to a TOP 200 name/city LIKE lookup', async () => {

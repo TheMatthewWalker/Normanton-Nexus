@@ -14,7 +14,7 @@
  * file for why it has to be detached.
  *
  * TIMEZONE HANDLING — important, and the reason ScheduledAt is treated
- * specially throughout this file: kongsberg.dbo.ScheduledDeployments.ScheduledAt
+ * specially throughout this file: dbo.ScheduledDeployments.ScheduledAt
  * is a plain SQL Server DATETIME column, which has NO timezone concept, and
  * the cron checker in server.js compares it directly against GETDATE(), which
  * returns the SQL Server machine's own local wall-clock time. So ScheduledAt
@@ -46,7 +46,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusPool } from '../config.js';
 
 const router = express.Router();
 
@@ -58,7 +58,7 @@ function requireSuperadmin(req, res, next) {
 // ── Audit helper (mirrors routes/useradmin.js) ──────────────────────────────
 async function audit(eventType, actorUsername, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip   = req.ip || req.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  actorUsername || null)
@@ -66,7 +66,7 @@ async function audit(eventType, actorUsername, detail, req) {
       .input('detail',    sql.NVarChar(500), detail || null)
       .input('ip',        sql.NVarChar(45),  ip)
       .query(`
-        INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+        INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
         VALUES (@username, @eventType, @detail, @ip)
       `);
   } catch (err) {
@@ -93,11 +93,11 @@ async function audit(eventType, actorUsername, detail, req) {
 // at the top of this file.
 router.get('/next', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const result = await pool.request().query(`
       SELECT TOP 1 DeploymentID, CONVERT(varchar(23), ScheduledAt, 126) AS ScheduledAt,
         WarningMinutes, Notes, Status, ErrorMessage
-      FROM kongsberg.dbo.ScheduledDeployments
+      FROM dbo.ScheduledDeployments
       WHERE Status IN ('pending', 'running')
       ORDER BY CASE Status WHEN 'running' THEN 0 ELSE 1 END, ScheduledAt ASC
     `);
@@ -111,14 +111,14 @@ router.get('/next', async (req, res) => {
 // ── GET / — list all (superadmin) ───────────────────────────────────────────
 router.get('/', requireSuperadmin, async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const result = await pool.request().query(`
       SELECT TOP 200
         DeploymentID, CONVERT(varchar(23), ScheduledAt, 126) AS ScheduledAt,
         GitRef, WarningMinutes, Status, Notes,
         CreatedByUsername, CreatedAt, StartedAt, CompletedAt,
         OutputLog, ErrorMessage, CancelledAt, CancelledBy
-      FROM kongsberg.dbo.ScheduledDeployments
+      FROM dbo.ScheduledDeployments
       ORDER BY ScheduledAt DESC
     `);
     res.json({ success: true, deployments: result.recordset });
@@ -171,7 +171,7 @@ router.post('/', requireSuperadmin, async (req, res) => {
   }
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     const result = await pool.request()
@@ -182,7 +182,7 @@ router.post('/', requireSuperadmin, async (req, res) => {
       .input('createdByID',   sql.Int,           req.session.user.userID)
       .input('createdByUser', sql.NVarChar(80),  actor)
       .query(`
-        INSERT INTO kongsberg.dbo.ScheduledDeployments
+        INSERT INTO dbo.ScheduledDeployments
           (ScheduledAt, GitRef, WarningMinutes, Notes, CreatedByUserID, CreatedByUsername)
         OUTPUT INSERTED.DeploymentID
         VALUES (CONVERT(datetime, @scheduledAt, 120), @gitRef, @warningMin, @notes, @createdByID, @createdByUser)
@@ -209,14 +209,14 @@ router.post('/:id/cancel', requireSuperadmin, async (req, res) => {
   }
 
   try {
-    const pool  = await sql.connect(sqlConfig);
+    const pool  = await getNexusPool();
     const actor = req.session.user.username;
 
     const result = await pool.request()
       .input('id',    sql.Int,          id)
       .input('actor', sql.NVarChar(80), actor)
       .query(`
-        UPDATE kongsberg.dbo.ScheduledDeployments
+        UPDATE dbo.ScheduledDeployments
         SET Status = 'cancelled', CancelledAt = GETDATE(), CancelledBy = @actor
         OUTPUT INSERTED.DeploymentID
         WHERE DeploymentID = @id AND Status = 'pending'

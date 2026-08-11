@@ -1,17 +1,17 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.Forwarders');
+            .query('SELECT * FROM log.Forwarders');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -24,7 +24,7 @@ router.get('/id/:forwarderId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('forwarderId', sql.BigInt, req.params.forwarderId)
-            .query('SELECT * FROM Logistics.dbo.Forwarders WHERE forwarderID = @forwarderId');
+            .query('SELECT * FROM log.Forwarders WHERE forwarderID = @forwarderId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -36,7 +36,7 @@ router.get('/approved', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT forwarderID, forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1 ORDER BY forwarderName');
+            .query('SELECT forwarderID, forwarderName FROM log.Forwarders WHERE forwarderApproval = 1 ORDER BY forwarderName');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -48,7 +48,7 @@ router.get('/modes', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT DISTINCT forwarderMode FROM Logistics.dbo.Forwarders WHERE forwarderApproval = 1 AND forwarderMode IS NOT NULL ORDER BY forwarderMode');
+            .query('SELECT DISTINCT forwarderMode FROM log.Forwarders WHERE forwarderApproval = 1 AND forwarderMode IS NOT NULL ORDER BY forwarderMode');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -72,7 +72,7 @@ router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
             .input('forwarderName', sql.NVarChar, forwarderName)
             .input('forwarderApproval', sql.Bit, forwarderApproval ?? 0)
             .input('forwarderMode', sql.NVarChar, forwarderMode || null)
-            .query(`INSERT INTO Logistics.dbo.Forwarders (forwarderID, forwarderName, forwarderApproval, forwarderMode)
+            .query(`INSERT INTO log.Forwarders (forwarderID, forwarderName, forwarderApproval, forwarderMode)
                     VALUES (@forwarderID, @forwarderName, @forwarderApproval, @forwarderMode)`);
 
         res.status(201).json({ success: true, message: 'Record created successfully' });
@@ -108,7 +108,7 @@ router.put('/:forwarderId', requirePermission('LOG_ADMIN'), async (req, res) => 
             .input('forwarderApproval', sql.Bit, forwarderApproval ?? 0)
             .input('forwarderMode', sql.NVarChar, forwarderMode || null)
             .input('originalMode', sql.NVarChar, originalMode || null)
-            .query(`UPDATE Logistics.dbo.Forwarders
+            .query(`UPDATE log.Forwarders
                     SET forwarderName = @forwarderName,
                         forwarderApproval = @forwarderApproval,
                         forwarderMode = @forwarderMode

@@ -1,6 +1,6 @@
 // routes/customsreportadmin.js manages the two small admin-maintained
-// fallback tables backing the Customs Report (dbo.CustomsVatNumberOverrides,
-// dbo.CustomsHsCodeDescriptions) and also exports lookupVatOverride()/
+// fallback tables backing the Customs Report (log.CustomsVatNumberOverrides,
+// log.CustomsHsCodeDescriptions) and also exports lookupVatOverride()/
 // lookupHsDescription() directly for routes/customsreport.js to call
 // in-process. Real logic worth testing: the duplicate-key error rewrites for
 // both tables, and the two lookup helpers' present/absent behavior.

@@ -113,7 +113,7 @@ describe('upsertConsignmentVendorConfig', () => {
       { recordset: [{ VendorId: 1, Active: 1 }] },    // getConsignmentVendor's re-read
     );
     const result = await db.upsertConsignmentVendorConfig(1, { defaultAllocationMethod: 'FEFO' }, 'j.smith');
-    expect(dbRequest.query.mock.calls[1][0]).toContain('INSERT INTO dbo.ConsignmentVendorConfig');
+    expect(dbRequest.query.mock.calls[1][0]).toContain('INSERT INTO log.ConsignmentVendorConfig');
     expect(result).toEqual({ VendorId: 1, Active: 1 });
   });
 
@@ -124,7 +124,7 @@ describe('upsertConsignmentVendorConfig', () => {
       { recordset: [{ VendorId: 1, Active: 0 }] },     // getConsignmentVendor's re-read
     );
     await db.upsertConsignmentVendorConfig(1, { active: false }, 'j.smith');
-    expect(dbRequest.query.mock.calls[1][0]).toContain('UPDATE dbo.ConsignmentVendorConfig');
+    expect(dbRequest.query.mock.calls[1][0]).toContain('UPDATE log.ConsignmentVendorConfig');
   });
 
   test('defaults active to true when not specified', async () => {
@@ -250,7 +250,7 @@ describe('setDeclarationLines', () => {
       { recordset: [] }, // TotalQty UPDATE
     );
     await db.setDeclarationLines(1, [{ deliveryId: 1, material: 'M1', qtyAllocated: 12 }]);
-    expect(dbRequest.query.mock.calls[1][0]).toContain('DELETE FROM dbo.ConsignmentDeclarationLine');
+    expect(dbRequest.query.mock.calls[1][0]).toContain('DELETE FROM log.ConsignmentDeclarationLine');
     expect(dbRequest.input).toHaveBeenCalledWith('totalQty', expect.anything(), 12);
     expect(transaction.commit).toHaveBeenCalled();
   });

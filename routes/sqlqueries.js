@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import { requireDepartment, requireLogin, requirePermission, requireRole } from '../middleware/auth.js';
-import { apiKey, auditQuery, sqlConfig } from '../config.js';
+import { apiKey, auditQuery, getNexusPool } from '../config.js';
 
 const router = express.Router();
 
@@ -31,7 +31,7 @@ router.post("/query", requireLogin, async (req, res) => {
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const result = await pool.request().query(query);
     auditQuery('RAW_SQL', username, query.slice(0, 500), req);
     // Always return JSON, even if recordset is empty (e.g., for INSERT/DELETE).
@@ -61,7 +61,7 @@ router.post("/query-csv", async (req, res) => {
   if (!query) return res.status(400).send("Missing query");
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const result = await pool.request().query(query);
 
     

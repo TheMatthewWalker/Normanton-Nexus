@@ -1,6 +1,6 @@
 import { Router }                from 'express';
 import sql                       from 'mssql';
-import { sqlConfig }             from '../config.js';
+import { getNexusPool } from '../config.js';
 import { requireRole }           from '../middleware/auth.js';
 import { notify }                from '../lib/notify.js';
 
@@ -14,7 +14,7 @@ const userId = req => req.session?.user?.userID;
 
 router.get('/', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const r = await pool.request()
       .input('uid', sql.Int, userId(req))
       .query(`
@@ -41,7 +41,7 @@ router.get('/', async (req, res) => {
 
 router.get('/history', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const r = await pool.request()
       .input('uid', sql.Int, userId(req))
       .query(`
@@ -65,7 +65,7 @@ router.get('/history', async (req, res) => {
 
 router.patch('/read-all', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     await pool.request()
       .input('uid', sql.Int, userId(req))
       .query(`UPDATE dbo.NotificationDeliveries
@@ -81,7 +81,7 @@ router.patch('/read-all', async (req, res) => {
 router.patch('/:deliveryId/dismiss', async (req, res) => {
   const id = Number(req.params.deliveryId);
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     await pool.request()
       .input('id',  sql.Int, id)
       .input('uid', sql.Int, userId(req))
@@ -109,7 +109,7 @@ router.post('/admin', requireRole('admin'), async (req, res) => {
     return res.status(400).json({ success: false, error: 'severity must be 1, 2 or 3.' });
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const notificationID = await notify(pool, {
       title, body,
       severity:   Number(severity),
@@ -138,7 +138,7 @@ router.post('/admin', requireRole('admin'), async (req, res) => {
 
 router.get('/admin', requireRole('admin'), async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const r = await pool.request().query(`
       SELECT
         n.NotificationID, n.Title, n.Severity, n.Category,
@@ -167,7 +167,7 @@ router.get('/admin', requireRole('admin'), async (req, res) => {
 router.delete('/admin/:id', requireRole('admin'), async (req, res) => {
   const id = Number(req.params.id);
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     await pool.request()
       .input('id', sql.Int, id)
       .query(`UPDATE dbo.Notifications SET ExpiresAt = GETDATE() WHERE NotificationID = @id`);
@@ -180,7 +180,7 @@ router.delete('/admin/:id', requireRole('admin'), async (req, res) => {
 
 router.get('/admin/targets', requireRole('admin'), async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const [depts, perms] = await Promise.all([
       pool.request().query(`SELECT DISTINCT Department FROM dbo.PortalUserDepartments ORDER BY Department`),
       pool.request().query(`SELECT PermissionCode, PermissionName, Category FROM dbo.PortalPermissions ORDER BY Category, PermissionName`),

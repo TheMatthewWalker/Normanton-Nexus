@@ -1,16 +1,16 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.PalletValidation');
+            .query('SELECT * FROM log.PalletValidation');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -27,8 +27,8 @@ router.get('/pallet/:palletId', async (req, res) => {
             .query(`SELECT pv.palletID, pv.packagingID,
                            pd.packMaterial, pd.packDescription,
                            pd.packWeight, pd.packLength, pd.packWidth, pd.packHeight
-                    FROM   Logistics.dbo.PalletValidation pv
-                    LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pv.packagingID
+                    FROM   log.PalletValidation pv
+                    LEFT JOIN log.PackagingData pd ON pd.packID = pv.packagingID
                     WHERE  pv.palletID = @palletId`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
@@ -42,7 +42,7 @@ router.get('/packaging/:packagingId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('packagingId', sql.NVarChar, req.params.packagingId)
-            .query('SELECT * FROM Logistics.dbo.PalletValidation WHERE packagingID = @packagingId');
+            .query('SELECT * FROM log.PalletValidation WHERE packagingID = @packagingId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -58,7 +58,7 @@ router.post('/', async (req, res) => {
         await pool.request()
             .input('palletID', sql.NVarChar, palletID)
             .input('packagingID', sql.NVarChar, packagingID)
-            .query(`INSERT INTO Logistics.dbo.PalletValidation (palletID, packagingID)
+            .query(`INSERT INTO log.PalletValidation (palletID, packagingID)
                     VALUES (@palletID, @packagingID)`);
 
         res.status(201).json({ message: 'Record created successfully' });

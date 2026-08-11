@@ -12,7 +12,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { resolveLegacyTablePool } from '../lib/legacyTableRouting.js';
 
 const router = express.Router();
 
@@ -65,10 +65,11 @@ router.post('/', async (req, res) => {
   // the server-side allowlist and fkCol is validated against a strict regex.
   // Only fkValue is bound as a parameter.
   try {
-    const pool   = await sql.connect(sqlConfig);
+    const { getPool, schema } = resolveLegacyTablePool(tableName);
+    const pool   = await getPool();
     const result = await pool.request()
       .input('fkValue', sqlType, fkValue)
-      .query(`SELECT TOP 500 * FROM dbo.${tableName} WHERE ${fkCol} = @fkValue`);
+      .query(`SELECT TOP 500 * FROM ${schema}.${tableName} WHERE ${fkCol} = @fkValue`);
 
     res.json({ success: true, recordset: result.recordset });
   } catch (err) {

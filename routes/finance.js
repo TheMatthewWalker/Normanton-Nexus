@@ -1,9 +1,9 @@
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
 const router  = express.Router();
-const getPool = async () => sql.connect(sqlConfig);
+const getPool = async () => getNexusOperationsPool();
 
 // ── GET /api/finance/gl-groups — list all groups with their GL accounts ───────
 router.get('/gl-groups', async (req, res) => {
@@ -12,12 +12,12 @@ router.get('/gl-groups', async (req, res) => {
     const [groups, accounts] = await Promise.all([
       pool.request().query(
         `SELECT GroupID, GroupLabel, SortOrder
-         FROM   dbo.FinanceGlGroups
+         FROM   acct.FinanceGlGroups
          ORDER  BY SortOrder, GroupLabel`
       ),
       pool.request().query(
         `SELECT ga.GroupID, ga.GlAccount
-         FROM   dbo.FinanceGlGroupAccounts ga
+         FROM   acct.FinanceGlGroupAccounts ga
          ORDER  BY ga.GroupID, ga.SortOrder, ga.GlAccount`
       ),
     ]);
@@ -49,7 +49,7 @@ router.post('/gl-groups', async (req, res) => {
     const pool = await getPool();
     const ins  = await pool.request()
       .input('label', sql.NVarChar(100), label.trim())
-      .query(`INSERT INTO dbo.FinanceGlGroups (GroupLabel)
+      .query(`INSERT INTO acct.FinanceGlGroups (GroupLabel)
               OUTPUT INSERTED.GroupID VALUES (@label)`);
 
     const groupID = ins.recordset[0].GroupID;
@@ -61,7 +61,7 @@ router.post('/gl-groups', async (req, res) => {
         .input('gid', sql.Int,          groupID)
         .input('acc', sql.NVarChar(20), acc)
         .input('seq', sql.Int,          i)
-        .query(`INSERT INTO dbo.FinanceGlGroupAccounts (GroupID, GlAccount, SortOrder)
+        .query(`INSERT INTO acct.FinanceGlGroupAccounts (GroupID, GlAccount, SortOrder)
                 VALUES (@gid, @acc, @seq)`);
     }
 
@@ -81,7 +81,7 @@ router.put('/gl-groups/:id', async (req, res) => {
     const updated = await pool.request()
       .input('id',    sql.Int,          id)
       .input('label', sql.NVarChar(100), label.trim())
-      .query(`UPDATE dbo.FinanceGlGroups SET GroupLabel=@label
+      .query(`UPDATE acct.FinanceGlGroups SET GroupLabel=@label
               WHERE GroupID=@id`);
 
     if (updated.rowsAffected[0] === 0)
@@ -89,7 +89,7 @@ router.put('/gl-groups/:id', async (req, res) => {
 
     await pool.request()
       .input('gid', sql.Int, id)
-      .query(`DELETE FROM dbo.FinanceGlGroupAccounts WHERE GroupID=@gid`);
+      .query(`DELETE FROM acct.FinanceGlGroupAccounts WHERE GroupID=@gid`);
 
     for (let i = 0; i < accounts.length; i++) {
       const acc = String(accounts[i] || '').trim();
@@ -98,7 +98,7 @@ router.put('/gl-groups/:id', async (req, res) => {
         .input('gid', sql.Int,          id)
         .input('acc', sql.NVarChar(20), acc)
         .input('seq', sql.Int,          i)
-        .query(`INSERT INTO dbo.FinanceGlGroupAccounts (GroupID, GlAccount, SortOrder)
+        .query(`INSERT INTO acct.FinanceGlGroupAccounts (GroupID, GlAccount, SortOrder)
                 VALUES (@gid, @acc, @seq)`);
     }
 
@@ -113,7 +113,7 @@ router.delete('/gl-groups/:id', async (req, res) => {
     const pool    = await getPool();
     const deleted = await pool.request()
       .input('id', sql.Int, id)
-      .query(`DELETE FROM dbo.FinanceGlGroups WHERE GroupID=@id`);
+      .query(`DELETE FROM acct.FinanceGlGroups WHERE GroupID=@id`);
 
     if (deleted.rowsAffected[0] === 0)
       return res.status(404).json({ success: false, error: 'Group not found.' });

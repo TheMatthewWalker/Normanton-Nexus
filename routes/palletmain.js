@@ -1,17 +1,17 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { reverseStagedPackage } from './sapStaging.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.PalletMain');
+            .query('SELECT * FROM log.PalletMain');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -24,7 +24,7 @@ router.get('/id/:palletId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('palletId', sql.Int, req.params.palletId)
-            .query('SELECT * FROM Logistics.dbo.PalletMain WHERE palletID = @palletId');
+            .query('SELECT * FROM log.PalletMain WHERE palletID = @palletId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -37,7 +37,7 @@ router.get('/category/:category', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('category', sql.NVarChar, req.params.category)
-            .query('SELECT * FROM Logistics.dbo.PalletMain WHERE palletCategory = @category');
+            .query('SELECT * FROM log.PalletMain WHERE palletCategory = @category');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -50,7 +50,7 @@ router.get('/location/:location', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('location', sql.NVarChar, req.params.location)
-            .query('SELECT * FROM Logistics.dbo.PalletMain WHERE palletLocation = @location');
+            .query('SELECT * FROM log.PalletMain WHERE palletLocation = @location');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -83,7 +83,7 @@ router.post('/', async (req, res) => {
             .input('palletLocation', sql.NVarChar, palletLocation)
             .input('palletCreationDate', sql.DateTime, palletCreationDate ? new Date(palletCreationDate) : null)
             .input('palletFinishDate', sql.DateTime, palletFinishDate ? new Date(palletFinishDate) : null)
-            .query(`INSERT INTO Logistics.dbo.PalletMain
+            .query(`INSERT INTO log.PalletMain
                 (palletType, palletFinish, packagingWeight, grossWeight,
                  palletVolume, palletLength, palletWidth, palletHeight,
                  palletRemoved, palletCategory, palletLocation, palletCreationDate, palletFinishDate)
@@ -121,7 +121,7 @@ router.patch('/:palletId', async (req, res) => {
                 .input('palletId', sql.Int, req.params.palletId)
                 .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
                                sapSourceStorageType, sapSourceBin
-                        FROM   Logistics.dbo.PalletPackages
+                        FROM   log.PalletPackages
                         WHERE  palletID = @palletId`);
 
             const failures = [];
@@ -198,7 +198,7 @@ router.patch('/:palletId', async (req, res) => {
         if (!sets.length) return res.status(400).json({ success: false, error: 'Nothing to update' });
 
         await request.query(
-            `UPDATE Logistics.dbo.PalletMain SET ${sets.join(', ')} WHERE palletID = @palletId`
+            `UPDATE log.PalletMain SET ${sets.join(', ')} WHERE palletID = @palletId`
         );
         res.json({ success: true });
     } catch (err) {
@@ -225,7 +225,7 @@ router.get('/landing-sparkline', async (req, res) => {
             )
             SELECT d.day, ISNULL(COUNT(pm.palletID), 0) AS cnt
             FROM days d
-            LEFT JOIN Logistics.dbo.PalletMain pm
+            LEFT JOIN log.PalletMain pm
                 ON DATEADD(day, DATEDIFF(day, 0, pm.palletFinishDate), 0) = d.day
                AND pm.palletFinish = 1
                AND pm.palletRemoved = 0
@@ -238,7 +238,7 @@ router.get('/landing-sparkline', async (req, res) => {
         // Previous 7 days for week-over-week
         const prevResult = await pool.request().query(`
             SELECT COUNT(*) AS cnt
-            FROM Logistics.dbo.PalletMain
+            FROM log.PalletMain
             WHERE palletFinish = 1
               AND palletRemoved = 0
               AND palletFinishDate >= DATEADD(day, -13, DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0))
@@ -252,7 +252,7 @@ router.get('/landing-sparkline', async (req, res) => {
         // Overdue picksheets — due date has passed and not yet completed
         const overdueResult = await pool.request().query(`
             SELECT COUNT(*) AS cnt
-            FROM Logistics.dbo.DeliveryMain
+            FROM log.DeliveryMain
             WHERE completionStatus = 0
               AND ISNULL(deliveryCancelled, 0) = 0
               AND dispatchDate < DATEADD(day, DATEDIFF(day, 0, GETDATE()), 0)`);

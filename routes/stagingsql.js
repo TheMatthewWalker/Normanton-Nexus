@@ -6,11 +6,9 @@
 // in this project — this SQL Server instance predates the DATE type.
 
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
-async function getPool() {
-  return await sql.connect(sqlConfig);
-}
+const getPool = getNexusOperationsPool;
 
 // Fulfilment outcome after a delivery, used by the frontend to decide
 // whether to auto-complete, ask, or just leave the request open — see
@@ -45,7 +43,7 @@ export async function searchMaterials(search) {
     .input('search', sql.VarChar(42), `%${search}%`)
     .query(`
       SELECT TOP 30 Material AS material, MaterialText AS materialText, Uom AS uom
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       WHERE Material LIKE @search OR MaterialText LIKE @search
       ORDER BY Material
     `);
@@ -57,7 +55,7 @@ export async function searchMaterials(search) {
 export async function listOpenStagingRequests() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
-    SELECT ${REQUEST_COLUMNS} FROM dbo.StagingRequest
+    SELECT ${REQUEST_COLUMNS} FROM log.StagingRequest
     WHERE Status = 'Open'
     ORDER BY DueAtUtc ASC
   `);
@@ -74,7 +72,7 @@ export async function getStagingOpenSummary() {
     SELECT
       COUNT(*) AS OpenCount,
       SUM(CASE WHEN DueAtUtc < GETUTCDATE() THEN 1 ELSE 0 END) AS OverdueCount
-    FROM dbo.StagingRequest
+    FROM log.StagingRequest
     WHERE Status = 'Open'
   `);
   const row = recordset[0] || {};
@@ -87,7 +85,7 @@ export async function getStagingOpenSummary() {
 export async function listStagingRequests() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
-    SELECT ${REQUEST_COLUMNS} FROM dbo.StagingRequest
+    SELECT ${REQUEST_COLUMNS} FROM log.StagingRequest
     ORDER BY
       CASE WHEN Status = 'Open' THEN 0 ELSE 1 END,
       CASE WHEN Status = 'Open' THEN DueAtUtc END ASC,
@@ -100,7 +98,7 @@ export async function getStagingRequestById(requestId) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('requestId', sql.Int, requestId)
-    .query(`SELECT ${REQUEST_COLUMNS} FROM dbo.StagingRequest WHERE RequestId = @requestId`);
+    .query(`SELECT ${REQUEST_COLUMNS} FROM log.StagingRequest WHERE RequestId = @requestId`);
   return recordset[0] || null;
 }
 
@@ -114,7 +112,7 @@ export async function listCompletedStagingRequests({ from, to } = {}) {
   if (from) { where.push('RequestedAtUtc >= @from'); request.input('from', sql.DateTime, from); }
   if (to)   { where.push('RequestedAtUtc <  @to');   request.input('to',   sql.DateTime, to); }
   const { recordset } = await request.query(`
-    SELECT ${REQUEST_COLUMNS} FROM dbo.StagingRequest
+    SELECT ${REQUEST_COLUMNS} FROM log.StagingRequest
     WHERE ${where.join(' AND ')}
     ORDER BY RequestedAtUtc DESC
   `);
@@ -139,7 +137,7 @@ export async function createStagingRequest({
     .input('notes',                    sql.NVarChar(500), notes || null)
     .input('requestedBy',               sql.NVarChar(100), requestedBy)
     .query(`
-      INSERT INTO dbo.StagingRequest
+      INSERT INTO log.StagingRequest
         (Material, MaterialText, Uom, QuantityRequested, Location, RequestedBatch, DueAtUtc, Notes, RequestedBy)
       OUTPUT INSERTED.RequestId
       VALUES (@material, @materialText, @uom, @quantityRequested, @location, @requestedBatch, @dueAtUtc, @notes, @requestedBy)
@@ -157,7 +155,7 @@ export async function cancelStagingRequest(requestId, cancelledBy) {
     .input('requestId',   sql.Int, requestId)
     .input('cancelledBy', sql.NVarChar(100), cancelledBy)
     .query(`
-      UPDATE dbo.StagingRequest
+      UPDATE log.StagingRequest
         SET Status = 'Cancelled', CancelledBy = @cancelledBy, CancelledAtUtc = GETUTCDATE(), UpdatedAtUtc = GETUTCDATE()
       OUTPUT INSERTED.RequestId
       WHERE RequestId = @requestId AND Status = 'Open' AND QuantityDelivered = 0
@@ -171,7 +169,7 @@ export async function completeStagingRequest(requestId, completedBy) {
     .input('requestId',   sql.Int, requestId)
     .input('completedBy', sql.NVarChar(100), completedBy)
     .query(`
-      UPDATE dbo.StagingRequest
+      UPDATE log.StagingRequest
         SET Status = 'Completed', CompletedBy = @completedBy, CompletedAtUtc = GETUTCDATE(), UpdatedAtUtc = GETUTCDATE()
       OUTPUT INSERTED.RequestId
       WHERE RequestId = @requestId AND Status = 'Open'
@@ -189,7 +187,7 @@ export async function listStagingRequestDeliveries(requestId) {
       SELECT DeliveryId, RequestId, QuantityMoved, Batch,
              SourceStorageType, SourceBin, DestinationStorageType, DestinationBin,
              TransferOrderNumber, DeliveredBy, DeliveredAtUtc
-      FROM dbo.StagingRequestDelivery
+      FROM log.StagingRequestDelivery
       WHERE RequestId = @requestId
       ORDER BY DeliveredAtUtc ASC
     `);
@@ -220,7 +218,7 @@ export async function recordStagingDelivery(requestId, {
     .input('transferOrderNumber',           sql.NVarChar(10),  transferOrderNumber || null)
     .input('deliveredBy',                    sql.NVarChar(100), deliveredBy)
     .query(`
-      INSERT INTO dbo.StagingRequestDelivery
+      INSERT INTO log.StagingRequestDelivery
         (RequestId, QuantityMoved, Batch, SourceStorageType, SourceBin, DestinationStorageType, DestinationBin, TransferOrderNumber, DeliveredBy)
       VALUES (@requestId, @quantityMoved, @batch, @sourceStorageType, @sourceBin, @destinationStorageType, @destinationBin, @transferOrderNumber, @deliveredBy)
     `);
@@ -229,7 +227,7 @@ export async function recordStagingDelivery(requestId, {
     .input('requestId',      sql.Int, requestId)
     .input('quantityMoved',  sql.Decimal(15, 3), quantityMoved)
     .query(`
-      UPDATE dbo.StagingRequest
+      UPDATE log.StagingRequest
         SET QuantityDelivered = QuantityDelivered + @quantityMoved, UpdatedAtUtc = GETUTCDATE()
       OUTPUT INSERTED.QuantityDelivered, INSERTED.QuantityRequested
       WHERE RequestId = @requestId
@@ -261,7 +259,7 @@ export async function computeStagingKpis({ from, to } = {}) {
       COUNT(*) AS CompletedCount,
       SUM(CASE WHEN CompletedAtUtc <= DueAtUtc THEN 1 ELSE 0 END) AS OnTimeCount,
       AVG(CAST(DATEDIFF(MINUTE, RequestedAtUtc, CompletedAtUtc) AS DECIMAL(15, 2))) / 60.0 AS AvgLeadTimeHours
-    FROM dbo.StagingRequest
+    FROM log.StagingRequest
     WHERE ${whereSql}
   `);
 
@@ -274,7 +272,7 @@ export async function computeStagingKpis({ from, to } = {}) {
       COUNT(*) AS CompletedCount,
       SUM(CASE WHEN CompletedAtUtc <= DueAtUtc THEN 1 ELSE 0 END) AS OnTimeCount,
       AVG(CAST(DATEDIFF(MINUTE, RequestedAtUtc, CompletedAtUtc) AS DECIMAL(15, 2))) / 60.0 AS AvgLeadTimeHours
-    FROM dbo.StagingRequest
+    FROM log.StagingRequest
     WHERE ${whereSql}
     GROUP BY Material
     ORDER BY Material
@@ -289,7 +287,7 @@ export async function listBinRestrictions() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT RestrictionId, Material, StorageType, Bin, Notes, CreatedBy, CreatedAtUtc
-    FROM dbo.StagingBinRestriction
+    FROM log.StagingBinRestriction
     ORDER BY Material, StorageType, Bin
   `);
   return recordset;
@@ -301,7 +299,7 @@ export async function getBinRestrictionsForMaterial(material) {
     .input('material', sql.NVarChar(18), material)
     .query(`
       SELECT RestrictionId, Material, StorageType, Bin, Notes
-      FROM dbo.StagingBinRestriction
+      FROM log.StagingBinRestriction
       WHERE Material = @material
       ORDER BY StorageType, Bin
     `);
@@ -317,7 +315,7 @@ export async function createBinRestriction({ material, storageType, bin, notes, 
     .input('notes',         sql.NVarChar(200), notes || null)
     .input('createdBy',      sql.NVarChar(100), createdBy || null)
     .query(`
-      INSERT INTO dbo.StagingBinRestriction (Material, StorageType, Bin, Notes, CreatedBy)
+      INSERT INTO log.StagingBinRestriction (Material, StorageType, Bin, Notes, CreatedBy)
       OUTPUT INSERTED.RestrictionId
       VALUES (@material, @storageType, @bin, @notes, @createdBy)
     `);
@@ -333,7 +331,7 @@ export async function updateBinRestriction(restrictionId, { material, storageTyp
     .input('bin',            sql.NVarChar(10),  bin || null)
     .input('notes',           sql.NVarChar(200), notes || null)
     .query(`
-      UPDATE dbo.StagingBinRestriction
+      UPDATE log.StagingBinRestriction
         SET Material = @material, StorageType = @storageType, Bin = @bin, Notes = @notes
       WHERE RestrictionId = @restrictionId
     `);
@@ -342,5 +340,5 @@ export async function updateBinRestriction(restrictionId, { material, storageTyp
 export async function deleteBinRestriction(restrictionId) {
   const pool = await getPool();
   await pool.request().input('restrictionId', sql.Int, restrictionId)
-    .query('DELETE FROM dbo.StagingBinRestriction WHERE RestrictionId = @restrictionId');
+    .query('DELETE FROM log.StagingBinRestriction WHERE RestrictionId = @restrictionId');
 }

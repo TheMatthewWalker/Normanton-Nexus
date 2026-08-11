@@ -10,7 +10,7 @@ import * as sap from './performancesap.js';
 import * as db  from './performancesql.js';
 import sql from 'mssql';
 import ExcelJS from 'exceljs';
-import { sqlConfig, auditQuery, sapConfig, sapServerSecret } from '../config.js';
+import { getNexusOperationsPool, getNexusPool, auditQuery, sapConfig, sapServerSecret } from '../config.js';
 import { requirePermission, requireAnyPermission, requireSessionOrApiToken } from '../middleware/auth.js';
 import { insertInboundCostLine } from './inboundcosts.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
@@ -45,15 +45,13 @@ function extractPoErrorMessage(body, fallback) {
   return base;
 }
 
-async function getPool() {
-  return await sql.connect(sqlConfig);
-}
+const getPool = getNexusOperationsPool;
 
 // ── Weekly expected-stock-level forecast ────────────────────────────────────
 // Projects stock forward week by week from a current total, driven by the 13
 // monthly PredictedUsage buckets already computed by the seasonal-index model
 // (performanceforecast.js), optionally overridden day-by-day by manual
-// dbo.DemandAdjustment rows (see makeDailyUsageFn below). This is Phase 1: no
+// log.DemandAdjustment rows (see makeDailyUsageFn below). This is Phase 1: no
 // confirmed-delivery data exists yet (that's a later phase), so the line only
 // ever goes down on its own; it does not yet show deliveries putting stock
 // back up (that's incomingDeliveries, added separately below).
@@ -127,7 +125,7 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
 
     // Open orders (accepted-but-not-received) expected to land this week —
     // added before that week's usage is deducted, since goods arrive then
-    // get consumed. See dbo.PurchaseOrderSuggestion / listOpenIncomingOrders.
+    // get consumed. See log.PurchaseOrderSuggestion / listOpenIncomingOrders.
     // Empty array by default, so every existing caller that doesn't pass
     // incomingDeliveries behaves exactly as before.
     const incomingThisWeek = incomingDeliveries
@@ -273,7 +271,7 @@ function groupIncomingByMaterial(incoming) {
   return map;
 }
 
-// Shapes raw dbo.DemandAdjustment rows into the {startDate, endDate,
+// Shapes raw log.DemandAdjustment rows into the {startDate, endDate,
 // usagePercent} form makeDailyUsageFn expects, normalizing StartDate/
 // EndDate to UTC-midnight Date objects (or null, preserved as-is — a NULL
 // bound means unbounded, see migrate_demand_adjustments.sql's header).
@@ -435,7 +433,7 @@ async function computeOrderSuggestions() {
 }
 
 // Groups the flat "needs ordering" list by vendor and tallies the running
-// total against that vendor's combined order-level MOQ (dbo.Vendor.
+// total against that vendor's combined order-level MOQ (log.Vendor.
 // OrderMoqQty) — without this a buyer has to manually add up several
 // materials' suggested quantities themselves to know whether a single order
 // would even clear the vendor's shipping/order minimum.
@@ -789,7 +787,7 @@ router.post('/refresh', async (req, res) => {
 });
 
 router.get('/refresh-log', async (req, res) => {
-  const pool = await getPool();
+  const pool = await getNexusPool();
   const { recordset } = await pool.request().query(`
     SELECT TOP 20 * FROM dbo.RefreshLog ORDER BY RunId DESC
   `);
@@ -799,7 +797,7 @@ router.get('/refresh-log', async (req, res) => {
 router.get('/refresh-status', async (req, res) => {
   try {
     const datasets = ['Stock', 'Agreements', 'Invoicing', 'Otif'];
-    const pool = await getPool();
+    const pool = await getNexusPool();
     const { recordset } = await pool.request().query(`
       SELECT TOP 80 DatasetName, Status, CompletedAtUtc, ErrorMessage, RunId
       FROM dbo.RefreshLog
@@ -851,7 +849,7 @@ router.get('/value-metrics', async (req, res) => {
   const { recordset } = await pool.request().query(`
     SELECT MetricDate, ValueStream,
            InvoicedValue, StockValue, PickedValue
-    FROM dbo.DailyPerformance
+    FROM log.DailyPerformance
     ORDER BY MetricDate
   `);
 
@@ -891,7 +889,7 @@ router.get('/otif-metrics', async (req, res) => {
   const { recordset } = await pool.request().query(`
     SELECT MetricDate, ValueStream,
            OtifOnTimeCount, OtifTotalCount
-    FROM dbo.DailyPerformance
+    FROM log.DailyPerformance
     ORDER BY MetricDate
   `);
 
@@ -1042,7 +1040,7 @@ function excelColumnLetter(n) {
 //   date" is a live SUMIFS/COUNTIFS formula against the Data sheet, scoped
 //   to ValueStream = PTFE, so it recalculates as planners edit Stock Qty /
 //   Won't Get / Expected to Invoice Qty there. "Invoiced to date" comes from
-//   real SAP billing documents (dbo.InvoiceSnapshot via dbo.DailyPerformance)
+//   real SAP billing documents (log.InvoiceSnapshot via log.DailyPerformance)
 //   — there's nothing on the Data sheet to compute it from, so it's written
 //   as a plain value, accurate as of the moment this file was generated.
 //   Data — the row-level export (as before), plus Won't Get and Reason.
@@ -1193,7 +1191,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
       // Prefill from whatever a previous planner already flagged and
       // uploaded for this exact order/material — see
-      // dbo.OrderBookLineNotes / listOrderBookLineNotes — so downloading
+      // log.OrderBookLineNotes / listOrderBookLineNotes — so downloading
       // fresh never starts from a blank sheet and duplicates work already
       // done.
       const notes = lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {};
@@ -1214,7 +1212,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
         lastDay: notes.lastDay || '',
         lastDayTime: notes.lastDayTime || '',
         // Prefills from whatever was last uploaded for this line (see
-        // dbo.OrderBookLineNotes.PlannedProductionQty) so a planner's
+        // log.OrderBookLineNotes.PlannedProductionQty) so a planner's
         // override survives a re-download instead of reverting to the
         // default every time; falls back to Order Qty when nothing's been
         // uploaded yet — this way the Value-by-Hour "Expected" bucket and
@@ -1354,7 +1352,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
     // the figure only reflects what's actually been confirmed, not just
     // whatever happens to be sat in stock. getOrderBookBreakdown() carries
     // StockQty/StockValue for every row regardless of month, so this needs
-    // no extra query. The flag round-trips via dbo.OrderBookLineNotes.
+    // no extra query. The flag round-trips via log.OrderBookLineNotes.
     // BringForward (see listOrderBookLineNotes/upsertOrderBookLineNotes in
     // performancesql.js and the upload-notes route further down) so it
     // survives a re-download instead of resetting every export.
@@ -1395,7 +1393,7 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 
         // Prefill the confirm flag from whatever a previous planner already
         // uploaded for this exact order/material — see
-        // dbo.OrderBookLineNotes.BringForward / listOrderBookLineNotes — so
+        // log.OrderBookLineNotes.BringForward / listOrderBookLineNotes — so
         // downloading fresh never resets a decision already made.
         const nmNotes = lineNotesMap.get(`${r.ReferenceDocument}||${r.Material}`) || {};
         const bringForwardFlag = nmNotes.bringForward === 'x' ? 'x' : '';
@@ -1808,11 +1806,11 @@ router.get('/orderbook-breakdown/export', async (req, res) => {
 // file (see /order-suggestions/shipments/:shipmentId/documents/upload).
 // Reads the Data sheet back out with ExcelJS and upserts whatever a planner
 // typed into Won't Get/Reason/Last Day/Last Day Time/Expected to Invoice
-// Qty into dbo.OrderBookLineNotes, so the next person to download
+// Qty into log.OrderBookLineNotes, so the next person to download
 // the sheet sees it prefilled instead of starting blank. The Next Month
 // tab's Stock Qty/Value and Bring Forward Value are still live formulas,
 // not manual input, but its Bring Forward column (the "x" confirm flag) IS
-// read back here too — same dbo.OrderBookLineNotes.BringForward field,
+// read back here too — same log.OrderBookLineNotes.BringForward field,
 // keyed the same way — so a planner's confirmation survives a re-download.
 //
 // Column positions are read from the header row rather than assumed fixed
@@ -2014,7 +2012,7 @@ router.delete('/consignment-customers/:customer', requirePermission('LOG_ADMIN')
 // is just a clean table meant to go straight to a printer, auto-firing
 // window.print() on load the same way the label preview does.
 //
-// Scope: PTFE lines flagged Last Day = "x" in dbo.OrderBookLineNotes,
+// Scope: PTFE lines flagged Last Day = "x" in log.OrderBookLineNotes,
 // excluding anything also flagged Won't Get, sorted by Last Day Time.
 // Quantity is whatever's been uploaded as Expected to Invoice Qty for that
 // line (falling back to Order Qty if nothing's been uploaded yet) — the
@@ -2146,7 +2144,7 @@ router.get('/orderbook-breakdown/production-plan/print', async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── MM Turns / Valuation Class ───────────────────────────────────────────
-// Reads come from dbo.TurnsValClassSnapshot / dbo.ValuationClassCatalog —
+// Reads come from log.TurnsValClassSnapshot / log.ValuationClassCatalog —
 // the cached daily 05:45 pull, same as every other Performance* read here.
 // The change-valuation-class action is the one exception: it's a live SAP
 // write, so it goes straight to SapServer and is never served from cache.
@@ -2175,7 +2173,7 @@ router.post('/turns-valclass/refresh', requirePermission('LOG_MRP'), async (req,
 router.get('/turns-valclass/refresh-status', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
   try {
     const datasets = ['TurnsValClass', 'ValuationClasses'];
-    const pool = await getPool();
+    const pool = await getNexusPool();
     const { recordset } = await pool.request().query(`
       SELECT TOP 40 DatasetName, Status, CompletedAtUtc, ErrorMessage, RunId
       FROM dbo.RefreshLog
@@ -2258,7 +2256,7 @@ router.get('/turns-valclass', requirePermission('LOG_MRP'), async (req, res) => 
         StockTurns AS stockTurns, DaysInStock AS daysInStock, DailyRequirementValue AS dailyRequirementValue,
         TurnoverCategory AS turnoverCategory, Warning AS warning,
         SnapshotAtUtc AS snapshotAtUtc
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       ${whereSql}
       ORDER BY Material
     `);
@@ -2289,7 +2287,7 @@ router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG
         SUM(CASE WHEN Warning IS NOT NULL AND Warning <> '' THEN 1 ELSE 0 END) AS warningCount,
         AVG(CASE WHEN StockTurns  IS NOT NULL THEN StockTurns  END)            AS avgStockTurns,
         AVG(CASE WHEN DaysInStock IS NOT NULL THEN DaysInStock END)            AS avgDaysInStock
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
     `);
 
     // Ordered chronologically by days-in-stock bucket (see TurnoverCategoryFor
@@ -2301,7 +2299,7 @@ router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG
     // in at the very end rather than being silently dropped.
     const byTurnoverCategory = await pool.request().query(`
       SELECT TurnoverCategory AS category, COUNT(*) AS materialCount, SUM(StockValue) AS stockValue
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       GROUP BY TurnoverCategory
       ORDER BY CASE TurnoverCategory
         WHEN '<10 days'                  THEN 1
@@ -2320,14 +2318,14 @@ router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG
 
     const byValuationClass = await pool.request().query(`
       SELECT ValuationClass AS valuationClass, COUNT(*) AS materialCount, SUM(StockValue) AS stockValue, SUM(BookValue) AS bookValue
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       GROUP BY ValuationClass
       ORDER BY stockValue DESC
     `);
 
     const byMaterialType = await pool.request().query(`
       SELECT MaterialType AS materialType, COUNT(*) AS materialCount, SUM(StockValue) AS stockValue
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       GROUP BY MaterialType
       ORDER BY stockValue DESC
     `);
@@ -2375,7 +2373,7 @@ router.get('/turns-valclass/value-by-price', requireAnyPermission(['LOG_ADMIN', 
         COUNT(*)          AS materialCount,
         SUM(StockQty)     AS totalStockQty,
         SUM(StockValue)   AS totalStockValue
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       GROUP BY
         CASE
           WHEN UnitPrice IS NULL THEN '(no price)'
@@ -2446,7 +2444,7 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         ForecastM06, ForecastM05, ForecastM04, ForecastM03, ForecastM02, ForecastM01, ForecastM00,
         PredictedM12, PredictedM11, PredictedM10, PredictedM09, PredictedM08, PredictedM07,
         PredictedM06, PredictedM05, PredictedM04, PredictedM03, PredictedM02, PredictedM01, PredictedM00
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       ${whereSql}
       ORDER BY Material
     `);
@@ -2521,7 +2519,7 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     });
     const stockForecast = mergeWeeklyForecasts(perMaterialForecasts);
 
-    // ── Recorded accuracy overlay (dbo.ForecastAccuracyLog) ─────────────────────
+    // ── Recorded accuracy overlay (log.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen
     // as of right before each month started, alongside what actually happened — see
     // the table comment in create_performance_turnsvalclass_database.sql for the full
@@ -2548,7 +2546,7 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
 
     const { recordset: accuracyRows } = await accuracyRequest.query(`
       SELECT TargetMonth, SUM(SapDemandQty) AS SapDemandQty, SUM(PredictedQty) AS PredictedQty, SUM(ActualQty) AS ActualQty
-      FROM dbo.ForecastAccuracyLog
+      FROM log.ForecastAccuracyLog
       ${accuracyWhereSql}
       GROUP BY TargetMonth
       ORDER BY TargetMonth
@@ -2590,7 +2588,7 @@ router.get('/turns-valclass/mrp-controllers', requirePermission('LOG_MRP'), asyn
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
       SELECT MrpController AS controller, COUNT(*) AS materialCount
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       WHERE MrpController IS NOT NULL AND MrpController <> ''
       GROUP BY MrpController
       ORDER BY MrpController
@@ -2774,7 +2772,7 @@ router.get('/turns-valclass/valuation-classes', requirePermission('LOG_MRP'), as
     const { recordset } = await request.query(`
       SELECT ValuationClass AS valuationClass, MaterialType AS materialType,
              AccountRef AS accountRef, Description AS description
-      FROM dbo.ValuationClassCatalog
+      FROM log.ValuationClassCatalog
       ${whereSql}
       ORDER BY ValuationClass
     `);
@@ -2920,7 +2918,7 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
 
 // Combines several materials from one vendor into a single accepted order —
 // the Build Order modal's submit path, for clearing a vendor's combined
-// order-level MOQ (dbo.Vendor.OrderMoqQty/OrderMaxQty) rather than accepting
+// order-level MOQ (log.Vendor.OrderMoqQty/OrderMaxQty) rather than accepting
 // materials one at a time and hoping they happen to add up. Every item gets
 // its own PurchaseOrderSuggestion row (lead time/dates/spot-PO can differ
 // per material even within one vendor) but shares the same OrderDate. Items

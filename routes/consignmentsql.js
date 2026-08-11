@@ -5,18 +5,16 @@
 // design writeup — especially the "UNDECLARED CONSUMPTION IS A BALANCE"
 // section, which this file's getVendorBalance() implements directly.
 //
-// Reuses dbo.Vendor/dbo.VendorMaterial (already seeded from MRP2.xlsx —
+// Reuses log.Vendor/log.VendorMaterial (already seeded from MRP2.xlsx —
 // Chemours, Fothergill/FCF, Raaj all already exist there) rather than a
 // separate vendor table — a vendor consignment-tracks the exact same
 // materials it's already an MRP source for. DATETIME (not DATE) throughout,
 // matching every other date column in this project.
 
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
-async function getPool() {
-  return await sql.connect(sqlConfig);
-}
+const getPool = getNexusOperationsPool;
 
 // ── Vendors + config ──────────────────────────────────────────────────────────
 
@@ -30,8 +28,8 @@ export async function listConsignmentVendors() {
       ISNULL(cvc.DefaultAllocationMethod, 'FIFO') AS DefaultAllocationMethod,
       ISNULL(cvc.Active, 1)                    AS Active,
       cvc.Notes, cvc.UpdatedAtUtc, cvc.UpdatedByUsername
-    FROM dbo.ConsignmentVendorConfig cvc
-    JOIN dbo.Vendor v ON v.VendorId = cvc.VendorId
+    FROM log.ConsignmentVendorConfig cvc
+    JOIN log.Vendor v ON v.VendorId = cvc.VendorId
     ORDER BY v.VendorName
   `);
   return recordset;
@@ -49,19 +47,19 @@ export async function getConsignmentVendor(vendorId) {
         ISNULL(cvc.DefaultAllocationMethod, 'FIFO') AS DefaultAllocationMethod,
         ISNULL(cvc.Active, 1)                    AS Active,
         cvc.Notes
-      FROM dbo.Vendor v
-      LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = v.VendorId
+      FROM log.Vendor v
+      LEFT JOIN log.ConsignmentVendorConfig cvc ON cvc.VendorId = v.VendorId
       WHERE v.VendorId = @vendorId
     `);
   return recordset[0] || null;
 }
 
-// Guarded upsert — dbo.ConsignmentVendorConfig.VendorId is the PK, so this is
+// Guarded upsert — log.ConsignmentVendorConfig.VendorId is the PK, so this is
 // a plain existence-check-then-INSERT-or-UPDATE (no MERGE — SQL2005).
 export async function upsertConsignmentVendorConfig(vendorId, body, username) {
   const pool = await getPool();
   const exists = await pool.request().input('vendorId', sql.Int, vendorId)
-    .query('SELECT 1 FROM dbo.ConsignmentVendorConfig WHERE VendorId = @vendorId');
+    .query('SELECT 1 FROM log.ConsignmentVendorConfig WHERE VendorId = @vendorId');
 
   const req = pool.request()
     .input('vendorId', sql.Int, vendorId)
@@ -80,7 +78,7 @@ export async function upsertConsignmentVendorConfig(vendorId, body, username) {
 
   if (exists.recordset.length) {
     await req.query(`
-      UPDATE dbo.ConsignmentVendorConfig SET
+      UPDATE log.ConsignmentVendorConfig SET
         TrackExpiry = @trackExpiry, ExpiryWarningDays = @expiryWarningDays,
         ExpiryDays = @expiryDays,
         DefaultAllocationMethod = @defaultAllocationMethod, Active = @active,
@@ -89,7 +87,7 @@ export async function upsertConsignmentVendorConfig(vendorId, body, username) {
     `);
   } else {
     await req.query(`
-      INSERT INTO dbo.ConsignmentVendorConfig
+      INSERT INTO log.ConsignmentVendorConfig
         (VendorId, TrackExpiry, ExpiryWarningDays, ExpiryDays, DefaultAllocationMethod, Active, Notes, UpdatedByUsername)
       VALUES
         (@vendorId, @trackExpiry, @expiryWarningDays, @expiryDays, @defaultAllocationMethod, @active, @notes, @username)
@@ -102,7 +100,7 @@ export async function listVendorMaterials(vendorId) {
   const pool = await getPool();
   const { recordset } = await pool.request().input('vendorId', sql.Int, vendorId).query(`
     SELECT VendorMaterialId, Material, ScheduleAgreement
-    FROM dbo.VendorMaterial WHERE VendorId = @vendorId ORDER BY Material
+    FROM log.VendorMaterial WHERE VendorId = @vendorId ORDER BY Material
   `);
   return recordset;
 }
@@ -135,8 +133,8 @@ export async function listConsignmentDeliveries(vendorId, material) {
   if (material) { req.input('material', sql.NVarChar(18), material); where += ' AND d.Material = @material'; }
   const { recordset } = await req.query(`
     SELECT ${DELIVERY_COLUMNS}
-    FROM dbo.ConsignmentDelivery d
-    LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
+    FROM log.ConsignmentDelivery d
+    LEFT JOIN log.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
     ${where}
     ORDER BY d.Material, COALESCE(d.ExpiryDate,
                                    CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
@@ -184,13 +182,13 @@ export async function upsertConsignmentDeliveriesFromSap(vendorId, rows) {
           .input('postingDate', sql.DateTime, r.postingDate || null);
 
         const result = await req.query(`
-          INSERT INTO dbo.ConsignmentDelivery
+          INSERT INTO log.ConsignmentDelivery
             (VendorId, Material, MaterialDocument, MaterialDocItem, Quantity, Uom,
              InvoiceNumber, DocumentDate, PostingDate, RemainingQty, Source)
           SELECT @vendorId, @material, @materialDocument, @materialDocItem, @quantity, @uom,
                  @invoiceNumber, @documentDate, @postingDate, @quantity, 'SAP'
           WHERE NOT EXISTS (
-            SELECT 1 FROM dbo.ConsignmentDelivery
+            SELECT 1 FROM log.ConsignmentDelivery
             WHERE MaterialDocument = @materialDocument AND MaterialDocItem = @materialDocItem
           )
         `);
@@ -223,7 +221,7 @@ export async function addManualConsignmentDelivery(vendorId, body, username) {
     .input('source', sql.NVarChar(10), body.source === 'CSV' ? 'CSV' : 'MANUAL')
     .input('username', sql.NVarChar(80), username || null)
     .query(`
-      INSERT INTO dbo.ConsignmentDelivery
+      INSERT INTO log.ConsignmentDelivery
         (VendorId, Material, MaterialDocument, MaterialDocItem, Quantity, Uom,
          Container, BillOfLading, InvoiceNumber, DocumentDate, PostingDate, ExpiryDate,
          RemainingQty, Source, CreatedByUsername)
@@ -245,7 +243,7 @@ export async function updateConsignmentDelivery(deliveryId, body) {
     .input('billOfLading', sql.NVarChar(30), body.billOfLading ?? null)
     .input('expiryDate', sql.DateTime, body.expiryDate ?? null)
     .query(`
-      UPDATE dbo.ConsignmentDelivery SET
+      UPDATE log.ConsignmentDelivery SET
         InvoiceNumber = @invoiceNumber, Container = @container,
         BillOfLading = @billOfLading, ExpiryDate = @expiryDate
       WHERE DeliveryId = @deliveryId
@@ -255,7 +253,7 @@ export async function updateConsignmentDelivery(deliveryId, body) {
 // ── Stock snapshot cache (SAP MKOL SLABS, plant-wide) ────────────────────────
 //
 // Overwrite-only cache (TRUNCATE + re-insert every run), same convention as
-// dbo.TurnsValClassSnapshot — refreshed daily by the 06:20 cron (see
+// log.TurnsValClassSnapshot — refreshed daily by the 06:20 cron (see
 // routes/consignment.js's runConsignmentSync/refreshConsignmentStockSnapshot)
 // plus an optional manual "Refresh Now". See
 // sql/migrate_consignment_stock_snapshot.sql for the full rationale: this
@@ -267,7 +265,7 @@ export async function replaceConsignmentStockSnapshot(stockByMaterial) {
   const entries = Object.entries(stockByMaterial || {});
   const syncedAt = new Date();
 
-  await pool.request().query('TRUNCATE TABLE dbo.ConsignmentStockSnapshot');
+  await pool.request().query('TRUNCATE TABLE log.ConsignmentStockSnapshot');
   if (!entries.length) return { materialCount: 0, syncedAtUtc: syncedAt };
 
   const batchSize = 600; // 3 params/row — comfortably under SQL Server's 2100-param limit
@@ -282,7 +280,7 @@ export async function replaceConsignmentStockSnapshot(stockByMaterial) {
       selectClauses.push(`SELECT @m${idx} AS Material, @q${idx} AS Qty, @t${idx} AS SnapshotAtUtc`);
     });
     await request.query(`
-      INSERT INTO dbo.ConsignmentStockSnapshot (Material, Qty, SnapshotAtUtc)
+      INSERT INTO log.ConsignmentStockSnapshot (Material, Qty, SnapshotAtUtc)
       ${selectClauses.join('\nUNION ALL\n')}
     `);
   }
@@ -291,7 +289,7 @@ export async function replaceConsignmentStockSnapshot(stockByMaterial) {
 
 export async function getConsignmentStockSnapshot() {
   const pool = await getPool();
-  const { recordset } = await pool.request().query('SELECT Material, Qty FROM dbo.ConsignmentStockSnapshot');
+  const { recordset } = await pool.request().query('SELECT Material, Qty FROM log.ConsignmentStockSnapshot');
   const byMaterial = {};
   for (const row of recordset) byMaterial[row.Material] = Number(row.Qty);
   return byMaterial;
@@ -301,7 +299,7 @@ export async function getConsignmentStockSnapshotMeta() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT COUNT(*) AS MaterialCount, MAX(SnapshotAtUtc) AS LastSnapshotAtUtc
-    FROM dbo.ConsignmentStockSnapshot
+    FROM log.ConsignmentStockSnapshot
   `);
   const row = recordset[0] || {};
   return { materialCount: row.MaterialCount || 0, lastSnapshotAtUtc: row.LastSnapshotAtUtc || null };
@@ -323,11 +321,11 @@ export async function getVendorDeliveredAndDeclaredTotals(vendorId) {
       SUM(d.Quantity) AS Delivered,
       ISNULL((
         SELECT SUM(dl.QtyAllocated)
-        FROM dbo.ConsignmentDeclarationLine dl
-        JOIN dbo.ConsignmentDeclaration dec ON dec.DeclarationId = dl.DeclarationId
+        FROM log.ConsignmentDeclarationLine dl
+        JOIN log.ConsignmentDeclaration dec ON dec.DeclarationId = dl.DeclarationId
         WHERE dec.Status = 'Confirmed' AND dl.Material = d.Material AND dec.VendorId = @vendorId
       ), 0) AS Declared
-    FROM dbo.ConsignmentDelivery d
+    FROM log.ConsignmentDelivery d
     WHERE d.VendorId = @vendorId
     GROUP BY d.Material
   `);
@@ -349,7 +347,7 @@ export async function createDeclaration(vendorId, allocationMethod, lines, usern
       .input('totalQty', sql.Decimal(15, 3), totalQty)
       .input('username', sql.NVarChar(80), username || null)
       .query(`
-        INSERT INTO dbo.ConsignmentDeclaration (VendorId, Status, AllocationMethod, TotalQty, CreatedByUsername)
+        INSERT INTO log.ConsignmentDeclaration (VendorId, Status, AllocationMethod, TotalQty, CreatedByUsername)
         OUTPUT INSERTED.DeclarationId
         VALUES (@vendorId, 'Draft', @allocationMethod, @totalQty, @username)
       `);
@@ -362,7 +360,7 @@ export async function createDeclaration(vendorId, allocationMethod, lines, usern
         .input('material', sql.NVarChar(18), line.material)
         .input('qtyAllocated', sql.Decimal(15, 3), line.qtyAllocated)
         .query(`
-          INSERT INTO dbo.ConsignmentDeclarationLine (DeclarationId, DeliveryId, Material, QtyAllocated)
+          INSERT INTO log.ConsignmentDeclarationLine (DeclarationId, DeliveryId, Material, QtyAllocated)
           VALUES (@declarationId, @deliveryId, @material, @qtyAllocated)
         `);
     }
@@ -383,12 +381,12 @@ export async function setDeclarationLines(declarationId, lines) {
   await tx.begin();
   try {
     const statusCheck = await tx.request().input('declarationId', sql.Int, declarationId)
-      .query('SELECT Status FROM dbo.ConsignmentDeclaration WHERE DeclarationId = @declarationId');
+      .query('SELECT Status FROM log.ConsignmentDeclaration WHERE DeclarationId = @declarationId');
     if (!statusCheck.recordset.length) throw new Error('Declaration not found.');
     if (statusCheck.recordset[0].Status !== 'Draft') throw new Error('Only a Draft declaration can have its lines edited.');
 
     await tx.request().input('declarationId', sql.Int, declarationId)
-      .query('DELETE FROM dbo.ConsignmentDeclarationLine WHERE DeclarationId = @declarationId');
+      .query('DELETE FROM log.ConsignmentDeclarationLine WHERE DeclarationId = @declarationId');
 
     const totalQty = lines.reduce((s, l) => s + Number(l.qtyAllocated), 0);
 
@@ -399,13 +397,13 @@ export async function setDeclarationLines(declarationId, lines) {
         .input('material', sql.NVarChar(18), line.material)
         .input('qtyAllocated', sql.Decimal(15, 3), line.qtyAllocated)
         .query(`
-          INSERT INTO dbo.ConsignmentDeclarationLine (DeclarationId, DeliveryId, Material, QtyAllocated)
+          INSERT INTO log.ConsignmentDeclarationLine (DeclarationId, DeliveryId, Material, QtyAllocated)
           VALUES (@declarationId, @deliveryId, @material, @qtyAllocated)
         `);
     }
 
     await tx.request().input('declarationId', sql.Int, declarationId).input('totalQty', sql.Decimal(15, 3), totalQty)
-      .query('UPDATE dbo.ConsignmentDeclaration SET TotalQty = @totalQty WHERE DeclarationId = @declarationId');
+      .query('UPDATE log.ConsignmentDeclaration SET TotalQty = @totalQty WHERE DeclarationId = @declarationId');
 
     await tx.commit();
   } catch (err) {
@@ -420,8 +418,8 @@ export async function getDeclaration(declarationId) {
     SELECT dec.DeclarationId, dec.VendorId, v.VendorName, dec.Status, dec.AllocationMethod, dec.TotalQty,
            dec.CreatedAtUtc, dec.CreatedByUsername, dec.ConfirmedAtUtc, dec.ConfirmedByUsername,
            dec.SettlementDocumentNumber, dec.SettlementReconciledQty, dec.Notes
-    FROM dbo.ConsignmentDeclaration dec
-    JOIN dbo.Vendor v ON v.VendorId = dec.VendorId
+    FROM log.ConsignmentDeclaration dec
+    JOIN log.Vendor v ON v.VendorId = dec.VendorId
     WHERE dec.DeclarationId = @declarationId
   `);
   if (!headerRes.recordset.length) return null;
@@ -439,9 +437,9 @@ export async function getDeclaration(declarationId) {
            ISNULL(d.ExpiryDate,
                   CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
                        THEN DATEADD(day, cvc.ExpiryDays, d.PostingDate) END) AS ExpiryDate
-    FROM dbo.ConsignmentDeclarationLine dl
-    JOIN dbo.ConsignmentDelivery d ON d.DeliveryId = dl.DeliveryId
-    LEFT JOIN dbo.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
+    FROM log.ConsignmentDeclarationLine dl
+    JOIN log.ConsignmentDelivery d ON d.DeliveryId = dl.DeliveryId
+    LEFT JOIN log.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
     WHERE dl.DeclarationId = @declarationId
     ORDER BY dl.Material, COALESCE(d.ExpiryDate,
                                     CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
@@ -461,8 +459,8 @@ export async function listDeclarations(vendorId) {
     SELECT dec.DeclarationId, dec.VendorId, v.VendorName, dec.Status, dec.AllocationMethod, dec.TotalQty,
            dec.CreatedAtUtc, dec.CreatedByUsername, dec.ConfirmedAtUtc, dec.ConfirmedByUsername,
            dec.SettlementDocumentNumber, dec.SettlementReconciledQty
-    FROM dbo.ConsignmentDeclaration dec
-    JOIN dbo.Vendor v ON v.VendorId = dec.VendorId
+    FROM log.ConsignmentDeclaration dec
+    JOIN log.Vendor v ON v.VendorId = dec.VendorId
     ${where}
     ORDER BY dec.CreatedAtUtc DESC
   `);
@@ -482,19 +480,19 @@ export async function confirmDeclaration(declarationId, settlementDocumentNumber
   await tx.begin();
   try {
     const statusCheck = await tx.request().input('declarationId', sql.Int, declarationId)
-      .query('SELECT Status FROM dbo.ConsignmentDeclaration WHERE DeclarationId = @declarationId');
+      .query('SELECT Status FROM log.ConsignmentDeclaration WHERE DeclarationId = @declarationId');
     if (!statusCheck.recordset.length) throw new Error('Declaration not found.');
     if (statusCheck.recordset[0].Status !== 'Draft') throw new Error(`Declaration is already ${statusCheck.recordset[0].Status}, not Draft.`);
 
     const lines = await tx.request().input('declarationId', sql.Int, declarationId)
-      .query('SELECT DeliveryId, QtyAllocated FROM dbo.ConsignmentDeclarationLine WHERE DeclarationId = @declarationId');
+      .query('SELECT DeliveryId, QtyAllocated FROM log.ConsignmentDeclarationLine WHERE DeclarationId = @declarationId');
 
     for (const line of lines.recordset) {
       const upd = await tx.request()
         .input('deliveryId', sql.Int, line.DeliveryId)
         .input('qty', sql.Decimal(15, 3), line.QtyAllocated)
         .query(`
-          UPDATE dbo.ConsignmentDelivery SET RemainingQty = RemainingQty - @qty
+          UPDATE log.ConsignmentDelivery SET RemainingQty = RemainingQty - @qty
           WHERE DeliveryId = @deliveryId AND RemainingQty >= @qty
         `);
       if (!upd.rowsAffected[0]) {
@@ -508,7 +506,7 @@ export async function confirmDeclaration(declarationId, settlementDocumentNumber
       .input('settlementReconciledQty', sql.Decimal(15, 3), settlementReconciledQty ?? null)
       .input('username', sql.NVarChar(80), username || null)
       .query(`
-        UPDATE dbo.ConsignmentDeclaration SET
+        UPDATE log.ConsignmentDeclaration SET
           Status = 'Confirmed', ConfirmedAtUtc = GETUTCDATE(), ConfirmedByUsername = @username,
           SettlementDocumentNumber = @settlementDocumentNumber, SettlementReconciledQty = @settlementReconciledQty
         WHERE DeclarationId = @declarationId
@@ -525,7 +523,7 @@ export async function confirmDeclaration(declarationId, settlementDocumentNumber
 export async function cancelDeclaration(declarationId) {
   const pool = await getPool();
   const result = await pool.request().input('declarationId', sql.Int, declarationId).query(`
-    UPDATE dbo.ConsignmentDeclaration SET Status = 'Cancelled'
+    UPDATE log.ConsignmentDeclaration SET Status = 'Cancelled'
     WHERE DeclarationId = @declarationId AND Status = 'Draft'
   `);
   if (!result.rowsAffected[0]) throw new Error('Only a Draft declaration can be cancelled (Confirmed declarations already adjusted delivery balances).');

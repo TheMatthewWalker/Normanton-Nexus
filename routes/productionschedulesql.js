@@ -5,9 +5,9 @@
  * open PTFE order lines due in the next 5 working days (2 working-day
  * offset), the Arrears view (everything overdue and still open), planner
  * comments/ETA on each line, and the OTIF (on-time-in-full) tracker that
- * watches dbo.AgreementSnapshot for lines disappearing to infer completion.
+ * watches log.AgreementSnapshot for lines disappearing to infer completion.
  *
- * Data source: dbo.AgreementSnapshot (refreshed every 30 min by the existing
+ * Data source: log.AgreementSnapshot (refreshed every 30 min by the existing
  * cron in server.js — see routes/performancesync.js). This file only reads
  * it; nothing here writes AgreementSnapshot.
  *
@@ -21,7 +21,7 @@
  * from the sales order number to the delivery number the instant SAP creates
  * a delivery against the line (see performanceorderlink.js's header comment).
  * Without this alias, a line picked between visits would silently vanish
- * from dbo.ProductionScheduleComments' key and dbo.OrderFulfillmentTracking's
+ * from prod.ProductionScheduleComments' key and log.OrderFulfillmentTracking's
  * openKeys set below — losing its planner comment/ETA, and (worse) the OTIF
  * tracker would misread the key-change as the order having shipped, logging
  * a false COMPLETED days or weeks before it actually ships. Aliasing at the
@@ -31,11 +31,9 @@
  */
 
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
-async function getPool() {
-  return await sql.connect(sqlConfig);
-}
+const getPool = getNexusOperationsPool;
 
 // UTC midnight — see performancesql.js's startOfDay() for why useUTC matters here.
 function startOfDay(d) {
@@ -94,7 +92,7 @@ export async function getProductionSchedule() {
         DockStockAllocated   AS StockQty,
         PickedStockAllocated AS PickedQty,
         StandardPrice, Amount, Currency
-      FROM dbo.AgreementSnapshot
+      FROM log.AgreementSnapshot
       WHERE RequestDate IS NOT NULL
         AND ValueStream = 'PTFE'
         AND CONVERT(VARCHAR(8), RequestDate, 112) >= CONVERT(VARCHAR(8), @start, 112)
@@ -130,7 +128,7 @@ export async function getProductionArrears() {
         DockStockAllocated   AS StockQty,
         PickedStockAllocated AS PickedQty,
         StandardPrice, Amount, Currency
-      FROM dbo.AgreementSnapshot
+      FROM log.AgreementSnapshot
       WHERE RequestDate IS NOT NULL
         AND ValueStream = 'PTFE'
         AND CONVERT(VARCHAR(8), RequestDate, 112) < CONVERT(VARCHAR(8), @today, 112)
@@ -141,7 +139,7 @@ export async function getProductionArrears() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Comments + ETA — dbo.ProductionScheduleComments, keyed (ReferenceDocument,
+// Comments + ETA — prod.ProductionScheduleComments, keyed (ReferenceDocument,
 // Item). Sales and Production Supervisors both write here (see
 // requireAnyPermission(['PROD_SUPERVISOR','SALES_SUPERVISOR']) in
 // routes/productionschedule.js). Small, hand-edited volume (a handful of
@@ -154,7 +152,7 @@ export async function listProductionScheduleComments() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT ReferenceDocument, Item, Comment, Eta, LastUpdatedUtc, UpdatedByUsername
-    FROM dbo.ProductionScheduleComments
+    FROM prod.ProductionScheduleComments
   `);
 
   const map = new Map();
@@ -178,18 +176,18 @@ export async function upsertProductionScheduleComment({ referenceDocument, item,
     .input('eta',     sql.DateTime,      eta ? new Date(eta) : null)
     .input('user',    sql.NVarChar(80),  username || null)
     .query(`
-      IF EXISTS (SELECT 1 FROM dbo.ProductionScheduleComments WHERE ReferenceDocument = @ref AND Item = @item)
-        UPDATE dbo.ProductionScheduleComments
+      IF EXISTS (SELECT 1 FROM prod.ProductionScheduleComments WHERE ReferenceDocument = @ref AND Item = @item)
+        UPDATE prod.ProductionScheduleComments
         SET Comment = @comment, Eta = @eta, LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @user
         WHERE ReferenceDocument = @ref AND Item = @item
       ELSE
-        INSERT INTO dbo.ProductionScheduleComments (ReferenceDocument, Item, Comment, Eta, LastUpdatedUtc, UpdatedByUsername)
+        INSERT INTO prod.ProductionScheduleComments (ReferenceDocument, Item, Comment, Eta, LastUpdatedUtc, UpdatedByUsername)
         VALUES (@ref, @item, @comment, @eta, GETUTCDATE(), @user)
     `);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// OTIF tracking — dbo.OrderFulfillmentTracking. See
+// OTIF tracking — log.OrderFulfillmentTracking. See
 // sql/migrate_production_schedule.sql's header comment for the full design
 // rationale. Called once daily from server.js's cron (a dedicated slot,
 // separate from the 30-min AgreementSnapshot refresh — see that cron
@@ -206,14 +204,14 @@ export async function diffProductionScheduleOtif() {
       OriginalDoc AS ReferenceDocument, OriginalDocItem AS Item, Customer, CustomerName, Material, MaterialText,
       ValueStream, OrderQty, Uom,
       CAST(CONVERT(VARCHAR(8), RequestDate, 112) AS DATETIME) AS RequestDate
-    FROM dbo.AgreementSnapshot
+    FROM log.AgreementSnapshot
     WHERE RequestDate IS NOT NULL AND ValueStream = 'PTFE'
   `);
   const openKeys = new Set(openRows.map(r => `${r.ReferenceDocument}||${r.Item}`));
 
   const { recordset: trackedOpen } = await pool.request().query(`
     SELECT TrackingID, ReferenceDocument, Item, DueDate
-    FROM dbo.OrderFulfillmentTracking
+    FROM log.OrderFulfillmentTracking
     WHERE Status = 'OPEN'
   `);
   const trackedMap = new Map(trackedOpen.map(r => [`${r.ReferenceDocument}||${r.Item}`, r]));
@@ -236,7 +234,7 @@ export async function diffProductionScheduleOtif() {
       .input('uom',          sql.VarChar(3),    r.Uom)
       .input('due',          sql.DateTime,      r.RequestDate)
       .query(`
-        INSERT INTO dbo.OrderFulfillmentTracking
+        INSERT INTO log.OrderFulfillmentTracking
           (ReferenceDocument, Item, Customer, CustomerName, Material, MaterialText, ValueStream, OrderQty, Uom, DueDate, FirstSeenUtc, LastSeenUtc, Status)
         VALUES
           (@ref, @item, @customer, @customerName, @material, @materialText, @valueStream, @orderQty, @uom, @due, GETUTCDATE(), GETUTCDATE(), 'OPEN')
@@ -252,7 +250,7 @@ export async function diffProductionScheduleOtif() {
     await pool.request()
       .input('id',  sql.Int,      tracked.TrackingID)
       .input('due', sql.DateTime, r.RequestDate)
-      .query(`UPDATE dbo.OrderFulfillmentTracking SET LastSeenUtc = GETUTCDATE(), DueDate = @due WHERE TrackingID = @id`);
+      .query(`UPDATE log.OrderFulfillmentTracking SET LastSeenUtc = GETUTCDATE(), DueDate = @due WHERE TrackingID = @id`);
     refreshed++;
   }
 
@@ -266,7 +264,7 @@ export async function diffProductionScheduleOtif() {
       const c = await pool.request()
         .input('ref',  sql.NVarChar(10), r.ReferenceDocument)
         .input('item', sql.NVarChar(6),  r.Item)
-        .query(`SELECT Comment FROM dbo.ProductionScheduleComments WHERE ReferenceDocument = @ref AND Item = @item`);
+        .query(`SELECT Comment FROM prod.ProductionScheduleComments WHERE ReferenceDocument = @ref AND Item = @item`);
       reason = c.recordset[0]?.Comment || null;
     }
     await pool.request()
@@ -275,7 +273,7 @@ export async function diffProductionScheduleOtif() {
       .input('onTime',    sql.Bit,           onTime)
       .input('reason',    sql.NVarChar(500), reason)
       .query(`
-        UPDATE dbo.OrderFulfillmentTracking
+        UPDATE log.OrderFulfillmentTracking
         SET Status = 'COMPLETED', CompletedDate = @completed, OnTime = @onTime, Reason = @reason
         WHERE TrackingID = @id
       `);
@@ -294,7 +292,7 @@ export async function getOtifKpiHistory() {
       DATEPART(MONTH, CompletedDate) AS [Month],
       SUM(CASE WHEN OnTime = 1 THEN 1 ELSE 0 END) AS OnTimeCount,
       COUNT(*) AS TotalCount
-    FROM dbo.OrderFulfillmentTracking
+    FROM log.OrderFulfillmentTracking
     WHERE Status = 'COMPLETED' AND CompletedDate IS NOT NULL
     GROUP BY DATEPART(YEAR, CompletedDate), DATEPART(MONTH, CompletedDate)
     ORDER BY [Year], [Month]
@@ -309,7 +307,7 @@ export async function getOtifLateList() {
     SELECT TOP 200
       ReferenceDocument, Item, Customer, CustomerName, Material, MaterialText,
       OrderQty, Uom, DueDate, CompletedDate, Reason
-    FROM dbo.OrderFulfillmentTracking
+    FROM log.OrderFulfillmentTracking
     WHERE Status = 'COMPLETED' AND OnTime = 0
     ORDER BY CompletedDate DESC
   `);
