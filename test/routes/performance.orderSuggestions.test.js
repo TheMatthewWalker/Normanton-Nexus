@@ -32,6 +32,9 @@ const db = {
   listVendorMaterialsForSuggestions: jest.fn(),
   listOpenIncomingOrders: jest.fn(),
   listDemandAdjustments: jest.fn(),
+  getVendorMaterialConstraints: jest.fn(),
+  getVendorOrderConstraints: jest.fn(),
+  acceptOrderSuggestion: jest.fn(),
 };
 jest.unstable_mockModule('../../routes/performancesql.js', () => db);
 
@@ -151,4 +154,96 @@ test('a DB failure is reported as a 500', async () => {
   db.listVendorMaterialsForSuggestions.mockRejectedValueOnce(new Error('connection lost'));
   const res = await request(appMrp).get('/order-suggestions');
   expect(res.status).toBe(500);
+});
+
+// POST /order-suggestions/preview — the "Start New Order" builder's live what-if chart. Injects
+// a synthetic (unsaved) delivery into buildWeeklyStockForecast alongside real open orders, so
+// the modal can show the effect of a draft order before accept-batch is ever called.
+describe('POST /order-suggestions/preview', () => {
+  test('403s without LOG_MRP', async () => {
+    const res = await request(app).post('/order-suggestions/preview').send({
+      deliveryDate: '2026-02-01', items: [{ material: 'M1', orderQty: 100 }],
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('400s without a non-empty items array', async () => {
+    const res = await request(appMrp).post('/order-suggestions/preview').send({ deliveryDate: '2026-02-01', items: [] });
+    expect(res.status).toBe(400);
+  });
+
+  test('400s without a valid deliveryDate', async () => {
+    const res = await request(appMrp).post('/order-suggestions/preview').send({ items: [{ material: 'M1', orderQty: 100 }] });
+    expect(res.status).toBe(400);
+  });
+
+  test('injects the draft delivery into the forecast, landing in the week its date falls in', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([materialRow()]);
+    db.listOpenIncomingOrders.mockResolvedValueOnce([]);
+    db.listDemandAdjustments.mockResolvedValueOnce([]);
+
+    const res = await request(appMrp).post('/order-suggestions/preview').send({
+      deliveryDate: '2026-01-16', // lands in the first week (system time pinned to 2026-01-15)
+      items: [{ material: 'M1', orderQty: 400 }],
+    });
+
+    expect(res.status).toBe(200);
+    const forecast = res.body.data[0].stockForecast;
+    expect(forecast.weeks).toHaveLength(26); // same 26-week horizon as /turns-valclass/history
+    expect(forecast.weeks[0].deliveries).toEqual([{ id: null, poNumber: 'Draft', qty: 400 }]);
+  });
+
+  test('reports an error for an item whose material has no MRP master data row, without failing the rest', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([materialRow()]);
+    db.listOpenIncomingOrders.mockResolvedValueOnce([]);
+    db.listDemandAdjustments.mockResolvedValueOnce([]);
+
+    const res = await request(appMrp).post('/order-suggestions/preview').send({
+      deliveryDate: '2026-01-16',
+      items: [{ material: 'M1', orderQty: 400 }, { material: 'UNKNOWN', orderQty: 100 }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].stockForecast).toBeDefined();
+    expect(res.body.data[1]).toEqual({ material: 'UNKNOWN', error: 'Material not found in MRP master data.' });
+  });
+});
+
+// POST /order-suggestions/accept-batch — added deliveryDate passthrough so the "Start New
+// Order" builder's shared delivery-date field is actually honored on confirm, not just used for
+// the live preview above.
+describe('POST /order-suggestions/accept-batch — deliveryDate override', () => {
+  test('passes each item\'s deliveryDate through buildAcceptPayload to the persisted suggestion', async () => {
+    db.getVendorMaterialConstraints.mockResolvedValue({ MaterialMoqQty: 0, MaterialMaxQty: 0 });
+    db.getVendorOrderConstraints.mockResolvedValue({ OrderMoqQty: null, OrderMaxQty: null });
+    db.acceptOrderSuggestion.mockResolvedValue(1);
+
+    const res = await request(appMrp).post('/order-suggestions/accept-batch').send({
+      vendorId: 1,
+      orderDate: '2026-01-15',
+      items: [{ vendorMaterialId: 1, material: 'M1', orderQty: 500, deliveryDate: '2026-02-10' }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(db.acceptOrderSuggestion).toHaveBeenCalledWith(
+      expect.objectContaining({ material: 'M1', orderQty: 500, deliveryDate: new Date('2026-02-10') })
+    );
+  });
+
+  test('falls back to the lead-time-derived delivery date when no override is given', async () => {
+    db.getVendorMaterialConstraints.mockResolvedValue({ MaterialMoqQty: 0, MaterialMaxQty: 0 });
+    db.getVendorOrderConstraints.mockResolvedValue({ OrderMoqQty: null, OrderMaxQty: null });
+    db.acceptOrderSuggestion.mockResolvedValue(1);
+
+    const res = await request(appMrp).post('/order-suggestions/accept-batch').send({
+      vendorId: 1,
+      orderDate: '2026-01-15',
+      items: [{ vendorMaterialId: 1, material: 'M1', orderQty: 500, leadTimeDays: 5 }],
+    });
+
+    expect(res.status).toBe(200);
+    const payload = db.acceptOrderSuggestion.mock.calls[0][0];
+    // 2026-01-15 is a Thursday — 5 working days later is 2026-01-22.
+    expect(payload.deliveryDate.toISOString().slice(0, 10)).toBe('2026-01-22');
+  });
 });

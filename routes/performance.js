@@ -128,9 +128,8 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
     // get consumed. See log.PurchaseOrderSuggestion / listOpenIncomingOrders.
     // Empty array by default, so every existing caller that doesn't pass
     // incomingDeliveries behaves exactly as before.
-    const incomingThisWeek = incomingDeliveries
-      .filter(d => d.date >= weekStart && d.date < weekEnd)
-      .reduce((sum, d) => sum + d.qty, 0);
+    const deliveriesThisWeek = incomingDeliveries.filter(d => d.date >= weekStart && d.date < weekEnd);
+    const incomingThisWeek = deliveriesThisWeek.reduce((sum, d) => sum + d.qty, 0);
     runningStock += incomingThisWeek;
 
     let weeklyUsage = 0;
@@ -143,6 +142,11 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
       weekEnding: weekEnd.toISOString().slice(0, 10),
       weeklyUsage: Math.round(weeklyUsage * 100) / 100,
       incomingQty: Math.round(incomingThisWeek * 100) / 100,
+      // Individually-identified deliveries landing this week, alongside the summed incomingQty
+      // above — lets a caller show/exclude a specific delivery (e.g. simulating a late/lost
+      // shipment) rather than only ever seeing the combined total. See listOpenIncomingOrders'
+      // SuggestionId/PoNumber columns for where id/poNumber originate.
+      deliveries: deliveriesThisWeek.map(d => ({ id: d.id ?? null, poNumber: d.poNumber ?? null, qty: Math.round(d.qty * 100) / 100 })),
       expectedStock: Math.round(runningStock * 100) / 100,
     });
 
@@ -168,7 +172,7 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
 // safe to sum by index. Equivalent to the old aggregate-then-forecast
 // approach whenever nothing has an adjustment, since day-by-day usage is
 // linear/additive either way.
-function mergeWeeklyForecasts(forecasts) {
+function mergeWeeklyForecasts(forecasts, materials = []) {
   if (!forecasts.length) return { asOfDate: null, currentStock: 0, weeks: [] };
   const weekCount = forecasts[0].weeks.length;
   const weeks = [];
@@ -177,6 +181,11 @@ function mergeWeeklyForecasts(forecasts) {
       weekEnding: forecasts[0].weeks[i].weekEnding,
       weeklyUsage: Math.round(forecasts.reduce((sum, f) => sum + f.weeks[i].weeklyUsage, 0) * 100) / 100,
       incomingQty: Math.round(forecasts.reduce((sum, f) => sum + f.weeks[i].incomingQty, 0) * 100) / 100,
+      // Tag each delivery with its material only when merging more than one (the common case is
+      // a single-material call, where the tag would just be noise).
+      deliveries: forecasts.flatMap((f, fi) => f.weeks[i].deliveries.map(d =>
+        materials.length > 1 ? { ...d, material: materials[fi] } : d
+      )),
       expectedStock: Math.round(forecasts.reduce((sum, f) => sum + f.weeks[i].expectedStock, 0) * 100) / 100,
     });
   }
@@ -496,13 +505,14 @@ async function computeVendorOrderBuild(vendorId) {
 
   const vendorRows = rows.filter(r => r.VendorId === vendorId);
   const materials = [];
-  let vendorName = null, orderMoqQty = null, orderMaxQty = null, orderMoqUom = null;
+  let vendorName = null, orderMoqQty = null, orderMaxQty = null, orderMoqUom = null, defaultLeadTimeDays = null;
 
   for (const r of vendorRows) {
     vendorName = r.VendorName;
     orderMoqQty = r.OrderMoqQty;
     orderMaxQty = r.OrderMaxQty;
     orderMoqUom = r.OrderMoqUom;
+    defaultLeadTimeDays = r.DefaultLeadTimeDays;
     const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial);
     if (built) materials.push(built);
   }
@@ -512,7 +522,9 @@ async function computeVendorOrderBuild(vendorId) {
     return (a.orderByDate || '9999').localeCompare(b.orderByDate || '9999');
   });
 
-  return { vendorId, vendorName, orderMoqQty, orderMaxQty, orderMoqUom, materials };
+  // defaultLeadTimeDays lets the "Start New Order" builder pre-fill a delivery date before any
+  // material is checked yet — see osRenderBuildOrderForm's delivery-date field.
+  return { vendorId, vendorName, orderMoqQty, orderMaxQty, orderMoqUom, defaultLeadTimeDays, materials };
 }
 
 // A material's own lot size (MaterialMoqQty) and cap (MaterialMaxQty) are
@@ -2509,15 +2521,32 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     const incomingByMaterial = groupIncomingByMaterial(openIncomingOrders);
     const adjustmentsByMaterial = groupAdjustmentsByMaterial(demandAdjustments);
 
+    // Lets the Stock History & Forecast graph simulate "what if this specific delivery is late
+    // or lost" — a buyer ticks a delivery off in the UI, which re-requests this route with that
+    // SuggestionId excluded, so it never lands in incomingDeliveries below. Nothing is persisted;
+    // it's a pure what-if against the same real data every other request sees.
+    const excludeDeliveryIds = new Set(
+      req.query.excludeDeliveryIds
+        ? String(req.query.excludeDeliveryIds).split(',').map(s => Number(s.trim())).filter(n => !isNaN(n))
+        : []
+    );
+
     const perMaterialForecasts = data.map(r => {
       const onHandStock = (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0);
       const incomingDeliveries = (incomingByMaterial.get(r.material) || [])
-        .filter(o => o.DeliveryDate)
-        .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0 }));
+        .filter(o => o.DeliveryDate && !excludeDeliveryIds.has(o.SuggestionId))
+        .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
       const materialAdjustments = adjustmentsByMaterial.get(r.material) || [];
       return buildWeeklyStockForecast(onHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments);
     });
-    const stockForecast = mergeWeeklyForecasts(perMaterialForecasts);
+    const stockForecast = mergeWeeklyForecasts(perMaterialForecasts, materialsInScope);
+
+    // The chart only needs a 26-week horizon — the vendor's longest lead time is 16 weeks, so
+    // 26 weeks of runway is enough to judge stock position without the full 13-month/~56-week
+    // computation making the graph harder to read. buildWeeklyStockForecast itself still computes
+    // the full horizon (other callers, e.g. order-suggestion breach-date detection, need it) —
+    // this is a response-level truncation only.
+    stockForecast.weeks = stockForecast.weeks.slice(0, 26);
 
     // ── Recorded accuracy overlay (log.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen
@@ -2860,6 +2889,63 @@ router.get('/order-suggestions/vendor/:vendorId/build', requirePermission('LOG_M
   }
 });
 
+// Live "what if" preview for the Start New Order / Build Order flow — recomputes each draft
+// item's weekly stock forecast with a synthetic delivery injected (the prospective order the
+// buyer is still assembling), alongside real open orders, WITHOUT persisting anything. Lets the
+// modal's chart update as materials/quantities/the delivery date change, before accept-batch is
+// actually called. One shared deliveryDate for the whole draft order (see accept-batch — each
+// item still gets its own PurchaseOrderSuggestion row once accepted, but this UI only offers one
+// combined delivery date across the batch).
+router.post('/order-suggestions/preview', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { deliveryDate, items } = req.body;
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ success: false, error: { message: 'A non-empty items array is required.' } });
+    }
+    const deliveryDateObj = deliveryDate ? new Date(deliveryDate) : null;
+    if (!deliveryDateObj || isNaN(deliveryDateObj.getTime())) {
+      return res.status(400).json({ success: false, error: { message: 'A valid deliveryDate is required.' } });
+    }
+
+    const materials = items.map(item => String(item.material)).filter(Boolean);
+    const [rows, incoming, adjustments] = await Promise.all([
+      db.listVendorMaterialsForSuggestions(),
+      db.listOpenIncomingOrders(materials),
+      db.listDemandAdjustments(materials),
+    ]);
+    const incomingByMaterial = groupIncomingByMaterial(incoming);
+    const adjustmentsByMaterial = groupAdjustmentsByMaterial(adjustments);
+    const rowsByMaterial = new Map(rows.map(r => [r.Material, r]));
+
+    const data = items.map(item => {
+      const r = rowsByMaterial.get(item.material);
+      if (!r) return { material: item.material, error: 'Material not found in MRP master data.' };
+
+      const onHandStock = (Number(r.StockQty) || 0) + (Number(r.ConsignmentQty) || 0);
+      const predictedMonthly = [
+        r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
+        r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
+      ];
+      const realDeliveries = (incomingByMaterial.get(item.material) || [])
+        .filter(o => o.DeliveryDate)
+        .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
+      // The hypothetical draft order has no real SuggestionId yet — tagged distinctly (id:
+      // null, poNumber: 'Draft') so the frontend can style/label it apart from real deliveries.
+      const draftDelivery = { date: deliveryDateObj, qty: Number(item.orderQty) || 0, id: null, poNumber: 'Draft' };
+      const materialAdjustments = adjustmentsByMaterial.get(item.material) || [];
+
+      const stockForecast = buildWeeklyStockForecast(onHandStock, predictedMonthly, new Date(), [...realDeliveries, draftDelivery], materialAdjustments);
+      stockForecast.weeks = stockForecast.weeks.slice(0, 26); // same 26-week horizon as /turns-valclass/history
+
+      return { material: item.material, materialText: r.MaterialText, stockForecast };
+    });
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const {
@@ -2972,11 +3058,12 @@ router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), asy
     for (const item of enforcedItems) {
       const {
         vendorMaterialId, material, suggestedQty, orderQty,
-        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes,
+        deliveryDate: deliveryDateOverride
       } = item;
       const payload = buildAcceptPayload({
         vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
-        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes
+        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes, deliveryDateOverride
       });
       suggestionIds.push(await db.acceptOrderSuggestion(payload));
     }
