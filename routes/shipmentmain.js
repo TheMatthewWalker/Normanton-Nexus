@@ -1837,7 +1837,7 @@ router.post('/update-planned-collection', requirePermission('LOG_PLANNING'), asy
 
 
 // ── Write ShipmentEvents entries ──────────────────────────────────────────────
-router.post('/events', async (req, res) => {
+router.post('/events', requirePermission('LOG_PLANNING'), async (req, res) => {
   const events = req.body.events;
   if (!Array.isArray(events) || !events.length) return res.status(400).json({ success: false, error: 'events array required.' });
 
@@ -2271,7 +2271,7 @@ router.post('/create-from-deliveries', requirePermission('LOG_PLANNING'), async 
 });
 
 
-router.post('/:shipmentId/create-folder', async (req, res) => {
+router.post('/:shipmentId/create-folder', requirePermission('LOG_PLANNING'), async (req, res) => {
   try { const context = await getShipmentContext(req.params.shipmentId); 
         const folder = await ensureShipmentFolder(context.shipment); 
         res.json({ success: true, data: { 

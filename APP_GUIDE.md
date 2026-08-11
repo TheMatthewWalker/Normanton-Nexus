@@ -108,7 +108,7 @@ Execute arbitrary SQL queries against the database and view results in the brows
 
 The logistics module manages the full lifecycle of outbound and inbound shipments from the Normanton site, including freight booking, cost capture, and SAP cost posting readiness.
 
-#### Shipment Creation *(LOG_VIEW to view · LOG_PLANNING to write)*
+#### Transport Management *(LOG_VIEW to view · LOG_PLANNING to write)*
 
 **Create Shipment**  
 Create a new outbound or inbound shipment record. Fields include:
@@ -131,8 +131,6 @@ KN cost calculation uses: `chargeableWeight = MAX(grossWeight, volumetricWeight)
 **Customer Specifics**  
 Manage per-customer or per-destination special handling notes and requirements.
 
-#### Shipment Monitoring *(LOG_VIEW)*
-
 **Awaiting Collection**  
 Shipments that have been booked and are waiting to be collected by the haulier. You can:
 - Mark a shipment as collected (with operator name and actual collection date)
@@ -152,14 +150,16 @@ Search across all shipments by reference number, destination, date range, or sta
 - Edit shipment dates and collection/delivery status
 - View the shipment event log (creation, booking, collection, delivery)
 
-**Completed Shipments**  
-Archive view of fully delivered shipments.
-
 **Customs Documents**  
 Manage customs documentation batches for shipments requiring export clearance.
 
 #### Material Planning *(LOG_MRP)*
 Functions for MRP (Material Requirements Planning) related to logistics. Manages delivery schedules and planned inbound material movements.
+
+#### Reports *(LOG_ADMIN, LOG_MRP, or LOG_REPORTS)*
+
+**Monthly Customs Report (French VAT)** *(also requires LOG_CUSTOMS_REPORT)*  
+Upload the Shipments list, download the SAP-enriched CUSTOMS report for DDP France import-VAT reclaim. Gated behind its own `LOG_CUSTOMS_REPORT` permission, on top of the section's own access requirement, since it carries customer VAT numbers and sales values.
 
 #### Admin *(LOG_ADMIN)*
 

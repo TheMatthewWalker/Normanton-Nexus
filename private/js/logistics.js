@@ -3135,15 +3135,17 @@ function renderShipmentDetailModal(shipment, deliveries) {
   const customsComplete = Boolean(shipment.customsComplete);
   const customsRequired = Boolean(shipment.customsRequired);
 
+  const canEdit = hasPlanning();
+
   let badgeClass, badgeText, toggleHtml;
   if (customsComplete) {
     badgeClass = 'sd-badge--complete'; badgeText = 'Complete'; toggleHtml = '';
   } else if (customsRequired) {
     badgeClass = 'sd-badge--required'; badgeText = 'Required';
-    toggleHtml = `<button class="btn-secondary" id="sd-customs-toggle" data-target="false">Set Not Required</button>`;
+    toggleHtml = canEdit ? `<button class="btn-secondary" id="sd-customs-toggle" data-target="false">Set Not Required</button>` : '';
   } else {
     badgeClass = 'sd-badge--none'; badgeText = 'Not Required';
-    toggleHtml = `<button class="btn-secondary" id="sd-customs-toggle" data-target="true">Set Required</button>`;
+    toggleHtml = canEdit ? `<button class="btn-secondary" id="sd-customs-toggle" data-target="true">Set Required</button>` : '';
   }
 
   const plannedRaw = shipment.plannedCollection || shipment.plannedDelivery;
@@ -3181,13 +3183,13 @@ function renderShipmentDetailModal(shipment, deliveries) {
         <div class="sd-section">
           <div class="sd-section-title">Haulier</div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
-          <div class="sd-haulier-row">
+          ${canEdit ? `<div class="sd-haulier-row">
             <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
             <button class="btn-secondary" id="sd-forwarder-save">Save</button>
             <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
-          </div>
+          </div>` : ''}
         </div>
-        <div class="sd-section">
+        ${canEdit ? `<div class="sd-section">
           <div class="sd-section-title">Actions</div>
           <div class="sd-actions">
             <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
@@ -3195,7 +3197,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
             ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
             <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
           </div>
-        </div>
+        </div>` : ''}
       </div>
       <div class="sd-section" style="margin-bottom:16px">
         <div class="sd-section-title">Associated Costs</div>
@@ -3206,15 +3208,15 @@ function renderShipmentDetailModal(shipment, deliveries) {
     </div>
     <div class="ps-modal-actions">
       <button class="btn-secondary" onclick="openShipmentEventLog(${shipment.shipmentID}, '${esc(shipmentRef)}')">Event Log</button>
-      ${hasPlanning() ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
+      ${canEdit ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`;
 
   renderShipmentAssociatedCosts(shipment.shipmentID);
 
-  // Load hauliers
-  loadApprovedForwarders().then(forwarders => {
+  // Load hauliers (edit UI only — canEdit gates the select/save row's existence)
+  if (canEdit) loadApprovedForwarders().then(forwarders => {
     const sel = document.getElementById('sd-forwarder-select');
     if (!sel) return;
     sel.innerHTML = `<option value="">Select haulier…</option>` +
@@ -3244,8 +3246,9 @@ function renderShipmentDetailModal(shipment, deliveries) {
     });
   }
 
-  // Haulier save
-  document.getElementById('sd-forwarder-save').addEventListener('click', async () => {
+  // Haulier save (canEdit-gated — element doesn't exist for a view-only user)
+  const forwarderSaveBtn = document.getElementById('sd-forwarder-save');
+  if (forwarderSaveBtn) forwarderSaveBtn.addEventListener('click', async () => {
     const sel = document.getElementById('sd-forwarder-select');
     const result = document.getElementById('sd-forwarder-result');
     result.textContent = 'Saving…';
@@ -3260,8 +3263,9 @@ function renderShipmentDetailModal(shipment, deliveries) {
     } catch (err) { result.textContent = err.message; }
   });
 
-  // Packing list
-  document.getElementById('sd-packing-list-btn').addEventListener('click', async () => {
+  // Packing list (canEdit-gated)
+  const packingListBtn = document.getElementById('sd-packing-list-btn');
+  if (packingListBtn) packingListBtn.addEventListener('click', async () => {
     if (!await wConfirmLg({ title: 'Generate Packing List', message: 'This will overwrite any existing packing list files for this shipment. Continue?', confirmText: 'Generate', variant: '' })) return;
     const result = document.getElementById('sd-packing-list-result');
     result.textContent = 'Generating…';
@@ -3288,8 +3292,9 @@ function renderShipmentDetailModal(shipment, deliveries) {
     });
   }
 
-  // Modify deliveries → wide panel
-  document.getElementById('sd-deliveries-btn').addEventListener('click', () => {
+  // Modify deliveries → wide panel (canEdit-gated)
+  const deliveriesBtn = document.getElementById('sd-deliveries-btn');
+  if (deliveriesBtn) deliveriesBtn.addEventListener('click', () => {
     openShipmentDeliveriesPanel(shipment.shipmentID, shipment, deliveries);
   });
 }
@@ -3313,6 +3318,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
 async function renderShipmentAssociatedCosts(shipmentId) {
   const container = document.getElementById('sd-costs');
   if (!container) return;
+  const canEdit = hasPlanning();
   try {
     const res = await fetch(`/api/shipmentcost/shipment/${shipmentId}`);
     const json = await res.json();
@@ -3326,7 +3332,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         <td>${l.migoStatus
           ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>`
           : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
-        <td style="white-space:nowrap">${l.migoStatus
+        <td style="white-space:nowrap">${!canEdit ? '' : l.migoStatus
           ? `<button type="button" class="btn-secondary sd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
           : `<button type="button" class="btn-secondary sd-cost-edit" data-cost-id="${l.costID}" data-amount="${esc(String(l.expectedCost))}" style="padding:2px 8px;font-size:11px">Edit</button>
              <button type="button" class="btn-secondary sd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
@@ -3339,7 +3345,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
           <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
         </table>
       </div>
-      <div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
+      ${canEdit ? `<div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
         <div class="tf-field">
           <label class="tf-label">GL Account</label>
           <select class="tf-input" id="sd-cost-element" style="min-width:220px"></select>
@@ -3359,8 +3365,10 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         <div class="tf-field">
           <button type="button" class="btn-secondary" id="sd-cost-add-btn">+ Add Cost</button>
         </div>
-      </div>
+      </div>` : ''}
       <div id="sd-cost-result" style="margin-top:8px"></div>`;
+
+    if (!canEdit) return;
 
     // GL Account options — outbound CostElements only, same restriction the
     // display join above already applies. Reuses Material Group Mapping's

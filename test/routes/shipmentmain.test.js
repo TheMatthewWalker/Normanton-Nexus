@@ -108,6 +108,18 @@ describe('permission-gated routes', () => {
     const res = await request(app).post('/update-planned-collection').send({});
     expect(res.status).toBe(403);
   });
+
+  test('POST /events is rejected for a user without LOG_PLANNING', async () => {
+    const res = await request(app).post('/events').send({ events: [{ shipmentID: 1, category: 'TEST', description: 'x' }] });
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('POST /:shipmentId/create-folder is rejected for a user without LOG_PLANNING', async () => {
+    const res = await request(app).post('/1/create-folder');
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /', () => {
