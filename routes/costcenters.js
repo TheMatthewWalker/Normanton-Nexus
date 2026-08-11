@@ -1,17 +1,17 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.CostCenters');
+            .query('SELECT * FROM log.CostCenters');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -24,7 +24,7 @@ router.get('/id/:centerId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('centerId', sql.BigInt, req.params.centerId)
-            .query('SELECT * FROM Logistics.dbo.CostCenters WHERE centerID = @centerId');
+            .query('SELECT * FROM log.CostCenters WHERE centerID = @centerId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -51,7 +51,7 @@ router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
         const { recordset } = await pool.request()
             .input('centerCode',        sql.NVarChar(10), String(centerCode).trim())
             .input('centerDescription', sql.NVarChar(200), String(centerDescription).trim())
-            .query(`INSERT INTO Logistics.dbo.CostCenters (centerCode, centerDescription)
+            .query(`INSERT INTO log.CostCenters (centerCode, centerDescription)
                     OUTPUT INSERTED.centerID
                     VALUES (@centerCode, @centerDescription)`);
 
@@ -77,7 +77,7 @@ router.put('/:centerId', requirePermission('LOG_ADMIN'), async (req, res) => {
             .input('centerId',          sql.BigInt,        req.params.centerId)
             .input('centerCode',        sql.NVarChar(10),  String(centerCode).trim())
             .input('centerDescription', sql.NVarChar(200), String(centerDescription).trim())
-            .query(`UPDATE Logistics.dbo.CostCenters
+            .query(`UPDATE log.CostCenters
                     SET centerCode = @centerCode, centerDescription = @centerDescription
                     WHERE centerID = @centerId;
                     SELECT @@ROWCOUNT AS rowsAffected;`);
@@ -96,7 +96,7 @@ router.delete('/:centerId', requirePermission('LOG_ADMIN'), async (req, res) => 
     try {
         const pool = await getPool();
         await pool.request().input('centerId', sql.BigInt, req.params.centerId)
-            .query('DELETE FROM Logistics.dbo.CostCenters WHERE centerID = @centerId');
+            .query('DELETE FROM log.CostCenters WHERE centerID = @centerId');
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: { message: err.message } });

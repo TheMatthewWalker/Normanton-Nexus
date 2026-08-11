@@ -4,7 +4,7 @@ import jwt     from 'jsonwebtoken';
 import express from 'express';
 import fs      from 'fs';
 import sql     from 'mssql';
-import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { sapConfig, sapServerSecret, getNexusPool, getNexusOperationsPool } from '../config.js';
 import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
 
@@ -28,7 +28,7 @@ export function makeSapToken() {
 // ── Audit helper ──────────────────────────────────────────────────────────────
 async function audit(eventType, actorUsername, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip   = req.ip || req.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  actorUsername || null)
@@ -36,7 +36,7 @@ async function audit(eventType, actorUsername, detail, req) {
       .input('detail',    sql.NVarChar(500), detail || null)
       .input('ip',        sql.NVarChar(45),  ip)
       .query(`
-        INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+        INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
         VALUES (@username, @eventType, @detail, @ip)
       `);
   } catch (err) {
@@ -271,11 +271,11 @@ router.get('/sales-sparkline', async (req, res) => {
 
     try {
         // 1. Resolve the "Sales" GL account group from the portal DB
-        const pool = await sql.connect(sqlConfig);
+        const pool = await getNexusOperationsPool();
         const grpRes = await pool.request().query(`
             SELECT ga.GlAccount
-            FROM   dbo.FinanceGlGroups g
-            JOIN   dbo.FinanceGlGroupAccounts ga ON ga.GroupID = g.GroupID
+            FROM   acct.FinanceGlGroups g
+            JOIN   acct.FinanceGlGroupAccounts ga ON ga.GroupID = g.GroupID
             WHERE  LOWER(g.GroupLabel) = N'sales'`);
 
         const glAccounts = [...new Set(grpRes.recordset.map(r => r.GlAccount))];

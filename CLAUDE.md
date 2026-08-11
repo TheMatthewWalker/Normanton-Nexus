@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Normanton Nexus** (npm package name `sql2005-bridge` — the project's original purpose before it grew into a full portal) is Kongsberg Automotive's internal web portal for the Normanton site. It started as a TLS bridge exposing a modern REST API in front of a legacy SQL Server 2005 database (Windows 11 dropped TLS 1.0/1.1 support, which SQL Server 2005 requires) and has since grown into the enterprise portal for production, logistics, warehouse, finance, sales, quality, engineering and management, plus a SAP integration via the separate `SapServer` service.
+**Normanton Nexus** (npm package name `normanton-nexus` — the project's original purpose before it grew into a full portal) is Kongsberg Automotive's internal web portal for the Normanton site. It started as a TLS bridge exposing a modern REST API in front of a legacy SQL Server 2005 database (Windows 11 dropped TLS 1.0/1.1 support, which SQL Server 2005 requires) and has since grown into the enterprise portal for production, logistics, warehouse, finance, sales, quality, engineering and management, plus a SAP integration via the separate `SapServer` service.
 
 - **Runtime**: Node.js (ES Modules — `"type": "module"` in package.json)
 - **Framework**: Express 5.x

@@ -3,19 +3,19 @@
 // Inbound Log cost tracking — "Associated Costs" on an existing shipment,
 // and the cost line a Manual Inbound Shipment creates for itself.
 //
-// This file only adds/lists/removes lines in Logistics.dbo.ShipmentCost —
+// This file only adds/lists/removes lines in log.ShipmentCost —
 // posting to SAP is NOT done here. Per the user, inbound cost lines post
 // through the SAME log and endpoint as outbound freight costs
 // (routes/shipmentcost.js's GET /unprocessed + POST /post-migo), not a
 // separate route. Both directions live in the same table, distinguished by
-// which FK is set: shipmentID (outbound, -> Logistics.dbo.ShipmentMain) or
-// poShipmentID (inbound, -> kongsberg.dbo.PurchaseOrderShipment) — see
+// which FK is set: shipmentID (outbound, -> log.ShipmentMain) or
+// poShipmentID (inbound, -> log.PurchaseOrderShipment) — see
 // shipmentcost.js for the unified query/posting logic.
 //
-// Storage: Logistics.dbo.ShipmentCost — the same table the outbound flow
+// Storage: log.ShipmentCost — the same table the outbound flow
 // uses — via a new poShipmentID column (nullable, points at
-// dbo.PurchaseOrderShipment.ShipmentId in this connection's default DB)
-// instead of overloading shipmentID (which is scoped to Logistics.dbo.
+// log.PurchaseOrderShipment.ShipmentId in this connection's default DB)
+// instead of overloading shipmentID (which is scoped to log.
 // ShipmentMain, a different identity space). Every existing outbound query
 // INNER JOINs ShipmentMain on shipmentID, so rows with shipmentID NULL /
 // poShipmentID set are automatically invisible to that code unless it's
@@ -24,7 +24,7 @@
 // GL account + cost centre: per the user's spec, associated-cost lines on
 // an Inbound Log shipment always use cost centre 2012 (fixed — not a
 // dropdown), with the GL code driven by a standard/premium toggle
-// (602200 / 602100, both already seeded in Logistics.dbo.CostElements by
+// (602200 / 602100, both already seeded in log.CostElements by
 // migrate_shipment_costing.sql). The cost-centre DROPDOWN the user asked
 // for is specific to Manual Inbound Shipment creation (routes/performance.js
 // createManualOrderShipment caller below) — see that route.
@@ -37,11 +37,11 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 const canView = requirePermission('LOG_MRP');
 
@@ -53,7 +53,7 @@ async function lookupElementCode(pool, direction, tier) {
   const { recordset } = await pool.request()
     .input('direction', sql.NVarChar, direction)
     .input('tier',      sql.NVarChar, tier)
-    .query(`SELECT TOP 1 elementCode FROM Logistics.dbo.CostElements
+    .query(`SELECT TOP 1 elementCode FROM log.CostElements
             WHERE direction = @direction AND tier = @tier`);
   return recordset[0]?.elementCode ?? null;
 }
@@ -65,7 +65,7 @@ async function lookupElementCode(pool, direction, tier) {
 export async function insertInboundCostLine(pool, { poShipmentID, costCenter, tier, amount, information, modeOfTransport }) {
   const elementCode = await lookupElementCode(pool, 'inbound', tier === 'premium' ? 'premium' : 'standard');
   if (!elementCode) {
-    const err = new Error(`No inbound ${tier} cost element configured in Logistics.dbo.CostElements.`);
+    const err = new Error(`No inbound ${tier} cost element configured in log.CostElements.`);
     err.statusCode = 422;
     throw err;
   }
@@ -74,7 +74,7 @@ export async function insertInboundCostLine(pool, { poShipmentID, costCenter, ti
   if (!mode) {
     const { recordset } = await pool.request()
       .input('poShipmentId', sql.Int, poShipmentID)
-      .query('SELECT ModeOfTransport FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @poShipmentId');
+      .query('SELECT ModeOfTransport FROM log.PurchaseOrderShipment WHERE ShipmentId = @poShipmentId');
     mode = recordset[0]?.ModeOfTransport ?? null;
   }
 
@@ -85,7 +85,7 @@ export async function insertInboundCostLine(pool, { poShipmentID, costCenter, ti
     .input('costCenter',      sql.NVarChar,       costCenter || INBOUND_COST_CENTER)
     .input('expectedCost',    sql.Decimal(18, 2), amount)
     .input('modeOfTransport', sql.NVarChar(20),   mode)
-    .query(`INSERT INTO Logistics.dbo.ShipmentCost
+    .query(`INSERT INTO log.ShipmentCost
               (poShipmentID, costType, costElement, costCenter, expectedCost, actualCost, migoStatus, modeOfTransport)
             OUTPUT INSERTED.costID
             VALUES (@poShipmentID, @costType, @costElement, @costCenter, @expectedCost, @expectedCost, 0, @modeOfTransport)`);
@@ -103,8 +103,8 @@ router.get('/shipment/:poShipmentId', canView, async (req, res) => {
         SELECT sc.costID, sc.poShipmentID, sc.costElement, sc.costCenter,
                sc.expectedCost, sc.actualCost, sc.migoStatus, sc.materialDocument, sc.modeOfTransport,
                ce.elementDescription, ce.tier
-        FROM Logistics.dbo.ShipmentCost sc
-        LEFT JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'inbound'
+        FROM log.ShipmentCost sc
+        LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'inbound'
         WHERE sc.poShipmentID = @poShipmentId
         ORDER BY sc.costID DESC
       `);
@@ -133,7 +133,7 @@ router.post('/', canView, async (req, res) => {
     // the line itself doesn't need it.
     const { recordset: shipRows } = await pool.request()
       .input('poShipmentId', sql.Int, poShipmentID)
-      .query('SELECT ShipmentId, ForwarderID FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @poShipmentId');
+      .query('SELECT ShipmentId, ForwarderID FROM log.PurchaseOrderShipment WHERE ShipmentId = @poShipmentId');
     if (!shipRows.length) return res.status(404).json({ success: false, error: { message: 'Shipment not found.' } });
 
     const data = await insertInboundCostLine(pool, {
@@ -151,7 +151,7 @@ router.delete('/:costId', canView, async (req, res) => {
     const pool = await getPool();
     const { recordset } = await pool.request()
       .input('costId', sql.BigInt, req.params.costId)
-      .query(`DELETE FROM Logistics.dbo.ShipmentCost
+      .query(`DELETE FROM log.ShipmentCost
               OUTPUT DELETED.costID
               WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
     if (!recordset.length) return res.status(400).json({ success: false, error: { message: 'Line not found, or already posted to SAP.' } });

@@ -19,7 +19,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { resolveLegacyTablePool } from '../lib/legacyTableRouting.js';
 
 const router = express.Router();
 
@@ -98,10 +98,11 @@ router.post('/', async (req, res) => {
   // Table name and column name are safe: table from allowlist, col from regex.
   // Only sqlVal is a user-supplied value and it is always bound as @val.
   try {
-    const pool   = await sql.connect(sqlConfig);
+    const { getPool, schema } = resolveLegacyTablePool(tableName);
+    const pool   = await getPool();
     const result = await pool.request()
       .input('val', sqlType, useEquals && sqlType === sql.BigInt ? num : sqlVal)
-      .query(`SELECT TOP 500 * FROM dbo.${tableName} WHERE ${col} ${operator} @val`);
+      .query(`SELECT TOP 500 * FROM ${schema}.${tableName} WHERE ${col} ${operator} @val`);
 
     res.json({ success: true, recordset: result.recordset });
   } catch (err) {

@@ -4,10 +4,10 @@ import sql from 'mssql';
 const router = express.Router();
 
 // Export your sqlConfig from server.js and import it here
-import { sqlConfig } from '../config.js';
+import { getNexusArchivePool } from '../config.js';
 
 // ── Helper to get a connection pool ──
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusArchivePool;
 
     // ── Get all records ──
 router.get('/', async (req, res) => {

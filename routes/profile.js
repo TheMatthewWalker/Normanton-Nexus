@@ -11,7 +11,7 @@ import bcrypt  from 'bcrypt';
 import sql     from 'mssql';
 import { requireLogin } from '../middleware/auth.js';
 import { getSapCredentialStatus, setSapCredentials, clearSapCredentials } from '../lib/sapCredentials.js';
-import { auditQuery, sqlConfig } from '../config.js';
+import { auditQuery, getNexusPool } from '../config.js';
 
 const router = express.Router();
 
@@ -72,12 +72,12 @@ router.post('/change-password', requireLogin, async (req, res) => {
       });
     }
 
-    const pool   = await sql.connect(sqlConfig);
+    const pool   = await getNexusPool();
     const userID = req.session.user.userID;
 
     const current = await pool.request()
       .input('userID', sql.Int, userID)
-      .query(`SELECT PasswordHash FROM kongsberg.dbo.PortalUsers WHERE UserID = @userID`);
+      .query(`SELECT PasswordHash FROM dbo.PortalUsers WHERE UserID = @userID`);
 
     const row = current.recordset[0];
     if (!row) {
@@ -100,7 +100,7 @@ router.post('/change-password', requireLogin, async (req, res) => {
       .input('userID', sql.Int, userID)
       .input('hash',   sql.NVarChar(256), hash)
       .query(`
-        UPDATE kongsberg.dbo.PortalUsers
+        UPDATE dbo.PortalUsers
         SET PasswordHash = @hash, MustChangePassword = 0
         WHERE UserID = @userID
       `);

@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import rateLimit from 'express-rate-limit';
-import { sqlConfig } from '../config.js';
+import { getNexusPool } from '../config.js';
 
 const router = express.Router();
 
@@ -17,7 +17,7 @@ const askLimiter = rateLimit({
 
 async function audit(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip = req.ip || req.socket?.remoteAddress || null;
     await pool.request()
       .input('username', sql.NVarChar(80), username || null)
@@ -25,7 +25,7 @@ async function audit(eventType, username, detail, req) {
       .input('detail', sql.NVarChar(500), detail || null)
       .input('ip', sql.NVarChar(45), ip)
       .query(`
-        INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+        INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
         VALUES (@username, @eventType, @detail, @ip)
       `);
   } catch (err) {

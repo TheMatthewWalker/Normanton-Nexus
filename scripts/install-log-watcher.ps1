@@ -1,5 +1,5 @@
 # install-log-watcher.ps1 - Register a logon task that opens a terminal tailing
-# the Normanton Nexus (sql2005-bridge) service log. Run as Administrator.
+# the Normanton Nexus (normanton-nexus) service log. Run as Administrator.
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = 'Stop'

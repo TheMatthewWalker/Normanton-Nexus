@@ -15,7 +15,7 @@ import https   from 'https';
 import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
 import sql     from 'mssql';
-import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { sapConfig, sapServerSecret, getNexusPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import * as db from './consignmentsql.js';
 import { buildConsignmentDeclarationPdf } from '../lib/consignmentDeclarationPdf.js';
@@ -38,14 +38,14 @@ function makeSapToken() {
 
 async function audit(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip = req?.ip || req?.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  username || null)
       .input('eventType', sql.NVarChar(50),  eventType)
       .input('detail',    sql.NVarChar(500), detail || null)
       .input('ip',        sql.NVarChar(45),  ip)
-      .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+      .query(`INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
               VALUES (@username, @eventType, @detail, @ip)`);
   } catch (err) {
     console.error('[consignment audit]', err.message);
@@ -114,7 +114,7 @@ export async function fetchSapConsignmentStock() {
   return body.data; // { [material]: qty }
 }
 
-// Pulls fresh stock from SAP and writes it into dbo.ConsignmentStockSnapshot
+// Pulls fresh stock from SAP and writes it into log.ConsignmentStockSnapshot
 // — the balance dashboard reads that cache (db.getConsignmentStockSnapshot)
 // rather than calling fetchSapConsignmentStock() itself, so a page load is
 // an instant SQL read instead of waiting on this potentially multi-minute
@@ -163,7 +163,7 @@ router.put('/vendors/:vendorId/config', requirePermission('LOG_MRP'), async (req
 // ── Balance dashboard ─────────────────────────────────────────────────────────
 //
 // Delivered/Declared come from SQL (db.getVendorDeliveredAndDeclaredTotals);
-// current stock comes from the daily-refreshed dbo.ConsignmentStockSnapshot
+// current stock comes from the daily-refreshed log.ConsignmentStockSnapshot
 // cache (db.getConsignmentStockSnapshot), NOT a live SAP call — see
 // sql/migrate_consignment_stock_snapshot.sql for why: the underlying MKOL
 // scan is unfiltered and plant-wide, and calling it synchronously on every
@@ -383,7 +383,7 @@ router.post('/declarations/:declarationId/confirm', requirePermission('VENDOR_CO
   try {
     const { settlementDocumentNumber, settlementReconciledQty } = req.body;
 
-    // dbo.ConsignmentDeclaration.SettlementDocumentNumber is NVARCHAR(10)
+    // log.ConsignmentDeclaration.SettlementDocumentNumber is NVARCHAR(10)
     // (see migrate_consignment_tracker.sql) — a value that's too long or
     // non-numeric used to reach db.confirmDeclaration and fail inside the
     // SQL parameter binding with an opaque error (no clean .message),
@@ -452,7 +452,7 @@ router.post('/declarations/:declarationId/cancel', requirePermission('LOG_MRP'),
 // that way until someone fills it in via Vendor Master Data, same as the
 // per-request /sync route's own guard.
 //
-// Also refreshes dbo.ConsignmentStockSnapshot once, AFTER the per-vendor GR
+// Also refreshes log.ConsignmentStockSnapshot once, AFTER the per-vendor GR
 // loop finishes — deliberately sequential, not concurrent with the GR
 // pulls, so this doesn't compete with them for a SapServer connection-pool
 // worker slot. This is what lets the balance dashboard read stock from SQL

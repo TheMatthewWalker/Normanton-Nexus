@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool, getNexusPool } from '../config.js';
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -24,13 +24,7 @@ function startOfDay(d) {
 }
 
 // ── Pool ──────────────────────────────────────────────────────────────────────
-// sql.connect() returns the global singleton pool for this config — the same pattern
-// your working test used. No custom pool management needed; mssql handles reconnection
-// internally, and since we're not using explicit transactions, a failed request returns
-// its connection to the pool cleanly on its own.
-async function getPool() {
-  return await sql.connect(sqlConfig);
-}
+const getPool = getNexusOperationsPool;
 
 // ── Snapshot writes ───────────────────────────────────────────────────────────
 // TRUNCATE then batch INSERT using the UNION ALL SELECT pattern — confirmed working
@@ -239,7 +233,7 @@ async function upsertBatch(tableName, keyColumns, columns, rows) {
 // ── Snapshot replace functions ────────────────────────────────────────────────
 
 export function replaceStockSnapshot(rows) {
-  return replaceTable('dbo.StockSnapshot', [
+  return replaceTable('log.StockSnapshot', [
     ['Material',          'material',          sql.VarChar(18), null, 18],
     ['Batch',             'batch',             sql.VarChar(10), null, 10],
     ['StorageBin',        'storageBin',        sql.VarChar(10), null, 10],
@@ -253,7 +247,7 @@ export function replaceStockSnapshot(rows) {
 }
 
 export function replaceAgreementSnapshot(rows) {
-  return replaceTable('dbo.AgreementSnapshot', [
+  return replaceTable('log.AgreementSnapshot', [
     ['ProfitCentre',         'profitCentre',       sql.VarChar(10), null, 10],
     ['Plant',                'plant',              sql.VarChar(4), null, 4],
     ['Mid',                  'mid',                sql.VarChar(48), null, 48],
@@ -302,7 +296,7 @@ export function replaceAgreementSnapshot(rows) {
 }
 
 export function replaceInvoiceSnapshot(rows) {
-  return replaceTable('dbo.InvoiceSnapshot', [
+  return replaceTable('log.InvoiceSnapshot', [
     ['Plant',          'plant',          sql.VarChar(4), null, 4],
     ['SalesOrg',       'salesOrg',       sql.VarChar(4), null, 4],
     ['InvoiceDate',    'invoiceDate',    sql.DateTime,     toDate],
@@ -327,7 +321,7 @@ export function replaceInvoiceSnapshot(rows) {
 }
 
 export function replaceOtifSnapshot(rows) {
-  return replaceTable('dbo.OtifSnapshot', [
+  return replaceTable('log.OtifSnapshot', [
     ['Customer',     'customer',     sql.VarChar(10), null, 10],
     ['CustomerName', 'customerName', sql.VarChar(35), null, 35],
     ['Plant',        'plant',        sql.VarChar(4), null, 4],
@@ -414,7 +408,7 @@ export function dedupeTurnsValClassRows(rows) {
 }
 
 export function replaceTurnsValClassSnapshot(rows) {
-  return replaceTable('dbo.TurnsValClassSnapshot', [
+  return replaceTable('log.TurnsValClassSnapshot', [
     ['Material',               'material',               sql.VarChar(18), null, 18],
     ['Plant',                  'plant',                  sql.VarChar(4),  null, 4],
     ['MaterialText',           'materialText',           sql.VarChar(40), null, 40],
@@ -466,7 +460,7 @@ export function replaceTurnsValClassSnapshot(rows) {
 }
 
 export function replaceValuationClassCatalog(rows) {
-  return replaceTable('dbo.ValuationClassCatalog', [
+  return replaceTable('log.ValuationClassCatalog', [
     ['ValuationClass', 'valuationClass', sql.VarChar(4),  null, 4],
     ['MaterialType',   'materialType',   sql.VarChar(4),  null, 4],
     ['AccountRef',     'accountRef',     sql.VarChar(4),  null, 4],
@@ -475,7 +469,7 @@ export function replaceValuationClassCatalog(rows) {
 }
 
 // ── Forecast accuracy log ───────────────────────────────────────────────────
-// Append-only — never truncated (see dbo.ForecastAccuracyLog comment in the SQL script for
+// Append-only — never truncated (see log.ForecastAccuracyLog comment in the SQL script for
 // the full design rationale). Called once per sync, after predictedUsage has been attached
 // to each row (see performancesync.js).
 //
@@ -505,7 +499,7 @@ function firstOfDayUtc(d) {
 }
 
 // ── Stock valuation history ───────────────────────────────────────────────
-// Append-only — never truncated (see dbo.StockValuationHistory comment in the SQL
+// Append-only — never truncated (see log.StockValuationHistory comment in the SQL
 // script for the full design rationale). Called once per sync, right alongside
 // upsertForecastAccuracyLog above and for the same reason: TurnsValClassSnapshot
 // itself is TRUNCATE + reinsert on every run (replaceTurnsValClassSnapshot), so
@@ -539,7 +533,7 @@ export async function upsertStockValuationHistory(rows) {
     ['SnapshotDate', 'snapshotDate', sql.DateTime],
   ];
 
-  await upsertBatch('dbo.StockValuationHistory', keyColumns, [
+  await upsertBatch('log.StockValuationHistory', keyColumns, [
     ['MaterialType',   'materialType',   sql.VarChar(4)],
     ['StockQty',       'stockQty',       sql.Decimal(15, 3)],
     ['StockValue',     'stockValue',     sql.Decimal(18, 2)],
@@ -588,12 +582,12 @@ export async function upsertForecastAccuracyLog(rows) {
     ['TargetMonth', 'targetMonth', sql.DateTime],
   ];
 
-  await upsertBatch('dbo.ForecastAccuracyLog', keyColumns, [
+  await upsertBatch('log.ForecastAccuracyLog', keyColumns, [
     ['SapDemandQty', 'sapDemandQty', sql.Decimal(15, 3)],
     ['PredictedQty', 'predictedQty', sql.Decimal(15, 3)],
   ], forecastRows);
 
-  await upsertBatch('dbo.ForecastAccuracyLog', keyColumns, [
+  await upsertBatch('log.ForecastAccuracyLog', keyColumns, [
     ['ActualQty', 'actualQty', sql.Decimal(15, 3)],
   ], actualRows);
 }
@@ -613,7 +607,7 @@ export async function logValuationClassChangeBatch({ orderNumber, plant, userId,
     .input('success',   sql.Bit,          !!success)
     .input('totalChange',sql.Decimal(18, 2), totalValueChange || 0)
     .input('errorMessage', sql.VarChar(4000), errorMessage ? String(errorMessage).slice(0, 4000) : null)
-    .query(`INSERT INTO dbo.ValuationClassChangeBatch
+    .query(`INSERT INTO log.ValuationClassChangeBatch
               (OrderNumber, Plant, RequestedByUserID, RequestedByName, Success, TotalValueChange, ErrorMessage)
             OUTPUT INSERTED.BatchID
             VALUES (@order, @plant, @userId, @userName, @success, @totalChange, @errorMessage)`);
@@ -634,7 +628,7 @@ export async function logValuationClassChangeBatch({ orderNumber, plant, userId,
       .input('valueChange',  sql.Decimal(18, 2), r.valueChange  || 0)
       .input('success',      sql.Bit,            !!r.success)
       .input('message',      sql.VarChar(500),   (r.message || '').slice(0, 500))
-      .query(`INSERT INTO dbo.ValuationClassChangeDetail
+      .query(`INSERT INTO log.ValuationClassChangeDetail
                 (BatchID, Material, MaterialText, Plant, StockQty, OldValuationClass, NewValuationClass,
                  OldBookValue, NewBookValue, ValueChange, Success, Message)
               VALUES
@@ -648,7 +642,7 @@ export async function logValuationClassChangeBatch({ orderNumber, plant, userId,
 // ── Refresh log ───────────────────────────────────────────────────────────────
 
 export async function startRefresh(datasetName) {
-  const pool = await getPool();
+  const pool = await getNexusPool();
   const result = await pool.request()
     .input('name', sql.VarChar(50), datasetName)
     .query(`INSERT INTO dbo.RefreshLog (DatasetName, StartedAtUtc, Status)
@@ -658,7 +652,7 @@ export async function startRefresh(datasetName) {
 }
 
 export async function completeRefresh(runId, totalRows) {
-  const pool = await getPool();
+  const pool = await getNexusPool();
   await pool.request()
     .input('runId', sql.Int, runId)
     .input('totalRows', sql.Int, totalRows)
@@ -668,7 +662,7 @@ export async function completeRefresh(runId, totalRows) {
 }
 
 export async function failRefresh(runId, message) {
-  const pool = await getPool();
+  const pool = await getNexusPool();
   await pool.request()
     .input('runId', sql.Int, runId)
     .input('message', sql.VarChar(4000), String(message ?? '').slice(0, 4000))
@@ -687,7 +681,7 @@ export async function failRefresh(runId, message) {
 export async function recomputeDailyInvoiced() {
   const pool = await getPool();
 
-  // LEFT JOIN .. IS NULL excludes consignment customers (dbo.ConsignmentCustomer)
+  // LEFT JOIN .. IS NULL excludes consignment customers (log.ConsignmentCustomer)
   // — we ship to them but don't invoice until they consume it, so their
   // InvoiceSnapshot rows (if any ever land — normally there shouldn't be any)
   // must not inflate the daily invoiced fact table. See
@@ -698,8 +692,8 @@ export async function recomputeDailyInvoiced() {
       CAST(CONVERT(VARCHAR(8), i.InvoiceDate, 112) AS DATETIME) AS MetricDate,
       i.ValueStream AS ValueStream,
       SUM(i.LocalAmount) AS InvoicedValue
-    FROM dbo.InvoiceSnapshot i
-    LEFT JOIN dbo.ConsignmentCustomer cc ON cc.Customer = i.Customer
+    FROM log.InvoiceSnapshot i
+    LEFT JOIN log.ConsignmentCustomer cc ON cc.Customer = i.Customer
     WHERE i.InvoiceType <> 'F5'
       AND cc.Customer IS NULL
     GROUP BY CONVERT(VARCHAR(8), i.InvoiceDate, 112), i.ValueStream
@@ -711,11 +705,11 @@ export async function recomputeDailyInvoiced() {
       .input('vs',  sql.VarChar(8),  row.ValueStream)
       .input('val', sql.Decimal(18, 2), row.InvoicedValue || 0)
       .query(`
-        IF EXISTS (SELECT 1 FROM dbo.DailyPerformance WHERE MetricDate = @d AND ValueStream = @vs)
-          UPDATE dbo.DailyPerformance SET InvoicedValue = @val
+        IF EXISTS (SELECT 1 FROM log.DailyPerformance WHERE MetricDate = @d AND ValueStream = @vs)
+          UPDATE log.DailyPerformance SET InvoicedValue = @val
           WHERE MetricDate = @d AND ValueStream = @vs
         ELSE
-          INSERT INTO dbo.DailyPerformance (MetricDate, ValueStream, InvoicedValue)
+          INSERT INTO log.DailyPerformance (MetricDate, ValueStream, InvoicedValue)
           VALUES (@d, @vs, @val)
       `);
   }
@@ -730,7 +724,7 @@ export async function recomputeDailyOtif() {
       ValueStream AS ValueStream,
       SUM(CASE WHEN OnTime = 1 THEN 1 ELSE 0 END) AS OtifOnTimeCount,
       COUNT(*) AS OtifTotalCount
-    FROM dbo.OtifSnapshot
+    FROM log.OtifSnapshot
     GROUP BY CONVERT(VARCHAR(8), DeliveryDate, 112), ValueStream
   `);
 
@@ -741,12 +735,12 @@ export async function recomputeDailyOtif() {
       .input('onTime',     sql.Int,        row.OtifOnTimeCount || 0)
       .input('total',      sql.Int,        row.OtifTotalCount  || 0)
       .query(`
-        IF EXISTS (SELECT 1 FROM dbo.DailyPerformance WHERE MetricDate = @d AND ValueStream = @vs)
-          UPDATE dbo.DailyPerformance
+        IF EXISTS (SELECT 1 FROM log.DailyPerformance WHERE MetricDate = @d AND ValueStream = @vs)
+          UPDATE log.DailyPerformance
           SET OtifOnTimeCount = @onTime, OtifTotalCount = @total
           WHERE MetricDate = @d AND ValueStream = @vs
         ELSE
-          INSERT INTO dbo.DailyPerformance (MetricDate, ValueStream, OtifOnTimeCount, OtifTotalCount)
+          INSERT INTO log.DailyPerformance (MetricDate, ValueStream, OtifOnTimeCount, OtifTotalCount)
           VALUES (@d, @vs, @onTime, @total)
       `);
   }
@@ -764,11 +758,11 @@ export async function upsertTodayStockAndPicked(totalsByValueStream) {
       .input('stock',  sql.Decimal(18, 2), totals.stockValue  || 0)
       .input('picked', sql.Decimal(18, 2), totals.pickedValue || 0)
       .query(`
-        IF EXISTS (SELECT 1 FROM dbo.DailyPerformance WHERE MetricDate = @d AND ValueStream = @vs)
-          UPDATE dbo.DailyPerformance SET StockValue = @stock, PickedValue = @picked
+        IF EXISTS (SELECT 1 FROM log.DailyPerformance WHERE MetricDate = @d AND ValueStream = @vs)
+          UPDATE log.DailyPerformance SET StockValue = @stock, PickedValue = @picked
           WHERE MetricDate = @d AND ValueStream = @vs
         ELSE
-          INSERT INTO dbo.DailyPerformance (MetricDate, ValueStream, StockValue, PickedValue)
+          INSERT INTO log.DailyPerformance (MetricDate, ValueStream, StockValue, PickedValue)
           VALUES (@d, @vs, @stock, @picked)
       `);
   }
@@ -808,8 +802,8 @@ export async function getOrderBookSummary() {
         END
       ) AS PickedValue
 
-    FROM dbo.AgreementSnapshot a
-    LEFT JOIN dbo.ConsignmentCustomer cc ON cc.Customer = a.Customer
+    FROM log.AgreementSnapshot a
+    LEFT JOIN log.ConsignmentCustomer cc ON cc.Customer = a.Customer
 
     WHERE
       a.RequestDate IS NOT NULL
@@ -895,8 +889,8 @@ export async function getOrderBookBreakdown() {
         END
       ) AS PickedValue
 
-    FROM dbo.AgreementSnapshot a
-    LEFT JOIN dbo.ConsignmentCustomer cc ON cc.Customer = a.Customer
+    FROM log.AgreementSnapshot a
+    LEFT JOIN log.ConsignmentCustomer cc ON cc.Customer = a.Customer
 
     WHERE
       a.RequestDate IS NOT NULL
@@ -916,9 +910,9 @@ export async function getOrderBookBreakdown() {
 
 // ── PTFE invoiced value, current calendar month ─────────────────────────────
 // Feeds the Dashboard sheet on the order-book Excel export ("Invoiced to
-// date" card). Pulled from dbo.DailyPerformance — the daily fact table
+// date" card). Pulled from log.DailyPerformance — the daily fact table
 // populated by recomputeDailyInvoiced() from real SAP billing documents
-// (dbo.InvoiceSnapshot) — NOT from AgreementSnapshot/getOrderBookBreakdown,
+// (log.InvoiceSnapshot) — NOT from AgreementSnapshot/getOrderBookBreakdown,
 // which only covers open order-book lines and has no invoiced figures at all.
 // Scoped to PTFE only and to the current month (YEAR/MONTH, not a DATE cast —
 // see the SQL Server 2005 note above) per the dashboard's intended scope.
@@ -927,7 +921,7 @@ export async function getPtfeInvoicedMonthToDate() {
 
   const { recordset } = await pool.request().query(`
     SELECT SUM(InvoicedValue) AS InvoicedToDate
-    FROM dbo.DailyPerformance
+    FROM log.DailyPerformance
     WHERE ValueStream = 'PTFE'
       AND YEAR(MetricDate) = YEAR(GETDATE())
       AND MONTH(MetricDate) = MONTH(GETDATE())
@@ -942,7 +936,7 @@ export async function getPtfeInvoicedMonthToDate() {
 // upload-notes route (routes/performance.js) so the next person to download
 // the sheet sees what's already been flagged instead of starting blank and
 // duplicating work. See sql/migrate_orderbook_line_notes.sql for the table
-// design and dbo.OrderBookLineNotes' column comments.
+// design and log.OrderBookLineNotes' column comments.
 // ══════════════════════════════════════════════════════════════════════════
 
 // Keyed by `${referenceDocument}||${material}` — same grain as a Data-sheet
@@ -952,7 +946,7 @@ export async function listOrderBookLineNotes() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT ReferenceDocument, Material, Risk, Reason, WontGet, LastDay, LastDayTime, BringForward, PlannedProductionQty
-    FROM dbo.OrderBookLineNotes
+    FROM log.OrderBookLineNotes
   `);
 
   const map = new Map();
@@ -1003,7 +997,7 @@ export async function upsertOrderBookLineNotes(rows, username) {
     updatedByUsername:    username || null,
   }));
 
-  await upsertBatch('dbo.OrderBookLineNotes', keyColumns, [
+  await upsertBatch('log.OrderBookLineNotes', keyColumns, [
     ['Risk',                 'risk',                 sql.VarChar(1),    null, 1],
     ['Reason',               'reason',               sql.NVarChar(500), null, 500],
     ['WontGet',              'wontGet',              sql.VarChar(1),    null, 1],
@@ -1016,12 +1010,12 @@ export async function upsertOrderBookLineNotes(rows, username) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Delivery → order link cache — dbo.DeliveryOrderLink
+// Delivery → order link cache — log.DeliveryOrderLink
 // ══════════════════════════════════════════════════════════════════════════
 // Z_STOCK_REQ_LIST's ReferenceDocument (SRC03) holds the sales order number
 // while an order is open, but flips to the delivery number the instant SAP
 // creates a delivery against it — silently breaking the (ReferenceDocument,
-// Material) key dbo.OrderBookLineNotes uses to remember Risk/Won't
+// Material) key log.OrderBookLineNotes uses to remember Risk/Won't
 // Get/comments for that line, so a genuinely at-risk line looks "fine"
 // again the moment it's picked. resolveDeliveryReferenceDocuments()
 // (routes/performanceorderlink.js) detects a delivery-shaped
@@ -1043,7 +1037,7 @@ export async function getCachedDeliveryOrderLinks(deliveryNumbers) {
 
   const { recordset } = await request.query(`
     SELECT DeliveryNumber, DeliveryItem, OrderNumber, OrderItem
-    FROM dbo.DeliveryOrderLink
+    FROM log.DeliveryOrderLink
     WHERE DeliveryNumber IN (${inClause})
   `);
 
@@ -1065,7 +1059,7 @@ export async function insertDeliveryOrderLinksIfMissing(rows) {
   // Defensive dedupe by (DeliveryNumber, DeliveryItem) — the target table's
   // PK grain — before building the staging batch below. The anti-join in
   // the query only guards against rows that already exist in
-  // dbo.DeliveryOrderLink; it can't see duplicates *within* this same
+  // log.DeliveryOrderLink; it can't see duplicates *within* this same
   // batch, and VBFA (SapServer's BuildVbfaOrderLinkRequest) is a flat
   // document-flow log that can — even with its VBTYP_V = 'C' order-only
   // filter — occasionally surface more than one predecessor row for the
@@ -1101,10 +1095,10 @@ export async function insertDeliveryOrderLinksIfMissing(rows) {
 
     await request.query(`
       WITH staging AS (${selectClauses.join('\nUNION ALL\n')})
-      INSERT INTO dbo.DeliveryOrderLink (DeliveryNumber, DeliveryItem, OrderNumber, OrderItem)
+      INSERT INTO log.DeliveryOrderLink (DeliveryNumber, DeliveryItem, OrderNumber, OrderItem)
       SELECT s.DeliveryNumber, s.DeliveryItem, s.OrderNumber, s.OrderItem
       FROM staging s
-      LEFT JOIN dbo.DeliveryOrderLink t
+      LEFT JOIN log.DeliveryOrderLink t
         ON t.DeliveryNumber = s.DeliveryNumber AND t.DeliveryItem = s.DeliveryItem
       WHERE t.DeliveryNumber IS NULL
     `);
@@ -1112,7 +1106,7 @@ export async function insertDeliveryOrderLinksIfMissing(rows) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Consignment customers — dbo.ConsignmentCustomer
+// Consignment customers — log.ConsignmentCustomer
 // ══════════════════════════════════════════════════════════════════════════
 // Customers on a consignment stock agreement: we ship to them but don't
 // invoice until they consume it. Flagging a customer here excludes them from
@@ -1126,7 +1120,7 @@ export async function listConsignmentCustomers() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername
-    FROM dbo.ConsignmentCustomer
+    FROM log.ConsignmentCustomer
     ORDER BY Customer
   `);
   return recordset;
@@ -1136,7 +1130,7 @@ export async function upsertConsignmentCustomer(customer, customerName, username
   const pool = await getPool();
   const exists = await pool.request()
     .input('cust', sql.NVarChar(10), customer)
-    .query(`SELECT 1 FROM dbo.ConsignmentCustomer WHERE Customer = @cust`);
+    .query(`SELECT 1 FROM log.ConsignmentCustomer WHERE Customer = @cust`);
 
   const r = pool.request()
     .input('cust', sql.NVarChar(10), customer)
@@ -1145,12 +1139,12 @@ export async function upsertConsignmentCustomer(customer, customerName, username
 
   if (exists.recordset.length) {
     await r.query(`
-      UPDATE dbo.ConsignmentCustomer
+      UPDATE log.ConsignmentCustomer
       SET CustomerName = @name, LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @who
       WHERE Customer = @cust`);
   } else {
     await r.query(`
-      INSERT INTO dbo.ConsignmentCustomer (Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername)
+      INSERT INTO log.ConsignmentCustomer (Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername)
       VALUES (@cust, @name, GETUTCDATE(), @who)`);
   }
 }
@@ -1159,11 +1153,11 @@ export async function deleteConsignmentCustomer(customer) {
   const pool = await getPool();
   await pool.request()
     .input('cust', sql.NVarChar(10), customer)
-    .query(`DELETE FROM dbo.ConsignmentCustomer WHERE Customer = @cust`);
+    .query(`DELETE FROM log.ConsignmentCustomer WHERE Customer = @cust`);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Vendor master data (MRP Phase 2) — dbo.Vendor / dbo.VendorMaterial
+// Vendor master data (MRP Phase 2) — log.Vendor / log.VendorMaterial
 // ══════════════════════════════════════════════════════════════════════════
 // Manually-maintained business data (lead time, Incoterms, MOQ), NOT sourced
 // from SAP — see sql/migrate_vendor_master_data.sql for why. Plain parameterised
@@ -1177,8 +1171,8 @@ export async function listVendors() {
     SELECT
       v.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.Incoterms, v.OrderMoqQty, v.OrderMaxQty, v.OrderMoqUom,
       v.DefaultLeadTimeDays, v.TransitTimeDays, v.Notes, v.CreatedAtUtc, v.UpdatedAtUtc,
-      (SELECT COUNT(*) FROM dbo.VendorMaterial vm WHERE vm.VendorId = v.VendorId) AS MaterialCount
-    FROM dbo.Vendor v
+      (SELECT COUNT(*) FROM log.VendorMaterial vm WHERE vm.VendorId = v.VendorId) AS MaterialCount
+    FROM log.Vendor v
     ORDER BY v.VendorName
   `);
   return recordset;
@@ -1198,7 +1192,7 @@ export async function createVendor({ vendorName, sapVendorNumber, currency, inco
     .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
-      INSERT INTO dbo.Vendor (VendorName, SapVendorNumber, Currency, Incoterms, OrderMoqQty, OrderMaxQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
+      INSERT INTO log.Vendor (VendorName, SapVendorNumber, Currency, Incoterms, OrderMoqQty, OrderMaxQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
       OUTPUT INSERTED.VendorId
       VALUES (@vendorName, @sapVendorNumber, @currency, @incoterms, @orderMoqQty, @orderMaxQty, @orderMoqUom, @defaultLeadTimeDays, @transitTimeDays, @notes)
     `);
@@ -1220,7 +1214,7 @@ export async function updateVendor(vendorId, { vendorName, sapVendorNumber, curr
     .input('transitTimeDays',     sql.Decimal(9, 2), transitTimeDays ?? null)
     .input('notes',               sql.NVarChar(500), notes || null)
     .query(`
-      UPDATE dbo.Vendor SET
+      UPDATE log.Vendor SET
         VendorName = @vendorName, SapVendorNumber = @sapVendorNumber, Currency = @currency, Incoterms = @incoterms,
         OrderMoqQty = @orderMoqQty, OrderMaxQty = @orderMaxQty, OrderMoqUom = @orderMoqUom,
         DefaultLeadTimeDays = @defaultLeadTimeDays, TransitTimeDays = @transitTimeDays, Notes = @notes,
@@ -1238,9 +1232,9 @@ export async function updateVendor(vendorId, { vendorName, sapVendorNumber, curr
 export async function deleteVendor(vendorId) {
   const pool = await getPool();
   await pool.request().input('vendorId', sql.Int, vendorId)
-    .query('DELETE FROM dbo.VendorMaterial WHERE VendorId = @vendorId');
+    .query('DELETE FROM log.VendorMaterial WHERE VendorId = @vendorId');
   await pool.request().input('vendorId', sql.Int, vendorId)
-    .query('DELETE FROM dbo.Vendor WHERE VendorId = @vendorId');
+    .query('DELETE FROM log.Vendor WHERE VendorId = @vendorId');
 }
 
 // Joined with TurnsValClassSnapshot so the admin page can show material
@@ -1258,8 +1252,8 @@ export async function listVendorMaterials(vendorId) {
         vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty, vm.MaterialMaxQty,
         vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement, vm.SourceHint,
         t.MaterialText, t.MrpController, t.PlannedDeliveryTime AS SapLeadTimeDays, t.SafetyStock AS SapSafetyStock
-      FROM dbo.VendorMaterial vm
-      LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = vm.Material
+      FROM log.VendorMaterial vm
+      LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = vm.Material
       WHERE vm.VendorId = @vendorId
       ORDER BY vm.Material
     `);
@@ -1278,7 +1272,7 @@ export async function addVendorMaterial(vendorId, { material, materialMoqQty, ma
     .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
     .input('sourceHint',           sql.NVarChar(40),   sourceHint || null)
     .query(`
-      INSERT INTO dbo.VendorMaterial (VendorId, Material, MaterialMoqQty, MaterialMaxQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, SourceHint)
+      INSERT INTO log.VendorMaterial (VendorId, Material, MaterialMoqQty, MaterialMaxQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, SourceHint)
       OUTPUT INSERTED.VendorMaterialId
       VALUES (@vendorId, @material, @materialMoqQty, @materialMaxQty, @leadTimeDaysOverride, @minSafetyStockQty, @scheduleAgreement, @sourceHint)
     `);
@@ -1295,7 +1289,7 @@ export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, m
     .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
     .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
     .query(`
-      UPDATE dbo.VendorMaterial SET
+      UPDATE log.VendorMaterial SET
         MaterialMoqQty = @materialMoqQty, MaterialMaxQty = @materialMaxQty,
         LeadTimeDaysOverride = @leadTimeDaysOverride,
         MinSafetyStockQty = @minSafetyStockQty,
@@ -1307,7 +1301,7 @@ export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, m
 export async function deleteVendorMaterial(vendorMaterialId) {
   const pool = await getPool();
   await pool.request().input('vendorMaterialId', sql.Int, vendorMaterialId)
-    .query('DELETE FROM dbo.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
+    .query('DELETE FROM log.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
 }
 
 // ── Order suggestions (MRP Phase 2b) ──────────────────────────────────────────────────
@@ -1337,9 +1331,9 @@ export async function listVendorMaterialsForSuggestions() {
       t.SafetyStock AS SapSafetyStock, t.PlannedDeliveryTime AS SapLeadTimeDays,
       t.PredictedM12, t.PredictedM11, t.PredictedM10, t.PredictedM09, t.PredictedM08, t.PredictedM07,
       t.PredictedM06, t.PredictedM05, t.PredictedM04, t.PredictedM03, t.PredictedM02, t.PredictedM01, t.PredictedM00
-    FROM dbo.VendorMaterial vm
-    JOIN dbo.Vendor v ON v.VendorId = vm.VendorId
-    LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = vm.Material
+    FROM log.VendorMaterial vm
+    JOIN log.Vendor v ON v.VendorId = vm.VendorId
+    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = vm.Material
     ORDER BY vm.Material
   `);
   return recordset;
@@ -1365,14 +1359,14 @@ export async function listOpenIncomingOrders(materials = null) {
   }
   const { recordset } = await request.query(`
     SELECT Material, OrderQty, DeliveryDate, Status
-    FROM dbo.PurchaseOrderSuggestion
+    FROM log.PurchaseOrderSuggestion
     ${whereSql}
   `);
   return recordset;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Demand adjustments — dbo.DemandAdjustment
+// Demand adjustments — log.DemandAdjustment
 // ══════════════════════════════════════════════════════════════════════════
 // Manual overrides to a material's predicted usage (see
 // sql/migrate_demand_adjustments.sql's header for the full design). Read
@@ -1394,7 +1388,7 @@ export async function listDemandAdjustments(materials = null) {
   }
   const { recordset } = await request.query(`
     SELECT AdjustmentId, Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy, CreatedAtUtc, UpdatedAtUtc
-    FROM dbo.DemandAdjustment
+    FROM log.DemandAdjustment
     ${whereSql}
     ORDER BY Material, StartDate
   `);
@@ -1412,8 +1406,8 @@ export async function listDemandAdjustmentsForAdmin() {
     SELECT
       d.AdjustmentId, d.Material, d.StartDate, d.EndDate, d.UsagePercent, d.Reason,
       d.CreatedBy, d.CreatedAtUtc, d.UpdatedAtUtc, t.MaterialText
-    FROM dbo.DemandAdjustment d
-    LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = d.Material
+    FROM log.DemandAdjustment d
+    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = d.Material
     ORDER BY d.Material, d.StartDate
   `);
   return recordset;
@@ -1439,7 +1433,7 @@ async function findOverlappingDemandAdjustment(material, startDate, endDate, exc
     excludeSql = 'AND AdjustmentId <> @excludeId';
   }
   const { recordset } = await request.query(`
-    SELECT TOP 1 AdjustmentId, StartDate, EndDate FROM dbo.DemandAdjustment
+    SELECT TOP 1 AdjustmentId, StartDate, EndDate FROM log.DemandAdjustment
     WHERE Material = @material
       ${excludeSql}
       AND NOT (EndDate IS NOT NULL AND @startDate IS NOT NULL AND EndDate < @startDate)
@@ -1470,7 +1464,7 @@ export async function createDemandAdjustment({ material, startDate, endDate, usa
     .input('reason',       sql.NVarChar(500), reason || null)
     .input('createdBy',    sql.NVarChar(100), createdBy || null)
     .query(`
-      INSERT INTO dbo.DemandAdjustment (Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy)
+      INSERT INTO log.DemandAdjustment (Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy)
       OUTPUT INSERTED.AdjustmentId
       VALUES (@material, @startDate, @endDate, @usagePercent, @reason, @createdBy)
     `);
@@ -1493,7 +1487,7 @@ export async function updateDemandAdjustment(adjustmentId, { material, startDate
     .input('usagePercent', sql.Decimal(9, 2),  usagePercent)
     .input('reason',       sql.NVarChar(500), reason || null)
     .query(`
-      UPDATE dbo.DemandAdjustment SET
+      UPDATE log.DemandAdjustment SET
         Material = @material, StartDate = @startDate, EndDate = @endDate,
         UsagePercent = @usagePercent, Reason = @reason, UpdatedAtUtc = GETUTCDATE()
       WHERE AdjustmentId = @adjustmentId
@@ -1503,7 +1497,7 @@ export async function updateDemandAdjustment(adjustmentId, { material, startDate
 export async function deleteDemandAdjustment(adjustmentId) {
   const pool = await getPool();
   await pool.request().input('adjustmentId', sql.Int, adjustmentId)
-    .query('DELETE FROM dbo.DemandAdjustment WHERE AdjustmentId = @adjustmentId');
+    .query('DELETE FROM log.DemandAdjustment WHERE AdjustmentId = @adjustmentId');
 }
 
 export async function acceptOrderSuggestion({
@@ -1525,7 +1519,7 @@ export async function acceptOrderSuggestion({
     .input('isSpotPo',              sql.Bit,            isSpotPo ? 1 : 0)
     .input('notes',                 sql.NVarChar(500),  notes || null)
     .query(`
-      INSERT INTO dbo.PurchaseOrderSuggestion
+      INSERT INTO log.PurchaseOrderSuggestion
         (VendorId, VendorMaterialId, Material, Status, SuggestedQty, OrderQty, OrderDate,
          LeadTimeDaysUsed, DeliveryDate, TransitTimeDaysUsed, ReadyToCollectDate, IsSpotPo, Notes)
       OUTPUT INSERTED.SuggestionId
@@ -1551,10 +1545,10 @@ export async function listOrderSuggestionsTracked() {
       p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc,
       p.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport,
       s.TrackingNumber AS ShipmentTrackingNumber, s.ExpectedEta, s.ReceivedAtUtc AS ShipmentReceivedAtUtc
-    FROM dbo.PurchaseOrderSuggestion p
-    JOIN dbo.Vendor v ON v.VendorId = p.VendorId
-    LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
-    LEFT JOIN dbo.PurchaseOrderShipment s ON s.ShipmentId = p.ShipmentId
+    FROM log.PurchaseOrderSuggestion p
+    JOIN log.Vendor v ON v.VendorId = p.VendorId
+    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
+    LEFT JOIN log.PurchaseOrderShipment s ON s.ShipmentId = p.ShipmentId
     WHERE p.Status <> 'Cancelled'
     ORDER BY
       CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Booked' THEN 2 WHEN 'Received' THEN 3 ELSE 4 END,
@@ -1608,7 +1602,7 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
     .input('deliveryDate',       sql.DateTime, deliveryDate ? new Date(deliveryDate) : null)
     .input('readyToCollectDate', sql.DateTime, readyToCollectDate ? new Date(readyToCollectDate) : null)
     .query(`
-      UPDATE dbo.PurchaseOrderSuggestion SET
+      UPDATE log.PurchaseOrderSuggestion SET
         Status = @status, PoNumber = @poNumber, Notes = @notes,
         SupplierReference = @supplierReference,
         PoItemNumber = COALESCE(@poItemNumber, PoItemNumber),
@@ -1634,7 +1628,7 @@ export async function deleteOrderSuggestion(suggestionId) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('suggestionId', sql.Int, suggestionId)
-    .query('DELETE FROM dbo.PurchaseOrderSuggestion OUTPUT DELETED.SuggestionId WHERE SuggestionId = @suggestionId');
+    .query('DELETE FROM log.PurchaseOrderSuggestion OUTPUT DELETED.SuggestionId WHERE SuggestionId = @suggestionId');
   if (!recordset[0]) { const err = new Error('Tracked order not found.'); err.statusCode = 404; throw err; }
 }
 
@@ -1642,11 +1636,11 @@ export async function deleteOrderSuggestion(suggestionId) {
 // number, dispatch date / ETA, B/L & container), and self-delivering-
 // supplier reconciliation via SupplierReference above — see
 // sql/migrate_order_shipments.sql for why this is a separate, much lighter
-// table than Logistics.dbo.ShipmentMain, and for the Booked status this
+// table than log.ShipmentMain, and for the Booked status this
 // section introduces. Mirrors the Open Deliveries pattern: select order
 // lines, Create Shipment — so creation and line-assignment happen in one
 // call (createOrderShipment), not two.
-// forwarderID is looked up against Logistics.dbo.Forwarders (cross-database
+// forwarderID is looked up against log.Forwarders (cross-database
 // three-part name — same pattern already used in destinations.js/
 // forwarders.js) and its name stored into Haulier as a display snapshot, so
 // every existing read of PurchaseOrderShipment.Haulier keeps working with
@@ -1658,7 +1652,7 @@ async function resolveForwarderName(pool, forwarderID) {
   if (!forwarderID) return null;
   const { recordset } = await pool.request()
     .input('forwarderID', sql.BigInt, forwarderID)
-    .query('SELECT forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = @forwarderID');
+    .query('SELECT forwarderName FROM log.Forwarders WHERE forwarderID = @forwarderID');
   return recordset[0]?.forwarderName ?? null;
 }
 
@@ -1679,7 +1673,7 @@ export async function createOrderShipment({
     .input('containerNumber', sql.NVarChar(50),  containerNumber || null)
     .input('notes',           sql.NVarChar(500), notes || null)
     .query(`
-      INSERT INTO dbo.PurchaseOrderShipment
+      INSERT INTO log.PurchaseOrderShipment
         (DispatchDate, ExpectedEta, Haulier, ForwarderID, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber, Notes)
       OUTPUT INSERTED.ShipmentId
       VALUES (@dispatchDate, @expectedEta, @haulier, @forwarderID, @modeOfTransport, @trackingNumber, @billOfLading, @containerNumber, @notes)
@@ -1693,14 +1687,14 @@ export async function createOrderShipment({
   await pool.request()
     .input('shipmentId',        sql.Int, shipmentId)
     .input('shipmentReference', sql.NVarChar(50), shipmentReference)
-    .query('UPDATE dbo.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
+    .query('UPDATE log.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
 
   const ids = (suggestionIds || []).map(Number).filter(Boolean);
   if (ids.length) {
     const request = pool.request().input('shipmentId', sql.Int, shipmentId);
     const inClause = ids.map((id, i) => { request.input(`sid${i}`, sql.Int, id); return `@sid${i}`; }).join(',');
     await request.query(`
-      UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
+      UPDATE log.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
       WHERE SuggestionId IN (${inClause})
     `);
   }
@@ -1720,19 +1714,19 @@ export async function listOrderShipments() {
       s.Haulier, s.ForwarderID, s.ModeOfTransport, s.TrackingNumber, s.BillOfLading, s.ContainerNumber,
       s.Notes, s.ReceivedAtUtc, s.ReceivedBy, s.CancelledAtUtc, s.CancelledBy,
       s.CreatedAtUtc, s.UpdatedAtUtc, s.IsManual, s.OriginName,
-      (SELECT COUNT(*) FROM dbo.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount,
+      (SELECT COUNT(*) FROM log.PurchaseOrderSuggestion p WHERE p.ShipmentId = s.ShipmentId) AS OrderCount,
       -- Distinct vendor names of orders currently linked to this shipment,
       -- comma-joined. No STRING_AGG on SQL Server 2005+, so FOR XML PATH is
       -- the compatible way to concatenate — same constraint as everywhere
       -- else in this codebase (see migrate_*.sql header notes).
       STUFF((
         SELECT DISTINCT ', ' + v.VendorName
-        FROM dbo.PurchaseOrderSuggestion p2
-        JOIN dbo.Vendor v ON v.VendorId = p2.VendorId
+        FROM log.PurchaseOrderSuggestion p2
+        JOIN log.Vendor v ON v.VendorId = p2.VendorId
         WHERE p2.ShipmentId = s.ShipmentId
         FOR XML PATH('')
       ), 1, 2, '') AS Suppliers
-    FROM dbo.PurchaseOrderShipment s
+    FROM log.PurchaseOrderShipment s
     ORDER BY s.CreatedAtUtc DESC
   `);
   return recordset;
@@ -1751,7 +1745,7 @@ export async function getOrderShipmentWithOrders(shipmentId) {
              Haulier, ForwarderID, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber,
              Notes, ReceivedAtUtc, ReceivedBy, CancelledAtUtc, CancelledBy, CreatedAtUtc, UpdatedAtUtc,
              IsManual, OriginDestinationID, OriginName
-      FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId
+      FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId
     `);
   const shipment = shipmentRows[0] || null;
   if (!shipment) return null;
@@ -1761,9 +1755,9 @@ export async function getOrderShipmentWithOrders(shipmentId) {
     .query(`
       SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.ReceivedQty, p.Status, p.SupplierReference, p.PoNumber, p.PoItemNumber,
              p.SapMaterialDocument, p.SapGrError, p.SapGrSkipped
-      FROM dbo.PurchaseOrderSuggestion p
-      JOIN dbo.Vendor v ON v.VendorId = p.VendorId
-      LEFT JOIN dbo.TurnsValClassSnapshot t ON t.Material = p.Material
+      FROM log.PurchaseOrderSuggestion p
+      JOIN log.Vendor v ON v.VendorId = p.VendorId
+      LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
       WHERE p.ShipmentId = @shipmentId
       ORDER BY p.Material
     `);
@@ -1793,7 +1787,7 @@ export async function updateOrderShipment(shipmentId, {
     .input('containerNumber', sql.NVarChar(50),  containerNumber || null)
     .input('notes',           sql.NVarChar(500), notes || null)
     .query(`
-      UPDATE dbo.PurchaseOrderShipment SET
+      UPDATE log.PurchaseOrderShipment SET
         DispatchDate = @dispatchDate, ExpectedEta = @expectedEta, Haulier = @haulier,
         ForwarderID = @forwarderID,
         ModeOfTransport = @modeOfTransport, TrackingNumber = @trackingNumber,
@@ -1807,7 +1801,7 @@ export async function updateOrderShipment(shipmentId, {
 // any PurchaseOrderSuggestion selection (e.g. a customer return). Origin is
 // captured via the Destinations lookup (cross-database, same pattern as
 // resolveForwarderName above) and snapshotted into OriginName. If a price
-// is supplied, one Logistics.dbo.ShipmentCost row is created alongside it
+// is supplied, one log.ShipmentCost row is created alongside it
 // via the same helper the Associated Costs feature uses
 // (insertInboundCostLine, routes/inboundcosts.js) — see that file for why
 // cost lines live in one place rather than duplicating cost fields onto
@@ -1823,7 +1817,7 @@ export async function createManualOrderShipment({
   if (originDestinationID) {
     const { recordset } = await pool.request()
       .input('destinationId', sql.BigInt, originDestinationID)
-      .query('SELECT destinationName FROM Logistics.dbo.Destinations WHERE destinationID = @destinationId');
+      .query('SELECT destinationName FROM log.Destinations WHERE destinationID = @destinationId');
     originName = recordset[0]?.destinationName ?? null;
   }
 
@@ -1838,7 +1832,7 @@ export async function createManualOrderShipment({
     .input('originDestinationID', sql.BigInt,     originDestinationID || null)
     .input('originName',          sql.NVarChar(200), originName)
     .query(`
-      INSERT INTO dbo.PurchaseOrderShipment
+      INSERT INTO log.PurchaseOrderShipment
         (DispatchDate, ExpectedEta, Haulier, ForwarderID, ModeOfTransport, TrackingNumber, Notes,
          IsManual, OriginDestinationID, OriginName)
       OUTPUT INSERTED.ShipmentId
@@ -1851,7 +1845,7 @@ export async function createManualOrderShipment({
   await pool.request()
     .input('shipmentId',        sql.Int, shipmentId)
     .input('shipmentReference', sql.NVarChar(50), shipmentReference)
-    .query('UPDATE dbo.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
+    .query('UPDATE log.PurchaseOrderShipment SET ShipmentReference = @shipmentReference WHERE ShipmentId = @shipmentId');
 
   return { shipmentId, shipmentReference };
 }
@@ -1869,7 +1863,7 @@ export async function getManualInboundItems(shipmentId) {
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
       SELECT ItemId, ShipmentId, Material, Description, Quantity, UnitOfMeasure, CreatedAtUtc, CreatedBy
-      FROM dbo.ManualInboundItem
+      FROM log.ManualInboundItem
       WHERE ShipmentId = @shipmentId AND Removed = 0
       ORDER BY ItemId ASC
     `);
@@ -1880,7 +1874,7 @@ export async function addManualInboundItem(shipmentId, { material, description, 
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query('SELECT IsManual FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+    .query('SELECT IsManual FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
   const shipment = recordset[0];
   if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   if (!shipment.IsManual) { const err = new Error('Cargo items can only be added to a manual shipment.'); err.statusCode = 400; throw err; }
@@ -1899,7 +1893,7 @@ export async function addManualInboundItem(shipmentId, { material, description, 
     .input('unitOfMeasure', sql.NVarChar(10), String(unitOfMeasure || '').trim() || null)
     .input('createdBy', sql.NVarChar(100), createdBy || null)
     .query(`
-      INSERT INTO dbo.ManualInboundItem (ShipmentId, Material, Description, Quantity, UnitOfMeasure, CreatedBy)
+      INSERT INTO log.ManualInboundItem (ShipmentId, Material, Description, Quantity, UnitOfMeasure, CreatedBy)
       VALUES (@shipmentId, @material, @description, @quantity, @unitOfMeasure, @createdBy)
     `);
 }
@@ -1908,12 +1902,12 @@ export async function removeManualInboundItem(itemId) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('itemId', sql.Int, itemId)
-    .query('SELECT ItemId FROM dbo.ManualInboundItem WHERE ItemId = @itemId AND Removed = 0');
+    .query('SELECT ItemId FROM log.ManualInboundItem WHERE ItemId = @itemId AND Removed = 0');
   if (!recordset[0]) { const err = new Error('Item not found.'); err.statusCode = 404; throw err; }
 
   await pool.request()
     .input('itemId', sql.Int, itemId)
-    .query('UPDATE dbo.ManualInboundItem SET Removed = 1 WHERE ItemId = @itemId');
+    .query('UPDATE log.ManualInboundItem SET Removed = 1 WHERE ItemId = @itemId');
 }
 
 // shipmentId may be null to unassign (e.g. an order was linked to the wrong
@@ -1928,7 +1922,7 @@ export async function assignOrderShipment(suggestionId, shipmentId) {
   if (shipmentId) {
     const { recordset } = await pool.request()
       .input('shipmentId', sql.Int, shipmentId)
-      .query('SELECT CancelledAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+      .query('SELECT CancelledAtUtc FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
     if (!recordset[0]) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
     if (recordset[0].CancelledAtUtc) { const err = new Error('This shipment has been cancelled and cannot accept orders.'); err.statusCode = 400; throw err; }
   }
@@ -1937,7 +1931,7 @@ export async function assignOrderShipment(suggestionId, shipmentId) {
     .input('suggestionId', sql.Int, suggestionId)
     .input('shipmentId',   sql.Int, shipmentId || null)
     .query(`
-      UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
+      UPDATE log.PurchaseOrderSuggestion SET ShipmentId = @shipmentId, UpdatedAtUtc = GETUTCDATE()
       WHERE SuggestionId = @suggestionId
     `);
 }
@@ -1954,7 +1948,7 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query('SELECT ShipmentId, ReceivedAtUtc, CancelledAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+    .query('SELECT ShipmentId, ReceivedAtUtc, CancelledAtUtc FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
   const shipment = recordset[0];
   if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   if (shipment.CancelledAtUtc) { const err = new Error('This shipment has already been cancelled.'); err.statusCode = 400; throw err; }
@@ -1963,14 +1957,14 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
     .input('shipmentId',   sql.Int, shipmentId)
     .input('cancelledBy',  sql.NVarChar(100), cancelledBy || null)
     .query(`
-      UPDATE dbo.PurchaseOrderShipment SET CancelledAtUtc = GETUTCDATE(), CancelledBy = @cancelledBy, UpdatedAtUtc = GETUTCDATE()
+      UPDATE log.PurchaseOrderShipment SET CancelledAtUtc = GETUTCDATE(), CancelledBy = @cancelledBy, UpdatedAtUtc = GETUTCDATE()
       WHERE ShipmentId = @shipmentId
     `);
 
   const { recordset: unlinked } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
-      UPDATE dbo.PurchaseOrderSuggestion SET ShipmentId = NULL, UpdatedAtUtc = GETUTCDATE()
+      UPDATE log.PurchaseOrderSuggestion SET ShipmentId = NULL, UpdatedAtUtc = GETUTCDATE()
       OUTPUT INSERTED.SuggestionId
       WHERE ShipmentId = @shipmentId
     `);
@@ -2014,7 +2008,7 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
   const pool = await getPool();
   const { recordset: shipmentRows } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query('SELECT ShipmentId, ShipmentReference, TrackingNumber, ReceivedAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+    .query('SELECT ShipmentId, ShipmentReference, TrackingNumber, ReceivedAtUtc FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
   const shipment = shipmentRows[0];
   if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   if (shipment.ReceivedAtUtc) { const err = new Error('This shipment has already been marked received.'); err.statusCode = 400; throw err; }
@@ -2023,7 +2017,7 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
 
   const { recordset: orders } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query(`SELECT SuggestionId, Material, OrderQty, PoNumber, PoItemNumber FROM dbo.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'`);
+    .query(`SELECT SuggestionId, Material, OrderQty, PoNumber, PoItemNumber FROM log.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'`);
 
   const resolvedOrders = orders.map(order => {
     const raw = receivedQuantities ? receivedQuantities[order.SuggestionId] : undefined;
@@ -2041,7 +2035,7 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
     .input('receivedAt', sql.DateTime, receivedDate)
     .input('receivedBy', sql.NVarChar(100), receivedBy || null)
     .query(`
-      UPDATE dbo.PurchaseOrderShipment SET ReceivedAtUtc = @receivedAt, ReceivedBy = @receivedBy, UpdatedAtUtc = GETUTCDATE()
+      UPDATE log.PurchaseOrderShipment SET ReceivedAtUtc = @receivedAt, ReceivedBy = @receivedBy, UpdatedAtUtc = GETUTCDATE()
       WHERE ShipmentId = @shipmentId
     `);
 
@@ -2066,7 +2060,7 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
       .input('sapGrError',           sql.NVarChar(500), sapResult.success === false ? (sapResult.error || 'Goods receipt failed.') : null)
       .input('sapGrSkipped',         sql.Bit, sapResult.skipped ? 1 : 0)
       .query(`
-        UPDATE dbo.PurchaseOrderSuggestion SET
+        UPDATE log.PurchaseOrderSuggestion SET
           Status = 'Booked', ReceivedQty = @receivedQty,
           SapMaterialDocument = @sapMaterialDocument, SapGrError = @sapGrError, SapGrSkipped = @sapGrSkipped,
           UpdatedAtUtc = GETUTCDATE()
@@ -2114,7 +2108,7 @@ export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsRe
   const pool = await getPool();
   const { recordset: shipmentRows } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query('SELECT ShipmentId, ReceivedAtUtc, CancelledAtUtc FROM dbo.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
+    .query('SELECT ShipmentId, ReceivedAtUtc, CancelledAtUtc FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId');
   const shipment = shipmentRows[0];
   if (!shipment) { const err = new Error('Shipment not found.'); err.statusCode = 404; throw err; }
   if (!shipment.ReceivedAtUtc) { const err = new Error('This shipment has not been marked received.'); err.statusCode = 400; throw err; }
@@ -2122,7 +2116,7 @@ export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsRe
 
   const { recordset: orders } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query(`SELECT SuggestionId, Material, SapMaterialDocument FROM dbo.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status IN ('Booked', 'Received')`);
+    .query(`SELECT SuggestionId, Material, SapMaterialDocument FROM log.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status IN ('Booked', 'Received')`);
 
   const sapResults = [];
   let reversedCount = 0;
@@ -2144,7 +2138,7 @@ export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsRe
       await pool.request()
         .input('suggestionId', sql.Int, order.SuggestionId)
         .input('sapGrError',   sql.NVarChar(500), reverseResult.error || 'Goods receipt reversal failed.')
-        .query(`UPDATE dbo.PurchaseOrderSuggestion SET SapGrError = @sapGrError, UpdatedAtUtc = GETUTCDATE() WHERE SuggestionId = @suggestionId`);
+        .query(`UPDATE log.PurchaseOrderSuggestion SET SapGrError = @sapGrError, UpdatedAtUtc = GETUTCDATE() WHERE SuggestionId = @suggestionId`);
       continue;
     }
 
@@ -2152,7 +2146,7 @@ export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsRe
     await pool.request()
       .input('suggestionId', sql.Int, order.SuggestionId)
       .query(`
-        UPDATE dbo.PurchaseOrderSuggestion SET
+        UPDATE log.PurchaseOrderSuggestion SET
           Status = 'Ordered', ReceivedQty = NULL,
           SapMaterialDocument = NULL, SapGrError = NULL, SapGrSkipped = NULL,
           UpdatedAtUtc = GETUTCDATE()
@@ -2165,7 +2159,7 @@ export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsRe
     await pool.request()
       .input('shipmentId', sql.Int, shipmentId)
       .query(`
-        UPDATE dbo.PurchaseOrderShipment SET ReceivedAtUtc = NULL, ReceivedBy = NULL, UpdatedAtUtc = GETUTCDATE()
+        UPDATE log.PurchaseOrderShipment SET ReceivedAtUtc = NULL, ReceivedBy = NULL, UpdatedAtUtc = GETUTCDATE()
         WHERE ShipmentId = @shipmentId
       `);
   }
@@ -2183,7 +2177,7 @@ export async function getVendorMaterialConstraints(vendorMaterialId) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorMaterialId', sql.Int, vendorMaterialId)
-    .query('SELECT MaterialMoqQty, MaterialMaxQty FROM dbo.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
+    .query('SELECT MaterialMoqQty, MaterialMaxQty FROM log.VendorMaterial WHERE VendorMaterialId = @vendorMaterialId');
   return recordset[0] || null;
 }
 
@@ -2191,6 +2185,6 @@ export async function getVendorOrderConstraints(vendorId) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('vendorId', sql.Int, vendorId)
-    .query('SELECT VendorName, OrderMoqQty, OrderMaxQty, OrderMoqUom FROM dbo.Vendor WHERE VendorId = @vendorId');
+    .query('SELECT VendorName, OrderMoqQty, OrderMaxQty, OrderMoqUom FROM log.Vendor WHERE VendorId = @vendorId');
   return recordset[0] || null;
 }

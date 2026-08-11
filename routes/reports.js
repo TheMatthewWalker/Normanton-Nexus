@@ -32,7 +32,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusArchivePool, getNexusOperationsPool } from '../config.js';
 
 const router = express.Router();
 
@@ -342,7 +342,7 @@ const REPORTS = {
             CONVERT(datetime, LEFT(DeliveryTime, 8), 4)
           ) AS float
         ) / 60.0)                   AS value
-      FROM dbo.Staging
+      FROM log.Staging
       WHERE CONVERT(datetime, LEFT(CreationTime, 8), 4) >= CONVERT(datetime, @dateFrom)
         AND CONVERT(datetime, LEFT(CreationTime, 8), 4) <= CONVERT(datetime, @dateTo)
         AND LEFT(DeliveryTime, 8) IS NOT NULL
@@ -381,7 +381,9 @@ router.post('/', async (req, res) => {
   const def = REPORTS[report];
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    // Every report queries NexusArchive's legacy tables except Staging,
+    // which moved to NexusOperations' .log schema in the Nexus restructure.
+    const pool = report === 'Staging' ? await getNexusOperationsPool() : await getNexusArchivePool();
 
   switch (def.type) {
     case 'quad-chart':

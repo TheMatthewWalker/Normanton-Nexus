@@ -1,12 +1,12 @@
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import express from 'express';
 
-const router = express.Router();    
+const router = express.Router();
 
 router.get('/test-otif-insert', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
 
     const row = {
       customer: '0000301524',
@@ -45,7 +45,7 @@ router.get('/test-otif-insert', async (req, res) => {
       .input('OnTime', sql.Bit, row.onTime ? 1 : 0)
       .input('ValueStream', sql.VarChar(8), row.valueStream)
       .query(`
-        INSERT INTO dbo.OtifSnapshot (
+        INSERT INTO log.OtifSnapshot (
           Customer, CustomerName, Plant, ProfitCentre,
           Material, MaterialText, Delivery, DeliveryDate,
           DeliveryQty, Uom, TargetDate, TargetQty,

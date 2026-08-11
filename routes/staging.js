@@ -16,7 +16,7 @@ import https   from 'https';
 import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
 import ExcelJS from 'exceljs';
-import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { sapConfig, sapServerSecret, getNexusPool } from '../config.js';
 import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
 import { notify } from '../lib/notify.js';
@@ -40,14 +40,14 @@ function makeSapToken() {
 
 async function audit(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip = req?.ip || req?.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  username || null)
       .input('eventType', sql.NVarChar(50),  eventType)
       .input('detail',    sql.NVarChar(500), detail || null)
       .input('ip',        sql.NVarChar(45),  ip)
-      .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+      .query(`INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
               VALUES (@username, @eventType, @detail, @ip)`);
   } catch (err) {
     console.error('[staging audit]', err.message);
@@ -224,7 +224,7 @@ router.post('/requests', async (req, res) => {
     // Let the warehouse department know a new request is waiting — best-effort,
     // must never block the response the requester is waiting on.
     try {
-      const pool = await sql.connect(sqlConfig);
+      const pool = await getNexusPool();
       await notify(pool, {
         title: 'New Staging Post Request',
         body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${due.toISOString().slice(0, 16).replace('T', ' ')}.`,

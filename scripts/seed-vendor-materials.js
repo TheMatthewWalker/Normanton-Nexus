@@ -1,8 +1,8 @@
 /**
  * seed-vendor-materials.js
  *
- * One-time import: creates dbo.Vendor rows for each vendor tab in the existing
- * MRP2.xlsx workbook, and dbo.VendorMaterial rows assigning that vendor's
+ * One-time import: creates log.Vendor rows for each vendor tab in the existing
+ * MRP2.xlsx workbook, and log.VendorMaterial rows assigning that vendor's
  * materials — so the new Vendor Master Data admin page (private/logistics.html,
  * "Vendor Master Data" tile) doesn't start completely empty.
  *
@@ -13,7 +13,7 @@
  *
  * MATCHING:
  * MRP2.xlsx uses short display material codes (e.g. "30005R", "10006") which may
- * or may not be stored identically in dbo.TurnsValClassSnapshot.Material (SAP's
+ * or may not be stored identically in log.TurnsValClassSnapshot.Material (SAP's
  * raw MATNR, possibly zero-padded). Rather than guess the padding, this script
  * pulls every distinct Material already in TurnsValClassSnapshot and matches
  * against it in memory:
@@ -29,7 +29,7 @@
  * nothing seeded here is silently wrong; it's just flagged for a human glance.
  *
  * SAFE TO RE-RUN: skips any vendor+material pairing that's already assigned
- * (checks dbo.VendorMaterial before inserting), and reuses an existing vendor
+ * (checks log.VendorMaterial before inserting), and reuses an existing vendor
  * row by name rather than creating a duplicate.
  *
  * Run manually on the server once the SQL migration is in place:
@@ -43,7 +43,7 @@
 // standalone script in this repo would need if it imports config.js.
 import 'dotenv/config';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
 // Extracted directly from MRP2.xlsx's per-vendor tabs (row 1 = material code,
 // row 2 = schedule agreement where the sheet tracks one — only Raaj's tab
@@ -91,20 +91,20 @@ function normalise(code) {
 async function findOrCreateVendor(pool, vendorName) {
   const existing = await pool.request()
     .input('name', sql.NVarChar(80), vendorName)
-    .query('SELECT VendorId FROM dbo.Vendor WHERE VendorName = @name');
+    .query('SELECT VendorId FROM log.Vendor WHERE VendorName = @name');
   if (existing.recordset.length) return { vendorId: existing.recordset[0].VendorId, created: false };
 
   const inserted = await pool.request()
     .input('name', sql.NVarChar(80), vendorName)
-    .query('INSERT INTO dbo.Vendor (VendorName) OUTPUT INSERTED.VendorId VALUES (@name)');
+    .query('INSERT INTO log.Vendor (VendorName) OUTPUT INSERTED.VendorId VALUES (@name)');
   return { vendorId: inserted.recordset[0].VendorId, created: true };
 }
 
 async function main() {
-  const pool = await sql.connect(sqlConfig);
+  const pool = await getNexusOperationsPool();
 
-  console.log('Loading distinct materials from dbo.TurnsValClassSnapshot...');
-  const { recordset } = await pool.request().query('SELECT DISTINCT Material FROM dbo.TurnsValClassSnapshot');
+  console.log('Loading distinct materials from log.TurnsValClassSnapshot...');
+  const { recordset } = await pool.request().query('SELECT DISTINCT Material FROM log.TurnsValClassSnapshot');
   const byNormalised = new Map();
   for (const { Material } of recordset) {
     const key = normalise(Material);
@@ -138,7 +138,7 @@ async function main() {
       const already = await pool.request()
         .input('vendorId', sql.Int, vendorId)
         .input('material', sql.NVarChar(18), material)
-        .query('SELECT 1 FROM dbo.VendorMaterial WHERE VendorId = @vendorId AND Material = @material');
+        .query('SELECT 1 FROM log.VendorMaterial WHERE VendorId = @vendorId AND Material = @material');
       if (already.recordset.length) {
         console.log(`  ${code} -> ${material} [${bucket}] — already assigned, skipped.`);
         continue;
@@ -150,7 +150,7 @@ async function main() {
         .input('scheduleAgreement', sql.NVarChar(10), scheduleAgreement || null)
         .input('sourceHint',        sql.NVarChar(40), code)
         .query(`
-          INSERT INTO dbo.VendorMaterial (VendorId, Material, ScheduleAgreement, SourceHint)
+          INSERT INTO log.VendorMaterial (VendorId, Material, ScheduleAgreement, SourceHint)
           VALUES (@vendorId, @material, @scheduleAgreement, @sourceHint)
         `);
 

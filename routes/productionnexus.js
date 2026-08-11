@@ -4,7 +4,7 @@ import axios   from 'axios';
 import https   from 'https';
 import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
-import { getProductionPool, sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { getNexusOperationsPool, getNexusPool, sapConfig, sapServerSecret } from '../config.js';
 import { requireRole, requirePermission } from '../middleware/auth.js';
 import { notify } from '../lib/notify.js';
 
@@ -26,14 +26,14 @@ function makeSapToken() {
 // ── Audit logger — records SAP call outcomes to PortalAuditLog (fire-and-forget) ─
 async function audit(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip   = req?.ip || req?.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  username || null)
       .input('eventType', sql.NVarChar(50),  eventType)
       .input('detail',    sql.NVarChar(500), detail   || null)
       .input('ip',        sql.NVarChar(45),  ip)
-      .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+      .query(`INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
               VALUES (@username, @eventType, @detail, @ip)`);
   } catch (err) {
     console.error('[audit]', err.message);
@@ -322,7 +322,7 @@ function rptBind(req, pool) {
 
 router.get('/landing-sparkline', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT CONVERT(varchar(10), CompletedAt, 120) AS Day,
              CAST(SUM(Quantity) AS DECIMAL(14,1)) AS TotalMetres
@@ -358,7 +358,7 @@ router.get('/landing-sparkline', async (req, res) => {
 
 router.get('/reports/output', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, groupBy, r, extra } = rptBind(req, pool);
     const period = rptPeriod('CompletedAt', groupBy);
 
@@ -385,7 +385,7 @@ router.get('/reports/output', requirePermission('PROD_SUPERVISOR'), async (req, 
 
 router.get('/reports/scrap', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, groupBy, r, extra } = rptBind(req, pool);
     const period = rptPeriod('se.EnteredAt', groupBy);
 
@@ -424,7 +424,7 @@ router.get('/reports/scrap', requirePermission('PROD_SUPERVISOR'), async (req, r
 
 router.get('/reports/sap-performance', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, groupBy, r } = rptBind(req, pool);
     const period = rptPeriod('sp.PostedAt', groupBy);
 
@@ -455,7 +455,7 @@ router.get('/reports/sap-performance', requirePermission('PROD_SUPERVISOR'), asy
 
 router.get('/reports/batches', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, r, extra } = rptBind(req, pool);
     const rows = await r.query(`
       SELECT ProcessCode,
@@ -475,7 +475,7 @@ router.get('/reports/batches', requirePermission('PROD_SUPERVISOR'), async (req,
 
 router.get('/reports/shift-comparison', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, r, extra } = rptBind(req, pool);
     const rows = await r.query(`
       SELECT s.ShiftName, B.ProcessCode, B.UOM,
@@ -501,14 +501,14 @@ router.get('/reports/shift-comparison', requirePermission('PROD_SUPERVISOR'), as
 
 router.get('/reports/operator-output', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, r, extra } = rptBind(req, pool);
     const rows = await r.query(`
       SELECT pu.Username, bo.ProcessCode, AB.UOM,
              COUNT(DISTINCT bo.ProcessRecordID) AS BatchCount,
              CAST(SUM(AB.Quantity) AS DECIMAL(14,3)) AS TotalOutput
       FROM prod.BatchOperators bo
-      JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = bo.UserID
+      JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = bo.UserID
       JOIN (
         SELECT N'MX' AS ProcessCode,MixingID    AS RecordID,TotalWeightKG AS Quantity,N'KG' AS UOM,CompletedAt FROM prod.Mixing      WHERE Status=4 AND IsReversed=0
         UNION ALL SELECT N'EX',ExtrusionID,  LengthMetres,N'M',CompletedAt FROM prod.Extrusion   WHERE Status=4 AND IsReversed=0
@@ -529,7 +529,7 @@ router.get('/reports/operator-output', requirePermission('PROD_SUPERVISOR'), asy
 
 router.get('/reports/material-output', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { from, to, r, extra } = rptBind(req, pool);
     const rows = await r.query(`
       SELECT Material, ProcessCode, UOM,
@@ -565,7 +565,7 @@ router.post('/process/:processCode/entry', async (req, res) => {
   try { await assertProfitCentre(code, material); }
   catch (err) { return res.status(err.statusCode || 502).json({ success: false, error: err.message }); }
 
-  const pool   = await getProductionPool();
+  const pool   = await getNexusOperationsPool();
   const uid    = userId(req);
   const cfg    = PROCESS[code];
   const sid    = shiftID || currentShiftID();
@@ -705,7 +705,7 @@ router.post('/process/:processCode/entry', async (req, res) => {
 
     await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
 
-    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+    getNexusPool().then(kPool => notify(kPool, {
       title:       'SAP Backflush Failed',
       body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
       severity:    2,
@@ -739,7 +739,7 @@ router.post('/process/:processCode/draft', async (req, res) => {
     // otherwise the operator creates an open run they can never complete.
     await assertProfitCentre(code, material); // throws 400/502 — caught below
 
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
     const cfg  = PROCESS[code];
     const sid  = currentShiftID();
@@ -802,14 +802,14 @@ const HAS_ISREVERSED     = new Set(['MX','EX','CO','BR','CL','TW','DR']);
 
 router.get('/open-runs', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool  = await getProductionPool();
+    const pool  = await getNexusOperationsPool();
     const union = OPEN_RUN_PROCESSES.map(code => {
       const cfg = PROCESS[code];
       const rev = HAS_ISREVERSED.has(code) ? 'AND t.IsReversed = 0' : '';
       return `SELECT N'${code}' AS ProcessCode, t.${cfg.pk} AS RecordID, t.${cfg.ref} AS BatchRef,
                      t.Material, t.CreatedAt, pu.Username AS CreatedBy
               FROM ${cfg.table} t
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
               WHERE t.Status = 1 ${rev}`;
     }).join('\nUNION ALL\n');
 
@@ -826,7 +826,7 @@ router.patch('/open-runs/:processCode/:recordId/cancel', requirePermission('PROD
 
   try {
     const cfg  = processConfig(code);
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     const upd = await pool.request()
@@ -855,7 +855,7 @@ router.get('/process/:processCode/open-entries', async (req, res) => {
       return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
 
     const cfg  = PROCESS[code];
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     const result = await pool.request()
       .query(`SELECT t.${cfg.pk} AS RecordID, t.${cfg.ref} AS BatchRef,
@@ -864,7 +864,7 @@ router.get('/process/:processCode/open-entries', async (req, res) => {
                      pu.Username AS CreatedBy
               FROM ${cfg.table} t
               LEFT JOIN prod.Machines m ON m.MachineID = t.MachineID
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
               WHERE t.Status = 1 AND t.IsReversed = 0
               ORDER BY t.CreatedAt DESC`);
 
@@ -893,7 +893,7 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
     if (!lengthMetres || Number(lengthMetres) <= 0)
       return res.status(400).json({ success: false, error: 'lengthMetres is required.' });
 
-    const pool   = await getProductionPool();
+    const pool   = await getNexusOperationsPool();
     const uid    = userId(req);
     const cfg    = PROCESS[code];
     const sid    = shiftID || currentShiftID();
@@ -1052,7 +1052,7 @@ router.get('/process/:processCode/data', async (req, res) => {
   const cfg = PROCESS[code];
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('mat',  sql.NVarChar(18), material ? `%${material}%` : null)
       .input('from', sql.DateTime,     dateFrom  ? new Date(dateFrom) : null)
@@ -1069,7 +1069,7 @@ router.get('/process/:processCode/data', async (req, res) => {
               LEFT JOIN prod.Shifts              s  ON s.ShiftID   = t.ShiftID
               LEFT JOIN prod.Machines            m  ON m.MachineID = t.MachineID
               LEFT JOIN prod.StatusCodes         sc ON sc.StatusID = t.Status
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID  = t.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID  = t.CreatedByUserID
               WHERE  (@mat  IS NULL OR t.Material   LIKE @mat)
                 AND  (@from IS NULL OR t.StartedAt >= @from)
                 AND  (@to   IS NULL OR t.StartedAt <= @to)
@@ -1238,7 +1238,7 @@ function userId(req) { return req.session?.user?.userID ?? 0; }
 
 router.get('/shifts', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`SELECT ShiftID, ShiftName, StartTime, EndTime, SpansMidnight FROM prod.Shifts WHERE IsActive = 1 ORDER BY ShiftID`);
     res.json({ success: true, data: r.recordset });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
@@ -1246,7 +1246,7 @@ router.get('/shifts', async (req, res) => {
 
 router.get('/work-centres', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT wc.WorkCentreID, wc.ProcessCode, wc.WorkCentreName, wc.SAPWorkCentre,
              m.MachineID, m.MachineCode, m.MachineName, m.IdealOutputPerHour, m.PlannedHoursPerShift
@@ -1261,7 +1261,7 @@ router.get('/work-centres', async (req, res) => {
 router.get('/scrap-reasons', async (req, res) => {
   const { pc } = req.query;
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('pc', sql.NVarChar(5), pc ? pc.toUpperCase() : null)
       .query(`SELECT ReasonID, ReasonCode, ReasonDescription, AppliesTo
@@ -1280,7 +1280,7 @@ router.get('/scrap-reasons', async (req, res) => {
 
 router.get('/active', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT ab.ProcessCode, ab.RecordID, ab.BatchRef, ab.Material,
              ab.Quantity, ab.UOM, ab.Status, ab.ShiftID, ab.MachineID,
@@ -1297,7 +1297,7 @@ router.get('/active', async (req, res) => {
       LEFT JOIN prod.BatchOperators bo
         ON bo.ProcessCode = ab.ProcessCode AND bo.ProcessRecordID = ab.RecordID
         AND bo.IsPrimary = 1 AND bo.RemovedAt IS NULL
-      LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = bo.UserID
+      LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = bo.UserID
       ORDER BY ab.StartedAt DESC, ab.CreatedAt DESC`);
     res.json({ success: true, data: r.recordset });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -1309,7 +1309,7 @@ router.get('/batch/:processCode/:recordId', async (req, res) => {
   try {
     const cfg  = processConfig(req.params.processCode.toUpperCase());
     const id   = Number(req.params.recordId);
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     const r = await pool.request()
       .input('id', sql.Int, id)
@@ -1324,7 +1324,7 @@ router.get('/batch/:processCode/:recordId', async (req, res) => {
       .query(`SELECT bo.BatchOperatorID, bo.UserID, bo.IsPrimary, bo.AssignedAt, bo.RemovedAt,
                      pu.Username
               FROM   prod.BatchOperators bo
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = bo.UserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = bo.UserID
               WHERE  bo.ProcessCode = @pc AND bo.ProcessRecordID = @rid
               ORDER BY bo.IsPrimary DESC, bo.AssignedAt`);
 
@@ -1345,7 +1345,7 @@ router.post('/batch', async (req, res) => {
   try {
     processConfig(code); // validates code
     await assertProfitCentre(code, material); // throws 400/502 — caught below
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     let insertId;
 
     // Process-specific insert
@@ -1459,7 +1459,7 @@ router.patch('/batch/:processCode/:recordId/status', async (req, res) => {
 
   try {
     const cfg  = processConfig(code);
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     const setClause = status === 2 /* IN_PROGRESS */ ? `Status=@s, StartedAt=GETDATE()`
@@ -1488,7 +1488,7 @@ router.patch('/batch/:processCode/:recordId/quantity', async (req, res) => {
 
   try {
     const cfg  = processConfig(code);
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     await pool.request()
       .input('id', sql.Int,            id)
@@ -1509,7 +1509,7 @@ router.post('/batch/:processCode/:recordId/operators', async (req, res) => {
 
   try {
     processConfig(code);
-    const pool  = await getProductionPool();
+    const pool  = await getNexusOperationsPool();
     const uid   = userId(req);
 
     // Check not already active on this batch
@@ -1539,7 +1539,7 @@ router.delete('/batch/:processCode/:recordId/operators/:targetUserId', async (re
 
   try {
     processConfig(code);
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     await pool.request()
@@ -1561,7 +1561,7 @@ router.post('/trace', async (req, res) => {
     return res.status(400).json({ success: false, error: 'childProcessCode, childRecordID, parentProcessCode, parentRecordID are required.' });
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     await pool.request()
@@ -1585,7 +1585,7 @@ router.get('/trace/:processCode/:recordId', async (req, res) => {
   const id   = Number(req.params.recordId);
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     // Step 1: recursive CTE — all ancestors of the given batch
     const traceR = await pool.request()
@@ -1640,7 +1640,7 @@ router.get('/trace/:processCode/:recordId', async (req, res) => {
                CAST(t.${cfg.qtyCol} AS DECIMAL(14,3)) AS Quantity, '${cfg.uom}' AS UOM,
                t.CreatedAt, pu.Username AS Operator
         FROM   ${cfg.table} t
-        LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
+        LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID
         WHERE  t.${cfg.pk} IN (${idParams})`);
     }
 
@@ -1663,7 +1663,7 @@ router.post('/scrap', async (req, res) => {
 
   try {
     processConfig(processCode.toUpperCase());
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     await pool.request()
@@ -1680,7 +1680,7 @@ router.post('/scrap', async (req, res) => {
     await writeEvent(pool, processCode.toUpperCase(), processRecordID, 'SCRAP',
       `Scrap: ${quantity} ${unitOfMeasure} — reason ${reasonID}`, 1, uid);
 
-    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+    getNexusPool().then(kPool => notify(kPool, {
       title:       'Scrap Pending Approval',
       body:        `${quantity} ${unitOfMeasure} scrap logged on ${processCode.toUpperCase()}-${String(processRecordID).padStart(8,'0')} — awaiting supervisor approval.`,
       severity:    1,
@@ -1698,7 +1698,7 @@ router.post('/scrap', async (req, res) => {
 
 router.get('/batch/:processCode/:recordId/events', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('pc',  sql.NVarChar(5), req.params.processCode.toUpperCase())
       .input('rid', sql.Int,         Number(req.params.recordId))
@@ -1715,7 +1715,7 @@ router.post('/event', async (req, res) => {
   if (!processCode || !processRecordID || !eventType || !message)
     return res.status(400).json({ success: false, error: 'processCode, processRecordID, eventType and message are required.' });
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     await writeEvent(pool, processCode.toUpperCase(), processRecordID, eventType, message, severity ?? 0, userId(req));
     res.status(201).json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -1728,7 +1728,7 @@ router.get('/history', async (req, res) => {
   const offset = (Number(page) - 1) * Number(pageSize);
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const parts = [];
 
     // Build a single request object that carries all filter parameters
@@ -1775,7 +1775,7 @@ router.get('/history', async (req, res) => {
 
 router.get('/ewald/:ewaldId/boxes', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('id', sql.Int, Number(req.params.ewaldId))
       .query(`SELECT EwaldBoxID, PiecesEA, CustomerCode, SAPBatchNumber, BackflushedAt, IsReversed, ReversedAt, ReversalDocumentSAP
@@ -1788,7 +1788,7 @@ router.post('/ewald/:ewaldId/boxes', async (req, res) => {
   const { piecesEA, customerCode, sapBatchNumber } = req.body;
   if (!piecesEA) return res.status(400).json({ success: false, error: 'piecesEA is required.' });
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
     const ewaldId = Number(req.params.ewaldId);
 
@@ -1812,7 +1812,7 @@ router.post('/sap-posting', async (req, res) => {
   const { processCode, processRecordID, postingType, quantity, unitOfMeasure,
           materialDocumentSAP, salesOrderSAP, productionOrderSAP, sapBatchNumber, isSuccess, errorMessage } = req.body;
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     await pool.request()
@@ -1849,7 +1849,7 @@ router.get('/reversal/search', async (req, res) => {
   const { materialDocument } = req.query;
   if (!materialDocument) return res.status(400).json({ success: false, error: 'materialDocument is required.' });
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('doc', sql.NVarChar(10), materialDocument)
       .query(`SELECT SAPPostingID, ProcessCode, ProcessRecordID, PostingType, Quantity, UnitOfMeasure,
@@ -1911,7 +1911,7 @@ router.patch('/reversal/:sapPostingId', async (req, res) => {
   if (!reversalDocumentSAP) return res.status(400).json({ success: false, error: 'reversalDocumentSAP is required.' });
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     // Get the posting to find the process record
@@ -2056,7 +2056,7 @@ async function insertScrapDocuments(pool, scrapID, responses, uid) {
 
 router.get('/scrap/summary', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT se.ProcessCode,
              sr.ReasonCode, sr.ReasonDescription,
@@ -2080,7 +2080,7 @@ router.get('/scrap/summary', async (req, res) => {
 
 router.get('/scrap/failed', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT se.ScrapID, se.ProcessCode, se.ProcessRecordID,
              se.ReasonID, sr.ReasonCode, sr.ReasonDescription,
@@ -2093,7 +2093,7 @@ router.get('/scrap/failed', async (req, res) => {
                       br.Material, cl.Material, tw.Material, ew.Material, ha.Material) AS Material
       FROM   prod.ScrapEntries se
       JOIN   prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-      LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = se.EnteredByUserID
+      LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = se.EnteredByUserID
       LEFT JOIN prod.Mixing       mx ON mx.MixingID       = se.ProcessRecordID AND se.ProcessCode = 'MX'
       LEFT JOIN prod.Drumming     dr ON dr.DrummingID     = se.ProcessRecordID AND se.ProcessCode = 'DR'
       LEFT JOIN prod.Extrusion    ex ON ex.ExtrusionID    = se.ProcessRecordID AND se.ProcessCode = 'EX'
@@ -2114,7 +2114,7 @@ router.get('/scrap/failed', async (req, res) => {
 router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   const scrapID = Number(req.params.scrapId);
   const { quantity, reasonID } = req.body;
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
   const uid  = userId(req);
 
   try {
@@ -2194,7 +2194,7 @@ router.patch('/scrap/:scrapId/retry', requirePermission('PROD_SUPERVISOR'), asyn
 router.get('/scrap/entries', async (req, res) => {
   const { processCode, processRecordID, reasonCode } = req.query;
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const request = pool.request();
     let where = '';
     if (processCode) {
@@ -2222,7 +2222,7 @@ router.get('/scrap/entries', async (req, res) => {
                       br.Material, cl.Material, tw.Material, ew.Material, ha.Material) AS Material
       FROM   prod.ScrapEntries se
       LEFT JOIN prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-      LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = se.EnteredByUserID
+      LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = se.EnteredByUserID
       LEFT JOIN prod.Mixing       mx ON mx.MixingID       = se.ProcessRecordID AND se.ProcessCode = 'MX'
       LEFT JOIN prod.Drumming     dr ON dr.DrummingID     = se.ProcessRecordID AND se.ProcessCode = 'DR'
       LEFT JOIN prod.Extrusion    ex ON ex.ExtrusionID    = se.ProcessRecordID AND se.ProcessCode = 'EX'
@@ -2279,7 +2279,7 @@ router.get('/scrap/entries', async (req, res) => {
 router.get('/users', async (req, res) => {
   const { q } = req.query;
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('q', sql.NVarChar(80), `%${q || ''}%`)
       .query(`SELECT UserID, Username,
@@ -2290,7 +2290,7 @@ router.get('/users', async (req, res) => {
                        THEN FirstName + N' ' + LastName
                        ELSE Username
                      END AS DisplayName
-              FROM kongsberg.dbo.PortalUsers
+              FROM Nexus.dbo.PortalUsers
               WHERE IsActive=1
                 AND (Username   LIKE @q
                   OR FirstName  LIKE @q
@@ -2318,7 +2318,7 @@ router.post('/mixing/entry', async (req, res) => {
   }))
     return res.status(400).json({ success: false, error: 'Each tub weight must be greater than 0 and no more than 38 KG.' });
 
-  const pool    = await getProductionPool();
+  const pool    = await getNexusOperationsPool();
   const uid     = userId(req);
   const shiftID = currentShiftID();
   const totalWeightKG = tubs.reduce((s, t) => s + Number(t.weightKG || 0), 0);
@@ -2460,7 +2460,7 @@ router.post('/mixing/entry', async (req, res) => {
       .query(`UPDATE prod.Mixing SET Status=6 WHERE MixingID=@rid`);
 
     const mixRef = `MX-${String(mixingID).padStart(8, '0')}`;
-    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+    getNexusPool().then(kPool => notify(kPool, {
       title:       'SAP Backflush Failed',
       body:        `${mixRef} (Mixing) had one or more tubs fail SAP posting.`,
       severity:    2,
@@ -2517,7 +2517,7 @@ router.post('/drumming/entry', async (req, res) => {
   if (!material || !coilLengths.length)
     return res.status(400).json({ success: false, error: 'material and at least one coilLength are required.' });
 
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
 
   try { await assertParentBatchesReversed(pool, parentBatches); }
   catch (err) { return res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
@@ -2696,7 +2696,7 @@ async function submitDrumming(req, res, entryType) {
   if (!material || !packagingID || !weightKG)
     return res.status(400).json({ success: false, error: 'material, packagingID, weightKG and at least one coilLength are required.' });
 
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
 
   try { await assertParentBatchesReversed(pool, parentBatches); }
   catch (err) { return res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
@@ -2853,7 +2853,7 @@ async function submitDrumming(req, res, entryType) {
       await writeEvent(pool, 'DR', drummingID, 'NOTE',
         `BOM mismatch: backflushed ${material}, BOM expects ${expectedText}, traceability shows ${actualText} (entered by ${username}).`, 2, uid);
 
-      sql.connect(sqlConfig).then(kPool => notify(kPool, {
+      getNexusPool().then(kPool => notify(kPool, {
         title:       'Drumming traceability does not match BOM',
         body:        `${drumRef} backflushed ${material} — BOM expects ${expectedText}, but traceability shows ${actualText}. Entered by ${username}.`,
         severity:    2,
@@ -2889,13 +2889,12 @@ async function submitDrumming(req, res, entryType) {
     let stockSyncWarning;
     if (entryType === 'customer' && orderNumber && orderItem) {
       try {
-        const kPool = await sql.connect(sqlConfig);
-        await kPool.request()
+        await pool.request()
           .input('ref',  sql.NVarChar(10),  orderNumber)
           .input('item', sql.NVarChar(6),   orderItem)
           .input('qty',  sql.Decimal(15,3), totalLength)
           .query(`
-            UPDATE dbo.AgreementSnapshot
+            UPDATE log.AgreementSnapshot
             SET DockStockAllocated = ISNULL(DockStockAllocated,0) + @qty
             WHERE OriginalDoc = @ref AND OriginalDocItem = @item`);
       } catch (err) {
@@ -2930,7 +2929,7 @@ async function submitDrumming(req, res, entryType) {
 
     await writeEvent(pool, 'DR', drummingID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
 
-    sql.connect(sqlConfig).then(kPool => notify(kPool, {
+    getNexusPool().then(kPool => notify(kPool, {
       title:       'SAP Backflush Failed',
       body:        `${drumRef} (Drumming) failed to post to SAP: ${errMsg}`,
       severity:    2,
@@ -2956,7 +2955,7 @@ router.post('/drumming/customer', async (req, res) => { try { await submitDrummi
 
 router.get('/mixing/:mixingId/tubs', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('id', sql.Int, Number(req.params.mixingId))
       .query(`SELECT TubID, TubSeq, TubWeightKG,
@@ -2994,7 +2993,7 @@ const MX_AGE_BUCKET_SQL = `CASE
 // Batches" queue (GET /mixing/expired), not this operator-facing list.
 router.get('/mixing/staging/queue', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT t.TubID, t.MixingID, t.TubSeq, t.SupplierTubNo, t.TubWeightKG,
              m.Material, m.MixCode, m.MixRef, m.CompletedAt,
@@ -3071,7 +3070,7 @@ async function stageTub(pool, uid, tubId) {
 // convention for entry-level routes elsewhere in this file).
 router.patch('/mixing/tubs/:tubId/stage', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const { status, body } = await stageTub(pool, userId(req), Number(req.params.tubId));
     res.status(status).json(body);
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
@@ -3090,7 +3089,7 @@ router.patch('/mixing/tubs/stage-by-ref', async (req, res) => {
     return res.status(400).json({ success: false, error: `Unrecognised ticket format: "${raw}". Expected something like MX-00000064-T1.` });
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const mixingId = Number(match[1]);
     const tubSeq   = Number(match[2]);
 
@@ -3113,7 +3112,7 @@ router.post('/mixing/tubs/:tubId/return-to-conditioning', async (req, res) => {
   try {
     if (!(quantityKG > 0)) return res.status(400).json({ success: false, error: 'quantityKG must be greater than 0.' });
 
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     const cur = await pool.request().input('id', sql.Int, tubId)
@@ -3146,7 +3145,7 @@ router.post('/mixing/tubs/:tubId/return-to-conditioning', async (req, res) => {
 router.get('/mixing/tubs/search', async (req, res) => {
   const qRaw = String(req.query.q || '').trim();
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().input('q', sql.NVarChar(60), qRaw ? `%${qRaw}%` : null).query(`
       SELECT TOP 50
              t.TubID, t.MixingID, t.TubSeq, t.SupplierTubNo, t.TubWeightKG,
@@ -3167,7 +3166,7 @@ router.get('/mixing/tubs/search', async (req, res) => {
 // Expired, unstaged, un-actioned tubs — the supervisor review queue.
 router.get('/mixing/expired', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request().query(`
       SELECT t.TubID, t.MixingID, t.TubSeq, t.SupplierTubNo, t.TubWeightKG,
              m.Material, m.MixCode, m.MixRef, m.CompletedAt,
@@ -3190,7 +3189,7 @@ router.get('/mixing/expired', requirePermission('PROD_SUPERVISOR'), async (req, 
 router.post('/mixing/tubs/:tubId/expiry/scrap', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   const tubId    = Number(req.params.tubId);
   const reasonID = Number(req.body?.reasonID) || 241; // default: 'Out of date polymer mix' (AppliesTo='MX')
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
   const uid  = userId(req);
   let scrapID;
 
@@ -3264,7 +3263,7 @@ router.post('/mixing/tubs/:tubId/expiry/override', requirePermission('PROD_SUPER
   try {
     if (!reason) return res.status(400).json({ success: false, error: 'A reason is required to override expiry.' });
 
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     const cur = await pool.request().input('id', sql.Int, tubId).query(`
@@ -3297,7 +3296,7 @@ router.post('/mixing/tubs/:tubId/expiry/override', requirePermission('PROD_SUPER
 
 router.get('/drumming/:drummingId/coils', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('id', sql.Int, Number(req.params.drummingId))
       .query(`SELECT CoilID, CoilSeq, LengthM FROM prod.DrummingCoils WHERE DrummingID=@id ORDER BY CoilSeq`);
@@ -3310,7 +3309,7 @@ router.get('/drumming/:drummingId/coils', async (req, res) => {
 // applied at submission time).
 router.get('/drumming/:drummingId/reversal-status', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('id', sql.Int, Number(req.params.drummingId))
       .query(`SELECT IsReversed FROM prod.Drumming WHERE DrummingID=@id`);
@@ -3322,11 +3321,11 @@ router.get('/drumming/:drummingId/reversal-status', async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── Drumming Ticket / Order Lookup ────────────────────────────────────────
-// Searches dbo.AgreementSnapshot — a separate database (kongsberg, via
-// sqlConfig) from the prod.* schema the rest of this file uses (Production
-// database, via getProductionPool()) — see config.js's comment on
-// getProductionPool for why these are two pools. Unlike the Production
-// Schedule report (routes/productionschedulesql.js), this is PTFE-only-free
+// Searches log.AgreementSnapshot — same NexusOperations database as the
+// prod.* schema the rest of this file uses, just a different schema (the
+// two used to be separate databases — kongsberg vs Production — before the
+// Nexus/NexusOperations restructure; see migrations/README.md). Unlike the
+// Production Schedule report (routes/productionschedulesql.js), this is PTFE-only-free
 // and unwindowed: every open value stream, every due date, since an
 // operator drumming up an order needs to find it regardless of which
 // report bucket it'd otherwise fall into.
@@ -3356,7 +3355,7 @@ router.get('/order-lookup', async (req, res) => {
     if (!material && !customer)
       return res.status(400).json({ success: false, error: 'Enter a part number or customer number to search.' });
 
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     const r = pool.request();
     const conditions = [];
     if (material) { r.input('mat', sql.NVarChar(40), `%${material}%`); conditions.push('Material LIKE @mat'); }
@@ -3368,7 +3367,7 @@ router.get('/order-lookup', async (req, res) => {
 
     const result = await r.query(`
       SELECT ${AGREEMENT_LOOKUP_COLUMNS}
-      FROM dbo.AgreementSnapshot
+      FROM log.AgreementSnapshot
       WHERE ${conditions.join(' AND ')}
       ORDER BY RequestDate, CustomerName, ReferenceDocument, Item`);
 
@@ -3381,12 +3380,12 @@ router.get('/order-lookup', async (req, res) => {
 // drumming, and material/customer auto-fill from the selected row.
 router.get('/order-lookup/by-order/:orderNumber', async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     const result = await pool.request()
       .input('ref', sql.NVarChar(10), req.params.orderNumber.trim())
       .query(`
         SELECT ${AGREEMENT_LOOKUP_COLUMNS}
-        FROM dbo.AgreementSnapshot
+        FROM log.AgreementSnapshot
         WHERE OriginalDoc = @ref
         ORDER BY Item`);
 
@@ -3401,7 +3400,7 @@ router.get('/order-lookup/by-order/:orderNumber', async (req, res) => {
 // Combines the AgreementSnapshot line, a live SAP RFC_READ_TEXT lookup for
 // the order's special-instructions text (via the new SapServer endpoint —
 // deliberately NOT cached, per the user's "process critical" instruction),
-// and the standing dbo.CustomerStandardInstructions text for the customer.
+// and the standing log.CustomerStandardInstructions text for the customer.
 // Served as a full HTML page (same pattern as buildProductionPlanHTML in
 // routes/performance.js) and opened client-side with window.open(...,
 // '_blank'), which auto-triggers window.print() — prints to the operator's
@@ -3409,13 +3408,13 @@ router.get('/order-lookup/by-order/:orderNumber', async (req, res) => {
 // printer TCP flow labelPrint()/tcpPrint() use elsewhere in this app.
 
 async function loadDrummingTicketData(referenceDocument, item) {
-  const pool = await sql.connect(sqlConfig);
+  const pool = await getNexusOperationsPool();
   const lineRes = await pool.request()
     .input('ref', sql.NVarChar(10), referenceDocument)
     .input('item', sql.NVarChar(6), item)
     .query(`
       SELECT ${AGREEMENT_LOOKUP_COLUMNS}
-      FROM dbo.AgreementSnapshot
+      FROM log.AgreementSnapshot
       WHERE OriginalDoc = @ref AND OriginalDocItem = @item`);
 
   const line = lineRes.recordset[0];
@@ -3423,7 +3422,7 @@ async function loadDrummingTicketData(referenceDocument, item) {
 
   const custRes = await pool.request()
     .input('cust', sql.NVarChar(10), line.Customer)
-    .query(`SELECT Instructions FROM dbo.CustomerStandardInstructions WHERE Customer = @cust`);
+    .query(`SELECT Instructions FROM log.CustomerStandardInstructions WHERE Customer = @cust`);
   const customerStandardInstructions = custRes.recordset[0]?.Instructions || '';
 
   let sapInstructions = '';
@@ -3552,7 +3551,7 @@ router.get('/drumming/ticket/:referenceDocument/:item/print', async (req, res) =
 
 router.get('/failed-backflush', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     // Find all process records with Status=6 (SAP_FAILED)
     // and join the most recent failed SAP posting for the error message
@@ -3590,7 +3589,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
   const uid  = userId(req);
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     if (code === 'MX') {
       const { mixCode, supplierBatchNo, supplierTubNo, notes } = req.body;
@@ -3897,7 +3896,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
     return res.status(400).json({ success: false, error: `Retry not yet implemented for process ${code}.` });
 
   } catch (sapErr) {
-    const pool2 = await getProductionPool();
+    const pool2 = await getNexusOperationsPool();
     const errMsg = sapErr.response?.data?.error || sapErr.message;
     audit('SAP_ERROR', req.session?.user?.username, `'${code}${String(id).padStart(8,'0')}' FAILED - Message = "${errMsg}"`, req);
     const cfg = PROCESS[code];
@@ -3925,7 +3924,7 @@ router.patch('/failed-backflush/:processCode/:recordId/cancel', requirePermissio
   }
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     await pool.request()
       .input('id', sql.Int, id)
       .query(`UPDATE ${table} SET Status=5 WHERE ${pk}=@id AND Status=6`);
@@ -3940,7 +3939,7 @@ router.patch('/failed-backflush/:processCode/:recordId/cancel', requirePermissio
 router.get('/mixing/data', async (req, res) => {
   const { material, dateFrom, dateTo, shift, supplierBatchNo } = req.query;
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('mat',  sql.NVarChar(18),  material       ? `%${material}%`       : null)
       .input('from', sql.DateTime,      dateFrom        ? new Date(dateFrom)     : null)
@@ -3955,7 +3954,7 @@ router.get('/mixing/data', async (req, res) => {
               FROM   prod.Mixing m
               LEFT JOIN prod.Shifts              s  ON s.ShiftID   = m.ShiftID
               LEFT JOIN prod.StatusCodes         sc ON sc.StatusID = m.Status
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID  = m.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID  = m.CreatedByUserID
               WHERE  (@mat IS NULL OR m.Material       LIKE @mat)
                 AND  (@from IS NULL OR m.StartedAt    >= @from)
                 AND  (@to   IS NULL OR m.StartedAt    <= @to)
@@ -3971,7 +3970,7 @@ router.get('/mixing/data', async (req, res) => {
 router.get('/drumming/data', async (req, res) => {
   const { material, dateFrom, dateTo, customerID, salesOrderSAP } = req.query;
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('mat',  sql.NVarChar(18), material      ? `%${material}%`      : null)
       .input('from', sql.DateTime,     dateFrom       ? new Date(dateFrom)    : null)
@@ -3986,7 +3985,7 @@ router.get('/drumming/data', async (req, res) => {
               FROM   prod.Drumming d
               LEFT JOIN prod.Shifts              s  ON s.ShiftID   = d.ShiftID
               LEFT JOIN prod.StatusCodes         sc ON sc.StatusID = d.Status
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID  = d.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID  = d.CreatedByUserID
               WHERE  (@mat  IS NULL OR d.Material      LIKE @mat)
                 AND  (@from IS NULL OR d.StartedAt    >= @from)
                 AND  (@to   IS NULL OR d.StartedAt    <= @to)
@@ -4001,7 +4000,7 @@ router.get('/drumming/data', async (req, res) => {
 
 router.get('/scrap/pending', async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     // Column-existence guards: both IsApproved and IsVoided were added in migrations.
     // If either column is absent the filter is omitted so the page still renders.
@@ -4024,7 +4023,7 @@ router.get('/scrap/pending', async (req, res) => {
                       br.Material, cl.Material, tw.Material, ew.Material, ha.Material) AS Material
       FROM   prod.ScrapEntries se
       JOIN   prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-      LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = se.EnteredByUserID
+      LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = se.EnteredByUserID
       LEFT JOIN prod.Mixing       mx ON mx.MixingID       = se.ProcessRecordID AND se.ProcessCode = 'MX'
       LEFT JOIN prod.Drumming     dr ON dr.DrummingID     = se.ProcessRecordID AND se.ProcessCode = 'DR'
       LEFT JOIN prod.Extrusion    ex ON ex.ExtrusionID    = se.ProcessRecordID AND se.ProcessCode = 'EX'
@@ -4047,7 +4046,7 @@ router.post('/scrap/approve', requirePermission('PROD_SUPERVISOR'), async (req, 
   if (!Array.isArray(scrapIDs) || !scrapIDs.length)
     return res.status(400).json({ success: false, error: 'scrapIDs array required.' });
 
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
   const uid  = userId(req);
 
   const results = await Promise.all(scrapIDs.map(async (scrapID) => {
@@ -4142,7 +4141,7 @@ router.post('/scrap/reject', requirePermission('PROD_SUPERVISOR'), async (req, r
   if (!Array.isArray(scrapIDs) || !scrapIDs.length)
     return res.status(400).json({ success: false, error: 'scrapIDs array required.' });
 
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
   const uid  = userId(req);
 
   const results = await Promise.all(scrapIDs.map(async (scrapID) => {
@@ -4185,7 +4184,7 @@ router.get('/scrap/:scrapId/documents', async (req, res) => {
   if (!scrapID || isNaN(scrapID))
     return res.status(400).json({ success: false, error: 'Invalid scrap ID.' });
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('id', sql.Int, scrapID)
       .query(`
@@ -4231,7 +4230,7 @@ function scrapDocSql(where) {
     FROM   prod.ScrapMaterialDocuments smd
     JOIN   prod.ScrapEntries se ON se.ScrapID = smd.ScrapID
     LEFT JOIN prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID
-    LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = smd.PostedByUserID
+    LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = smd.PostedByUserID
     LEFT JOIN (
       SELECT N'MX' AS PC, MixingID    AS RID, MixRef    AS BatchRef, Material, IsReversed AS ProcRev FROM prod.Mixing
       UNION ALL SELECT N'EX', ExtrusionID,    ExtRef,   Material, IsReversed FROM prod.Extrusion
@@ -4249,7 +4248,7 @@ function scrapDocSql(where) {
 // Unreversed scrap docs where the parent backflush has since been reversed
 router.get('/scrap-reversal/missed', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .query(scrapDocSql(`AND smd.IsReversed = 0
          AND (ISNULL(prc.ProcRev, 0) = 1
@@ -4269,7 +4268,7 @@ router.get('/scrap-reversal/search', requirePermission('PROD_SUPERVISOR'), async
     return res.status(400).json({ success: false, error: 'At least one search parameter is required.' });
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const req2 = pool.request();
     const conds = [];
 
@@ -4293,7 +4292,7 @@ router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), asy
     return res.status(400).json({ success: false, error: 'scrapDocumentID and materialDocument are required.' });
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const uid  = userId(req);
 
     const chk = await pool.request()
@@ -4379,7 +4378,7 @@ router.get('/reversal/by-batch/:processCode/:recordId', async (req, res) => {
   const pc  = req.params.processCode.toUpperCase();
   const rid = Number(req.params.recordId);
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
     const r = await pool.request()
       .input('pc',  sql.NVarChar(5), pc)
       .input('rid', sql.Int,         rid)
@@ -4388,7 +4387,7 @@ router.get('/reversal/by-batch/:processCode/:recordId', async (req, res) => {
                      sp.ReversalDocumentSAP, sp.PostedAt, sp.ReversedAt,
                      pu.Username AS PostedBy
               FROM   prod.SAPPostings sp
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = sp.PostedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = sp.PostedByUserID
               WHERE  sp.ProcessCode = @pc AND sp.ProcessRecordID = @rid
                 AND  sp.IsSuccess = 1 AND sp.MaterialDocumentSAP IS NOT NULL
               ORDER BY sp.PostedAt DESC`);
@@ -4404,7 +4403,7 @@ router.get('/reversal/find', async (req, res) => {
     return res.status(400).json({ success: false, error: 'At least one search parameter is required.' });
 
   try {
-    const pool = await getProductionPool();
+    const pool = await getNexusOperationsPool();
 
     // Build full datetime strings so SQL Server can use CONVERT style 120
     // (yyyy-mm-dd hh:mi:ss — reliably supported in SQL Server 2005).
@@ -4434,7 +4433,7 @@ router.get('/reversal/find', async (req, res) => {
           UNION ALL SELECT N'TW', TapeWrapID,     Material FROM prod.TapeWrap
           UNION ALL SELECT N'DR', DrummingID,     Material FROM prod.Drumming
         ) mat ON mat.PC = sp.ProcessCode AND mat.RID = sp.ProcessRecordID
-        LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = sp.PostedByUserID
+        LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = sp.PostedByUserID
         WHERE  sp.IsSuccess = 1 AND sp.MaterialDocumentSAP IS NOT NULL
           AND  (@material IS NULL OR mat.Material LIKE @material)
           AND  (@dateFrom IS NULL OR sp.PostedAt >= CONVERT(datetime, @dateFrom, 120))
@@ -4453,7 +4452,7 @@ router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, 
   if (!Array.isArray(materialDocuments) || !materialDocuments.length)
     return res.status(400).json({ success: false, error: 'materialDocuments array required.' });
 
-  const pool  = await getProductionPool();
+  const pool  = await getNexusOperationsPool();
   const uid   = userId(req);
   const total = materialDocuments.length;
 
@@ -4655,7 +4654,7 @@ async function markSapFailed(res, req, pool, code, cfg, recordID, batchRef, leng
 
   await writeEvent(pool, code, recordID, 'SAP_FAIL', `SAP backflush failed: ${errMsg}`, 2, uid);
 
-  sql.connect(sqlConfig).then(kPool => notify(kPool, {
+  getNexusPool().then(kPool => notify(kPool, {
     title:       'SAP Backflush Failed',
     body:        `${batchRef} (${code}) failed to post to SAP: ${errMsg}`,
     severity:    2,

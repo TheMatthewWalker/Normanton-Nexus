@@ -3,7 +3,7 @@ import express     from 'express';
 import sql         from 'mssql';
 import PDFDocument from 'pdfkit';
 import bwipjs      from 'bwip-js';
-import { getProductionPool, printersConfig, sqlConfig } from '../config.js';
+import { getNexusOperationsPool, getNexusPool, printersConfig } from '../config.js';
 
 const router = express.Router();
 
@@ -69,7 +69,7 @@ function renderedH(buf, displayW) {
 // ── DB fetch (shared by both HTML preview and PDF print) ──────────────────────
 async function fetchLabelData(processCode, recordID) {
   const cfg  = PROC[processCode];
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
 
   let rec;
   if (processCode === 'MX') {
@@ -83,7 +83,7 @@ async function fetchLabelData(processCode, recordID) {
                      COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
               FROM   prod.Mixing m
               LEFT JOIN prod.Shifts              s  ON s.ShiftID  = m.ShiftID
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = m.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = m.CreatedByUserID
               WHERE  m.MixingID = @id`);
     rec = r.recordset[0];
   } else {
@@ -98,7 +98,7 @@ async function fetchLabelData(processCode, recordID) {
               FROM   ${cfg.table} t
               LEFT JOIN prod.Shifts              s  ON s.ShiftID   = t.ShiftID
               LEFT JOIN prod.Machines            mc ON mc.MachineID = t.MachineID
-              LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID  = t.CreatedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID  = t.CreatedByUserID
               WHERE  t.${cfg.pk} = @id`);
     rec = r.recordset[0];
   }
@@ -110,7 +110,7 @@ async function fetchLabelData(processCode, recordID) {
     .query(`SELECT bo.IsPrimary, pu.Username,
                    COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
             FROM   prod.BatchOperators bo
-            JOIN   kongsberg.dbo.PortalUsers pu ON pu.UserID = bo.UserID
+            JOIN   Nexus.dbo.PortalUsers pu ON pu.UserID = bo.UserID
             WHERE  bo.ProcessCode = @pc AND bo.ProcessRecordID = @rid
               AND  bo.RemovedAt IS NULL
             ORDER  BY bo.IsPrimary DESC, bo.AssignedAt`);
@@ -172,7 +172,7 @@ async function fetchLabelData(processCode, recordID) {
 // document, and supplier tub number.
 
 async function fetchMixingHeader(recordID) {
-  const pool = await getProductionPool();
+  const pool = await getNexusOperationsPool();
   const r = await pool.request()
     .input('id', sql.Int, recordID)
     .query(`SELECT m.MixingID AS RecordID, m.MixRef AS BatchRef,
@@ -182,7 +182,7 @@ async function fetchMixingHeader(recordID) {
                    COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
             FROM   prod.Mixing m
             LEFT JOIN prod.Shifts              s  ON s.ShiftID  = m.ShiftID
-            LEFT JOIN kongsberg.dbo.PortalUsers pu ON pu.UserID = m.CreatedByUserID
+            LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = m.CreatedByUserID
             WHERE  m.MixingID = @id`);
   const rec = r.recordset[0];
   if (!rec) throw Object.assign(new Error('Record not found.'), { statusCode: 404 });
@@ -193,7 +193,7 @@ async function fetchMixingHeader(recordID) {
     .query(`SELECT bo.IsPrimary, pu.Username,
                    COALESCE(NULLIF(RTRIM(ISNULL(pu.FirstName,'')+' '+ISNULL(pu.LastName,'')), ''), pu.Username) AS DisplayName
             FROM   prod.BatchOperators bo
-            JOIN   kongsberg.dbo.PortalUsers pu ON pu.UserID = bo.UserID
+            JOIN   Nexus.dbo.PortalUsers pu ON pu.UserID = bo.UserID
             WHERE  bo.ProcessCode = @pc AND bo.ProcessRecordID = @rid
               AND  bo.RemovedAt IS NULL
             ORDER  BY bo.IsPrimary DESC, bo.AssignedAt`);
@@ -753,10 +753,10 @@ router.get('/printers', async (req, res) => {
     const uid = req.session?.user?.userID;
     let userDefault = null;
     if (uid) {
-      const pool = await sql.connect(sqlConfig);
+      const pool = await getNexusPool();
       const r = await pool.request()
         .input('uid', sql.Int, uid)
-        .query(`SELECT DefaultPrinterID FROM kongsberg.dbo.PortalUsers WHERE UserID = @uid`);
+        .query(`SELECT DefaultPrinterID FROM dbo.PortalUsers WHERE UserID = @uid`);
       userDefault = r.recordset[0]?.DefaultPrinterID || null;
     }
     res.json({
@@ -775,11 +775,11 @@ router.patch('/printers/default', async (req, res) => {
   if (!uid) return res.status(401).json({ error: 'Not logged in.' });
   const { printerId } = req.body;
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     await pool.request()
       .input('uid', sql.Int,           uid)
       .input('pid', sql.NVarChar(50),  printerId || null)
-      .query(`UPDATE kongsberg.dbo.PortalUsers SET DefaultPrinterID = @pid WHERE UserID = @uid`);
+      .query(`UPDATE dbo.PortalUsers SET DefaultPrinterID = @pid WHERE UserID = @uid`);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

@@ -1,20 +1,20 @@
 import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
-import { sqlConfig, sapConfig } from '../config.js';
+import { sapConfig, getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import { makeSapToken, sapAgent } from './sap.js';
 import { reverseStagedPackage } from './sapStaging.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.DeliveryMain');
+            .query('SELECT * FROM log.DeliveryMain');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -27,7 +27,7 @@ router.get('/id/:deliveryId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query('SELECT * FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId');
+            .query('SELECT * FROM log.DeliveryMain WHERE deliveryID = @deliveryId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -40,7 +40,7 @@ router.get('/customer/:customerId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('customerId', sql.BigInt, req.params.customerId)
-            .query('SELECT * FROM Logistics.dbo.DeliveryMain WHERE customerID = @customerId');
+            .query('SELECT * FROM log.DeliveryMain WHERE customerID = @customerId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -53,7 +53,7 @@ router.get('/operator/:operatorName', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('operatorName', sql.NVarChar, req.params.operatorName)
-            .query('SELECT * FROM Logistics.dbo.DeliveryMain WHERE operatorName = @operatorName');
+            .query('SELECT * FROM log.DeliveryMain WHERE operatorName = @operatorName');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -68,7 +68,7 @@ router.get('/daterange', async (req, res) => {
         const result = await pool.request()
             .input('dateFrom', sql.DateTime, new Date(dateFrom))
             .input('dateTo', sql.DateTime, new Date(dateTo))
-            .query('SELECT * FROM Logistics.dbo.DeliveryMain WHERE dispatchDate BETWEEN @dateFrom AND @dateTo');
+            .query('SELECT * FROM log.DeliveryMain WHERE dispatchDate BETWEEN @dateFrom AND @dateTo');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -104,7 +104,7 @@ router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
             .input('deliveryPriority', sql.Int, deliveryPriority ?? 0)
             .input('deliveryService', sql.NVarChar, deliveryService ?? null)
             .input('incoterms', sql.NVarChar(3), incoterms ?? null)
-            .query(`INSERT INTO Logistics.dbo.DeliveryMain
+            .query(`INSERT INTO log.DeliveryMain
                 (deliveryID, customerID, dispatchDate, deliveryDate, completionDate, completionStatus,
                  operatorName, supervisorName, netWeight, grossWeight, palletCount,
                  deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
@@ -129,8 +129,8 @@ router.get('/open-picksheets', async (req, res) => {
             .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dispatchDate,
                            dm.deliveryService, dm.picksheetComment, dm.deliveryPriority,
                            dm.incoterms
-                    FROM Logistics.dbo.DeliveryMain dm
-                    LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
+                    FROM log.DeliveryMain dm
+                    LEFT JOIN log.Destinations d ON dm.customerID = d.destinationID
                     WHERE dm.completionStatus = 0 AND dm.deliveryCancelled = 0
                     ORDER BY dm.deliveryPriority DESC, dm.dispatchDate ASC`);
         res.json({ success: true, data: result.recordset });
@@ -149,8 +149,8 @@ router.get('/packaging-holding', async (req, res) => {
             .query(`SELECT dm.deliveryID, dm.customerID, d.destinationName, dm.dispatchDate,
                            dm.deliveryService, dm.picksheetComment, dm.deliveryPriority,
                            dm.incoterms, dm.movedToHoldingAtUtc
-                    FROM Logistics.dbo.DeliveryMain dm
-                    LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
+                    FROM log.DeliveryMain dm
+                    LEFT JOIN log.Destinations d ON dm.customerID = d.destinationID
                     WHERE dm.completionStatus = 1
                       AND dm.pendingPackagingData = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
@@ -169,7 +169,7 @@ async function cancelHeldPicksheet(pool, deliveryId) {
         .input('sapDelivery', sql.NVarChar, String(deliveryId))
         .query(`SELECT palletItemID, sapMaterial, sapBatch, sapDelivery,
                        sapSourceStorageType, sapSourceBin
-                FROM   Logistics.dbo.PalletPackages
+                FROM   log.PalletPackages
                 WHERE  sapDelivery = @sapDelivery`);
 
     const failures = [];
@@ -185,7 +185,7 @@ async function cancelHeldPicksheet(pool, deliveryId) {
 
     await pool.request()
         .input('deliveryId', sql.BigInt, deliveryId)
-        .query(`UPDATE Logistics.dbo.DeliveryMain
+        .query(`UPDATE log.DeliveryMain
                 SET deliveryCancelled = 1, pendingPackagingData = 0
                 WHERE deliveryID = @deliveryId`);
     return { success: true };
@@ -208,7 +208,7 @@ router.delete('/:deliveryId/packaging-holding', async (req, res) => {
         const checkRes = await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
-                    FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId`);
+                    FROM log.DeliveryMain WHERE deliveryID = @deliveryId`);
         if (!checkRes.recordset.length) {
             return res.status(404).json({ success: false, error: 'Delivery not found' });
         }
@@ -240,7 +240,7 @@ router.delete('/packaging-holding/all', async (req, res) => {
     try {
         const pool = await getPool();
         const idsRes = await pool.request()
-            .query(`SELECT deliveryID FROM Logistics.dbo.DeliveryMain
+            .query(`SELECT deliveryID FROM log.DeliveryMain
                     WHERE completionStatus = 1 AND pendingPackagingData = 1
                       AND ISNULL(deliveryCancelled, 0) = 0`);
 
@@ -286,13 +286,13 @@ router.get('/completed-unshipped', async (req, res) => {
                            d.defaultIncoterms, d.defaultForwarder, dm.incoterms,
                            STUFF((
                                SELECT '; ' + e.address
-                               FROM Logistics.dbo.Email e
+                               FROM log.Email e
                                WHERE e.ID = dm.customerID
                                FOR XML PATH('')
                            ), 1, 2, '') AS address
-                    FROM Logistics.dbo.DeliveryMain dm
-                    LEFT JOIN Logistics.dbo.Destinations d ON dm.customerID = d.destinationID
-                    LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+                    FROM log.DeliveryMain dm
+                    LEFT JOIN log.Destinations d ON dm.customerID = d.destinationID
+                    LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
                     WHERE dm.completionStatus = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
                       AND ISNULL(dm.pendingPackagingData, 0) = 0
@@ -317,9 +317,9 @@ router.get('/available-for-shipment/:customerId', async (req, res) => {
                            CAST(ISNULL(dm.palletCount,    0) AS decimal(18,3)) AS palletCount,
                            CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS deliveryVolume,
                            d.destinationName, d.defaultIncoterms
-                    FROM Logistics.dbo.DeliveryMain dm
-                    LEFT JOIN Logistics.dbo.Destinations  d  ON d.destinationID  = dm.customerID
-                    LEFT JOIN Logistics.dbo.ShipmentLink  sl ON sl.deliveryID    = dm.deliveryID
+                    FROM log.DeliveryMain dm
+                    LEFT JOIN log.Destinations  d  ON d.destinationID  = dm.customerID
+                    LEFT JOIN log.ShipmentLink  sl ON sl.deliveryID    = dm.deliveryID
                     WHERE dm.customerID = @customerId
                       AND dm.completionStatus = 1
                       AND ISNULL(dm.deliveryCancelled, 0) = 0
@@ -352,8 +352,8 @@ router.patch('/:deliveryId/uncomplete', async (req, res) => {
             .query(`SELECT dm.completionStatus, ISNULL(dm.deliveryCancelled, 0) AS deliveryCancelled,
                            ISNULL(dm.pendingPackagingData, 0) AS pendingPackagingData,
                            sl.deliveryID AS linkedShipmentDelivery
-                    FROM Logistics.dbo.DeliveryMain dm
-                    LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+                    FROM log.DeliveryMain dm
+                    LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
                     WHERE dm.deliveryID = @deliveryId`);
         if (!checkRes.recordset.length) {
             return res.status(404).json({ success: false, error: 'Delivery not found' });
@@ -368,7 +368,7 @@ router.patch('/:deliveryId/uncomplete', async (req, res) => {
 
         await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`UPDATE Logistics.dbo.DeliveryMain
+            .query(`UPDATE log.DeliveryMain
                     SET completionStatus = 0,
                         completionDate   = NULL,
                         palletCount      = NULL,
@@ -399,8 +399,8 @@ router.patch('/:deliveryId/cancel-picksheet', async (req, res) => {
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .query(`SELECT dm.completionStatus, ISNULL(dm.deliveryCancelled, 0) AS deliveryCancelled,
                            sl.deliveryID AS linkedShipmentDelivery
-                    FROM Logistics.dbo.DeliveryMain dm
-                    LEFT JOIN Logistics.dbo.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+                    FROM log.DeliveryMain dm
+                    LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
                     WHERE dm.deliveryID = @deliveryId`);
         if (!checkRes.recordset.length) {
             return res.status(404).json({ success: false, error: 'Delivery not found' });
@@ -455,7 +455,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
 
         const dmRes = await pool.request()
             .input('deliveryId', sql.BigInt, deliveryId)
-            .query('SELECT customerID FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId');
+            .query('SELECT customerID FROM log.DeliveryMain WHERE deliveryID = @deliveryId');
         const customerId = dmRes.recordset[0]?.customerID != null ? String(dmRes.recordset[0].customerID) : null;
 
         // Direct SapServer call — mirrors the /api/sap/* routes in sap.js
@@ -595,7 +595,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
         const pickedRes = await pool.request()
             .input('sapDelivery', sql.NVarChar, String(deliveryId))
             .query(`SELECT sapMaterial, SUM(sapQuantity) AS pickedQty
-                    FROM   Logistics.dbo.PalletPackages
+                    FROM   log.PalletPackages
                     WHERE  sapDelivery = @sapDelivery AND sapMaterial IS NOT NULL
                     GROUP  BY sapMaterial`);
         pickedRes.recordset.forEach(row => {
@@ -740,8 +740,8 @@ router.get('/:deliveryId/pallets', async (req, res) => {
                            pm.palletLength, pm.palletWidth, pm.palletHeight,
                            pm.grossWeight, pm.packagingWeight, pm.palletVolume,
                            pm.palletLocation, pm.palletCategory, pm.palletCreationDate
-                    FROM Logistics.dbo.PalletMain pm
-                    INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                    FROM log.PalletMain pm
+                    INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                     WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                     ORDER BY pm.palletCreationDate ASC`);
         res.json({ success: true, data: result.recordset });
@@ -798,7 +798,7 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
             .input('status',       sql.NVarChar(10),  status)
             .input('messages',     sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
             .input('ranByUserID',  sql.Int,           userId ?? null)
-            .query(`INSERT INTO Logistics.dbo.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
+            .query(`INSERT INTO log.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
                     VALUES (@deliveryId, @status, @messages, @ranByUserID)`);
         return { status, messages: messages || [] };
     };
@@ -807,14 +807,14 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
         // 1. Delivery + pallet + package data already sitting in our own DB.
         const dmRes = await pool.request()
             .input('deliveryId', sql.BigInt, deliveryId)
-            .query('SELECT customerID FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId');
+            .query('SELECT customerID FROM log.DeliveryMain WHERE deliveryID = @deliveryId');
         const customerId = dmRes.recordset[0]?.customerID != null ? String(dmRes.recordset[0].customerID) : '';
 
         const palletsRes = await pool.request()
             .input('deliveryId', sql.BigInt, deliveryId)
             .query(`SELECT pm.palletID, pm.palletType, pm.grossWeight, pm.packagingWeight
-                    FROM Logistics.dbo.PalletMain pm
-                    INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                    FROM log.PalletMain pm
+                    INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                     WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                     ORDER BY pm.palletID ASC`);
         const pallets = palletsRes.recordset;
@@ -825,7 +825,7 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
         const packagesRes = await pool.request()
             .input('sapDelivery', sql.NVarChar, String(deliveryId))
             .query(`SELECT palletID, sapMaterial, sapQuantity, sapBatch, sapDeliveryItem, sapPackagingInstruction
-                    FROM Logistics.dbo.PalletPackages
+                    FROM log.PalletPackages
                     WHERE sapDelivery = @sapDelivery
                     ORDER BY palletID ASC, palletItemID ASC`);
 
@@ -872,7 +872,7 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
         const weightByIdnrk = {};
         if (allIdnrks.length) {
             const pdRes = await pool.request()
-                .query(`SELECT packMaterial, packWeight FROM Logistics.dbo.PackagingData WHERE packMaterial IS NOT NULL`);
+                .query(`SELECT packMaterial, packWeight FROM log.PackagingData WHERE packMaterial IS NOT NULL`);
             pdRes.recordset.forEach(r => { weightByIdnrk[String(r.packMaterial).trim()] = Number(r.packWeight || 0); });
         }
 
@@ -1000,37 +1000,37 @@ router.patch('/:deliveryId/complete', async (req, res) => {
         const pendingRes = await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
-                    FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryId`);
+                    FROM log.DeliveryMain WHERE deliveryID = @deliveryId`);
         const wasHeldForPackaging = !!pendingRes.recordset[0]?.pendingPackagingData;
 
         await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`UPDATE Logistics.dbo.DeliveryMain
+            .query(`UPDATE log.DeliveryMain
                     SET completionStatus = 1,
                         completionDate   = GETDATE(),
                         pendingPackagingData = 0,
                         palletCount = (
                             SELECT COUNT(*)
-                            FROM Logistics.dbo.PalletMain pm
-                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            FROM log.PalletMain pm
+                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                             WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                         ),
                         grossWeight = (
                             SELECT ISNULL(SUM(pm.grossWeight), 0)
-                            FROM Logistics.dbo.PalletMain pm
-                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            FROM log.PalletMain pm
+                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                             WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                         ),
                         netWeight = (
                             SELECT ISNULL(SUM(pm.grossWeight - ISNULL(pm.packagingWeight, 0)), 0)
-                            FROM Logistics.dbo.PalletMain pm
-                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            FROM log.PalletMain pm
+                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                             WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                         ),
                         deliveryVolume = (
                             SELECT ISNULL(SUM(pm.palletVolume), 0)
-                            FROM Logistics.dbo.PalletMain pm
-                            INNER JOIN Logistics.dbo.DeliveryLink dl ON pm.palletID = dl.palletID
+                            FROM log.PalletMain pm
+                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                             WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
                         )
                     WHERE deliveryID = @deliveryId`);
@@ -1038,7 +1038,7 @@ router.patch('/:deliveryId/complete', async (req, res) => {
         const rolledUp = await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .query(`SELECT palletCount, grossWeight, netWeight
-                    FROM Logistics.dbo.DeliveryMain
+                    FROM log.DeliveryMain
                     WHERE deliveryID = @deliveryId`);
         const totals = rolledUp.recordset[0] || {};
 
@@ -1087,10 +1087,10 @@ router.get('/zdelflag/warnings', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .query(`SELECT r.deliveryID, r.status, r.messages, r.ranAtUtc
-                    FROM Logistics.dbo.DeliveryZdelflagRun r
+                    FROM log.DeliveryZdelflagRun r
                     INNER JOIN (
                         SELECT deliveryID, MAX(ranAtUtc) AS latestRun
-                        FROM Logistics.dbo.DeliveryZdelflagRun
+                        FROM log.DeliveryZdelflagRun
                         GROUP BY deliveryID
                     ) latest ON latest.deliveryID = r.deliveryID AND latest.latestRun = r.ranAtUtc
                     WHERE r.status IN ('Failed', 'Warning')
@@ -1116,7 +1116,7 @@ router.get('/:deliveryId/zdelflag/status', async (req, res) => {
         const result = await pool.request()
             .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
             .query(`SELECT TOP 1 status, messages, ranAtUtc
-                    FROM Logistics.dbo.DeliveryZdelflagRun
+                    FROM log.DeliveryZdelflagRun
                     WHERE deliveryID = @deliveryId
                     ORDER BY ranAtUtc DESC`);
         const row = result.recordset[0];
@@ -1143,7 +1143,7 @@ router.post('/:deliveryId/zdelflag/reprocess', async (req, res) => {
         const latestRes = await pool.request()
             .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
             .query(`SELECT TOP 1 status
-                    FROM Logistics.dbo.DeliveryZdelflagRun
+                    FROM log.DeliveryZdelflagRun
                     WHERE deliveryID = @deliveryId
                     ORDER BY ranAtUtc DESC`);
         const latestStatus = latestRes.recordset[0]?.status;
@@ -1170,7 +1170,7 @@ router.post('/:deliveryId/pallets', async (req, res) => {
         await pool.request()
             .input('deliveryId', sql.BigInt, req.params.deliveryId)
             .input('palletId',   sql.Int,    palletId)
-            .query(`INSERT INTO Logistics.dbo.DeliveryLink (deliveryID, palletID)
+            .query(`INSERT INTO log.DeliveryLink (deliveryID, palletID)
                     VALUES (@deliveryId, @palletId)`);
         res.status(201).json({ success: true });
     } catch (err) {
@@ -1202,13 +1202,13 @@ router.post('/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
                 .input('deliveryPriority',sql.Int,         r.deliveryPriority ?? 0)
                 .input('picksheetComment',sql.NVarChar,    r.picksheetComment ?? null)
                 .input('incoterms',       sql.NVarChar(3), r.incoterms        ?? null)
-                .query(`INSERT INTO Logistics.dbo.DeliveryMain
+                .query(`INSERT INTO log.DeliveryMain
                             (deliveryID, customerID, dispatchDate, deliveryDate, completionStatus, deliveryCancelled,
                              deliveryService, deliveryPriority, picksheetComment, incoterms)
                         SELECT @deliveryID, @customerID, @dispatchDate, @deliveryDate, 0, 0,
                                @deliveryService, @deliveryPriority, @picksheetComment, @incoterms
                         WHERE NOT EXISTS (
-                            SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
+                            SELECT 1 FROM log.DeliveryMain WHERE deliveryID = @deliveryID
                         )`);
             if (result.rowsAffected[0] > 0) inserted++;
             else skipped++;
@@ -1248,7 +1248,7 @@ async function runSapSync() {
 
         // Load all destinations once to derive deliveryService and picksheetComment
         const destResult = await pool.request()
-            .query('SELECT destinationID, defaultDeliveryService, destinationComment, destinationCountry FROM Logistics.dbo.Destinations');
+            .query('SELECT destinationID, defaultDeliveryService, destinationComment, destinationCountry FROM log.Destinations');
         const destMap = Object.fromEntries(destResult.recordset.map(d => [String(d.destinationID), d]));
 
         function parseSapDate(str) {
@@ -1314,7 +1314,7 @@ async function runSapSync() {
                             .input('destinationZone',        sql.NVarChar, zone)
                             .input('defaultDeliveryService', sql.NVarChar, null)
                             .input('defaultForwarder',       sql.NVarChar, null)
-                            .query(`INSERT INTO Logistics.dbo.Destinations
+                            .query(`INSERT INTO log.Destinations
                                         (destinationID, destinationName, destinationStreet, destinationCity,
                                          destinationPostCode, destinationCountry, defaultIncoterms,
                                          destinationComment, destinationZone,
@@ -1324,7 +1324,7 @@ async function runSapSync() {
                                            @destinationComment, @destinationZone,
                                            @defaultDeliveryService, @defaultForwarder
                                     WHERE NOT EXISTS (
-                                        SELECT 1 FROM Logistics.dbo.Destinations WHERE destinationID = @destinationID
+                                        SELECT 1 FROM log.Destinations WHERE destinationID = @destinationID
                                     )`);
 
                         // Feed straight back into destMap so this sync run picks the
@@ -1385,13 +1385,13 @@ async function runSapSync() {
                     .input('deliveryPriority', sql.Int,         0)
                     .input('picksheetComment', sql.NVarChar,    picksheetComment)
                     .input('incoterms',        sql.NVarChar(3), incoterms)
-                    .query(`INSERT INTO Logistics.dbo.DeliveryMain
+                    .query(`INSERT INTO log.DeliveryMain
                                 (deliveryID, customerID, dispatchDate, completionStatus, deliveryCancelled,
                                  deliveryService, deliveryPriority, picksheetComment, incoterms)
                             SELECT @deliveryID, @customerID, @dispatchDate, 0, 0,
                                    @deliveryService, @deliveryPriority, @picksheetComment, @incoterms
                             WHERE NOT EXISTS (
-                                SELECT 1 FROM Logistics.dbo.DeliveryMain WHERE deliveryID = @deliveryID
+                                SELECT 1 FROM log.DeliveryMain WHERE deliveryID = @deliveryID
                             )`);
                 if (result.rowsAffected[0] > 0) inserted++;
                 else skipped++;
@@ -1424,7 +1424,7 @@ async function runSapSync() {
                 .filter(Number.isFinite)
         );
         const openInNexusRes = await pool.request()
-            .query(`SELECT deliveryID FROM Logistics.dbo.DeliveryMain
+            .query(`SELECT deliveryID FROM log.DeliveryMain
                     WHERE completionStatus = 0 AND ISNULL(deliveryCancelled, 0) = 0`);
         const movedToHolding = [];
         for (const row of openInNexusRes.recordset) {
@@ -1432,7 +1432,7 @@ async function runSapSync() {
             if (sapOpenDeliveryIds.has(id)) continue;
             await pool.request()
                 .input('deliveryId', sql.BigInt, id)
-                .query(`UPDATE Logistics.dbo.DeliveryMain
+                .query(`UPDATE log.DeliveryMain
                         SET completionStatus = 1, pendingPackagingData = 1, movedToHoldingAtUtc = GETUTCDATE()
                         WHERE deliveryID = @deliveryId`);
             movedToHolding.push(id);
@@ -1470,9 +1470,9 @@ router.get('/landing-sparkline', async (req, res) => {
                           <= DATEADD(day, DATEDIFF(day, 0, dm.dispatchDate), 0)
                         THEN 1 ELSE 0
                     END AS isOnTime
-                FROM Logistics.dbo.ShipmentMain sm
-                INNER JOIN Logistics.dbo.ShipmentLink sl ON sl.shipmentID = sm.shipmentID
-                INNER JOIN Logistics.dbo.DeliveryMain dm  ON dm.deliveryID  = sl.deliveryID
+                FROM log.ShipmentMain sm
+                INNER JOIN log.ShipmentLink sl ON sl.shipmentID = sm.shipmentID
+                INNER JOIN log.DeliveryMain dm  ON dm.deliveryID  = sl.deliveryID
                 WHERE sm.collectionStatus = 1
                   AND ISNULL(sm.shipmentCancelled, 0) = 0
                   AND sm.actualCollection IS NOT NULL

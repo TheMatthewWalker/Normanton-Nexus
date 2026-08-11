@@ -25,17 +25,6 @@ export const printersConfig = config.printers || [];
 // external tools (Excel, etc.) that can't hold a portal session.
 export const apiKey = config.apiKey;
 
-export const sqlConfig = {
-  user: config.sqlConfig.user,
-  password: config.sqlConfig.password,
-  server: config.sqlConfig.server,
-  database: config.sqlConfig.database,
-  options: {
-    encrypt: false,
-    trustServerCertificate: true
-  }
-};
-
 export const resendAPI = process.env.RESEND_API_KEY
     ?? (() => { throw new Error('RESEND_API_KEY env var is not set'); })();
 
@@ -64,37 +53,67 @@ export const sapConfig = {
 };
 
 
-// ── Production database pool (separate DB, same SQL Server) ──────────────────
-let _productionPool = null;
-export async function getProductionPool() {
-  if (!_productionPool) {
-    _productionPool = new sql.ConnectionPool({
-      user:     config.sqlConfig.user,
-      password: config.sqlConfig.password,
-      server:   config.sqlConfig.server,
-      database: 'Production',
-      options:  { encrypt: false, trustServerCertificate: true },
-    });
-    await _productionPool.connect();
-  }
-  return _productionPool;
+// ── Nexus / NexusOperations / NexusArchive pools ──────────────────────────
+// The pre-defined, independently-configurable pools every route/lib file
+// uses to reach the SQL Server instance (see migrations/README.md for the
+// Kongsberg/Production/Logistics -> Nexus/NexusOperations/NexusArchive
+// restructure this replaced).
+//
+// Each pool's connection details come from config.json's optional
+// `sqlPools.<name>` block; anything not overridden there falls back to the
+// same server/user/password every other pool already uses
+// (config.json's sqlConfig), with only the database name defaulting to the
+// pool's own conventional name. This is the actual point of this whole
+// refactor: moving ONE database to a new server is "add a sqlPools.<name>
+// block naming the new server" — every other pool is untouched.
+//
+// e.g. to move just NexusOperations to a new server:
+//   "sqlPools": { "nexusOperations": { "server": "NEW-SERVER", "user": "...", "password": "..." } }
+// (database name still defaults to "NexusOperations" unless also overridden)
+function resolvePoolConfig(databaseName, poolName) {
+  const override = config.sqlPools?.[poolName];
+  return {
+    user:     override?.user     ?? config.sqlConfig.user,
+    password: override?.password ?? config.sqlConfig.password,
+    server:   override?.server   ?? config.sqlConfig.server,
+    database: override?.database ?? databaseName,
+    options:  { encrypt: false, trustServerCertificate: true },
+  };
 }
 
-// ── Logistics database pool (separate DB, same SQL Server) ──────────────────
-let _logisticsPool = null;
-export async function getLogisticsPool() {
-  if (!_logisticsPool) {
-    _logisticsPool = new sql.ConnectionPool({
-      user:     config.sqlConfig.user,
-      password: config.sqlConfig.password,
-      server:   config.sqlConfig.server,
-      database: 'Logistics',
-      options:  { encrypt: false, trustServerCertificate: true },
-    });
-    await _logisticsPool.connect();
-  }
-  return _logisticsPool;
+// Wraps a config-resolving function into a cached pool getter. The pool is
+// only cached once .connect() actually succeeds — a failed first connect
+// would otherwise permanently wedge the cache with a dead pool if the
+// ConnectionPool instance were assigned before awaiting .connect(), since
+// every later call would just return that same broken object forever, with
+// no reconnect and no retry, until the whole process restarted.
+// `pool.connected` is also rechecked on every call, so a pool that later
+// drops (server restart, network blip) gets transparently reconnected
+// instead of silently served from a dead connection.
+function makePoolGetter(getConfig) {
+  let pool = null;
+  return async function getPool() {
+    if (pool && pool.connected) return pool;
+    const candidate = new sql.ConnectionPool(getConfig());
+    await candidate.connect(); // only cache below on success
+    pool = candidate;
+    return pool;
+  };
 }
+
+export const getNexusPool = makePoolGetter(() => resolvePoolConfig('Nexus', 'nexus'));
+export const getNexusOperationsPool = makePoolGetter(() => resolvePoolConfig('NexusOperations', 'nexusOperations'));
+
+// NexusArchive — the legacy pre-Production-Nexus per-process tables
+// (Mixing/Extrusion/Convo/Ewald/Firewall/Batches/Coils/Waste/etc., plus the
+// old dbo.ScrapReasons), kept for historical reference. Only a handful of
+// read-only legacy lookup endpoints (routes/mixing.js, routes/production.js,
+// routes/reports.js) still query these — see migrations/README.md. NOTE: as
+// of this pool's introduction, no data has been copied from the old
+// kongsberg-hosted copies of these tables into NexusArchive yet (schema
+// only) — those three endpoints will return empty results until that
+// separate, deliberate data-migration step happens.
+export const getNexusArchivePool = makePoolGetter(() => resolvePoolConfig('NexusArchive', 'nexusArchive'));
 
 
 // ── Department page map — which HTML page requires which department ────────────
@@ -119,17 +138,17 @@ export const DEPT_PAGE_MAP = {
 export async function stampDbChange(username, tableName) {
   if (!username || !tableName) return;
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     await pool.request()
       .input('user',  sql.NVarChar(128), username)
       .input('table', sql.NVarChar(100), tableName)
-      .query(`UPDATE TOP (1) kongsberg.dbo.DataChangeLog
+      .query(`UPDATE TOP (1) dbo.DataChangeLog
               SET DBUser = @user
               WHERE TableName = @table
                 AND DBUser != @user
                 AND ChangedAt >= DATEADD(second, -5, GETDATE())
                 AND LogID = (
-                  SELECT MAX(LogID) FROM kongsberg.dbo.DataChangeLog
+                  SELECT MAX(LogID) FROM dbo.DataChangeLog
                   WHERE TableName = @table AND ChangedAt >= DATEADD(second, -5, GETDATE())
                 )`);
   } catch { /* never block the request */ }
@@ -144,10 +163,10 @@ export function isAdmin(username) {
 
 
 
-// ── Audit helper — writes to kongsberg.dbo.PortalAuditLog (fire-and-forget) ─────────────
+// ── Audit helper — writes to Nexus dbo.PortalAuditLog (fire-and-forget) ─────────────
 export async function auditQuery(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip   = req.ip || req.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  username  || null)
@@ -155,7 +174,7 @@ export async function auditQuery(eventType, username, detail, req) {
       .input('detail',    sql.NVarChar(500), detail    || null)
       .input('ip',        sql.NVarChar(45),  ip)
       .query(`
-        INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+        INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
         VALUES (@username, @eventType, @detail, @ip)
       `);
   } catch (err) {
@@ -165,10 +184,10 @@ export async function auditQuery(eventType, username, detail, req) {
 
 export default {
     printersConfig,
-    sqlConfig,
     sapConfig,
-    getProductionPool,
-    getLogisticsPool,
+    getNexusPool,
+    getNexusOperationsPool,
+    getNexusArchivePool,
     DEPT_PAGE_MAP,
     stampDbChange,
     isAdmin,

@@ -1,17 +1,17 @@
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { reverseStagedPackage } from './sapStaging.js';
 
 const router   = express.Router();
-const getPool  = async () => await sql.connect(sqlConfig);
+const getPool  = async () => await getNexusOperationsPool();
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.PalletPackages');
+            .query('SELECT * FROM log.PalletPackages');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -24,7 +24,7 @@ router.get('/id/:palletItemId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('palletItemId', sql.Int, req.params.palletItemId)
-            .query('SELECT * FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');
+            .query('SELECT * FROM log.PalletPackages WHERE palletItemID = @palletItemId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -45,8 +45,8 @@ router.get('/pallet/:palletId', async (req, res) => {
                            pp.sapSourceStorageType, pp.sapSourceBin, pp.sapStageTransferOrder,
                            pp.sapPackagingInstruction,
                            pd.packDescription, pd.packMaterial, pd.packWeight, pd.packHeight
-                    FROM   Logistics.dbo.PalletPackages pp
-                    LEFT JOIN Logistics.dbo.PackagingData pd ON pd.packID = pp.packagingID
+                    FROM   log.PalletPackages pp
+                    LEFT JOIN log.PackagingData pd ON pd.packID = pp.packagingID
                     WHERE  pp.palletID = @palletId
                     ORDER  BY pp.palletLayer, pp.palletItemID`);
         res.json({ success: true, data: result.recordset });
@@ -61,7 +61,7 @@ router.get('/sapdelivery/:sapDelivery', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('sapDelivery', sql.NVarChar, req.params.sapDelivery)
-            .query('SELECT * FROM Logistics.dbo.PalletPackages WHERE sapDelivery = @sapDelivery');
+            .query('SELECT * FROM log.PalletPackages WHERE sapDelivery = @sapDelivery');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -74,7 +74,7 @@ router.get('/sapmaterial/:sapMaterial', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('sapMaterial', sql.NVarChar, req.params.sapMaterial)
-            .query('SELECT * FROM Logistics.dbo.PalletPackages WHERE sapMaterial = @sapMaterial');
+            .query('SELECT * FROM log.PalletPackages WHERE sapMaterial = @sapMaterial');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -119,7 +119,7 @@ router.post('/', async (req, res) => {
             .input('sapSourceBin',        sql.NVarChar(10), sapSourceBin ?? null)
             .input('sapStageTransferOrder',sql.NVarChar(10),sapStageTransferOrder ?? null)
             .input('sapPackagingInstruction', sql.NVarChar(40), sapPackagingInstruction ?? null)
-            .query(`INSERT INTO Logistics.dbo.PalletPackages
+            .query(`INSERT INTO log.PalletPackages
                         (palletID, packagingID, palletLayer, sapMaterial,
                          sapQuantity, sapBatch, sapDelivery, sapDeliveryItem,
                          sapCustomer, sapCustomerMaterial, scanTime,
@@ -177,7 +177,7 @@ router.patch('/:palletItemId', async (req, res) => {
         }
 
         const result = await request.query(`
-            UPDATE Logistics.dbo.PalletPackages
+            UPDATE log.PalletPackages
             SET    ${setClauses.join(', ')}
             WHERE  palletItemID = @palletItemId`);
 
@@ -206,7 +206,7 @@ router.delete('/:palletItemId', async (req, res) => {
         const rowRes = await pool.request()
             .input('palletItemId', sql.Int, req.params.palletItemId)
             .query(`SELECT sapMaterial, sapBatch, sapDelivery, sapSourceStorageType, sapSourceBin
-                    FROM   Logistics.dbo.PalletPackages
+                    FROM   log.PalletPackages
                     WHERE  palletItemID = @palletItemId`);
 
         const reversal = await reverseStagedPackage(rowRes.recordset[0]);
@@ -219,7 +219,7 @@ router.delete('/:palletItemId', async (req, res) => {
 
         await pool.request()
             .input('palletItemId', sql.Int, req.params.palletItemId)
-            .query('DELETE FROM Logistics.dbo.PalletPackages WHERE palletItemID = @palletItemId');
+            .query('DELETE FROM log.PalletPackages WHERE palletItemID = @palletItemId');
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });

@@ -1,4 +1,4 @@
-# watch-log.ps1 - Tail the Normanton Nexus (sql2005-bridge) service logs.
+# watch-log.ps1 - Tail the Normanton Nexus (normanton-nexus) service logs.
 # Opens in a visible terminal window at logon via the NormantonNexusLog scheduled task.
 
 $daemonDir = "$PSScriptRoot\..\daemon"

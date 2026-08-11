@@ -112,7 +112,7 @@ const limiter = rateLimit({
 app.use(limiter);
 
 // SQL Server-backed session store (lib/sqlSessionStore.js) — persists
-// sessions to kongsberg.dbo.PortalSessions instead of express-session's
+// sessions to dbo.PortalSessions instead of express-session's
 // default in-memory MemoryStore, so a server restart (scheduled deploy,
 // crash, manual bounce) no longer logs everyone out silently. Requires
 // sql/migrate_portal_sessions.sql to have been run.
@@ -181,7 +181,7 @@ cron.schedule('55 * * * *', () => {
 
 // Expired session cleanup — hourly. sessionStore.get() already ignores
 // expired rows on its own, so this is pure housekeeping to stop
-// kongsberg.dbo.PortalSessions growing unbounded with rows nobody will
+// dbo.PortalSessions growing unbounded with rows nobody will
 // ever read again (logged-out/idle-timed-out sessions).
 cron.schedule('20 * * * *', () => {
   sessionStore.cleanupExpired()
@@ -277,9 +277,9 @@ function runSchtasks(args, timeoutMs = 15000) {
 // cleanupScheduledTask() there.
 cron.schedule('*/15 * * * * *', async () => {
   try {
-    const pool = await sql.connect(configJS.sqlConfig);
+    const pool = await configJS.getNexusPool();
     const due = await pool.request().query(`
-      UPDATE kongsberg.dbo.ScheduledDeployments
+      UPDATE dbo.ScheduledDeployments
       SET Status = 'running', StartedAt = GETDATE()
       OUTPUT INSERTED.DeploymentID
       WHERE Status = 'pending' AND ScheduledAt <= GETDATE()
@@ -312,7 +312,7 @@ cron.schedule('*/15 * * * * *', async () => {
         await pool.request()
           .input('id',  sql.Int, row.DeploymentID)
           .input('err', sql.NVarChar(sql.MAX), detail)
-          .query(`UPDATE kongsberg.dbo.ScheduledDeployments
+          .query(`UPDATE dbo.ScheduledDeployments
                   SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
                   WHERE DeploymentID = @id`);
         await notifyDeployFailed(pool, row.DeploymentID, detail);
@@ -333,9 +333,9 @@ cron.schedule('*/15 * * * * *', async () => {
 // tight race against it.
 cron.schedule('*/5 * * * *', async () => {
   try {
-    const pool = await sql.connect(configJS.sqlConfig);
+    const pool = await configJS.getNexusPool();
     const stuck = await pool.request().query(`
-      UPDATE kongsberg.dbo.ScheduledDeployments
+      UPDATE dbo.ScheduledDeployments
       SET Status = 'failed', CompletedAt = GETDATE(),
           ErrorMessage = 'Stuck at running for over 20 minutes with no completion — deploy-runner.cjs likely crashed, was killed, or the host restarted mid-deployment. Check deploy-runner.log and confirm the service manually.'
       OUTPUT INSERTED.DeploymentID

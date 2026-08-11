@@ -1,10 +1,10 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records (optionally filtered by ?search= for typeahead lookups) ──
 // search mode mirrors the Mass Packaging Update material lookup
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
             where = 'WHERE destinationName LIKE @search OR destinationCity LIKE @search';
             request.input('search', sql.NVarChar(202), `%${search}%`);
         }
-        const result = await request.query(`SELECT ${top}* FROM Logistics.dbo.Destinations ${where} ORDER BY destinationName`);
+        const result = await request.query(`SELECT ${top}* FROM log.Destinations ${where} ORDER BY destinationName`);
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -37,7 +37,7 @@ router.get('/id/:destinationId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('destinationId', sql.BigInt, req.params.destinationId)
-            .query('SELECT * FROM Logistics.dbo.Destinations WHERE destinationID = @destinationId');
+            .query('SELECT * FROM log.Destinations WHERE destinationID = @destinationId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -50,7 +50,7 @@ router.get('/country/:country', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('country', sql.NVarChar, req.params.country)
-            .query('SELECT * FROM Logistics.dbo.Destinations WHERE destinationCountry = @country');
+            .query('SELECT * FROM log.Destinations WHERE destinationCountry = @country');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -63,7 +63,7 @@ router.get('/zone/:zone', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('zone', sql.NVarChar, req.params.zone)
-            .query('SELECT * FROM Logistics.dbo.Destinations WHERE destinationZone = @zone');
+            .query('SELECT * FROM log.Destinations WHERE destinationZone = @zone');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -93,7 +93,7 @@ router.post('/', async (req, res) => {
             .input('destinationZone',      sql.NVarChar, destinationZone)
             .input('defaultDeliveryService', sql.NVarChar, defaultDeliveryService ?? null)
             .input('defaultForwarder',       sql.NVarChar, defaultForwarder       ?? null)
-            .query(`INSERT INTO Logistics.dbo.Destinations
+            .query(`INSERT INTO log.Destinations
                 (destinationID, destinationName, destinationStreet, destinationCity,
                  destinationPostCode, destinationCountry, defaultIncoterms,
                  destinationComment, destinationZone,
@@ -118,7 +118,7 @@ router.delete('/bulk', requirePermission('LOG_ADMIN'), async (req, res) => {
         const pool    = await getPool();
         const request = pool.request();
         const inClause = ids.map((id, i) => { request.input(`id${i}`, sql.BigInt, id); return `@id${i}`; }).join(',');
-        await request.query(`DELETE FROM Logistics.dbo.Destinations WHERE destinationID IN (${inClause})`);
+        await request.query(`DELETE FROM log.Destinations WHERE destinationID IN (${inClause})`);
         res.json({ success: true, deleted: ids.length });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -143,7 +143,7 @@ router.patch('/bulk', requirePermission('LOG_ADMIN'), async (req, res) => {
         const request = pool.request();
         request.input('value', sql.NVarChar, value ?? null);
         const inClause = idList.map((id, i) => { request.input(`id${i}`, sql.BigInt, id); return `@id${i}`; }).join(',');
-        await request.query(`UPDATE Logistics.dbo.Destinations SET ${col} = @value WHERE destinationID IN (${inClause})`);
+        await request.query(`UPDATE log.Destinations SET ${col} = @value WHERE destinationID IN (${inClause})`);
         res.json({ success: true, updated: idList.length });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -172,7 +172,7 @@ router.put('/:destinationId', requirePermission('LOG_ADMIN'), async (req, res) =
             .input('destinationZone',        sql.NVarChar, destinationZone        ?? null)
             .input('defaultDeliveryService', sql.NVarChar, defaultDeliveryService ?? null)
             .input('defaultForwarder',       sql.NVarChar, defaultForwarder       ?? null)
-            .query(`UPDATE Logistics.dbo.Destinations
+            .query(`UPDATE log.Destinations
                     SET destinationName        = @destinationName,
                         destinationStreet      = @destinationStreet,
                         destinationCity        = @destinationCity,
@@ -196,7 +196,7 @@ router.get('/:destinationId/emails', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('destinationId', sql.BigInt, req.params.destinationId)
-            .query('SELECT address FROM Logistics.dbo.Email WHERE ID = @destinationId ORDER BY address');
+            .query('SELECT address FROM log.Email WHERE ID = @destinationId ORDER BY address');
         res.json({ success: true, addresses: result.recordset.map(r => r.address) });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -213,12 +213,12 @@ router.put('/:destinationId/emails', requirePermission('LOG_ADMIN'), async (req,
         const pool = await getPool();
         await pool.request()
             .input('destinationId', sql.BigInt, req.params.destinationId)
-            .query('DELETE FROM Logistics.dbo.Email WHERE ID = @destinationId');
+            .query('DELETE FROM log.Email WHERE ID = @destinationId');
         for (const address of addresses) {
             await pool.request()
                 .input('destinationId', sql.BigInt, req.params.destinationId)
                 .input('address', sql.NVarChar, address)
-                .query('INSERT INTO Logistics.dbo.Email (ID, address) VALUES (@destinationId, @address)');
+                .query('INSERT INTO log.Email (ID, address) VALUES (@destinationId, @address)');
         }
         res.json({ success: true });
     } catch (err) {

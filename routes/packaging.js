@@ -24,7 +24,7 @@ import axios   from 'axios';
 import https   from 'https';
 import fs      from 'fs';
 import jwt     from 'jsonwebtoken';
-import { sapConfig, sapServerSecret, sqlConfig } from '../config.js';
+import { sapConfig, sapServerSecret, getNexusPool, getNexusOperationsPool } from '../config.js';
 import { requireDepartment, requirePermission } from '../middleware/auth.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 
@@ -85,14 +85,14 @@ async function sapPost(method, path, payload, userId) {
 
 async function audit(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip = req?.ip || req?.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  username || null)
       .input('eventType', sql.NVarChar(50),  eventType)
       .input('detail',    sql.NVarChar(500), detail || null)
       .input('ip',        sql.NVarChar(45),  ip)
-      .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+      .query(`INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
               VALUES (@username, @eventType, @detail, @ip)`);
   } catch (err) {
     console.error('[packaging audit]', err.message);
@@ -107,7 +107,7 @@ function userId(req) {
 }
 
 // ── Material search (for the Mass Packaging Update lookup list) ───────────────
-// Reads the existing daily-synced material master list (dbo.TurnsValClassSnapshot
+// Reads the existing daily-synced material master list (log.TurnsValClassSnapshot
 // — the "mm_turns" list already used by the Stock Turns & Valuation tile in
 // Logistics) rather than calling SAP live or duplicating that sync. That route
 // is gated behind LOG_MRP (a Logistics permission Engineering users won't
@@ -117,7 +117,7 @@ function userId(req) {
 router.get('/materials', canView, async (req, res) => {
   try {
     const search = String(req.query.search || '').trim();
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     const request = pool.request();
     let where = '';
     if (search) {
@@ -126,7 +126,7 @@ router.get('/materials', canView, async (req, res) => {
     }
     const { recordset } = await request.query(`
       SELECT TOP 200 Material AS material, MaterialText AS materialText
-      FROM dbo.TurnsValClassSnapshot
+      FROM log.TurnsValClassSnapshot
       ${where}
       ORDER BY Material
     `);

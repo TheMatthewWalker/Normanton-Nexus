@@ -1,5 +1,5 @@
 // routes/sales.js manages Customer Standard Instructions
-// (dbo.CustomerStandardInstructions). Real logic worth testing: the single
+// (log.CustomerStandardInstructions). Real logic worth testing: the single
 // PUT's exists-then-UPDATE/INSERT branch, and bulk-import's per-row
 // validation + continue-on-failure behavior (a single bad row must not
 // abort the rest of the batch).
@@ -80,7 +80,7 @@ describe('PUT /customer-instructions/:customer', () => {
     );
     const res = await request(appSupervisor).put('/customer-instructions/C1').send({ instructions: 'New text' });
     expect(res.status).toBe(200);
-    expect(dbRequest.query.mock.calls[1][0]).toMatch(/UPDATE dbo\.CustomerStandardInstructions/);
+    expect(dbRequest.query.mock.calls[1][0]).toMatch(/UPDATE log.CustomerStandardInstructions/);
   });
 });
 

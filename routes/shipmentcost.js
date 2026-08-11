@@ -4,7 +4,7 @@ import axios  from 'axios';
 import https  from 'https';
 import jwt    from 'jsonwebtoken';
 import fs     from 'fs';
-import { sqlConfig, sapConfig, sapServerSecret, getLogisticsPool } from '../config.js';
+import { sapConfig, sapServerSecret, getNexusOperationsPool } from '../config.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 import { lookupMaterialGroup } from './materialgroups.js';
 import { requireAnyPermission } from '../middleware/auth.js';
@@ -43,14 +43,14 @@ function extractSapErrorMessage(body, fallback) {
 }
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.ShipmentCost');
+            .query('SELECT * FROM log.ShipmentCost');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -63,7 +63,7 @@ router.get('/id/:costId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('costId', sql.BigInt, req.params.costId)
-            .query('SELECT * FROM Logistics.dbo.ShipmentCost WHERE costID = @costId');
+            .query('SELECT * FROM log.ShipmentCost WHERE costID = @costId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -88,7 +88,7 @@ router.patch('/:costId', async (req, res) => {
         const result = await pool.request()
             .input('costId',       sql.BigInt,         req.params.costId)
             .input('expectedCost', sql.Decimal(18, 2), amount)
-            .query(`UPDATE Logistics.dbo.ShipmentCost
+            .query(`UPDATE log.ShipmentCost
                     SET expectedCost = @expectedCost
                     OUTPUT INSERTED.costID
                     WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
@@ -110,7 +110,7 @@ router.delete('/:costId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('costId', sql.BigInt, req.params.costId)
-            .query(`DELETE FROM Logistics.dbo.ShipmentCost
+            .query(`DELETE FROM log.ShipmentCost
                     OUTPUT DELETED.costID
                     WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
         if (!result.recordset.length)
@@ -134,8 +134,8 @@ router.get('/shipment/:shipmentId', async (req, res) => {
                 SELECT sc.costID, sc.shipmentID, sc.costType, sc.costElement, sc.costCenter,
                        sc.expectedCost, sc.actualCost, sc.migoStatus, sc.materialDocument, sc.modeOfTransport,
                        ce.elementDescription, ce.tier
-                FROM Logistics.dbo.ShipmentCost sc
-                LEFT JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'outbound'
+                FROM log.ShipmentCost sc
+                LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'outbound'
                 WHERE sc.shipmentID = @shipmentId
                 ORDER BY sc.costID DESC
             `);
@@ -151,7 +151,7 @@ router.get('/costtype/:costType', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('costType', sql.NVarChar, req.params.costType)
-            .query('SELECT * FROM Logistics.dbo.ShipmentCost WHERE costType = @costType');
+            .query('SELECT * FROM log.ShipmentCost WHERE costType = @costType');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -201,7 +201,7 @@ router.post('/', async (req, res) => {
             .input('migoStatus', sql.Bit, migoStatus ?? 0)
             .input('materialDocument', sql.NVarChar, materialDocument)
             .input('modeOfTransport', sql.NVarChar(20), modeOfTransport || null)
-            .query(`INSERT INTO Logistics.dbo.ShipmentCost
+            .query(`INSERT INTO log.ShipmentCost
                 (shipmentID, poShipmentID, costType, costElement, costCenter,
                  expectedCost, actualCost, migoStatus, materialDocument, modeOfTransport)
                 VALUES
@@ -230,8 +230,8 @@ router.get('/estimate/:shipmentId', async (req, res) => {
                            sm.destinationCountry, sm.destinationPostCode,
                            sm.originID, sm.destinationID, sm.incoTerms,
                            f.forwarderName, f.forwarderMode
-                    FROM Logistics.dbo.ShipmentMain sm
-                    LEFT JOIN Logistics.dbo.Forwarders f ON f.forwarderID = sm.forwarderID
+                    FROM log.ShipmentMain sm
+                    LEFT JOIN log.Forwarders f ON f.forwarderID = sm.forwarderID
                     WHERE sm.shipmentID = @shipmentId`);
 
         if (!smResult.recordset.length)
@@ -253,7 +253,7 @@ router.get('/estimate/:shipmentId', async (req, res) => {
         const elemResult = await pool.request()
             .input('direction', sql.NVarChar, direction)
             .input('tier',      sql.NVarChar, tier)
-            .query(`SELECT TOP 1 elementCode FROM Logistics.dbo.CostElements
+            .query(`SELECT TOP 1 elementCode FROM log.CostElements
                     WHERE direction = @direction AND tier = @tier`);
         const elementCode = elemResult.recordset[0]?.elementCode ?? null;
 
@@ -276,7 +276,7 @@ router.get('/estimate/:shipmentId', async (req, res) => {
             .input('prefix',  sql.NVarChar, postcodePrefix)
             .input('weight',  sql.Decimal,  chargeableWeight)
             .query(`SELECT TOP 1 agreedRate, minimumCharge
-                    FROM Logistics.dbo.RatesKN
+                    FROM log.RatesKN
                     WHERE countryCode = @country
                       AND postalCode  = @prefix
                       AND @weight     >= minWeight
@@ -309,7 +309,7 @@ router.get('/estimate/:shipmentId', async (req, res) => {
 
 // ── Unprocessed costs (migoStatus = 0) ───────────────────────────────────────
 // Unified outbound + inbound — a single UNION ALL rather than two separate
-// tiles/endpoints, per the user: inbound cost lines (Logistics.dbo.
+// tiles/endpoints, per the user: inbound cost lines (log.
 // ShipmentCost.poShipmentID set, from routes/inboundcosts.js) belong in the
 // exact same log as outbound (shipmentID set), and post through the same
 // POST /post-migo below. `direction` distinguishes the two in the UI;
@@ -329,7 +329,7 @@ router.get('/unprocessed', async (req, res) => {
                 sm.plannedCollection,
                 sm.actualCollection,
                 sm.ActualDelivery AS deliveredDate,
-                (SELECT TOP 1 forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = sm.forwarderID) AS forwarderName,
+                (SELECT TOP 1 forwarderName FROM log.Forwarders WHERE forwarderID = sm.forwarderID) AS forwarderName,
                 cc.centerCode  AS costCenter,
                 ce.elementCode AS costElement,
                 sc.expectedCost,
@@ -339,10 +339,10 @@ router.get('/unprocessed', async (req, res) => {
                 sm.destinationCountry,
                 sm.destinationPostCode,
                 sm.trackingNumber
-            FROM Logistics.dbo.ShipmentCost sc
-            INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-            LEFT  JOIN Logistics.dbo.CostCenters  cc ON cc.centerCode  = sc.costCenter
-            LEFT  JOIN Logistics.dbo.CostElements ce ON ce.elementCode = sc.costElement
+            FROM log.ShipmentCost sc
+            INNER JOIN log.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+            LEFT  JOIN log.CostCenters  cc ON cc.centerCode  = sc.costCenter
+            LEFT  JOIN log.CostElements ce ON ce.elementCode = sc.costElement
             WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.shipmentID IS NOT NULL
 
             UNION ALL
@@ -356,7 +356,7 @@ router.get('/unprocessed', async (req, res) => {
                 ps.DispatchDate AS plannedCollection,
                 NULL AS actualCollection,
                 ps.ReceivedAtUtc AS deliveredDate,
-                (SELECT TOP 1 forwarderName FROM Logistics.dbo.Forwarders WHERE forwarderID = ps.ForwarderID) AS forwarderName,
+                (SELECT TOP 1 forwarderName FROM log.Forwarders WHERE forwarderID = ps.ForwarderID) AS forwarderName,
                 cc.centerCode  AS costCenter,
                 ce.elementCode AS costElement,
                 sc.expectedCost,
@@ -372,11 +372,11 @@ router.get('/unprocessed', async (req, res) => {
                 d.destinationCountry,
                 d.destinationPostCode,
                 ps.TrackingNumber AS trackingNumber
-            FROM Logistics.dbo.ShipmentCost sc
-            INNER JOIN Kongsberg.dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
-            LEFT  JOIN Logistics.dbo.CostCenters   cc ON cc.centerCode  = sc.costCenter
-            LEFT  JOIN Logistics.dbo.CostElements  ce ON ce.elementCode = sc.costElement
-            LEFT  JOIN Logistics.dbo.Destinations  d  ON d.destinationID = ps.OriginDestinationID
+            FROM log.ShipmentCost sc
+            INNER JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+            LEFT  JOIN log.CostCenters   cc ON cc.centerCode  = sc.costCenter
+            LEFT  JOIN log.CostElements  ce ON ce.elementCode = sc.costElement
+            LEFT  JOIN log.Destinations  d  ON d.destinationID = ps.OriginDestinationID
             WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.poShipmentID IS NOT NULL
 
             ORDER BY plannedCollection ASC, shipmentID ASC`);
@@ -389,7 +389,7 @@ router.get('/unprocessed', async (req, res) => {
 // ── Freight spend analytics ───────────────────────────────────────────────────
 // Both queries below UNION ALL an outbound leg (ShipmentCost.shipmentID ->
 // ShipmentMain) with an inbound leg (ShipmentCost.poShipmentID ->
-// dbo.PurchaseOrderShipment, see sql/migrate_order_shipments.sql) —
+// log.PurchaseOrderShipment, see sql/migrate_order_shipments.sql) —
 // every one of these previously only INNER JOINed ShipmentMain, so any
 // inbound cost line (which has shipmentID NULL and poShipmentID set
 // instead — see the post-migo UNION ALL a little further down this file)
@@ -417,11 +417,11 @@ const COMBINED_COST_OUTBOUND = `
            sm.destinationName    AS customerLabel,
            sm.plannedCollection  AS periodDate,
            'O:' + CONVERT(VARCHAR(20), sm.shipmentID) AS shipmentKey
-    FROM Logistics.dbo.ShipmentCost sc
-    INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+    FROM log.ShipmentCost sc
+    INNER JOIN log.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
     OUTER APPLY (
         SELECT TOP 1 f.forwarderName, f.forwarderMode
-        FROM Logistics.dbo.Forwarders f
+        FROM log.Forwarders f
         WHERE f.forwarderID = sm.forwarderID
     ) fa
     WHERE sc.shipmentID IS NOT NULL`;
@@ -432,14 +432,14 @@ const COMBINED_COST_INBOUND = `
            d.destinationName    AS customerLabel,
            ISNULL(ps.DispatchDate, ps.CreatedAtUtc) AS periodDate,
            'I:' + CONVERT(VARCHAR(20), ps.ShipmentId) AS shipmentKey
-    FROM Logistics.dbo.ShipmentCost sc
-    INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+    FROM log.ShipmentCost sc
+    INNER JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
     OUTER APPLY (
         SELECT TOP 1 f.forwarderName, f.forwarderMode
-        FROM Logistics.dbo.Forwarders f
+        FROM log.Forwarders f
         WHERE f.forwarderID = ps.ForwarderID
     ) fa
-    LEFT  JOIN Logistics.dbo.Destinations d  ON d.destinationID = ps.OriginDestinationID
+    LEFT  JOIN log.Destinations d  ON d.destinationID = ps.OriginDestinationID
     WHERE sc.poShipmentID IS NOT NULL`;
 const COMBINED_COST = `(${COMBINED_COST_OUTBOUND} UNION ALL ${COMBINED_COST_INBOUND}) cc`;
 
@@ -512,7 +512,7 @@ router.get('/analytics', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPO
                            SUM(cc.expectedCost) AS totalCost,
                            COUNT(*) AS records
                     FROM ${COMBINED_COST}
-                    LEFT JOIN Logistics.dbo.CostCenters ctr ON ctr.centerCode = cc.costCenter
+                    LEFT JOIN log.CostCenters ctr ON ctr.centerCode = cc.costCenter
                     WHERE cc.periodDate >= DATEADD(month, -@months, GETDATE())
                     GROUP BY ctr.centerCode
                     ORDER BY totalCost DESC`);
@@ -615,8 +615,8 @@ router.post('/post-migo', async (req, res) => {
                    RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
                    sm.forwarderID, sm.actualCollection, sm.ActualDelivery AS deliveredDate, sm.trackingNumber,
                    sm.destinationCountry, sm.destinationPostCode
-            FROM Logistics.dbo.ShipmentCost sc
-            INNER JOIN Logistics.dbo.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
+            FROM log.ShipmentCost sc
+            INNER JOIN log.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
             WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0
 
             UNION ALL
@@ -626,9 +626,9 @@ router.post('/post-migo', async (req, res) => {
                    ps.ShipmentReference AS shipmentRef,
                    ps.ForwarderID AS forwarderID, ps.DispatchDate AS actualCollection, ps.ReceivedAtUtc AS deliveredDate, ps.TrackingNumber AS trackingNumber,
                    d.destinationCountry, d.destinationPostCode
-            FROM Logistics.dbo.ShipmentCost sc
-            INNER JOIN dbo.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
-            LEFT  JOIN Logistics.dbo.Destinations d ON d.destinationID = ps.OriginDestinationID
+            FROM log.ShipmentCost sc
+            INNER JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+            LEFT  JOIN log.Destinations d ON d.destinationID = ps.OriginDestinationID
             WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0`);
 
         if (!fetched.recordset.length)
@@ -782,7 +782,7 @@ router.post('/post-migo', async (req, res) => {
                             .input('costID',           sql.BigInt,       costID)
                             .input('materialDocument', sql.NVarChar(20), line.documentNumber)
                             .input('purchaseOrder',    sql.NVarChar(20), poResult.purchaseOrder || null)
-                            .query(`UPDATE Logistics.dbo.ShipmentCost
+                            .query(`UPDATE log.ShipmentCost
                                     SET migoStatus = 1, materialDocument = @materialDocument, purchaseOrder = @purchaseOrder
                                     WHERE costID = @costID`);
                         results.push({
@@ -846,7 +846,7 @@ router.post('/:costId/reverse', async (req, res) => {
 
         const { recordset } = await pool.request()
             .input('costId', sql.BigInt, costId)
-            .query(`SELECT costID, migoStatus, materialDocument FROM Logistics.dbo.ShipmentCost WHERE costID = @costId`);
+            .query(`SELECT costID, migoStatus, materialDocument FROM log.ShipmentCost WHERE costID = @costId`);
 
         const row = recordset[0];
         if (!row) return res.status(404).json({ success: false, error: 'Cost line not found.' });
@@ -868,7 +868,7 @@ router.post('/:costId/reverse', async (req, res) => {
         if (reversed) {
             await pool.request()
                 .input('costId', sql.BigInt, costId)
-                .query(`UPDATE Logistics.dbo.ShipmentCost
+                .query(`UPDATE log.ShipmentCost
                         SET migoStatus = 0, materialDocument = NULL
                         WHERE costID = @costId`);
         }

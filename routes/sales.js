@@ -14,7 +14,7 @@
 
 import express from 'express';
 import sql     from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requireDepartment, requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -29,10 +29,10 @@ function actor(req) {
 // GET / — full list, alphabetical by customer.
 router.get('/customer-instructions', canView, async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     const result = await pool.request().query(`
       SELECT Customer, CustomerName, Instructions, LastUpdatedUtc, UpdatedByUsername
-      FROM dbo.CustomerStandardInstructions
+      FROM log.CustomerStandardInstructions
       ORDER BY Customer`);
     res.json({ success: true, data: result.recordset });
   } catch (err) {
@@ -50,10 +50,10 @@ router.put('/customer-instructions/:customer', canEdit, async (req, res) => {
     if (!instructions || !instructions.trim())
       return res.status(400).json({ success: false, error: 'Instructions text is required.' });
 
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     const exists = await pool.request()
       .input('cust', sql.NVarChar(10), customer)
-      .query(`SELECT 1 FROM dbo.CustomerStandardInstructions WHERE Customer = @cust`);
+      .query(`SELECT 1 FROM log.CustomerStandardInstructions WHERE Customer = @cust`);
 
     const r = pool.request()
       .input('cust',  sql.NVarChar(10),   customer)
@@ -63,13 +63,13 @@ router.put('/customer-instructions/:customer', canEdit, async (req, res) => {
 
     if (exists.recordset.length) {
       await r.query(`
-        UPDATE dbo.CustomerStandardInstructions
+        UPDATE log.CustomerStandardInstructions
         SET CustomerName = @name, Instructions = @instr,
             LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @who
         WHERE Customer = @cust`);
     } else {
       await r.query(`
-        INSERT INTO dbo.CustomerStandardInstructions
+        INSERT INTO log.CustomerStandardInstructions
           (Customer, CustomerName, Instructions, LastUpdatedUtc, UpdatedByUsername)
         VALUES (@cust, @name, @instr, GETUTCDATE(), @who)`);
     }
@@ -95,7 +95,7 @@ router.post('/customer-instructions/bulk-import', canEdit, async (req, res) => {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     if (!rows.length) return res.status(400).json({ success: false, error: 'No rows provided.' });
 
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     const who = actor(req);
     let created = 0, updated = 0;
     const failed = [];
@@ -118,7 +118,7 @@ router.post('/customer-instructions/bulk-import', canEdit, async (req, res) => {
       try {
         const exists = await pool.request()
           .input('cust', sql.NVarChar(10), customer)
-          .query(`SELECT 1 FROM dbo.CustomerStandardInstructions WHERE Customer = @cust`);
+          .query(`SELECT 1 FROM log.CustomerStandardInstructions WHERE Customer = @cust`);
 
         const r = pool.request()
           .input('cust',  sql.NVarChar(10),   customer)
@@ -128,14 +128,14 @@ router.post('/customer-instructions/bulk-import', canEdit, async (req, res) => {
 
         if (exists.recordset.length) {
           await r.query(`
-            UPDATE dbo.CustomerStandardInstructions
+            UPDATE log.CustomerStandardInstructions
             SET CustomerName = @name, Instructions = @instr,
                 LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @who
             WHERE Customer = @cust`);
           updated++;
         } else {
           await r.query(`
-            INSERT INTO dbo.CustomerStandardInstructions
+            INSERT INTO log.CustomerStandardInstructions
               (Customer, CustomerName, Instructions, LastUpdatedUtc, UpdatedByUsername)
             VALUES (@cust, @name, @instr, GETUTCDATE(), @who)`);
           created++;
@@ -155,10 +155,10 @@ router.post('/customer-instructions/bulk-import', canEdit, async (req, res) => {
 // DELETE /:customer
 router.delete('/customer-instructions/:customer', canEdit, async (req, res) => {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusOperationsPool();
     await pool.request()
       .input('cust', sql.NVarChar(10), req.params.customer.trim())
-      .query(`DELETE FROM dbo.CustomerStandardInstructions WHERE Customer = @cust`);
+      .query(`DELETE FROM log.CustomerStandardInstructions WHERE Customer = @cust`);
     res.json({ success: true });
   } catch (err) {
     console.error('[sales] DELETE /customer-instructions failed', err);

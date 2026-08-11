@@ -1,16 +1,16 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT * FROM Logistics.dbo.ForwarderApproval');
+            .query('SELECT * FROM log.ForwarderApproval');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -23,7 +23,7 @@ router.get('/id/:forwarderId', async (req, res) => {
         const pool = await getPool();
         const result = await pool.request()
             .input('forwarderId', sql.BigInt, req.params.forwarderId)
-            .query('SELECT * FROM Logistics.dbo.ForwarderApproval WHERE forwarderID = @forwarderId');
+            .query('SELECT * FROM log.ForwarderApproval WHERE forwarderID = @forwarderId');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -40,7 +40,7 @@ router.post('/', async (req, res) => {
             .input('forwarderID', sql.BigInt, forwarderID)
             .input('ratesAgreed', sql.Bit, ratesAgreed)
             .input('usageAgreed', sql.Bit, usageAgreed)
-            .query(`INSERT INTO Logistics.dbo.ForwarderApproval (forwarderID, ratesAgreed, usageAgreed)
+            .query(`INSERT INTO log.ForwarderApproval (forwarderID, ratesAgreed, usageAgreed)
                     VALUES (@forwarderID, @ratesAgreed, @usageAgreed)`);
 
         res.status(201).json({ message: 'Record created successfully' });

@@ -19,7 +19,7 @@ import bcrypt       from 'bcrypt';
 import sql          from 'mssql';
 import jwt          from 'jsonwebtoken';
 import rateLimit    from 'express-rate-limit';
-import { sqlConfig, sapServerSecret, idleTimeoutMsFor, resendAPI } from '../config.js';
+import { sapServerSecret, idleTimeoutMsFor, resendAPI, getNexusPool } from '../config.js';
 import { notify }    from '../lib/notify.js';
 import {Resend } from 'resend';
 
@@ -41,7 +41,7 @@ const loginLimiter = rateLimit({
 // ── Helper — write to audit log ───────────────────────────────────────────────
 async function audit(eventType, username, detail, req) {
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const ip   = req.ip || req.socket?.remoteAddress || null;
     await pool.request()
       .input('username',  sql.NVarChar(80),  username  || null)
@@ -49,7 +49,7 @@ async function audit(eventType, username, detail, req) {
       .input('detail',    sql.NVarChar(500), detail    || null)
       .input('ip',        sql.NVarChar(45),  ip)
       .query(`
-        INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
+        INSERT INTO dbo.PortalAuditLog (Username, EventType, Detail, IPAddress)
         VALUES (@username, @eventType, @detail, @ip)
       `);
   } catch (err) {
@@ -67,7 +67,7 @@ router.post('/login', loginLimiter, async (req, res) => {
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     // Fetch user + their permitted departments in one go
     const userResult = await pool.request()
@@ -77,7 +77,7 @@ router.post('/login', loginLimiter, async (req, res) => {
           u.UserID, u.Username, u.Email, u.PasswordHash,
           u.Role, u.IsActive, u.IsLocked, u.FailedLogins, u.ShortIdleTimeout,
           u.MustChangePassword
-        FROM kongsberg.dbo.PortalUsers u
+        FROM dbo.PortalUsers u
         WHERE u.Username = @username
       `);
 
@@ -114,7 +114,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         .input('failedLogins', sql.Int, newFailCount)
         .input('isLocked',    sql.Bit, shouldLock ? 1 : 0)
         .query(`
-          UPDATE kongsberg.dbo.PortalUsers
+          UPDATE dbo.PortalUsers
           SET FailedLogins = @failedLogins, IsLocked = @isLocked
           WHERE UserID = @userID
         `);
@@ -129,9 +129,9 @@ router.post('/login', loginLimiter, async (req, res) => {
     // ── Success — fetch departments and permissions ───────────────────────────
     const [deptResult, permResult] = await Promise.all([
       pool.request().input('userID', sql.Int, user.UserID)
-        .query(`SELECT Department FROM kongsberg.dbo.PortalUserDepartments WHERE UserID = @userID`),
+        .query(`SELECT Department FROM dbo.PortalUserDepartments WHERE UserID = @userID`),
       pool.request().input('userID', sql.Int, user.UserID)
-        .query(`SELECT PermissionCode FROM kongsberg.dbo.PortalUserPermissions WHERE UserID = @userID`)
+        .query(`SELECT PermissionCode FROM dbo.PortalUserPermissions WHERE UserID = @userID`)
         .catch(() => ({ recordset: [] })), // graceful if table doesn't exist yet
     ]);
 
@@ -142,7 +142,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     await pool.request()
       .input('userID', sql.Int, user.UserID)
       .query(`
-        UPDATE kongsberg.dbo.PortalUsers
+        UPDATE dbo.PortalUsers
         SET FailedLogins = 0, IsLocked = 0, LastLogin = GETDATE()
         WHERE UserID = @userID
       `);
@@ -234,12 +234,12 @@ router.post('/register', registerLimiter, async (req, res) => {
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
 
     // ── Check for existing email ──────────────────────────────────────────────
     const emailCheck = await pool.request()
       .input('email', sql.NVarChar(160), emailClean)
-      .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers WHERE Email = @email`);
+      .query(`SELECT 1 FROM dbo.PortalUsers WHERE Email = @email`);
 
     if (emailCheck.recordset.length > 0) {
       return res.status(409).json({ success: false, error: 'That email address is already registered.' });
@@ -254,7 +254,7 @@ router.post('/register', registerLimiter, async (req, res) => {
     while (true) {
       const taken = await pool.request()
         .input('u', sql.NVarChar(80), username)
-        .query(`SELECT 1 FROM kongsberg.dbo.PortalUsers WHERE Username = @u`);
+        .query(`SELECT 1 FROM dbo.PortalUsers WHERE Username = @u`);
       if (!taken.recordset.length) break;
       suffix++;
       username = `${base}.${suffix}`;
@@ -269,13 +269,13 @@ router.post('/register', registerLimiter, async (req, res) => {
       .input('lastName',  sql.NVarChar(80),  lastClean)
       .input('email',     sql.NVarChar(160), emailClean)
       .input('hash',      sql.NVarChar(256), hash)
-      .query(`INSERT INTO kongsberg.dbo.PortalUsers
+      .query(`INSERT INTO dbo.PortalUsers
                 (Username, FirstName, LastName, Email, PasswordHash, Role, IsActive)
               VALUES (@username, @firstName, @lastName, @email, @hash, 'operator', 0)`);
 
     await audit('REGISTER', username, `Registration request submitted by ${firstClean} ${lastClean} — pending approval`, req);
 
-    sql.connect(sqlConfig).then(pool => notify(pool, {
+    getNexusPool().then(pool => notify(pool, {
       title:       'New User Registration',
       body:        `${firstClean} ${lastClean} (${username}) has requested an account — pending approval.`,
       severity:    1,
@@ -309,13 +309,13 @@ router.post('/forgot-password', loginLimiter, async (req, res) => {
         const token = crypto.randomBytes(32).toString('hex');
         const expiresAt = new Date(Date.now() + 604800000).toISOString(); // 1 week window
 
-        const pool = await sql.connect(sqlConfig);
+        const pool = await getNexusPool();
         const result = await pool.request()
             .input('email', sql.VarChar(255), email)
             .input('token', sql.VarChar(255), token)
             .input('expires', sql.DateTime, expiresAt)
             .query(`
-                UPDATE kongsberg.dbo.PortalUsers 
+                UPDATE dbo.PortalUsers 
                 SET reset_token = @token, reset_token_expires = @expires 
                 WHERE email = @email
             `);
@@ -351,7 +351,7 @@ router.post('/reset-password', loginLimiter, async (req, res) => {
     }
 
     try {
-        const pool = await sql.connect(sqlConfig);
+        const pool = await getNexusPool();
         const now = new Date().toISOString();
 
         // Target record and extract internal unique primary tracking keys
@@ -359,7 +359,7 @@ router.post('/reset-password', loginLimiter, async (req, res) => {
             .input('token', sql.VarChar(255), token)
             .input('now', sql.DateTime, now)
             .query(`
-                SELECT UserID FROM kongsberg.dbo.PortalUsers 
+                SELECT UserID FROM dbo.PortalUsers 
                 WHERE reset_token = @token AND reset_token_expires > @now
             `);
 
@@ -375,7 +375,7 @@ router.post('/reset-password', loginLimiter, async (req, res) => {
             .input('userId', sql.Int, userId)
             .input('newPasswordHash', sql.VarChar(255), hashedNewPassword)
             .query(`
-                UPDATE kongsberg.dbo.PortalUsers 
+                UPDATE dbo.PortalUsers 
                 SET passwordhash = @newPasswordHash, 
                     reset_token = NULL, 
                     reset_token_expires = NULL 
@@ -423,12 +423,12 @@ router.post('/api/auth/orderbook-token', orderBookTokenLimiter, async (req, res)
   }
 
   try {
-    const pool = await sql.connect(sqlConfig);
+    const pool = await getNexusPool();
     const userResult = await pool.request()
       .input('username', sql.NVarChar(80), String(username).trim())
       .query(`
         SELECT UserID, Username, PasswordHash, IsActive, IsLocked
-        FROM kongsberg.dbo.PortalUsers
+        FROM dbo.PortalUsers
         WHERE Username = @username
       `);
 

@@ -1,9 +1,9 @@
 import express from 'express';
 import sql from 'mssql';
-import { sqlConfig } from '../config.js';
+import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 
-// ── Forwarder Type -> Mode of Transport lookup (dbo.ForwarderModeMapping) ──
+// ── Forwarder Type -> Mode of Transport lookup (log.ForwarderModeMapping) ──
 // See sql/migrate_forwarder_mode_mapping.sql for the full writeup: the
 // freight/customs ShipmentCost rows created at booking time
 // (routes/shipmentmain.js's mark-booked) never carried the booked
@@ -17,14 +17,14 @@ import { requirePermission } from '../middleware/auth.js';
 // shipmentmain.js to call in-process.
 
 const router = express.Router();
-const getPool = async () => await sql.connect(sqlConfig);
+const getPool = getNexusOperationsPool;
 
 router.get('/', requirePermission('LOG_ADMIN'), async (req, res) => {
   try {
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
       SELECT MappingId, ForwarderMode, ModeOfTransport, Description, CreatedAtUtc, UpdatedAtUtc
-      FROM dbo.ForwarderModeMapping
+      FROM log.ForwarderModeMapping
       ORDER BY ForwarderMode
     `);
     res.json({ success: true, data: recordset });
@@ -33,7 +33,7 @@ router.get('/', requirePermission('LOG_ADMIN'), async (req, res) => {
   }
 });
 
-// Distinct forwarderMode values actually in use on Logistics.dbo.Forwarders —
+// Distinct forwarderMode values actually in use on log.Forwarders —
 // the Add/Edit Mapping modal's Forwarder Type field is populated from this
 // rather than free text, so a mapping can only ever be created for a mode
 // that's genuinely set on a real forwarder (no typos silently never matching
@@ -43,7 +43,7 @@ router.get('/forwarder-types', requirePermission('LOG_ADMIN'), async (req, res) 
     const pool = await getPool();
     const { recordset } = await pool.request().query(`
       SELECT DISTINCT forwarderMode
-      FROM Logistics.dbo.Forwarders
+      FROM log.Forwarders
       WHERE forwarderMode IS NOT NULL AND LTRIM(RTRIM(forwarderMode)) <> ''
       ORDER BY forwarderMode
     `);
@@ -69,7 +69,7 @@ router.post('/', requirePermission('LOG_ADMIN'), async (req, res) => {
       .input('modeOfTransport', sql.NVarChar(20),  String(modeOfTransport).trim())
       .input('description',     sql.NVarChar(200), description || null)
       .query(`
-        INSERT INTO dbo.ForwarderModeMapping (ForwarderMode, ModeOfTransport, Description)
+        INSERT INTO log.ForwarderModeMapping (ForwarderMode, ModeOfTransport, Description)
         OUTPUT INSERTED.MappingId
         VALUES (@forwarderMode, @modeOfTransport, @description)
       `);
@@ -100,7 +100,7 @@ router.put('/:mappingId', requirePermission('LOG_ADMIN'), async (req, res) => {
       .input('modeOfTransport', sql.NVarChar(20),  String(modeOfTransport).trim())
       .input('description',     sql.NVarChar(200), description || null)
       .query(`
-        UPDATE dbo.ForwarderModeMapping SET
+        UPDATE log.ForwarderModeMapping SET
           ForwarderMode = @forwarderMode, ModeOfTransport = @modeOfTransport,
           Description = @description, UpdatedAtUtc = GETUTCDATE()
         WHERE MappingId = @mappingId
@@ -119,7 +119,7 @@ router.delete('/:mappingId', requirePermission('LOG_ADMIN'), async (req, res) =>
   try {
     const pool = await getPool();
     await pool.request().input('mappingId', sql.Int, req.params.mappingId)
-      .query('DELETE FROM dbo.ForwarderModeMapping WHERE MappingId = @mappingId');
+      .query('DELETE FROM log.ForwarderModeMapping WHERE MappingId = @mappingId');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
@@ -138,7 +138,7 @@ export async function lookupModeOfTransport(forwarderMode) {
     const pool = await getPool();
     const { recordset } = await pool.request()
       .input('forwarderMode', sql.NVarChar(20), forwarderMode)
-      .query('SELECT TOP 1 ModeOfTransport FROM dbo.ForwarderModeMapping WHERE ForwarderMode = @forwarderMode');
+      .query('SELECT TOP 1 ModeOfTransport FROM log.ForwarderModeMapping WHERE ForwarderMode = @forwarderMode');
     return recordset.length ? recordset[0].ModeOfTransport : forwarderMode;
   } catch (_) {
     return forwarderMode;
