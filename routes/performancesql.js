@@ -133,7 +133,7 @@ async function replaceTable(tableName, columns, rows) {
 // against whatever already matches on keyColumns, followed by an INSERT for whatever didn't.
 // Two round-trips per batch instead of one, but no temp tables/transactions — same reasoning
 // as replaceTable() (SQL Server 2005 connection-pool behaviour under failed transactions).
-async function upsertBatch(tableName, keyColumns, columns, rows) {
+async function upsertBatch(tableName, keyColumns, columns, rows, { insertOnly = false } = {}) {
   if (rows.length === 0) return;
 
   const pool = await getPool();
@@ -184,14 +184,20 @@ async function upsertBatch(tableName, keyColumns, columns, rows) {
     const batch = rows.slice(i, i + batchSize);
 
     try {
-      const updateRequest = pool.request();
-      const updateStaging = buildStaging(updateRequest, batch, 'u');
-      await updateRequest.query(`
-        WITH staging AS (${updateStaging})
-        UPDATE t SET ${updateSet}, LastUpdatedUtc = GETUTCDATE()
-        FROM ${tableName} t
-        INNER JOIN staging s ON ${keyJoin};
-      `);
+      // insertOnly skips the UPDATE branch entirely — an existing row for a given key is left
+      // untouched forever, only a not-yet-seen key gets written. Used by upsertForecastAccuracyLog
+      // to freeze the current month's recorded forecast at whatever it was on the first sync run
+      // after the month started, instead of letting it drift all month via repeated UPDATEs.
+      if (!insertOnly) {
+        const updateRequest = pool.request();
+        const updateStaging = buildStaging(updateRequest, batch, 'u');
+        await updateRequest.query(`
+          WITH staging AS (${updateStaging})
+          UPDATE t SET ${updateSet}, LastUpdatedUtc = GETUTCDATE()
+          FROM ${tableName} t
+          INNER JOIN staging s ON ${keyJoin};
+        `);
+      }
 
       // Separate request/param set — a request's inputs can only be bound to one query.
       const insertRequest = pool.request();
@@ -474,9 +480,12 @@ export function replaceValuationClassCatalog(rows) {
 // to each row (see performancesync.js).
 //
 // Forward window (k = 0..12, current month through +12 months): upserts SapDemandQty and
-// PredictedQty. Once a month passes out of this window it's simply never touched again by
-// this loop on future days, which is what "freezes" the recorded forecast at whatever it
-// last was right before the month started — no separate freeze step needed.
+// PredictedQty. k=1..12 (not yet arrived) are freely overwritten every day, refining the
+// projection as the target month approaches. k=0 (the current month) is written insert-only —
+// once a row exists for it, later runs that same month leave it alone — so it freezes at
+// whatever the forecast was on the first successful sync after the month started, not at
+// whatever it drifts to by month-end. Once a month passes out of the k=0..12 window entirely
+// it's simply never touched again by this loop, which is what keeps it frozen after that.
 //
 // Backward window (j = 0..2, current month through 2 months back only): upserts ActualQty
 // from consumption history. Deliberately NOT the full 12-month backward window — once a
@@ -544,8 +553,9 @@ export async function upsertStockValuationHistory(rows) {
 export async function upsertForecastAccuracyLog(rows) {
   const thisMonth = firstOfMonthUtc(new Date());
 
-  const forecastRows = [];
-  const actualRows   = [];
+  const currentMonthRows = [];
+  const futureMonthRows  = [];
+  const actualRows       = [];
 
   for (const row of rows) {
     const demandForecast     = Array.isArray(row.demandForecast)     ? row.demandForecast     : [];
@@ -553,13 +563,14 @@ export async function upsertForecastAccuracyLog(rows) {
     const consumptionHistory = Array.isArray(row.consumptionHistory) ? row.consumptionHistory : [];
 
     for (let k = 0; k <= 12; k++) {
-      forecastRows.push({
+      const forecastRow = {
         material:     row.material,
         plant:        row.plant,
         targetMonth:  addMonthsUtc(thisMonth, k),
         sapDemandQty: Number(demandForecast[k]) || 0,
         predictedQty: Number(predictedUsage[k]) || 0,
-      });
+      };
+      (k === 0 ? currentMonthRows : futureMonthRows).push(forecastRow);
     }
 
     // consumptionHistory index 12 = current month, index (12-j) = j months back.
@@ -582,10 +593,17 @@ export async function upsertForecastAccuracyLog(rows) {
     ['TargetMonth', 'targetMonth', sql.DateTime],
   ];
 
-  await upsertBatch('log.ForecastAccuracyLog', keyColumns, [
+  const forecastColumns = [
     ['SapDemandQty', 'sapDemandQty', sql.Decimal(15, 3)],
     ['PredictedQty', 'predictedQty', sql.Decimal(15, 3)],
-  ], forecastRows);
+  ];
+
+  // k=1..12: not yet arrived, keep refining every day until the month becomes current.
+  await upsertBatch('log.ForecastAccuracyLog', keyColumns, forecastColumns, futureMonthRows);
+
+  // k=0: the current month — insert-only, so the value freezes at whatever it was on the
+  // first successful sync run after the month started (see comment above this function).
+  await upsertBatch('log.ForecastAccuracyLog', keyColumns, forecastColumns, currentMonthRows, { insertOnly: true });
 
   await upsertBatch('log.ForecastAccuracyLog', keyColumns, [
     ['ActualQty', 'actualQty', sql.Decimal(15, 3)],
@@ -1358,7 +1376,7 @@ export async function listOpenIncomingOrders(materials = null) {
     whereSql += ` AND Material IN (${inClause})`;
   }
   const { recordset } = await request.query(`
-    SELECT Material, OrderQty, DeliveryDate, Status
+    SELECT SuggestionId, Material, OrderQty, DeliveryDate, Status, PoNumber
     FROM log.PurchaseOrderSuggestion
     ${whereSql}
   `);

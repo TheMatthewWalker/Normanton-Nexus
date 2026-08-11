@@ -298,18 +298,22 @@ ELSE
    Written daily by the same sync that refreshes TurnsValClassSnapshot
    (routes/performancesync.js). Each day's upsert only ever touches:
      - SapDemandQty / PredictedQty for TargetMonth = today's month through +12 months
-       (i.e. while that month is still current or in the future). The moment a month
-       drops out of that forward window, this upsert stops touching it — so the row
-       is left holding whatever SapDemandQty/PredictedQty were last written right up
-       until the month started. No separate "freeze" step needed; it falls out of the
-       upsert boundary naturally.
+       (i.e. while that month is still current or in the future). Months not yet
+       arrived (+1..+12) are freely overwritten every day, refining the projection as
+       the target month approaches. The current month (+0) is written insert-only —
+       once a row exists for it, later runs that same month leave it alone — so it
+       freezes at whatever SapDemandQty/PredictedQty were on the first successful sync
+       after the month started, not at whatever they drift to by month-end. The moment
+       a month drops out of the forward window entirely, this upsert stops touching it,
+       which is what keeps it frozen after that.
      - ActualQty for TargetMonth = today's month through -12 months (current/recent/past),
        taken from consumption history — this keeps converging to the true total as the
        month progresses, and stays accurate once it's fully in the past.
 
-   Net effect: for any past month, this table holds the forecast as it stood right
-   before that month began, next to what actually happened — a straightforward
-   SAP-vs-predicted-vs-actual accuracy comparison per material per month.          */
+   Net effect: for any past month, this table holds the forecast as it stood on the
+   first sync of that month (before any of that month's usage had happened), next to
+   what actually happened — a straightforward SAP-vs-predicted-vs-actual accuracy
+   comparison per material per month.          */
 IF NOT EXISTS (SELECT 1 FROM sys.objects
                WHERE object_id = OBJECT_ID(N'dbo.ForecastAccuracyLog') AND type = 'U')
 BEGIN

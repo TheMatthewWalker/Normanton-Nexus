@@ -409,7 +409,7 @@ Nodes (12): prod.BatchOperators, prod.EventLog, prod.ProductionTrace, prod.SAPPo
 
 ### Community 57 - "SapServer Architecture Overview"
 Cohesion: 0.24
-Nodes (10): appsettings AllowedOrigins config section, appsettings Auth config section, string, Authentication & Permissions (JWT + SapDepartmentPermissions), AuthOptions, Program.cs (ASP.NET Core composition root), SapServer Architecture Overview, JWT issued by sql2005-bridge auth flow (+2 more)
+Nodes (10): appsettings AllowedOrigins config section, appsettings Auth config section, string, Authentication & Permissions (JWT + SapDepartmentPermissions), AuthOptions, Program.cs (ASP.NET Core composition root), SapServer Architecture Overview, JWT issued by normanton-nexus auth flow (+2 more)
 
 ### Community 58 - "SAP BDC Builder"
 Cohesion: 0.20
@@ -429,7 +429,7 @@ Nodes (5): Secrets via machine-level environment variables, Deploy via Task Sche
 
 ### Community 62 - "Bridge Auth Config Schema"
 Cohesion: 0.20
-Nodes (8): sql2005-bridge / Normanton Nexus system, config.redacted.json (sql2005-bridge config schema), apiKey config field, logistics config section, printers config section, session config section, sessionSecret config field, users config section
+Nodes (8): normanton-nexus / Normanton Nexus system, config.redacted.json (normanton-nexus config schema), apiKey config field, logistics config section, printers config section, session config section, sessionSecret config field, users config section
 
 ### Community 63 - "Community 63"
 Cohesion: 0.20

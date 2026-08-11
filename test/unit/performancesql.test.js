@@ -20,9 +20,10 @@ let markShipmentReceived;
 let undoShipmentReceived;
 let addManualInboundItem;
 let removeManualInboundItem;
+let upsertForecastAccuracyLog;
 
 beforeAll(async () => {
-  ({ createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem, removeManualInboundItem } = await import('../../routes/performancesql.js'));
+  ({ createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem, removeManualInboundItem, upsertForecastAccuracyLog } = await import('../../routes/performancesql.js'));
 });
 
 beforeEach(() => {
@@ -418,5 +419,69 @@ describe('removeManualInboundItem', () => {
     await removeManualInboundItem(1);
 
     expect(dbRequest.query).toHaveBeenCalledTimes(2);
+  });
+});
+
+// upsertForecastAccuracyLog's k=0 (current month) row must freeze at whatever it was on the
+// first successful sync after the month started, rather than drifting all month — see the
+// function's own header comment. Verified here by proving the *code path* taken: k=0 goes
+// through upsertBatch's insertOnly mode (INSERT only, no UPDATE query issued for that batch),
+// while k=1..12 and ActualQty go through the normal upsert (UPDATE then INSERT). A mocked-mssql
+// unit test can't prove the real "existing row is left alone" behavior end-to-end — that needs
+// the SQL Server-gated integration suite (see performance.orderSuggestions.integration.test.js
+// or add a case there) calling this twice in the same month with a different forecast value.
+describe('upsertForecastAccuracyLog', () => {
+  beforeEach(() => {
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+  });
+
+  test('writes the current month (k=0) insert-only, but freely upserts future months (k=1..12) and ActualQty', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-15T00:00:00Z'));
+
+    await upsertForecastAccuracyLog([
+      {
+        material: 'MAT1', plant: '1000',
+        demandForecast: Array(13).fill(10),
+        predictedUsage: Array(13).fill(5),
+        consumptionHistory: Array(13).fill(3),
+      },
+    ]);
+
+    const queries = dbRequest.query.mock.calls.map(call => call[0]);
+    // Order: futureMonthRows (UPDATE, INSERT) → currentMonthRows insertOnly (INSERT only) → actualRows (UPDATE, INSERT)
+    expect(queries).toHaveLength(5);
+    expect(queries[0]).toMatch(/UPDATE t SET/);
+    expect(queries[1]).toMatch(/INSERT INTO log\.ForecastAccuracyLog/);
+    expect(queries[2]).toMatch(/INSERT INTO log\.ForecastAccuracyLog/);
+    expect(queries[3]).toMatch(/UPDATE t SET/);
+    expect(queries[4]).toMatch(/INSERT INTO log\.ForecastAccuracyLog/);
+
+    jest.useRealTimers();
+  });
+
+  test('the current-month (k=0) row targets TargetMonth = first day of the current UTC month', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-15T00:00:00Z'));
+
+    // Sentinel at index 0 (k=0, the current month) — every other k gets a plain value, so this
+    // appears exactly once across all input() calls, letting us locate its row unambiguously.
+    const demandForecast = Array(13).fill(10);
+    demandForecast[0] = -999;
+
+    await upsertForecastAccuracyLog([
+      { material: 'MAT1', plant: '1000', demandForecast, predictedUsage: Array(13).fill(5), consumptionHistory: [] },
+    ]);
+
+    const inputCalls = dbRequest.input.mock.calls;
+    const sentinelCalls = inputCalls.filter(call => call[2] === -999);
+    expect(sentinelCalls).toHaveLength(1);
+
+    // Columns are bound in order (Material, Plant, TargetMonth, SapDemandQty, PredictedQty) per
+    // row, so TargetMonth is the input() call immediately before the SapDemandQty sentinel.
+    const sentinelIdx = inputCalls.indexOf(sentinelCalls[0]);
+    expect(inputCalls[sentinelIdx - 1][2]).toEqual(new Date(Date.UTC(2026, 7, 1)));
+
+    jest.useRealTimers();
   });
 });

@@ -9067,7 +9067,7 @@
       "id": "readme_session_keepalive"
     },
     {
-      "label": "JWT issued by sql2005-bridge auth flow",
+      "label": "JWT issued by normanton-nexus auth flow",
       "file_type": "concept",
       "source_file": "SapServer/README.md",
       "source_location": null,
@@ -9076,7 +9076,7 @@
       "author": null,
       "contributor": null,
       "community": 57,
-      "norm_label": "jwt issued by sql2005-bridge auth flow",
+      "norm_label": "jwt issued by normanton-nexus auth flow",
       "id": "readme_jwt_auth_flow"
     },
     {
@@ -9184,7 +9184,7 @@
       "id": "scripts_watchlog_script"
     },
     {
-      "label": "sql2005-bridge (external frontend/token-issuing service)",
+      "label": "normanton-nexus (external frontend/token-issuing service)",
       "file_type": "concept",
       "source_file": "SapServer/Program.cs",
       "source_location": null,
@@ -9193,7 +9193,7 @@
       "author": null,
       "contributor": null,
       "community": 57,
-      "norm_label": "sql2005-bridge (external frontend/token-issuing service)",
+      "norm_label": "normanton-nexus (external frontend/token-issuing service)",
       "id": "sql2005_bridge_service"
     },
     {
@@ -9626,7 +9626,7 @@
       "id": "concept_vulnerability_disclosure_process"
     },
     {
-      "label": "sql2005-bridge / Normanton Nexus system",
+      "label": "normanton-nexus / Normanton Nexus system",
       "file_type": "concept",
       "source_file": "CLAUDE.md",
       "source_location": null,
@@ -9635,7 +9635,7 @@
       "author": null,
       "contributor": null,
       "community": 62,
-      "norm_label": "sql2005-bridge / normanton nexus system",
+      "norm_label": "normanton-nexus / normanton nexus system",
       "id": "concept_sql2005_bridge"
     },
     {
@@ -9730,7 +9730,7 @@
       "id": "graphify_out_appsettings_redacted_urls"
     },
     {
-      "label": "config.redacted.json (sql2005-bridge config schema)",
+      "label": "config.redacted.json (normanton-nexus config schema)",
       "file_type": "document",
       "source_file": "Normanton-Nexus/graphify-out/config.redacted.json",
       "source_location": null,
@@ -9739,7 +9739,7 @@
       "author": null,
       "contributor": null,
       "community": 62,
-      "norm_label": "config.redacted.json (sql2005-bridge config schema)",
+      "norm_label": "config.redacted.json (normanton-nexus config schema)",
       "id": "graphify_out_config_redacted"
     },
     {

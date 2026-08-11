@@ -6792,12 +6792,20 @@ async function cvcSubmit() {
 // ── Tile 5: history / forecast, by material or combined ─────────────────────
 let shfMrpController = '';
 let shfCurrentMaterial = null; // null when the combined/"Show All" view is loaded — quick-add link hides itself in that case
+let shfExcludedDeliveryIds = new Set(); // single-material/combined view's what-if delivery exclusions (see shfRenderDeliveriesList)
+let shfStockChartRef = { instance: null }; // lets shfRefetchStockChart replace just the stock chart, not the whole panel
+let shfVendorId = ''; // '' = not in vendor-filter mode; mutually exclusive with material search / MRP controller
+let shfVendorRowCharts = new Map(); // material -> { consumption, stock } Chart instances, for per-row refresh on delivery toggle
 
 async function runStockHistoryForecast() {
-  showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast, plus a weekly expected-stock-level projection — search for a material, or view the combined trend for all materials');
+  showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast, plus a weekly expected-stock-level projection — search for a material, view the combined trend for all materials, or filter by vendor to see each of its materials side by side');
   destroyTurnsCharts();
   shfMrpController = '';
   shfCurrentMaterial = null;
+  shfExcludedDeliveryIds = new Set();
+  shfStockChartRef = { instance: null };
+  shfVendorId = '';
+  shfVendorRowCharts = new Map();
   const body = document.getElementById('result-body');
 
   body.innerHTML = `
@@ -6810,6 +6818,10 @@ async function runStockHistoryForecast() {
         <label class="tf-label">MRP Controller</label>
         <select class="tf-input" id="shf-mrp-controller"><option value="">All controllers</option></select>
       </div>
+      <div class="tf-field">
+        <label class="tf-label">Filter by Vendor</label>
+        <select class="tf-input" id="shf-vendor"><option value="">— none —</option></select>
+      </div>
       <div class="tf-field" style="justify-content:flex-end">
         <label class="tf-label">&nbsp;</label>
         <button type="button" class="btn-submit" id="shf-search-btn">Search</button>
@@ -6820,18 +6832,22 @@ async function runStockHistoryForecast() {
       </div>
     </div>
     <div id="shf-picker" style="margin:10px 0"></div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px">
-        <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Select a material or press &ldquo;Show All&rdquo;</div>
-        <a href="javascript:void(0)" id="shf-add-adjustment-link" class="hidden" style="font-size:12px;color:var(--accent);white-space:nowrap">+ Add Demand Adjustment</a>
+    <div id="shf-single-view">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px">
+          <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Select a material or press &ldquo;Show All&rdquo;</div>
+          <a href="javascript:void(0)" id="shf-add-adjustment-link" class="hidden" style="font-size:12px;color:var(--accent);white-space:nowrap">+ Add Demand Adjustment</a>
+        </div>
+        <canvas id="shf-chart" style="max-height:320px"></canvas>
       </div>
-      <canvas id="shf-chart" style="max-height:320px"></canvas>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
+        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Expected Stock Level (Next 26 Weeks)</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.</div>
+        <canvas id="shf-stock-chart" style="max-height:280px"></canvas>
+        <div id="shf-stock-deliveries" style="margin-top:10px"></div>
+      </div>
     </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
-      <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Expected Stock Level (Weekly)</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks. Confirmed deliveries are not shown yet — the line only goes down.</div>
-      <canvas id="shf-stock-chart" style="max-height:280px"></canvas>
-    </div>`;
+    <div id="shf-vendor-view" class="hidden"></div>`;
 
   document.getElementById('shf-search-btn').addEventListener('click', shfSearchMaterials);
   document.getElementById('shf-search').addEventListener('keydown', e => {
@@ -6845,8 +6861,10 @@ async function runStockHistoryForecast() {
     shfMrpController = e.target.value;
     shfLoadChart(null, shfMrpController ? `All Materials — MRP Controller ${shfMrpController} (combined)` : 'All Materials (combined)');
   });
+  document.getElementById('shf-vendor').addEventListener('change', e => shfOnVendorChange(e.target.value));
 
   shfLoadMrpControllers();
+  shfLoadVendors();
 }
 
 async function shfLoadMrpControllers() {
@@ -6862,6 +6880,126 @@ async function shfLoadMrpControllers() {
       sel.appendChild(opt);
     });
   } catch (_) { /* dropdown just stays at "All controllers" */ }
+}
+
+async function shfLoadVendors() {
+  const sel = document.getElementById('shf-vendor');
+  try {
+    const vendors = await vmFetchVendors(); // reused from Vendor Master Data — GET /api/performance/vendors
+    vendors.filter(v => Number(v.MaterialCount) > 0).forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.VendorId;
+      opt.textContent = `${v.VendorName} (${v.MaterialCount})`;
+      sel.appendChild(opt);
+    });
+  } catch (_) { /* dropdown just stays at "— none —" */ }
+}
+
+// Vendor filter is mutually exclusive with material search / MRP controller — picking a vendor
+// hides the single consumption+stock chart pair and instead renders one two-chart row per
+// material the vendor supplies (consumption/forecast chart + stock chart side by side), so a
+// buyer can visually scan that supplier's whole position at once.
+async function shfOnVendorChange(vendorId) {
+  shfVendorId = vendorId;
+  const singleView = document.getElementById('shf-single-view');
+  const vendorView = document.getElementById('shf-vendor-view');
+  destroyTurnsCharts();
+  shfVendorRowCharts = new Map();
+
+  if (!vendorId) {
+    vendorView.classList.add('hidden');
+    vendorView.innerHTML = '';
+    singleView.classList.remove('hidden');
+    return;
+  }
+
+  // Clear the other two filters — they're mutually exclusive with vendor mode.
+  document.getElementById('shf-search').value = '';
+  document.getElementById('shf-picker').innerHTML = '';
+  document.getElementById('shf-mrp-controller').value = '';
+  shfMrpController = '';
+  shfCurrentMaterial = null;
+
+  singleView.classList.add('hidden');
+  vendorView.classList.remove('hidden');
+  vendorView.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading vendor materials…</div>';
+
+  try {
+    const res = await fetch(`/api/performance/vendors/${vendorId}/materials`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load vendor materials');
+    const materials = json.data;
+    if (!materials.length) {
+      vendorView.innerHTML = '<div class="sap-empty">This vendor has no materials assigned in MRP master data.</div>';
+      return;
+    }
+
+    vendorView.innerHTML = materials.map(m => `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px" data-shf-row="${esc(m.Material)}">
+        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">${esc(m.Material)}${m.MaterialText ? ' — ' + esc(m.MaterialText) : ''}</div>
+        <div class="shf-vendor-row-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+          <div><canvas id="shf-vc-${esc(m.Material)}" style="max-height:260px"></canvas></div>
+          <div>
+            <canvas id="shf-vs-${esc(m.Material)}" style="max-height:260px"></canvas>
+            <div id="shf-vd-${esc(m.Material)}" style="margin-top:10px"></div>
+          </div>
+        </div>
+      </div>`).join('');
+
+    // One request per material, fired in parallel — each row renders independently as its own
+    // data arrives, rather than waiting on the slowest material to show anything.
+    materials.forEach(m => shfRenderVendorRow(m.Material, new Set()));
+  } catch (err) {
+    vendorView.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// Renders (or re-renders, on a delivery-exclude toggle) one vendor-filter row's pair of charts.
+// excludedIds is owned by the caller (one Set per material, kept alive across re-renders so
+// toggling one delivery doesn't forget any others already excluded for that same material).
+async function shfRenderVendorRow(material, excludedIds) {
+  const consumptionCanvas = document.getElementById(`shf-vc-${material}`);
+  const stockCanvas = document.getElementById(`shf-vs-${material}`);
+  const deliveriesEl = document.getElementById(`shf-vd-${material}`);
+  if (!consumptionCanvas || !stockCanvas) return;
+
+  try {
+    const json = await shfFetchHistory({ material, excludeDeliveryIds: excludedIds });
+    const row = json.data[0];
+    if (!row) throw new Error('No data for this material.');
+
+    shfDestroyVendorRowCharts(material);
+
+    const consumptionChart = new Chart(consumptionCanvas, shfBuildConsumptionChartConfig(row, json.accuracy || {}));
+    turnsCharts.push(consumptionChart);
+
+    let stockChart = null;
+    if (json.stockForecast) {
+      stockChart = new Chart(stockCanvas, shfBuildStockChartConfig(json.stockForecast));
+      turnsCharts.push(stockChart);
+      if (deliveriesEl) {
+        shfRenderDeliveriesList(deliveriesEl, json.stockForecast, excludedIds, (id, included) => {
+          if (included) excludedIds.delete(id); else excludedIds.add(id);
+          shfRenderVendorRow(material, excludedIds);
+        });
+      }
+    }
+    shfVendorRowCharts.set(material, { consumption: consumptionChart, stock: stockChart });
+  } catch (err) {
+    const wrapper = consumptionCanvas.closest('[data-shf-row]');
+    if (wrapper) wrapper.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function shfDestroyVendorRowCharts(material) {
+  const existing = shfVendorRowCharts.get(material);
+  if (!existing) return;
+  [existing.consumption, existing.stock].forEach(c => {
+    if (!c) return;
+    const idx = turnsCharts.indexOf(c);
+    if (idx !== -1) turnsCharts.splice(idx, 1);
+    try { c.destroy(); } catch (_) {}
+  });
 }
 
 async function shfSearchMaterials() {
@@ -6922,8 +7060,161 @@ async function shfSearchMaterials() {
   }
 }
 
+// Shared GET /turns-valclass/history fetch — used by the single-material/combined view, its
+// delivery-exclude refresh, and each vendor-filter grid row. Throws on failure; caller catches.
+async function shfFetchHistory({ material, mrpController, excludeDeliveryIds } = {}) {
+  const materialParam = material ? `materials=${encodeURIComponent(material)}` : '';
+  const ctrlParam = mrpController ? `mrpController=${encodeURIComponent(mrpController)}` : '';
+  const excludeParam = excludeDeliveryIds && excludeDeliveryIds.size ? `excludeDeliveryIds=${[...excludeDeliveryIds].join(',')}` : '';
+  const qs = [materialParam, ctrlParam, excludeParam].filter(Boolean).join('&');
+  const resp = await fetch(`/api/performance/turns-valclass/history${qs ? '?' + qs : ''}`);
+  const json = await resp.json();
+  if (!json.success) throw new Error(json.error?.message || 'Failed to load history');
+  return json;
+}
+
+// Builds the Chart.js config for the "Consumption History / SAP Demand Forecast / Predicted
+// Usage / recorded" chart, given one material's own {consumptionHistory, demandForecast,
+// predictedUsage} plus its accuracy overlay ({recordedSapDemand, recordedPredicted}, already
+// scoped to that same material set by the route). Shared by the single-material/combined view
+// and each vendor-filter grid row — both call this against a canvas, just a different one.
+function shfBuildConsumptionChartConfig(row, accuracy) {
+  const history   = (row.consumptionHistory || []).map(v => Number(v) || 0);
+  const forecast  = (row.demandForecast || []).map(v => Number(v) || 0);
+  const predicted = (row.predictedUsage || []).map(v => Number(v) || 0);
+  // "Recorded" values come from log.ForecastAccuracyLog (see performance.js
+  // /turns-valclass/history) — what SAP demand and our prediction WERE for each of the last 12
+  // months, frozen as of the first sync after each month started.
+  const recordedSapDemand = (accuracy.recordedSapDemand || new Array(13).fill(null)).map(v => v == null ? null : Number(v));
+  const recordedPredicted = (accuracy.recordedPredicted || new Array(13).fill(null)).map(v => v == null ? null : Number(v));
+
+  // history[0..12] runs M-12 -> Current; forecast/predicted[0..12] run Current -> M+12
+  // (see BuildConsumptionHistoryRequest/ParseDemandForecastRows in PerformanceHelpers.cs —
+  // the arrays share "Current" at opposite ends, not the same position). One continuous
+  // 25-point timeline, each series padded with nulls on the side it doesn't cover, so the
+  // lines visually join at "Current". recordedSapDemand/recordedPredicted (from
+  // log.ForecastAccuracyLog) are already 13-wide in the same M-12..Current shape as
+  // history, so they get the same right-padding treatment.
+  const labels = [
+    ...Array.from({ length: 12 }, (_, i) => `M-${12 - i}`),
+    'Current',
+    ...Array.from({ length: 12 }, (_, i) => `M+${i + 1}`),
+  ];
+  const historySeries           = [...history, ...Array(12).fill(null)];
+  const forecastSeries          = [...Array(12).fill(null), ...forecast];
+  const predictedSeries         = [...Array(12).fill(null), ...predicted];
+  const recordedSapSeries       = [...recordedSapDemand, ...Array(12).fill(null)];
+  const recordedPredictedSeries = [...recordedPredicted, ...Array(12).fill(null)];
+
+  return {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Consumption History', data: historySeries, borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#0891B2', spanGaps: false },
+        { label: 'SAP Demand Forecast', data: forecastSeries, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4], spanGaps: false },
+        { label: 'Predicted Usage', data: predictedSeries, borderColor: '#16A34A', backgroundColor: 'rgba(22,163,74,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#16A34A', borderDash: [5, 4], spanGaps: false },
+        { label: 'SAP Demand (recorded)', data: recordedSapSeries, borderColor: '#F59E0B', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#F59E0B', borderDash: [1, 3], borderWidth: 1.5, spanGaps: false },
+        { label: 'Predicted (recorded)', data: recordedPredictedSeries, borderColor: '#16A34A', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#16A34A', borderDash: [1, 3], borderWidth: 1.5, spanGaps: false },
+      ],
+    },
+    options: {
+      plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        y: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+      },
+    },
+  };
+}
+
+// Stock can't physically go below 0 — a shortfall is still obvious as "flat at 0" — so the
+// chart clamps for display only. The underlying (possibly negative) value is left untouched
+// server-side, since findStockBelowThresholdDate's breach-date math needs the true shortfall
+// magnitude. See routes/performance.js.
+function shfClampStock(v) { return Math.max(0, v); }
+
+// Builds the Chart.js config for the weekly "Expected Stock Level" chart, given a stockForecast
+// ({ asOfDate, currentStock, weeks: [{ weekEnding, weeklyUsage, incomingQty, deliveries,
+// expectedStock }] }) already truncated to 26 weeks server-side. Shared by the single-
+// material/combined view and each vendor-filter grid row.
+function shfBuildStockChartConfig(stockForecast) {
+  const stockLabels = [stockForecast.asOfDate, ...stockForecast.weeks.map(w => w.weekEnding)];
+  const rawStock     = [stockForecast.currentStock, ...stockForecast.weeks.map(w => w.expectedStock)];
+  const stockSeries  = rawStock.map(shfClampStock);
+  const usageSeries  = [null, ...stockForecast.weeks.map(w => w.weeklyUsage)];
+  // A week with one or more incoming deliveries gets a larger, distinct point on the stock line
+  // itself, so a delivery's effect is visible directly, not only in the list below the chart.
+  const hasDelivery = [false, ...stockForecast.weeks.map(w => (w.deliveries || []).length > 0)];
+  const pointRadius = hasDelivery.map(d => d ? 6 : 2);
+  const pointStyle  = hasDelivery.map(d => d ? 'rectRot' : 'circle');
+
+  return {
+    type: 'line',
+    data: {
+      labels: stockLabels,
+      datasets: [
+        { label: 'Expected Stock Level', data: stockSeries, borderColor: '#7C3AED', backgroundColor: 'rgba(124,58,237,0.10)', fill: true, tension: 0.2, pointRadius, pointStyle, pointBackgroundColor: '#7C3AED', yAxisID: 'y' },
+        { label: 'Weekly Usage', data: usageSeries, borderColor: '#DC2626', backgroundColor: 'transparent', fill: false, borderDash: [3, 3], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y1' },
+      ],
+    },
+    options: {
+      plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#8DA3BE', font: { size: 10 }, maxRotation: 60, minRotation: 60 }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        y:  { position: 'left',  min: 0, ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' }, title: { display: true, text: 'Stock', color: '#8DA3BE', font: { size: 10 } } },
+        y1: { position: 'right', ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { display: false }, title: { display: true, text: 'Weekly Usage', color: '#8DA3BE', font: { size: 10 } } },
+      },
+    },
+  };
+}
+
+// Renders the "Incoming Deliveries" checklist under a stock chart — one row per delivery
+// landing within the 26-week window, checked = included in the forecast above. Unchecking
+// simulates "what if this delivery is late or lost" — nothing is persisted, it just re-requests
+// the forecast with that SuggestionId added to excludeDeliveryIds. onToggle(deliveryId,
+// included) fires on change; the caller owns refetching/redrawing.
+function shfRenderDeliveriesList(container, stockForecast, excludedIds, onToggle) {
+  const deliveries = [];
+  stockForecast.weeks.forEach(w => (w.deliveries || []).forEach(d => deliveries.push({ ...d, weekEnding: w.weekEnding })));
+
+  if (!deliveries.length) {
+    container.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No open incoming deliveries in this window.</div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">Incoming Deliveries</div>
+    <div style="display:flex;flex-direction:column;gap:4px">
+      ${deliveries.map(d => `
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+          <input type="checkbox" class="shf-delivery-toggle" data-id="${d.id}" ${excludedIds.has(d.id) ? '' : 'checked'}>
+          <span style="font-family:'JetBrains Mono',monospace">${esc(d.weekEnding)}</span>
+          <span>${esc(String(d.qty))} units${d.poNumber ? ' — PO ' + esc(d.poNumber) : ''}${d.material ? ' — ' + esc(d.material) : ''}</span>
+        </label>`).join('')}
+    </div>`;
+
+  container.querySelectorAll('.shf-delivery-toggle').forEach(cb => {
+    cb.addEventListener('change', () => onToggle(Number(cb.dataset.id), cb.checked));
+  });
+}
+
 async function shfLoadChart(material, title) {
+  // Vendor mode is mutually exclusive with the material search / MRP controller / Show All
+  // actions that all funnel through here — switch back to the single-chart view first.
+  if (shfVendorId) {
+    shfVendorId = '';
+    const vendorSel = document.getElementById('shf-vendor');
+    if (vendorSel) vendorSel.value = '';
+    document.getElementById('shf-vendor-view').classList.add('hidden');
+    document.getElementById('shf-vendor-view').innerHTML = '';
+    document.getElementById('shf-single-view').classList.remove('hidden');
+    shfVendorRowCharts = new Map();
+  }
+
   destroyTurnsCharts();
+  shfStockChartRef = { instance: null };
+  shfExcludedDeliveryIds = new Set();
   const titleEl = document.getElementById('shf-chart-title');
   titleEl.textContent = 'Loading…';
   shfCurrentMaterial = material || null;
@@ -6931,39 +7222,21 @@ async function shfLoadChart(material, title) {
   if (addAdjLink) addAdjLink.classList.toggle('hidden', !shfCurrentMaterial);
 
   try {
-    const ctrlParam = shfMrpController ? `mrpController=${encodeURIComponent(shfMrpController)}` : '';
-    const materialParam = material ? `materials=${encodeURIComponent(material)}` : '';
-    const qs = [materialParam, ctrlParam].filter(Boolean).join('&');
-    const url = `/api/performance/turns-valclass/history${qs ? '?' + qs : ''}`;
-    const resp = await fetch(url);
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.error?.message || 'Failed to load history');
+    const json = await shfFetchHistory({ material, mrpController: shfMrpController });
 
-    let history, forecast, predicted;
-
+    let row;
     if (material) {
-      const row = json.data[0];
+      row = json.data[0];
       if (!row) throw new Error('No history/forecast data for that material.');
-      history   = row.consumptionHistory.map(v => Number(v) || 0);
-      forecast  = row.demandForecast.map(v => Number(v) || 0);
-      predicted = (row.predictedUsage || []).map(v => Number(v) || 0);
     } else {
-      history   = new Array(13).fill(0);
-      forecast  = new Array(13).fill(0);
-      predicted = new Array(13).fill(0);
+      const history = new Array(13).fill(0), forecast = new Array(13).fill(0), predicted = new Array(13).fill(0);
       json.data.forEach(r => {
         (r.consumptionHistory || []).forEach((v, i) => { history[i]   += Number(v) || 0; });
         (r.demandForecast     || []).forEach((v, i) => { forecast[i]  += Number(v) || 0; });
         (r.predictedUsage     || []).forEach((v, i) => { predicted[i] += Number(v) || 0; });
       });
+      row = { consumptionHistory: history, demandForecast: forecast, predictedUsage: predicted };
     }
-
-    // "Recorded" values come from dbo.ForecastAccuracyLog (see performance.js /turns-valclass/history) —
-    // what SAP demand and our prediction WERE for each of the last 12 months, frozen as of right before
-    // each month started. Already summed server-side across whichever materials this request covers.
-    const accuracy = json.accuracy || {};
-    const recordedSapDemand = (accuracy.recordedSapDemand || new Array(13).fill(null)).map(v => v == null ? null : Number(v));
-    const recordedPredicted = (accuracy.recordedPredicted || new Array(13).fill(null)).map(v => v == null ? null : Number(v));
 
     titleEl.textContent = title;
 
@@ -6971,7 +7244,7 @@ async function shfLoadChart(material, title) {
     // "consumption values" indicator is switched on — plenty of materials
     // legitimately have none, even when the forecast (live requirements) does.
     // Flag it explicitly rather than showing a silent flat line at zero.
-    const noHistory = history.every(v => !v);
+    const noHistory = (row.consumptionHistory || []).every(v => !v);
     let noteEl = document.getElementById('shf-history-note');
     if (!noteEl) {
       noteEl = document.createElement('div');
@@ -6983,24 +7256,6 @@ async function shfLoadChart(material, title) {
       ? 'No consumption history recorded in SAP (MVER) for this selection — the material\'s consumption-values indicator may not be maintained, or it genuinely has no consumption yet.'
       : '';
 
-    // history[0..12] runs M-12 -> Current; forecast/predicted[0..12] run Current -> M+12
-    // (see BuildConsumptionHistoryRequest/ParseDemandForecastRows in PerformanceHelpers.cs —
-    // the arrays share "Current" at opposite ends, not the same position). One continuous
-    // 25-point timeline, each series padded with nulls on the side it doesn't cover, so the
-    // lines visually join at "Current". recordedSapDemand/recordedPredicted (from
-    // dbo.ForecastAccuracyLog) are already 13-wide in the same M-12..Current shape as
-    // history, so they get the same right-padding treatment.
-    const labels = [
-      ...Array.from({ length: 12 }, (_, i) => `M-${12 - i}`),
-      'Current',
-      ...Array.from({ length: 12 }, (_, i) => `M+${i + 1}`),
-    ];
-    const historySeries          = [...history, ...Array(12).fill(null)];
-    const forecastSeries         = [...Array(12).fill(null), ...forecast];
-    const predictedSeries        = [...Array(12).fill(null), ...predicted];
-    const recordedSapSeries      = [...recordedSapDemand, ...Array(12).fill(null)];
-    const recordedPredictedSeries = [...recordedPredicted, ...Array(12).fill(null)];
-
     let canvas = document.getElementById('shf-chart');
     if (!canvas) {
       canvas = document.createElement('canvas');
@@ -7009,55 +7264,22 @@ async function shfLoadChart(material, title) {
       titleEl.insertAdjacentElement('afterend', canvas);
     }
 
-    turnsCharts.push(new Chart(canvas, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label: 'Consumption History', data: historySeries, borderColor: '#0891B2', backgroundColor: 'rgba(8,145,178,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#0891B2', spanGaps: false },
-          { label: 'SAP Demand Forecast', data: forecastSeries, borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#F59E0B', borderDash: [5, 4], spanGaps: false },
-          { label: 'Predicted Usage', data: predictedSeries, borderColor: '#16A34A', backgroundColor: 'rgba(22,163,74,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#16A34A', borderDash: [5, 4], spanGaps: false },
-          { label: 'SAP Demand (recorded)', data: recordedSapSeries, borderColor: '#F59E0B', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#F59E0B', borderDash: [1, 3], borderWidth: 1.5, spanGaps: false },
-          { label: 'Predicted (recorded)', data: recordedPredictedSeries, borderColor: '#16A34A', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#16A34A', borderDash: [1, 3], borderWidth: 1.5, spanGaps: false },
-        ],
-      },
-      options: {
-        plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
-        scales: {
-          x: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
-          y: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
-        },
-      },
-    }));
+    turnsCharts.push(new Chart(canvas, shfBuildConsumptionChartConfig(row, json.accuracy || {})));
 
-    // ── Weekly expected stock level (Phase 1 — see routes/performance.js
-    // buildWeeklyStockForecast for the month-to-week spreading method; no
-    // confirmed-delivery data exists yet, so this line only ever goes down). ──
     const stockForecast = json.stockForecast;
     const stockCanvas = document.getElementById('shf-stock-chart');
     if (stockForecast && stockCanvas) {
-      const stockLabels = [stockForecast.asOfDate, ...stockForecast.weeks.map(w => w.weekEnding)];
-      const stockSeries  = [stockForecast.currentStock, ...stockForecast.weeks.map(w => w.expectedStock)];
-      const usageSeries   = [null, ...stockForecast.weeks.map(w => w.weeklyUsage)];
+      const chart = new Chart(stockCanvas, shfBuildStockChartConfig(stockForecast));
+      turnsCharts.push(chart);
+      shfStockChartRef.instance = chart;
 
-      turnsCharts.push(new Chart(stockCanvas, {
-        type: 'line',
-        data: {
-          labels: stockLabels,
-          datasets: [
-            { label: 'Expected Stock Level', data: stockSeries, borderColor: '#7C3AED', backgroundColor: 'rgba(124,58,237,0.10)', fill: true, tension: 0.2, pointRadius: 2, pointBackgroundColor: '#7C3AED', yAxisID: 'y' },
-            { label: 'Weekly Usage', data: usageSeries, borderColor: '#DC2626', backgroundColor: 'transparent', fill: false, borderDash: [3, 3], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y1' },
-          ],
-        },
-        options: {
-          plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
-          scales: {
-            x: { ticks: { color: '#8DA3BE', font: { size: 10 }, maxRotation: 60, minRotation: 60 }, grid: { color: 'rgba(0,0,0,0.06)' } },
-            y:  { position: 'left',  ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' }, title: { display: true, text: 'Stock', color: '#8DA3BE', font: { size: 10 } } },
-            y1: { position: 'right', ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { display: false }, title: { display: true, text: 'Weekly Usage', color: '#8DA3BE', font: { size: 10 } } },
-          },
-        },
-      }));
+      const listEl = document.getElementById('shf-stock-deliveries');
+      if (listEl) {
+        shfRenderDeliveriesList(listEl, stockForecast, shfExcludedDeliveryIds, (id, included) => {
+          if (included) shfExcludedDeliveryIds.delete(id); else shfExcludedDeliveryIds.add(id);
+          shfRefetchStockChart();
+        });
+      }
     }
 
   } catch (err) {
@@ -7070,6 +7292,36 @@ async function shfLoadChart(material, title) {
       canvas.replaceWith(errDiv);
     }
   }
+}
+
+// Re-requests just the stock forecast (current material/MRP-controller scope, current
+// excludeDeliveryIds) and replaces only the stock chart + deliveries list — the consumption/
+// forecast chart above is left untouched. Used by the delivery-exclude checkboxes' onToggle.
+async function shfRefetchStockChart() {
+  const stockCanvas = document.getElementById('shf-stock-chart');
+  const listEl = document.getElementById('shf-stock-deliveries');
+  if (!stockCanvas) return;
+
+  try {
+    const json = await shfFetchHistory({ material: shfCurrentMaterial, mrpController: shfMrpController, excludeDeliveryIds: shfExcludedDeliveryIds });
+    if (!json.stockForecast) return;
+
+    if (shfStockChartRef.instance) {
+      const idx = turnsCharts.indexOf(shfStockChartRef.instance);
+      if (idx !== -1) turnsCharts.splice(idx, 1);
+      try { shfStockChartRef.instance.destroy(); } catch (_) {}
+    }
+    const chart = new Chart(stockCanvas, shfBuildStockChartConfig(json.stockForecast));
+    turnsCharts.push(chart);
+    shfStockChartRef.instance = chart;
+
+    if (listEl) {
+      shfRenderDeliveriesList(listEl, json.stockForecast, shfExcludedDeliveryIds, (id, included) => {
+        if (included) shfExcludedDeliveryIds.delete(id); else shfExcludedDeliveryIds.add(id);
+        shfRefetchStockChart();
+      });
+    }
+  } catch (_) { /* leave the existing chart/list as-is on a transient failure */ }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -7109,6 +7361,7 @@ function vmRenderVendorList(vendors) {
       <td>${v.DefaultLeadTimeDays != null ? esc(String(v.DefaultLeadTimeDays)) + ' days' : '—'}</td>
       <td>${v.MaterialCount}</td>
       <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary vm-start-order" data-id="${esc(String(v.VendorId))}" style="padding:3px 10px;font-size:11px" ${v.MaterialCount ? '' : 'disabled title="No materials assigned to this vendor yet"'}>Start New Order</button>
         <button class="btn-secondary vm-edit-vendor" data-id="${esc(String(v.VendorId))}" style="padding:3px 10px;font-size:11px">Edit</button>
         <button class="btn-secondary vm-delete-vendor" data-id="${esc(String(v.VendorId))}" data-name="${esc(v.VendorName)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
       </td>
@@ -7133,6 +7386,9 @@ function vmRenderVendorList(vendors) {
       const v = vendors.find(x => String(x.VendorId) === tr.dataset.id);
       if (v) vmShowVendorMaterials(v);
     });
+  });
+  document.querySelectorAll('.vm-start-order').forEach(btn => {
+    btn.addEventListener('click', () => osOpenBuildOrderModal(btn.dataset.id, { proactive: true }));
   });
   document.querySelectorAll('.vm-edit-vendor').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -8410,10 +8666,12 @@ function osRenderSuggestionList(groups) {
   if (!groups.length) {
     document.getElementById('result-body').innerHTML = `
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+        <button class="btn-secondary" id="os-start-new-btn">Start New Order</button>
         <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
         <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
       </div>
       <div class="sap-empty">Nothing needs ordering right now.</div>`;
+    document.getElementById('os-start-new-btn').addEventListener('click', () => osOpenStartNewOrderPicker());
     document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
     document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
     return;
@@ -8498,6 +8756,7 @@ function osRenderSuggestionList(groups) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px">
       <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor — not just-in-time. Vendors with a combined order MOQ are grouped so you can see whether one order clears it; use Build Order to combine materials and hit the minimum.</div>
       <div style="display:flex;gap:8px;white-space:nowrap">
+        <button class="btn-secondary" id="os-start-new-btn">Start New Order</button>
         <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
         <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
         <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
@@ -8506,6 +8765,7 @@ function osRenderSuggestionList(groups) {
     ${sections}
   `;
 
+  document.getElementById('os-start-new-btn').addEventListener('click', () => osOpenStartNewOrderPicker());
   document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
   document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
   document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
@@ -8692,6 +8952,134 @@ function osOpenAcceptModal(s) {
 }
 
 
+// Mirrors routes/performance.js's addWorkingDaysUtc — used client-side purely to pre-fill the
+// Start New Order / Build Order delivery-date field from lead time as a convenience default.
+// The server independently recomputes/validates the real delivery date when the order is
+// actually accepted (buildAcceptPayload), so this never needs to be authoritative.
+function osAddWorkingDaysUtc(dateStr, days) {
+  const result = new Date(dateStr + 'T00:00:00Z');
+  const step = days >= 0 ? 1 : -1;
+  let remaining = Math.abs(Math.round(Number(days) || 0));
+  while (remaining > 0) {
+    result.setUTCDate(result.getUTCDate() + step);
+    const dow = result.getUTCDay();
+    if (dow !== 0 && dow !== 6) remaining -= 1;
+  }
+  return result.toISOString().slice(0, 10);
+}
+
+// The Build Order modal's live stock-preview charts (POST /order-suggestions/preview) — tracked
+// separately from turnsCharts since the modal can open/close independently of whatever tile is
+// underneath it, and destroyTurnsCharts() cleaning up the modal on every unrelated panel
+// switch elsewhere isn't the right lifetime for these.
+let osBuildPreviewCharts = [];
+let osBuildPreviewTimer = null;
+
+function osDestroyBuildPreviewCharts() {
+  osBuildPreviewCharts.forEach(c => { try { c.destroy(); } catch (_) {} });
+  osBuildPreviewCharts = [];
+}
+
+function osScheduleBuildPreview(build) {
+  clearTimeout(osBuildPreviewTimer);
+  osBuildPreviewTimer = setTimeout(() => osRefreshBuildPreview(build), 400);
+}
+
+// Re-requests the live what-if stock forecast for whatever's currently checked/quantified in
+// the Build Order modal, and redraws one small stock chart per checked material — lets a buyer
+// see straight away whether the prospective order fixes the projected stock position, before
+// committing via Accept Order. Nothing here is persisted (see the /preview route).
+async function osRefreshBuildPreview(build) {
+  const panel = document.getElementById('os-build-chart-panel');
+  if (!panel) return;
+
+  const deliveryDate = document.getElementById('os-build-delivery-date')?.value;
+  const items = [];
+  document.querySelectorAll('.os-build-check').forEach(cb => {
+    if (!cb.checked) return;
+    const qtyInput = document.querySelector(`.os-build-qty[data-i="${cb.dataset.i}"]`);
+    const qty = Number(qtyInput?.value) || 0;
+    if (qty <= 0) return;
+    const m = build.materials[Number(cb.dataset.i)];
+    items.push({ material: m.material, materialText: m.materialText, orderQty: qty });
+  });
+
+  osDestroyBuildPreviewCharts();
+  if (!deliveryDate || !items.length) {
+    panel.innerHTML = '<div class="toolbar-hint">Check at least one material with a qty greater than 0, and set a delivery date, to preview its effect on stock levels.</div>';
+    return;
+  }
+
+  panel.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Updating stock preview…</div>';
+  try {
+    const res = await fetch('/api/performance/order-suggestions/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deliveryDate, items: items.map(i => ({ material: i.material, orderQty: i.orderQty })) }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load stock preview');
+
+    panel.innerHTML = `
+      <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin:12px 0 10px">Live Stock Preview — with this order&rsquo;s delivery included</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        ${json.data.map((d, i) => `
+          <div>
+            <div style="font-size:11px;color:var(--text-secondary,#666);margin-bottom:4px">${esc(d.material)}${d.materialText ? ' — ' + esc(d.materialText) : ''}</div>
+            ${d.error ? `<div class="sap-error">${esc(d.error)}</div>` : `<canvas id="os-build-chart-${i}" style="max-height:220px"></canvas>`}
+          </div>`).join('')}
+      </div>`;
+
+    json.data.forEach((d, i) => {
+      if (d.error || !d.stockForecast) return;
+      const canvas = document.getElementById(`os-build-chart-${i}`);
+      if (!canvas) return;
+      osBuildPreviewCharts.push(new Chart(canvas, shfBuildStockChartConfig(d.stockForecast)));
+    });
+  } catch (err) {
+    panel.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// The Order Suggestions toolbar's "Start New Order" entry point — lets a buyer pick ANY vendor
+// (not just one that currently has a due suggestion) and go straight into the Build Order
+// modal for it. A small pick step rather than embedding a select permanently in the toolbar,
+// since most vendors won't need this on a given day.
+async function osOpenStartNewOrderPicker() {
+  openModal(`<div class="ps-modal" style="max-width:420px;width:90vw">
+    <div class="ps-modal-header">
+      <div class="ps-modal-title">Start New Order</div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-field">
+        <label class="tf-label">Vendor</label>
+        <select class="tf-input" id="os-start-new-vendor-select"><option value="">Loading vendors…</option></select>
+      </div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="os-start-new-continue-btn" disabled>Continue</button>
+    </div>
+  </div>`);
+
+  const sel = document.getElementById('os-start-new-vendor-select');
+  const continueBtn = document.getElementById('os-start-new-continue-btn');
+  try {
+    const vendors = (await vmFetchVendors()).filter(v => Number(v.MaterialCount) > 0);
+    sel.innerHTML = '<option value="">Select a vendor…</option>' +
+      vendors.map(v => `<option value="${esc(String(v.VendorId))}">${esc(v.VendorName)}</option>`).join('');
+  } catch (err) {
+    sel.innerHTML = `<option value="">${esc(err.message)}</option>`;
+  }
+  sel.addEventListener('change', () => { continueBtn.disabled = !sel.value; });
+  continueBtn.addEventListener('click', () => {
+    const vendorId = sel.value;
+    closePickModal();
+    if (vendorId) osOpenBuildOrderModal(vendorId, { proactive: true });
+  });
+}
+
 // Combines several materials from one vendor into a single order — the way
 // a combined order-level MOQ (dbo.Vendor.OrderMoqQty) actually gets managed,
 // rather than just noted. Lists every material this vendor supplies (not
@@ -8699,11 +9087,17 @@ function osOpenAcceptModal(s) {
 // running total against the MOQ live as materials are checked/unchecked or
 // quantities adjusted, so a buyer can pull in a not-yet-urgent material to
 // close a gap without leaving the page to go check stock levels elsewhere.
-async function osOpenBuildOrderModal(vendorId) {
-  openModal(`<div class="ps-modal" style="max-width:760px;width:95vw">
+//
+// Also reachable proactively (not just from an already-due suggestion) via
+// the "Start New Order" entry points on Vendor Master Data and the Order
+// Suggestions toolbar (osOpenStartNewOrderPicker) — computeVendorOrderBuild
+// already returns every material a vendor supplies regardless of urgency, so
+// this same modal/form works unchanged for a vendor with nothing due yet.
+async function osOpenBuildOrderModal(vendorId, { proactive = false } = {}) {
+  openModal(`<div class="ps-modal" style="max-width:820px;width:95vw">
     <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Build Order</div><div class="ps-modal-sub" id="os-build-vendor-name">Loading…</div></div>
-      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+      <div><div class="ps-modal-title">${proactive ? 'Start New Order' : 'Build Order'}</div><div class="ps-modal-sub" id="os-build-vendor-name">Loading…</div></div>
+      <button class="ps-modal-close" onclick="osDestroyBuildPreviewCharts();closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
       <div id="os-build-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
@@ -8741,11 +9135,24 @@ function osRenderBuildOrderForm(build) {
       </tr>`;
   }).join('');
 
+  // Delivery date is pre-filled from the LONGEST lead time among currently-checked materials
+  // (the combined shipment can't arrive before its slowest-supplying material) — falling back
+  // to the vendor's own default lead time when nothing is checked yet. Stays editable/pushable
+  // afterward; osDeliveryDateTouched (set below) stops this recompute from clobbering a manual
+  // edit once the buyer has typed their own date.
+  const initiallyCheckedLeads = build.materials.filter(m => m.dueNow && m.suggestedQty > 0).map(m => Number(m.leadTimeDays) || 0);
+  const initialLeadTime = initiallyCheckedLeads.length ? Math.max(...initiallyCheckedLeads) : (Number(build.defaultLeadTimeDays) || 0);
+  const initialDeliveryDate = osAddWorkingDaysUtc(todayStr, initialLeadTime);
+
   document.getElementById('os-build-body').innerHTML = `
     <div class="tf-row">
       <div class="tf-field">
         <label class="tf-label">Order Date</label>
         <input class="tf-input" type="date" id="os-build-order-date" value="${todayStr}">
+      </div>
+      <div class="tf-field tf-field--wide">
+        <label class="tf-label">Delivery Date <span style="font-weight:400;color:var(--text-secondary,#666)">(earliest possible, from lead time — editable)</span></label>
+        <input class="tf-input" type="date" id="os-build-delivery-date" value="${initialDeliveryDate}">
       </div>
     </div>
     <div style="overflow-x:auto;max-height:340px;overflow-y:auto">
@@ -8755,12 +9162,30 @@ function osRenderBuildOrderForm(build) {
       </table>
     </div>
     <div id="os-build-moq-status" style="margin-top:12px;padding:10px;border-radius:6px;font-size:13px"></div>
+    <div id="os-build-chart-panel"></div>
     <div id="os-build-result"></div>
     <div class="ps-modal-actions" style="margin-top:14px">
-      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-secondary" onclick="osDestroyBuildPreviewCharts();closePickModal()">Cancel</button>
       <button type="button" class="btn-submit" id="os-build-save-btn">Accept Order</button>
     </div>
   `;
+
+  let deliveryDateTouched = false;
+  function recalcDeliveryDatePrefill() {
+    if (deliveryDateTouched) return;
+    const orderDate = document.getElementById('os-build-order-date').value || todayStr;
+    const checkedLeads = [];
+    document.querySelectorAll('.os-build-check').forEach(cb => {
+      if (!cb.checked) return;
+      const m = build.materials[Number(cb.dataset.i)];
+      checkedLeads.push(Number(m.leadTimeDays) || 0);
+    });
+    const lead = checkedLeads.length ? Math.max(...checkedLeads) : (Number(build.defaultLeadTimeDays) || 0);
+    document.getElementById('os-build-delivery-date').value = osAddWorkingDaysUtc(orderDate, lead);
+  }
+  document.getElementById('os-build-delivery-date').addEventListener('input', () => { deliveryDateTouched = true; });
+  document.getElementById('os-build-order-date').addEventListener('change', () => { recalcDeliveryDatePrefill(); osScheduleBuildPreview(build); });
+  document.getElementById('os-build-delivery-date').addEventListener('change', () => osScheduleBuildPreview(build));
 
   // Enforced (not hinted): handles plain minimum, plain maximum, a
   // min/max range, and the exact-quantity case (min === max, e.g. Raaj
@@ -8817,6 +9242,11 @@ function osRenderBuildOrderForm(build) {
   document.querySelectorAll('.os-build-check, .os-build-qty').forEach(el => {
     el.addEventListener('input', updateMoqStatus);
     el.addEventListener('change', updateMoqStatus);
+    el.addEventListener('input', () => osScheduleBuildPreview(build));
+    el.addEventListener('change', () => osScheduleBuildPreview(build));
+  });
+  document.querySelectorAll('.os-build-check').forEach(el => {
+    el.addEventListener('change', recalcDeliveryDatePrefill);
   });
 
   // Per-material enforcement (not hinted): snap to the nearest MOQ lot and
@@ -8827,11 +9257,14 @@ function osRenderBuildOrderForm(build) {
       const enforced = osEnforceQty(el.value, m.materialMoqQty, m.materialMaxQty);
       if (enforced != null) el.value = enforced;
       updateMoqStatus();
+      osScheduleBuildPreview(build);
     });
   });
   updateMoqStatus();
+  osRefreshBuildPreview(build);
 
   document.getElementById('os-build-save-btn').addEventListener('click', async () => {
+    const deliveryDate = document.getElementById('os-build-delivery-date').value || null;
     const items = [];
     document.querySelectorAll('.os-build-check').forEach(cb => {
       if (!cb.checked) return;
@@ -8851,6 +9284,9 @@ function osRenderBuildOrderForm(build) {
         transitTimeDays: m.transitTimeDays,
         incoterms: m.incoterms,
         isSpotPo: m.isSpotPo,
+        // Shared delivery date across the whole batch — see accept-batch's deliveryDate
+        // passthrough. Falls back to the per-material lead-time calc server-side when blank.
+        deliveryDate,
       });
     });
 
@@ -8882,6 +9318,7 @@ function osRenderBuildOrderForm(build) {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error?.message || 'Failed to accept order');
+      osDestroyBuildPreviewCharts();
       closePickModal();
       runOrderSuggestions();
     } catch (err) {
@@ -10361,36 +10798,37 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // columns persist (SapGrSkipped/SapGrError, no separate reason
       // column), so a true testing-mode skip (SapGrError null) is
       // distinguished from the other two generically. The reason text is
-      // shown inline, not just in a title tooltip — a missing PO item
-      // number is exactly the kind of thing that's easy to miss on hover
-      // and needs to be obvious enough to actually go fix (see the PO Item
-      // column below, editable for exactly this reason).
-      const sapGrCell = canReceive ? '' : `<td>${
-        isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
-        : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
-        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
-        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
-        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
-        : '-'
-      }</td>`;
-
-      // PO Item is always editable, not just once a GR has actually been
-      // skipped for it — filling it in before Mark Received is the normal
-      // path for a manually-raised PO (see os-po-item-input's equivalent on
-      // Tracked Orders); this is the same field, just reachable from the
-      // Inbound Log too. The current Status/PoNumber/SupplierReference/Notes
-      // ride along as data attributes so isd-po-item-save can send the full
-      // row state on PUT — updateOrderSuggestionStatus (performancesql.js)
-      // sets Status/PoNumber/Notes/SupplierReference directly (not COALESCE),
-      // so omitting them would wipe whatever was already there.
-      const poItemCell = `<td>
+      // shown inline, not just in a title tooltip.
+      //
+      // Status and PO Item aren't worth a dedicated column each on a
+      // genuine (non-manual) order line — Status rarely needs a glance once
+      // a line is on a shipment, and PO Item only matters when it's the
+      // reason a GR didn't post, so that one specific case (PO number set,
+      // item number missing) gets an inline fix control right here in the
+      // SAP GR cell instead of an always-visible column, keeping the table
+      // narrow enough to read without scrolling horizontally.
+      const missingPoItemOnly = !isCancelled && !o.SapMaterialDocument && o.SapGrSkipped && o.PoNumber && !o.PoItemNumber;
+      // Status/PoNumber/SupplierReference/Notes ride along as data
+      // attributes so isd-po-item-save can send the full row state on PUT —
+      // updateOrderSuggestionStatus (performancesql.js) sets those directly
+      // (not COALESCE), so omitting them would wipe whatever was already
+      // there.
+      const poItemFixControl = `
         <input class="tf-input isd-po-item-input" type="text" maxlength="5"
                data-suggestion-id="${o.SuggestionId}" data-status="${esc(o.Status)}"
                data-po-number="${esc(o.PoNumber || '')}" data-supplier-ref="${esc(o.SupplierReference || '')}"
                data-notes="${esc(o.Notes || '')}"
                value="${esc(o.PoItemNumber || '')}" placeholder="e.g. 00010" style="width:70px;padding:3px 6px;font-size:11px">
-        <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>
-      </td>`;
+        <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>`;
+      const sapGrCell = canReceive ? '' : `<td>${
+        isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
+        : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
+        : missingPoItemOnly ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626);margin-bottom:4px">${esc(o.SapGrError)}</div>${poItemFixControl}`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
+        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
+        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
+        : '-'
+      }</td>`;
 
       return `
       <tr class="admin-row">
@@ -10398,9 +10836,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <td>${esc(o.VendorName)}</td>
         <td>${Number(o.OrderQty).toLocaleString()}</td>
         <td>${qtyReceivedCell}</td>
-        <td>${esc(o.Status)}</td>
         <td>${esc(o.PoNumber || '-')}</td>
-        ${poItemCell}
         <td>${esc(o.SupplierReference || '-')}</td>
         ${sapGrCell}
       </tr>`;
@@ -10461,7 +10897,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       ${canReceive ? '<div class="toolbar-hint">Qty Received defaults to what was ordered — adjust any line before Mark Received to confirm a short or over delivery. Only the confirmed quantity is posted as goods receipt in SAP.</div>' : ''}
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>PO Item</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>PO Number</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
       </div>
