@@ -10005,22 +10005,44 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // a GR attempted against it.
       //
       // SapGrSkipped is true for three different reasons — the operator
-      // ticked "Skip SAP posting" (testing), the line had no real SAP PO to
-      // post against (postGoodsReceiptToSap's noPo case), or the confirmed
-      // Qty Received was 0 (its zeroQty case) — see that function's comment
-      // in performance.js. Only the DB columns persist (SapGrSkipped/
-      // SapGrError, no separate reason column), so a true testing-mode skip
-      // (SapGrError null) is distinguished from the other two generically —
-      // "Not posted" plus the specific reason in the tooltip — rather than
-      // guessing which of noPo/zeroQty it was from the error text.
+      // ticked "Skip SAP posting" (testing), the line had no real SAP PO/
+      // item to post against (postGoodsReceiptToSap's noPo case — split
+      // into a "no PO number" and a "PO number set but no item number"
+      // message there), or the confirmed Qty Received was 0 (its zeroQty
+      // case) — see that function's comment in performance.js. Only the DB
+      // columns persist (SapGrSkipped/SapGrError, no separate reason
+      // column), so a true testing-mode skip (SapGrError null) is
+      // distinguished from the other two generically. The reason text is
+      // shown inline, not just in a title tooltip — a missing PO item
+      // number is exactly the kind of thing that's easy to miss on hover
+      // and needs to be obvious enough to actually go fix (see the PO Item
+      // column below, editable for exactly this reason).
       const sapGrCell = canReceive ? '' : `<td>${
         isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
         : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
-        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error" title="${esc(o.SapGrError)}">Not posted</span>`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
         : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
-        : o.SapGrError ? `<span class="sap-error" title="${esc(o.SapGrError)}">Failed</span>`
+        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
         : '-'
       }</td>`;
+
+      // PO Item is always editable, not just once a GR has actually been
+      // skipped for it — filling it in before Mark Received is the normal
+      // path for a manually-raised PO (see os-po-item-input's equivalent on
+      // Tracked Orders); this is the same field, just reachable from the
+      // Inbound Log too. The current Status/PoNumber/SupplierReference/Notes
+      // ride along as data attributes so isd-po-item-save can send the full
+      // row state on PUT — updateOrderSuggestionStatus (performancesql.js)
+      // sets Status/PoNumber/Notes/SupplierReference directly (not COALESCE),
+      // so omitting them would wipe whatever was already there.
+      const poItemCell = `<td>
+        <input class="tf-input isd-po-item-input" type="text" maxlength="5"
+               data-suggestion-id="${o.SuggestionId}" data-status="${esc(o.Status)}"
+               data-po-number="${esc(o.PoNumber || '')}" data-supplier-ref="${esc(o.SupplierReference || '')}"
+               data-notes="${esc(o.Notes || '')}"
+               value="${esc(o.PoItemNumber || '')}" placeholder="e.g. 00010" style="width:70px;padding:3px 6px;font-size:11px">
+        <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>
+      </td>`;
 
       return `
       <tr class="admin-row">
@@ -10030,6 +10052,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <td>${qtyReceivedCell}</td>
         <td>${esc(o.Status)}</td>
         <td>${esc(o.PoNumber || '-')}</td>
+        ${poItemCell}
         <td>${esc(o.SupplierReference || '-')}</td>
         ${sapGrCell}
       </tr>`;
@@ -10090,7 +10113,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       ${canReceive ? '<div class="toolbar-hint">Qty Received defaults to what was ordered — adjust any line before Mark Received to confirm a short or over delivery. Only the confirmed quantity is posted as goods receipt in SAP.</div>' : ''}
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>PO Item</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
       </div>
@@ -10122,6 +10145,38 @@ async function refreshInboundShipmentDetail(shipmentId) {
     renderAssociatedCosts(shipmentId, s);
     renderShipmentDocuments(shipmentId);
     if (s.IsManual) renderManualInboundItems(shipmentId);
+
+    // PO Item save — sends the full current row state (see poItemCell's
+    // comment above for why) so this single-field edit can't wipe
+    // Status/PoNumber/SupplierReference/Notes on save.
+    document.querySelectorAll('.isd-po-item-save').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const suggestionId = btn.dataset.suggestionId;
+        const input = document.querySelector(`.isd-po-item-input[data-suggestion-id="${suggestionId}"]`);
+        const resultDiv = document.getElementById('isd-result');
+        if (resultDiv) resultDiv.innerHTML = '';
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          const res2 = await fetch(`/api/performance/order-suggestions/${suggestionId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              status: input.dataset.status,
+              poNumber: input.dataset.poNumber || null,
+              poItemNumber: input.value.trim() || null,
+              supplierReference: input.dataset.supplierRef || null,
+              notes: input.dataset.notes || null,
+            }),
+          });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error?.message || 'Failed to save PO item number');
+          await refreshInboundShipmentDetail(shipmentId);
+        } catch (err) {
+          if (resultDiv) resultDiv.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
+          btn.disabled = false; btn.textContent = 'Save';
+        }
+      });
+    });
 
     document.getElementById('isd-doc-upload-btn').addEventListener('click', () => document.getElementById('isd-doc-file-input').click());
     document.getElementById('isd-doc-file-input').addEventListener('change', async () => {
@@ -10233,7 +10288,7 @@ async function renderManualInboundItems(shipmentId) {
       <tr class="admin-row">
         <td><strong>${esc(i.Material || '-')}</strong></td>
         <td>${esc(i.Description || '-')}</td>
-        <td>${Number(i.Quantity).toLocaleString()}${i.UnitOfMeasure ? ' ' + esc(i.UnitOfMeasure) : ''}</td>
+        <td>${Number(i.Quantity).toLocaleString()}</td>
         <td><button type="button" class="btn-secondary isd-item-delete" data-item-id="${i.ItemId}" style="padding:2px 8px;font-size:11px">Remove</button></td>
       </tr>`).join('');
 
@@ -10248,7 +10303,6 @@ async function renderManualInboundItems(shipmentId) {
         <div class="tf-field"><label class="tf-label">Material</label><input class="tf-input" type="text" id="isd-item-material" placeholder="e.g. T1700-16" style="width:120px"></div>
         <div class="tf-field"><label class="tf-label">Description</label><input class="tf-input" type="text" id="isd-item-desc" placeholder="Optional if material given"></div>
         <div class="tf-field"><label class="tf-label">Quantity</label><input class="tf-input" type="number" step="0.001" min="0" id="isd-item-qty" style="width:90px"></div>
-        <div class="tf-field"><label class="tf-label">Unit</label><input class="tf-input" type="text" id="isd-item-uom" placeholder="e.g. M" style="width:60px"></div>
         <div class="tf-field"><button type="button" class="btn-secondary" id="isd-item-add-btn">+ Add Item</button></div>
       </div>
       <div id="isd-item-result" style="margin-top:8px"></div>`;
@@ -10259,7 +10313,6 @@ async function renderManualInboundItems(shipmentId) {
       const material = document.getElementById('isd-item-material').value.trim();
       const description = document.getElementById('isd-item-desc').value.trim();
       const quantity = document.getElementById('isd-item-qty').value;
-      const unitOfMeasure = document.getElementById('isd-item-uom').value.trim();
       if (!material && !description) { result.innerHTML = '<div class="sap-error">Enter a material or a description.</div>'; return; }
       if (!quantity || Number(quantity) <= 0) { result.innerHTML = '<div class="sap-error">Enter a quantity greater than 0.</div>'; return; }
       btn.disabled = true; btn.textContent = 'Adding…';

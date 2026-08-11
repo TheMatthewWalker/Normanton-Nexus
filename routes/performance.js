@@ -3577,8 +3577,17 @@ async function postGoodsReceiptToSap(order, shipment, callerUserId) {
   // below checks them specifically so neither is ever shown as if the
   // testing checkbox had been ticked (see the Inbound Log SAP GR column and
   // markInboundShipmentReceived's post-receive summary in logistics.js).
-  if (!order.PoNumber || !order.PoItemNumber) {
+  // Split into two distinct messages (both still flagged noPo — same
+  // "nothing to post" gate downstream) so the Inbound Log's PO Item column
+  // and its inline error tell an operator exactly which field to fill in
+  // rather than a generic "no PO on file" that reads as if Create PO in SAP
+  // was never run at all, even when the PO number itself is already there
+  // and only the item number is missing.
+  if (!order.PoNumber) {
     return { success: false, skipped: true, noPo: true, error: 'No SAP PO number on file for this order line — nothing to post.' };
+  }
+  if (!order.PoItemNumber) {
+    return { success: false, skipped: true, noPo: true, error: 'PO number is set but the PO item number is missing — enter it in the PO Item column, then Undo Received and Mark Received again to post the goods receipt.' };
   }
   if (Number(order.ReceivedQty) <= 0) {
     return { success: false, skipped: true, zeroQty: true, error: 'Confirmed received quantity is 0 — nothing to post.' };
