@@ -5537,7 +5537,7 @@ function spRenderList(requests) {
     return `
       <tr class="admin-row">
         <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
-        <td>${Number(r.QuantityRequested).toLocaleString()}${r.QuantityDelivered > 0 ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.QuantityDelivered).toLocaleString()} delivered)</span>` : ''} ${esc(r.Uom || '')}</td>
+        <td>${Number(r.QuantityRequested).toLocaleString()}${r.QuantityDelivered > 0 ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.QuantityDelivered).toLocaleString()} delivered)</span>` : ''} ${esc(r.Uom || '')}${r.RequestUnit ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.RequestUnitQty).toLocaleString()} ${esc(r.RequestUnit)})</span>` : ''}</td>
         <td>${esc(r.Location)}</td>
         <td>${r.RequestedBatch ? esc(r.RequestedBatch) : '—'}</td>
         <td>${spDueLabel(r)}</td>
@@ -5584,21 +5584,30 @@ function spOpenRequestModal() {
     <div class="ps-modal-body">
       <div class="tf-row">
         <div class="tf-field tf-field--wide">
-          <label class="tf-label">Material</label>
-          <input class="tf-input" type="text" id="sp-material-search" placeholder="Search by material number or description…" autocomplete="off">
+          <label class="tf-label">Material (Part Number)</label>
+          <input class="tf-input" type="text" id="sp-material-search" placeholder="Search by part number…" autocomplete="off">
           <input type="hidden" id="sp-material-value">
           <input type="hidden" id="sp-material-text-value">
           <input type="hidden" id="sp-material-uom-value">
           <div id="sp-material-results"></div>
         </div>
       </div>
-      <div id="sp-batch-row"></div>
       <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Search by Description <span class="tf-optional">(optional)</span></label>
+          <input class="tf-input" type="text" id="sp-material-desc-search" placeholder="Not sure of the part number? Search by description here instead…" autocomplete="off">
+          <div id="sp-material-desc-results"></div>
+        </div>
+      </div>
+      <div id="sp-batch-row"></div>
+      <div class="tf-row" id="sp-qty-row">
         <div class="tf-field">
           <label class="tf-label">Quantity</label>
           <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-qty">
         </div>
-        <div class="tf-field">
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
           <label class="tf-label">Location</label>
           <select class="tf-input" id="sp-location">
             ${SP_LOCATIONS.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('')}
@@ -5652,22 +5661,45 @@ function spOpenRequestModal() {
   document.getElementById('sp-material-search').addEventListener('input', function () {
     document.getElementById('sp-material-value').value = '';
     document.getElementById('sp-batch-row').innerHTML = '';
+    document.getElementById('sp-material-desc-search').value = '';
+    document.getElementById('sp-material-desc-results').innerHTML = '';
+    spRenderQtyField([]);
     clearTimeout(searchTimer);
     const q = this.value.trim();
     const results = document.getElementById('sp-material-results');
     if (!q) { results.innerHTML = ''; return; }
-    searchTimer = setTimeout(() => spSearchMaterials(q), 250);
+    searchTimer = setTimeout(() => spSearchMaterials(q, 'material', 'sp-material-results'), 250);
   });
+
+  // Separate box, description-only — the main box above only ever matches
+  // part numbers so a shift worker typing a known part number isn't shown
+  // unrelated hits whose description happens to share a word. This box is
+  // the deliberate escape hatch for "I don't know the part number".
+  let descSearchTimer = null;
+  document.getElementById('sp-material-desc-search').addEventListener('input', function () {
+    document.getElementById('sp-material-value').value = '';
+    document.getElementById('sp-batch-row').innerHTML = '';
+    document.getElementById('sp-material-search').value = '';
+    document.getElementById('sp-material-results').innerHTML = '';
+    spRenderQtyField([]);
+    clearTimeout(descSearchTimer);
+    const q = this.value.trim();
+    const results = document.getElementById('sp-material-desc-results');
+    if (!q) { results.innerHTML = ''; return; }
+    descSearchTimer = setTimeout(() => spSearchMaterials(q, 'description', 'sp-material-desc-results'), 250);
+  });
+
+  spRenderQtyField([]);
 
   document.getElementById('sp-submit-btn').addEventListener('click', spSubmitRequest);
 }
 
-async function spSearchMaterials(q) {
-  const results = document.getElementById('sp-material-results');
+async function spSearchMaterials(q, by, resultsElId) {
+  const results = document.getElementById(resultsElId);
   if (!results) return;
   results.innerHTML = '<div class="pn-loading"><div class="spinner"></div>Searching…</div>';
   try {
-    const json = await spApi(`/materials?search=${encodeURIComponent(q)}`);
+    const json = await spApi(`/materials?search=${encodeURIComponent(q)}&by=${by}`);
     const rows = json.data || [];
     if (!rows.length) { results.innerHTML = '<div class="pn-empty">No materials matched.</div>'; return; }
     results.innerHTML = `
@@ -5683,18 +5715,79 @@ async function spSearchMaterials(q) {
           </tbody>
         </table>
       </div>`;
-    document.querySelectorAll('.sp-material-pick').forEach(tr => {
+    results.querySelectorAll('.sp-material-pick').forEach(tr => {
       tr.addEventListener('click', () => {
         document.getElementById('sp-material-search').value = tr.dataset.material;
         document.getElementById('sp-material-value').value = tr.dataset.material;
         document.getElementById('sp-material-text-value').value = tr.dataset.text;
         document.getElementById('sp-material-uom-value').value = tr.dataset.uom;
+        document.getElementById('sp-material-desc-search').value = '';
+        document.getElementById('sp-material-desc-results').innerHTML = '';
         results.innerHTML = '';
         spLoadBatchOptions(tr.dataset.material);
+        spLoadRequestUnits(tr.dataset.material);
       });
     });
   } catch (err) {
     results.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
+  }
+}
+
+// Rebuilds the Quantity row: a configured material (units.length > 0) gets
+// a Unit dropdown + "Quantity (in Unit)" input with a live KG preview,
+// converted server-side on submit (routes/staging.js trusts its own
+// log.MaterialRequestUnits lookup, not this preview number) — everything
+// else falls back to the original plain-quantity input in the material's
+// own SAP UoM, so materials with no configured units still work exactly as
+// before.
+function spRenderQtyField(units) {
+  const row = document.getElementById('sp-qty-row');
+  if (!row) return;
+
+  if (!units.length) {
+    row.innerHTML = `
+      <div class="tf-field">
+        <label class="tf-label">Quantity</label>
+        <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-qty">
+      </div>`;
+    return;
+  }
+
+  row.innerHTML = `
+    <div class="tf-field">
+      <label class="tf-label">Unit</label>
+      <select class="tf-input" id="sp-unit">
+        <option value="">Select unit…</option>
+        ${units.map(u => `<option value="${esc(u.Unit)}" data-conversion="${u.ConversionQty}">${esc(u.Unit)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="tf-field">
+      <label class="tf-label">Quantity (in Unit)</label>
+      <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-unit-qty">
+      <div class="toolbar-hint" id="sp-unit-preview" style="margin-top:4px"></div>
+    </div>`;
+
+  const updatePreview = () => {
+    const sel = document.getElementById('sp-unit');
+    const qtyInput = document.getElementById('sp-unit-qty');
+    const preview = document.getElementById('sp-unit-preview');
+    const conversion = Number(sel.selectedOptions[0]?.dataset.conversion || 0);
+    const qty = Number(qtyInput.value);
+    preview.textContent = (conversion > 0 && qty > 0)
+      ? `= ${(conversion * qty).toLocaleString()} KG`
+      : '';
+  };
+  document.getElementById('sp-unit').addEventListener('change', updatePreview);
+  document.getElementById('sp-unit-qty').addEventListener('input', updatePreview);
+}
+
+async function spLoadRequestUnits(material) {
+  try {
+    const res = await fetch(`/api/material-request-units/by-material/${encodeURIComponent(material)}`);
+    const json = await res.json();
+    spRenderQtyField(json.success ? (json.data || []) : []);
+  } catch {
+    spRenderQtyField([]); // unit lookup failing shouldn't block a request in the material's base UoM
   }
 }
 
@@ -5749,16 +5842,36 @@ async function spSubmitRequest() {
     material,
     materialText: document.getElementById('sp-material-text-value').value || null,
     uom: document.getElementById('sp-material-uom-value').value || null,
-    quantityRequested: Number(document.getElementById('sp-qty').value),
     location,
     requestedBatch: document.getElementById('sp-batch')?.value || null,
     dueAtUtc: new Date(dueLocal).toISOString(),
     notes: document.getElementById('sp-notes').value.trim() || null,
   };
 
-  if (!(body.quantityRequested > 0)) {
-    resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
-    return;
+  // Unit path (material has configured request units — sp-unit exists) vs
+  // the plain-quantity fallback (no units configured for this material) —
+  // see spRenderQtyField. The KG conversion itself always happens
+  // server-side in routes/staging.js, never trusted from this preview.
+  const unitSel = document.getElementById('sp-unit');
+  if (unitSel) {
+    const unit = unitSel.value;
+    const unitQty = Number(document.getElementById('sp-unit-qty').value);
+    if (!unit) {
+      resultEl.innerHTML = '<div class="pn-empty">Pick a unit.</div>';
+      return;
+    }
+    if (!(unitQty > 0)) {
+      resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
+      return;
+    }
+    body.requestUnit = unit;
+    body.requestUnitQty = unitQty;
+  } else {
+    body.quantityRequested = Number(document.getElementById('sp-qty').value);
+    if (!(body.quantityRequested > 0)) {
+      resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
+      return;
+    }
   }
 
   const btn = document.getElementById('sp-submit-btn');
