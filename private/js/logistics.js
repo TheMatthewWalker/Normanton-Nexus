@@ -10361,36 +10361,37 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // columns persist (SapGrSkipped/SapGrError, no separate reason
       // column), so a true testing-mode skip (SapGrError null) is
       // distinguished from the other two generically. The reason text is
-      // shown inline, not just in a title tooltip — a missing PO item
-      // number is exactly the kind of thing that's easy to miss on hover
-      // and needs to be obvious enough to actually go fix (see the PO Item
-      // column below, editable for exactly this reason).
-      const sapGrCell = canReceive ? '' : `<td>${
-        isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
-        : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
-        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
-        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
-        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
-        : '-'
-      }</td>`;
-
-      // PO Item is always editable, not just once a GR has actually been
-      // skipped for it — filling it in before Mark Received is the normal
-      // path for a manually-raised PO (see os-po-item-input's equivalent on
-      // Tracked Orders); this is the same field, just reachable from the
-      // Inbound Log too. The current Status/PoNumber/SupplierReference/Notes
-      // ride along as data attributes so isd-po-item-save can send the full
-      // row state on PUT — updateOrderSuggestionStatus (performancesql.js)
-      // sets Status/PoNumber/Notes/SupplierReference directly (not COALESCE),
-      // so omitting them would wipe whatever was already there.
-      const poItemCell = `<td>
+      // shown inline, not just in a title tooltip.
+      //
+      // Status and PO Item aren't worth a dedicated column each on a
+      // genuine (non-manual) order line — Status rarely needs a glance once
+      // a line is on a shipment, and PO Item only matters when it's the
+      // reason a GR didn't post, so that one specific case (PO number set,
+      // item number missing) gets an inline fix control right here in the
+      // SAP GR cell instead of an always-visible column, keeping the table
+      // narrow enough to read without scrolling horizontally.
+      const missingPoItemOnly = !isCancelled && !o.SapMaterialDocument && o.SapGrSkipped && o.PoNumber && !o.PoItemNumber;
+      // Status/PoNumber/SupplierReference/Notes ride along as data
+      // attributes so isd-po-item-save can send the full row state on PUT —
+      // updateOrderSuggestionStatus (performancesql.js) sets those directly
+      // (not COALESCE), so omitting them would wipe whatever was already
+      // there.
+      const poItemFixControl = `
         <input class="tf-input isd-po-item-input" type="text" maxlength="5"
                data-suggestion-id="${o.SuggestionId}" data-status="${esc(o.Status)}"
                data-po-number="${esc(o.PoNumber || '')}" data-supplier-ref="${esc(o.SupplierReference || '')}"
                data-notes="${esc(o.Notes || '')}"
                value="${esc(o.PoItemNumber || '')}" placeholder="e.g. 00010" style="width:70px;padding:3px 6px;font-size:11px">
-        <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>
-      </td>`;
+        <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>`;
+      const sapGrCell = canReceive ? '' : `<td>${
+        isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
+        : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
+        : missingPoItemOnly ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626);margin-bottom:4px">${esc(o.SapGrError)}</div>${poItemFixControl}`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
+        : o.SapGrSkipped ? '<span style="color:var(--text-secondary,#666)">Skipped (testing)</span>'
+        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
+        : '-'
+      }</td>`;
 
       return `
       <tr class="admin-row">
@@ -10398,9 +10399,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
         <td>${esc(o.VendorName)}</td>
         <td>${Number(o.OrderQty).toLocaleString()}</td>
         <td>${qtyReceivedCell}</td>
-        <td>${esc(o.Status)}</td>
         <td>${esc(o.PoNumber || '-')}</td>
-        ${poItemCell}
         <td>${esc(o.SupplierReference || '-')}</td>
         ${sapGrCell}
       </tr>`;
@@ -10461,7 +10460,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       ${canReceive ? '<div class="toolbar-hint">Qty Received defaults to what was ordered — adjust any line before Mark Received to confirm a short or over delivery. Only the confirmed quantity is posted as goods receipt in SAP.</div>' : ''}
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>Status</th><th>PO Number</th><th>PO Item</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>PO Number</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
           <tbody>${ordersRows}</tbody>
         </table>
       </div>

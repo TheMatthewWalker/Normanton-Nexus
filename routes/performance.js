@@ -3587,7 +3587,7 @@ async function postGoodsReceiptToSap(order, shipment, callerUserId) {
     return { success: false, skipped: true, noPo: true, error: 'No SAP PO number on file for this order line — nothing to post.' };
   }
   if (!order.PoItemNumber) {
-    return { success: false, skipped: true, noPo: true, error: 'PO number is set but the PO item number is missing — enter it in the PO Item column, then Undo Received and Mark Received again to post the goods receipt.' };
+    return { success: false, skipped: true, noPo: true, error: 'PO number is set but the PO item number is missing — enter it below, then Undo Received and Mark Received again to post the goods receipt.' };
   }
   if (Number(order.ReceivedQty) <= 0) {
     return { success: false, skipped: true, zeroQty: true, error: 'Confirmed received quantity is 0 — nothing to post.' };
