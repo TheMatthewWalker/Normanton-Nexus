@@ -274,7 +274,11 @@ describe('POST /generate — consignment (no-invoice) fallback', () => {
     expect(res.status).toBe(200);
     const wb = await loadWorkbookFromResponse(res);
     const dataRow = wb.getWorksheet('CUSTOMS').getRow(2).values.slice(1);
-    expect(dataRow[4]).toBe(''); // Invoice Number still blank
+    // Invoice Number is still the delivery number placeholder even when no
+    // consignment price is found — only the value/currency stay blank.
+    expect(dataRow[4]).toBe('82900002');
+    expect(dataRow[5]).toBe('');   // Currency — blank, no price found
+    expect(dataRow[6]).toBe(''); // Sales Value — blank, no price found
 
     const warnWs = wb.getWorksheet('Warnings');
     expect(warnWs).toBeDefined();
