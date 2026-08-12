@@ -49,6 +49,9 @@ export function createMockSql() {
   // same shared `pool` (with `.request()`), not a disconnected stub, or any
   // route using those two helpers gets "pool.request is not a function".
   pool.connect = jest.fn().mockResolvedValue(undefined);
+  // config.js's getIsolatedNexusConnection() (the admin SQL console's
+  // per-query throwaway connection) always calls pool.close() when done.
+  pool.close = jest.fn().mockResolvedValue(undefined);
 
   const knownTypes = {
     // Type "constructors" — mssql exposes these as classes; nothing in this
@@ -107,6 +110,7 @@ export function resetMockSql({ pool, request, connect, transaction, Transaction 
   request.query.mockReset();
   pool.request.mockClear();
   pool.connect?.mockClear();
+  pool.close?.mockClear();
   connect.mockClear();
   if (transaction) {
     transaction.begin.mockClear();

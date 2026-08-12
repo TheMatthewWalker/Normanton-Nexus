@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import { requireDepartment, requireLogin, requirePermission, requireRole } from '../middleware/auth.js';
-import { apiKey, auditQuery, getNexusPool } from '../config.js';
+import { apiKey, auditQuery, getIsolatedNexusConnection } from '../config.js';
 
 const router = express.Router();
 
@@ -30,9 +30,18 @@ router.post("/query", requireLogin, async (req, res) => {
     }
   }
 
+  // A console query may contain a session-scoped statement (`USE <db>`), which
+  // changes the default database for whatever physical connection it runs on
+  // for the rest of that connection's life. Running it on the shared,
+  // cached getNexusPool() would leak that change back into the pool and
+  // corrupt unrelated requests (e.g. session lookups against
+  // dbo.PortalSessions) that later reuse the same connection. Use a
+  // dedicated, throwaway connection instead and always close it — any state
+  // change dies with it.
+  let conn;
   try {
-    const pool = await getNexusPool();
-    const result = await pool.request().query(query);
+    conn = await getIsolatedNexusConnection();
+    const result = await conn.request().query(query);
     auditQuery('RAW_SQL', username, query.slice(0, 500), req);
     // Always return JSON, even if recordset is empty (e.g., for INSERT/DELETE).
     // A query batch with several SELECTs (semicolon-separated statements)
@@ -51,6 +60,8 @@ router.post("/query", requireLogin, async (req, res) => {
     console.error('[SQL]', err.message, err.number ? `(#${err.number})` : '');
     auditQuery('RAW_SQL_ERROR', username, `${query.slice(0, 400)} — ERR: ${err.message.slice(0, 80)}`, req);
     res.status(500).json({ success: false, error: err.message });
+  } finally {
+    if (conn) conn.close().catch(() => {});
   }
 });
 
@@ -60,11 +71,12 @@ router.post("/query-csv", async (req, res) => {
   if (key !== apiKey) return res.status(403).send(key + " " + query);
   if (!query) return res.status(400).send("Missing query");
 
+  let conn;
   try {
-    const pool = await getNexusPool();
-    const result = await pool.request().query(query);
+    conn = await getIsolatedNexusConnection();
+    const result = await conn.request().query(query);
 
-    
+
     // INSERT / UPDATE / DELETE
     if (!result.recordset) {
       const rows = result.rowsAffected?.[0] ?? 0;
@@ -106,6 +118,8 @@ router.post("/query-csv", async (req, res) => {
       success: false,
       message: err.message
     });
+  } finally {
+    if (conn) conn.close().catch(() => {});
   }
 });
 

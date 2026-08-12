@@ -115,6 +115,24 @@ export const getNexusOperationsPool = makePoolGetter(() => resolvePoolConfig('Ne
 // separate, deliberate data-migration step happens.
 export const getNexusArchivePool = makePoolGetter(() => resolvePoolConfig('NexusArchive', 'nexusArchive'));
 
+// ── Isolated ad-hoc connection — for arbitrary/operator-supplied raw SQL
+// (the admin SQL console) where a query might contain a session-scoped
+// statement like `USE <database>`. `USE` changes the *default database* for
+// whichever physical connection it runs on, and that change persists on
+// that connection until it's closed or another `USE` runs on it. The cached
+// pools above (getNexusPool, etc.) are shared by every route — including
+// session validation against dbo.PortalSessions — and hand out their
+// physical connections round-robin, so a `USE` issued through a shared pool
+// silently corrupts whichever unrelated request next reuses that same
+// connection. This getter always opens a brand-new, uncached ConnectionPool
+// so any such state change is discarded when the caller closes it —
+// never returned to a shared pool. Callers must always pool.close() when done.
+export async function getIsolatedNexusConnection() {
+  const pool = new sql.ConnectionPool(resolvePoolConfig('Nexus', 'nexus'));
+  await pool.connect();
+  return pool;
+}
+
 
 // ── Department page map — which HTML page requires which department ────────────
 export const DEPT_PAGE_MAP = {
@@ -188,6 +206,7 @@ export default {
     getNexusPool,
     getNexusOperationsPool,
     getNexusArchivePool,
+    getIsolatedNexusConnection,
     DEPT_PAGE_MAP,
     stampDbChange,
     isAdmin,
