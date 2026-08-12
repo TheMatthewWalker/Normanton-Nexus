@@ -188,6 +188,71 @@ describe('GET /warehouse/tr-cleanup-candidates', () => {
   });
 });
 
+describe('POST /warehouse/transfer-order', () => {
+  test('audits success with the created TR number in the detail', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500009999', messages: [] } },
+    });
+
+    const res = await request(app).post('/warehouse/transfer-order').send({ Material: '30005R' });
+
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('TR 4500009999'));
+  });
+
+  test('does not append a TR number to the failure audit detail', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 422, data: { error: 'RFC call failed' } };
+    axiosMock.post.mockRejectedValueOnce(sapError);
+
+    const res = await request(app).post('/warehouse/transfer-order').send({ Material: '30005R' });
+
+    expect(res.status).toBe(422);
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('Transfer order failed'));
+  });
+});
+
+describe('POST /warehouse/batch-cleanup-transfer', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/warehouse/batch-cleanup-transfer').send({ kind: 'transfer', payload: {} });
+    expect(res.status).toBe(403);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('400s on an unrecognised kind', async () => {
+    const res = await request(appLogSuper).post('/warehouse/batch-cleanup-transfer').send({ kind: 'bogus', payload: {} });
+    expect(res.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('audits a transfer clean-up success with the created TR number in the detail', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500008888', messages: [] } },
+    });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer')
+      .send({ kind: 'transfer', payload: { Material: '30005R', Batch: 'B1' } });
+
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('TR 4500008888'));
+  });
+
+  test('does not look for a TR number on a consignment clean-up', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, mb1bMessage: 'Posted', toNonConsignMessage: '', toConsignMessage: '' } },
+    });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer')
+      .send({ kind: 'consignment', payload: { Material: '30005R', Batch: 'B1' } });
+
+    expect(res.status).toBe(200);
+    const detailCall = dbRequest.input.mock.calls.find(c => c[0] === 'detail');
+    expect(detailCall[2]).not.toContain('TR ');
+  });
+});
+
 describe('POST /warehouse/delete-tr', () => {
   test('is rejected for a user without LOG_SUPER', async () => {
     const res = await request(app).post('/warehouse/delete-tr').send({ TrNumber: '4500001234' });

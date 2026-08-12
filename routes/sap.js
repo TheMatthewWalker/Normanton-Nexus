@@ -414,7 +414,7 @@ router.post("/warehouse/transfer-order", async (req, res) => {
             throw new Error(body.error ?? 'SapServer returned success=false');
 
         const rows = body.data;
-        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Transfer order succeeded for material ${params.Material || ''}`), req);
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Transfer order succeeded for material ${params.Material || ''}`, rows?.transferOrderNumber ? `TR ${rows.transferOrderNumber}` : null), req);
 
         const redrum = await maybeReverseBatchManagedReturn({
             batch: params.Batch || null,
@@ -471,7 +471,8 @@ router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'),
         const body = response.data;
         if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
 
-        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} succeeded for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`), req);
+        const trNumber = kind === 'transfer' ? body.data?.transferOrderNumber : null;
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} succeeded for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`, trNumber ? `TR ${trNumber}` : null), req);
 
         const redrum = kind === 'transfer' ? await maybeReverseBatchManagedReturn({
             batch: payload.Batch || null,
