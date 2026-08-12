@@ -5610,6 +5610,7 @@ function spOpenRequestModal() {
         <div class="tf-field tf-field--wide">
           <label class="tf-label">Location</label>
           <select class="tf-input" id="sp-location">
+            <option value="" selected>Select location…</option>
             ${SP_LOCATIONS.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('')}
             <option value="__other__">Other…</option>
           </select>
@@ -5824,6 +5825,10 @@ async function spSubmitRequest() {
     return;
   }
   const locationSel = document.getElementById('sp-location').value;
+  if (!locationSel) {
+    resultEl.innerHTML = '<div class="pn-empty">Select a location.</div>';
+    return;
+  }
   const location = locationSel === '__other__'
     ? `Other: ${document.getElementById('sp-other-location').value.trim()}`
     : locationSel;
