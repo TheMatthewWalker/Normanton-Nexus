@@ -5,6 +5,20 @@ One subfolder per database (`kongsberg/`, `production/`, `logistics/`,
 `knex_migrations` table — see `knexfile.cjs` for connection config and the
 `--env` convention.
 
+> **Naming note (2026-08-10 restructure):** the three original databases
+> (Kongsberg, Production, Logistics) plus `production_archive` were merged/
+> renamed into **Nexus**, **NexusOperations**, and **NexusArchive** — see
+> `knexfile.cjs`'s own header comment for the full rationale. `knexfile.cjs`
+> and `package.json` only define `nexus` / `nexus_operations` /
+> `nexus_archive` environments (plus their `_live` counterparts) now — the
+> `kongsberg` / `production` / `logistics` / `production_archive` `--env`
+> names and `npm run migrate:kongsberg` etc. commands documented below are
+> **historical** (the folders and their already-applied initial migrations
+> are kept on disk for reference) and no longer runnable as written. New
+> schema work goes through `nexus` / `nexus_operations` / `nexus_archive`
+> (e.g. `npm run migrate:nexus_operations`, `npm run migrate:nexus_operations_live`)
+> — see the dated entry near the bottom of this file for a worked example.
+
 Run with:
 
 ```bash
@@ -182,3 +196,55 @@ sqlcmd -S GATEWAYHO -U <user> -P <password> -d Production_Archive -Q "CREATE TAB
 Knex only auto-creates these if they don't already exist, so once they're
 there with `DATETIME` instead of `DATETIME2`, `migrate:production_archive_live`
 runs normally.
+
+## 2026-08-12 — `prod.*Ref` computed-column fix (`nexus_operations`)
+
+`migrations/nexus_operations/20260812180000_fix_ref_computed_columns.cjs`
+corrects a real bug found while investigating a report that `BraidRef` was
+blank on a live `prod.Braiding` row: every process's `*Ref` column
+(`MixRef`/`ExtRef`/`ConvRef`/`BraidRef`/`CovRef`/`TWRef`/`DrumRef`/
+`EwaldRef`/`FWRef`/`HARef`) is meant to be a computed, `PERSISTED` column
+derived from the row's own identity column (e.g. `BraidRef = 'BR' +
+BraidingID` zero-padded to 8 digits — see `sql/migrate_production_v6.sql`
+lines 78-176 for the original, correct formula for each one).
+
+**Root cause**: `sql/generate_production_schema_script.sql` — the tool used
+to extract the live schema when `NexusOperations` was scaffolded fresh
+around 2026-08-10 (see the naming note at the top of this file) — built
+`CREATE TABLE` column definitions from `sys.columns`/`sys.types` only and
+never checked `sys.computed_columns`, so it silently emitted every one of
+these as a plain nullable `NVARCHAR(10)` column instead of its real
+computed formula. Application code never writes to these columns (they were
+always meant to self-populate), so every row inserted since
+`NexusOperations` went live had a `NULL` ref — and because each column also
+carries a UNIQUE index (`UQ_Braiding_BraidRef` etc.), which SQL Server
+treats as allowing only one `NULL` value, only the very first row of each
+process table could silently get away with it before a second insert would
+start hitting a unique-constraint violation.
+
+**Fixed in three places**:
+1. `sql/generate_production_schema_script.sql` — the generator itself now
+   detects a computed column (`c.is_computed`) and emits
+   `sys.computed_columns.definition` (+ `PERSISTED`) instead, so a future
+   schema extraction can't reintroduce this for any table.
+2. `migrations/nexus_operations/20260804120000_initial_schema.cjs` — the
+   original (already-applied) initial-schema migration's column definitions
+   were corrected at the source, so a *fresh* `nexus_operations` database
+   built from scratch won't reproduce the bug. Editing an already-applied
+   migration doesn't retroactively fix a live database, which is what #3 is
+   for.
+3. `migrations/nexus_operations/20260812180000_fix_ref_computed_columns.cjs`
+   — the actual live-database fix: drops and recreates each affected
+   column's indexes, drops the broken plain column, re-adds it as the
+   correct `AS (...) PERSISTED` formula, then recreates the indexes.
+   Re-adding a `PERSISTED` computed column automatically recomputes and
+   backfills every existing row (including whatever's currently sitting at
+   `NULL`) — no manual `UPDATE` needed. Every statement is individually
+   guarded (`COL_LENGTH`/`COLUMNPROPERTY`/`sys.indexes` checks, same
+   convention as `20260805134845_billet_staging.cjs`), so it's idempotent
+   and safe to run against an environment that was never actually broken.
+
+Apply with:
+```bash
+npm run migrate:nexus_operations_live
+```

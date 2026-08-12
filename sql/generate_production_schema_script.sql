@@ -42,6 +42,19 @@
      - Full-text indexes, XML schema collections (not used anywhere in
        this codebase as far as the app code shows, but flagging in case)
 
+   FIXED 2026-08-12: section 2's column generator previously built every
+   column from sys.columns/sys.types alone and never checked
+   sys.computed_columns, so it silently emitted a plain nullable column for
+   ANY computed column (e.g. prod.Braiding.BraidRef, and the equivalent
+   *Ref column on every other process table -- all meant to be `AS (...)
+   PERSISTED` formulas derived from the table's own identity column). That
+   dropped formula meant the column stopped auto-populating on new rows.
+   Now checks c.is_computed and, when set, emits the real
+   sys.computed_columns.definition (+ PERSISTED when applicable) instead of
+   a type/nullability-based definition -- see
+   migrations/nexus_operations/20260812180000_fix_ref_computed_columns.cjs
+   for the live-database corrective fix this generator bug necessitated.
+
    Order matches how a target server needs it applied:
      1. Row counts (context -- helps spot which tables are reference/
         lookup data worth seeding vs. transactional)
@@ -80,27 +93,32 @@ SELECT
     STUFF((
         SELECT
             N',    ' + c.name + N' ' +
-            UPPER(ty.name) +
-            CASE
-                WHEN ty.name IN ('varchar','char','varbinary','binary')
-                    THEN N'(' + CASE WHEN c.max_length = -1 THEN N'MAX' ELSE CAST(c.max_length AS NVARCHAR(10)) END + N')'
-                WHEN ty.name IN ('nvarchar','nchar')
-                    THEN N'(' + CASE WHEN c.max_length = -1 THEN N'MAX' ELSE CAST(c.max_length / 2 AS NVARCHAR(10)) END + N')'
-                WHEN ty.name IN ('decimal','numeric')
-                    THEN N'(' + CAST(c.precision AS NVARCHAR(10)) + N',' + CAST(c.scale AS NVARCHAR(10)) + N')'
-                WHEN ty.name IN ('datetime2','datetimeoffset','time')
-                    THEN N'(' + CAST(c.scale AS NVARCHAR(10)) + N')'
-                ELSE N''
+            CASE WHEN c.is_computed = 1
+                THEN N'AS ' + cc.definition + CASE WHEN cc.is_persisted = 1 THEN N' PERSISTED' ELSE N'' END
+                ELSE
+                    UPPER(ty.name) +
+                    CASE
+                        WHEN ty.name IN ('varchar','char','varbinary','binary')
+                            THEN N'(' + CASE WHEN c.max_length = -1 THEN N'MAX' ELSE CAST(c.max_length AS NVARCHAR(10)) END + N')'
+                        WHEN ty.name IN ('nvarchar','nchar')
+                            THEN N'(' + CASE WHEN c.max_length = -1 THEN N'MAX' ELSE CAST(c.max_length / 2 AS NVARCHAR(10)) END + N')'
+                        WHEN ty.name IN ('decimal','numeric')
+                            THEN N'(' + CAST(c.precision AS NVARCHAR(10)) + N',' + CAST(c.scale AS NVARCHAR(10)) + N')'
+                        WHEN ty.name IN ('datetime2','datetimeoffset','time')
+                            THEN N'(' + CAST(c.scale AS NVARCHAR(10)) + N')'
+                        ELSE N''
+                    END +
+                    CASE WHEN c.is_identity = 1
+                        THEN N' IDENTITY(' + CAST(ISNULL(idc.seed_value, 1) AS NVARCHAR(20)) + N',' + CAST(ISNULL(idc.increment_value, 1) AS NVARCHAR(20)) + N')'
+                        ELSE N''
+                    END +
+                    CASE WHEN c.is_nullable = 0 THEN N' NOT NULL' ELSE N' NULL' END
             END +
-            CASE WHEN c.is_identity = 1
-                THEN N' IDENTITY(' + CAST(ISNULL(idc.seed_value, 1) AS NVARCHAR(20)) + N',' + CAST(ISNULL(idc.increment_value, 1) AS NVARCHAR(20)) + N')'
-                ELSE N''
-            END +
-            CASE WHEN c.is_nullable = 0 THEN N' NOT NULL' ELSE N' NULL' END +
             CHAR(13) + CHAR(10)
         FROM Production.sys.columns c
         JOIN Production.sys.types ty ON ty.user_type_id = c.user_type_id
         LEFT JOIN Production.sys.identity_columns idc ON idc.object_id = c.object_id AND idc.column_id = c.column_id
+        LEFT JOIN Production.sys.computed_columns cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
         WHERE c.object_id = t.object_id
         ORDER BY c.column_id
         FOR XML PATH(''), TYPE
