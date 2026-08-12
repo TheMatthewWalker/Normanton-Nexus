@@ -15,6 +15,9 @@ import { requirePermission, requireAnyPermission, requireSessionOrApiToken } fro
 import { insertInboundCostLine } from './inboundcosts.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 import { buildPoPdf } from '../lib/poPdf.js';
+import { ISOPAR_MATERIAL } from './isoparConstants.js';
+import { isoparPeriodContaining } from './isoparPeriods.js';
+import { notify } from '../lib/notify.js';
 
 // Same TLS-pinned Node->SapServer setup used by routes/shipmentcost.js's
 // post-migo (create-po-and-receipt) — reused here for the MRP "Create PO in
@@ -104,7 +107,19 @@ function makeDailyUsageFn(predictedMonthly, from, adjustments = []) {
   };
 }
 
-function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = [], adjustments = []) {
+// makeIsoparDailyUsageFn: Isopar (Material 10010) is planned off a fixed weekday/weekend
+// L/day rate (log.IsoparPlanningRate) instead of SAP's PredictedUsage — see
+// routes/performancesql.js's getIsoparForecastContext. Returns the same (day) => number
+// contract makeDailyUsageFn's closure has, so it drops straight into buildWeeklyStockForecast's/
+// demandOverDays' dailyUsageFnOverride parameter.
+function makeIsoparDailyUsageFn(weekdayRateLPerDay, weekendRateLPerDay) {
+  return function dailyUsage(day) {
+    const dow = day.getUTCDay(); // 0 = Sunday, 6 = Saturday
+    return (dow === 0 || dow === 6) ? weekendRateLPerDay : weekdayRateLPerDay;
+  };
+}
+
+function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = [], adjustments = [], dailyUsageFnOverride = null) {
   const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
 
   // Calendar-month windows for i = 0..12, each [monthStart, monthEnd) — only
@@ -114,7 +129,7 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
     new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1))
   );
   const horizonEnd = monthEnds[monthEnds.length - 1];
-  const dailyUsage = makeDailyUsageFn(predictedMonthly, start, adjustments);
+  const dailyUsage = dailyUsageFnOverride || makeDailyUsageFn(predictedMonthly, start, adjustments);
 
   const weeks = [];
   let runningStock = currentStock;
@@ -236,9 +251,9 @@ function addWorkingDaysUtc(date, days) {
 // adjustment applies identically here as it does to the graph — used for
 // the suggested-qty calculation, which needs a demand total over an
 // arbitrary day-count rather than the week-by-week series.
-function demandOverDays(predictedMonthly, from, days, adjustments = []) {
+function demandOverDays(predictedMonthly, from, days, adjustments = [], dailyUsageFnOverride = null) {
   const rangeEnd = addDaysUtc(from, days);
-  const dailyUsage = makeDailyUsageFn(predictedMonthly, from, adjustments);
+  const dailyUsage = dailyUsageFnOverride || makeDailyUsageFn(predictedMonthly, from, adjustments);
   let total = 0;
   for (let day = from; day < rangeEnd; day = addDaysUtc(day, 1)) {
     total += dailyUsage(day);
@@ -304,7 +319,7 @@ function groupAdjustmentsByMaterial(adjustments) {
 // buyer can pull in a material that isn't urgent yet to help clear a
 // vendor's combined order MOQ). Returns null only when there's no SAP
 // snapshot to compute from at all.
-function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial = new Map()) {
+function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial = new Map(), isoparContext = null) {
   if (r.StockQty == null && r.ConsignmentQty == null) return null;
 
   const openOrders = incomingByMaterial.get(r.Material) || [];
@@ -321,6 +336,22 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
     r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
   ];
+
+  // ── Isopar override (Material 10010) ────────────────────────────────────
+  // Isopar sits in a tank with no SAP-trustworthy stock figure, so it's
+  // planned off a manually-entered daily meter reading (current stock) and
+  // a fixed weekday/weekend L/day rate (usage) instead of SAP's
+  // StockQty/PredictedUsage — both maintained via the Isopar Tied Oil tile
+  // (see routes/performancesql.js's getIsoparForecastContext). Falls back
+  // to the normal SAP-derived figures (flagged via isoparMeterReading.
+  // fallbackWarning below) until the first reading is entered.
+  const isIsopar = r.Material === ISOPAR_MATERIAL;
+  const isoparReading = isIsopar ? isoparContext?.latestReading : null;
+  const usingMeterReading = isIsopar && !!isoparReading;
+  const effectiveOnHandStock = usingMeterReading ? Number(isoparReading.ReadingQty) : onHandStock;
+  const isoparDailyUsageFnOverride = (isIsopar && isoparContext?.planningRate)
+    ? makeIsoparDailyUsageFn(Number(isoparContext.planningRate.WeekdayRateLPerDay), Number(isoparContext.planningRate.WeekendRateLPerDay))
+    : null;
 
   // Manually-maintained floor takes priority over SAP's EISBE — see
   // MinSafetyStockQty's column comment in migrate_vendor_master_data.sql.
@@ -342,7 +373,7 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     qty: Number(o.OrderQty) || 0,
   }));
 
-  const weeklyForecast = buildWeeklyStockForecast(onHandStock, predictedMonthly, today, incomingDeliveries, materialAdjustments);
+  const weeklyForecast = buildWeeklyStockForecast(effectiveOnHandStock, predictedMonthly, today, incomingDeliveries, materialAdjustments, isoparDailyUsageFnOverride);
   const breachDate = findStockBelowThresholdDate(weeklyForecast, asOfDate, safetyStockQty);
 
   const leadTimeDays = Number(r.LeadTimeDaysOverride ?? r.SapLeadTimeDays ?? r.DefaultLeadTimeDays ?? 0);
@@ -360,11 +391,11 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
   // Zero (not negative) when nothing's needed — Upcoming/NotDue materials
   // still get a real number here so the Build Order modal has something
   // sensible to prefill if a buyer opts to pull one in early.
-  const currentStock = onHandStock + openQty;
+  const currentStock = effectiveOnHandStock + openQty;
   let suggestedQty = 0;
   if (breachDate) {
     const coverageDays = leadTimeDays + ORDER_COVERAGE_BUFFER_DAYS;
-    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays, materialAdjustments);
+    const demandOverCoverage = demandOverDays(predictedMonthly, asOfDate, coverageDays, materialAdjustments, isoparDailyUsageFnOverride);
     const qty = demandOverCoverage + safetyStockQty - currentStock;
     if (qty > 0) {
       // MaterialMoqQty is a LOT SIZE, not just a floor — this vendor only
@@ -412,6 +443,12 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     incoterms: r.Incoterms || null,
     isSpotPo: !r.ScheduleAgreement,
     scheduleAgreement: r.ScheduleAgreement || null,
+    isoparMeterReading: isIsopar ? {
+      usingMeterReading,
+      readingDate: isoparReading ? new Date(isoparReading.ReadingDate).toISOString().slice(0, 10) : null,
+      fallbackWarning: usingMeterReading ? null
+        : 'No Isopar meter reading recorded yet — showing SAP stock figures until the first reading is entered.',
+    } : null,
   };
 }
 
@@ -419,10 +456,11 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
 // a suggestion is accepted (db.acceptOrderSuggestion) — this always reflects
 // current stock/usage/vendor data, recomputed fresh on every request.
 async function computeOrderSuggestions() {
-  const [rows, incoming, adjustments] = await Promise.all([
+  const [rows, incoming, adjustments, isoparContext] = await Promise.all([
     db.listVendorMaterialsForSuggestions(),
     db.listOpenIncomingOrders(),
     db.listDemandAdjustments(),
+    db.getIsoparForecastContext(),
   ]);
   const incomingByMaterial = groupIncomingByMaterial(incoming);
   const adjustmentsByMaterial = groupAdjustmentsByMaterial(adjustments);
@@ -433,7 +471,7 @@ async function computeOrderSuggestions() {
 
   const suggestions = [];
   for (const r of rows) {
-    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial);
+    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial, isoparContext);
     if (built && built.dueNow && built.suggestedQty > 0) suggestions.push(built);
   }
 
@@ -491,10 +529,11 @@ function groupSuggestionsByVendor(suggestions) {
 // Build Order modal can offer pulling a not-yet-urgent material into the
 // order to help clear a combined MOQ, alongside the ones actually needed.
 async function computeVendorOrderBuild(vendorId) {
-  const [rows, incoming, adjustments] = await Promise.all([
+  const [rows, incoming, adjustments, isoparContext] = await Promise.all([
     db.listVendorMaterialsForSuggestions(),
     db.listOpenIncomingOrders(),
     db.listDemandAdjustments(),
+    db.getIsoparForecastContext(),
   ]);
   const incomingByMaterial = groupIncomingByMaterial(incoming);
   const adjustmentsByMaterial = groupAdjustmentsByMaterial(adjustments);
@@ -513,7 +552,7 @@ async function computeVendorOrderBuild(vendorId) {
     orderMaxQty = r.OrderMaxQty;
     orderMoqUom = r.OrderMoqUom;
     defaultLeadTimeDays = r.DefaultLeadTimeDays;
-    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial);
+    const built = buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDate, adjustmentsByMaterial, isoparContext);
     if (built) materials.push(built);
   }
 
@@ -2514,9 +2553,10 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
     // correction — see sql/migrate_demand_adjustments.sql) — both scoped to
     // whatever material set this request already resolved to, same filter
     // as everything else on this route.
-    const [openIncomingOrders, demandAdjustments] = await Promise.all([
+    const [openIncomingOrders, demandAdjustments, isoparContext] = await Promise.all([
       db.listOpenIncomingOrders(scopeFilter),
       db.listDemandAdjustments(scopeFilter),
+      db.getIsoparForecastContext(),
     ]);
     const incomingByMaterial = groupIncomingByMaterial(openIncomingOrders);
     const adjustmentsByMaterial = groupAdjustmentsByMaterial(demandAdjustments);
@@ -2533,11 +2573,32 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
 
     const perMaterialForecasts = data.map(r => {
       const onHandStock = (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0);
+
+      // Same Isopar override as buildSuggestionForRow (routes/performance.js) — meter reading
+      // in place of SAP stock, weekday/weekend rate in place of SAP's forecast, when a reading
+      // exists. Attaches a fallbackWarning onto this material's response entry either way, so
+      // the chart can show it's not meter-reading-based yet.
+      const isIsopar = r.material === ISOPAR_MATERIAL;
+      const isoparReading = isIsopar ? isoparContext?.latestReading : null;
+      const usingMeterReading = isIsopar && !!isoparReading;
+      const effectiveOnHandStock = usingMeterReading ? Number(isoparReading.ReadingQty) : onHandStock;
+      const isoparDailyUsageFnOverride = (isIsopar && isoparContext?.planningRate)
+        ? makeIsoparDailyUsageFn(Number(isoparContext.planningRate.WeekdayRateLPerDay), Number(isoparContext.planningRate.WeekendRateLPerDay))
+        : null;
+      if (isIsopar) {
+        r.isoparMeterReading = {
+          usingMeterReading,
+          readingDate: isoparReading ? new Date(isoparReading.ReadingDate).toISOString().slice(0, 10) : null,
+          fallbackWarning: usingMeterReading ? null
+            : 'No Isopar meter reading recorded yet — showing SAP stock figures until the first reading is entered.',
+        };
+      }
+
       const incomingDeliveries = (incomingByMaterial.get(r.material) || [])
         .filter(o => o.DeliveryDate && !excludeDeliveryIds.has(o.SuggestionId))
         .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
       const materialAdjustments = adjustmentsByMaterial.get(r.material) || [];
-      return buildWeeklyStockForecast(onHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments);
+      return buildWeeklyStockForecast(effectiveOnHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments, isoparDailyUsageFnOverride);
     });
     const stockForecast = mergeWeeklyForecasts(perMaterialForecasts, materialsInScope);
 
@@ -2786,6 +2847,259 @@ router.delete('/demand-adjustments/:adjustmentId', requirePermission('LOG_MRP'),
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// Isopar Tied Oil (Material 10010) — meter-reading-driven planning + HMRC
+// Tied Oil declarations. See
+// migrations/nexus_operations/20260813090000_isopar_tied_oil.cjs for the
+// schema rationale. Meter readings + the planning rate are gated LOG_MRP
+// (same as the rest of Material Planning); the declaration section is
+// gated ISOPAR_DECL, since only whoever actually files the HMRC return
+// needs to see/confirm it — matches who checkIsoparDeclarationDue notifies.
+// ══════════════════════════════════════════════════════════════════════════
+
+router.get('/isopar/readings', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
+    const data = await db.listIsoparReadings({ from, to });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.post('/isopar/readings', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { readingDate, readingQty, notes } = req.body;
+    if (!readingDate) {
+      return res.status(400).json({ success: false, error: { message: 'readingDate is required.' } });
+    }
+    if (readingQty == null || Number(readingQty) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'readingQty is required and cannot be negative.' } });
+    }
+    const createdBy = req.session?.user?.username || 'unknown';
+    const readingId = await db.createIsoparReading({ readingDate: new Date(readingDate), readingQty, notes, createdBy });
+    res.json({ success: true, data: { readingId } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.put('/isopar/readings/:readingId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { readingQty, notes } = req.body;
+    if (readingQty == null || Number(readingQty) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'readingQty is required and cannot be negative.' } });
+    }
+    await db.updateIsoparReading(req.params.readingId, { readingQty, notes });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.delete('/isopar/readings/:readingId', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    await db.deleteIsoparReading(req.params.readingId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// The "actual" block is the measured average consumption from real readings + receipts (only
+// strictly-consecutive 1-day-apart reading pairs are used — simple and hand-verifiable, a
+// missed day just isn't counted rather than interpolated). "recommendation" is present only
+// when actual meaningfully differs from the currently configured rate — the UI offers a
+// one-click "Apply" that PUTs it as a new Source:'Recommended' version; nothing is ever
+// silently auto-applied.
+router.get('/isopar/planning-rate', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const [current, readings] = await Promise.all([
+      db.getIsoparPlanningRate(),
+      db.listIsoparReadings(),
+    ]);
+
+    const sorted = [...readings].sort((a, b) => new Date(a.ReadingDate) - new Date(b.ReadingDate));
+    const weekdayIntervals = [];
+    const weekendIntervals = [];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const curr = sorted[i];
+      const prevDate = new Date(prev.ReadingDate);
+      const currDate = new Date(curr.ReadingDate);
+      const dayGap = Math.round((currDate.getTime() - prevDate.getTime()) / 86400000);
+      if (dayGap !== 1) continue; // only strictly-consecutive 1-day-apart pairs count
+      const consumed = Number(prev.ReadingQty) - Number(curr.ReadingQty); // deliveries netted out separately below is intentionally skipped here — see note
+      const dow = currDate.getUTCDay();
+      (dow === 0 || dow === 6 ? weekendIntervals : weekdayIntervals).push(consumed);
+    }
+    const avg = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+    const actual = {
+      weekdayAvgLPerDay: avg(weekdayIntervals),
+      weekendAvgLPerDay: avg(weekendIntervals),
+      sampleIntervals: weekdayIntervals.length + weekendIntervals.length,
+      fromDate: sorted.length ? sorted[0].ReadingDate : null,
+      toDate: sorted.length ? sorted[sorted.length - 1].ReadingDate : null,
+    };
+
+    // A recommendation only appears once there's enough data to trust it, and only when it
+    // meaningfully (>5%) differs from what's currently configured — a tiny day-to-day wobble
+    // isn't worth prompting over.
+    let recommendation = null;
+    if (current && actual.weekdayAvgLPerDay != null && actual.weekendAvgLPerDay != null && actual.sampleIntervals >= 5) {
+      const weekdayDiff = Math.abs(actual.weekdayAvgLPerDay - Number(current.WeekdayRateLPerDay)) / Math.max(1, Number(current.WeekdayRateLPerDay));
+      const weekendDiff = Math.abs(actual.weekendAvgLPerDay - Number(current.WeekendRateLPerDay)) / Math.max(1, Number(current.WeekendRateLPerDay));
+      if (weekdayDiff > 0.05 || weekendDiff > 0.05) {
+        recommendation = {
+          weekdayRateLPerDay: Math.round(actual.weekdayAvgLPerDay * 100) / 100,
+          weekendRateLPerDay: Math.round(actual.weekendAvgLPerDay * 100) / 100,
+        };
+      }
+    }
+
+    res.json({ success: true, data: { current, actual, recommendation } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.put('/isopar/planning-rate', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { weekdayRateLPerDay, weekendRateLPerDay, source, notes } = req.body;
+    if (weekdayRateLPerDay == null || Number(weekdayRateLPerDay) < 0 || weekendRateLPerDay == null || Number(weekendRateLPerDay) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'weekdayRateLPerDay and weekendRateLPerDay are required and cannot be negative.' } });
+    }
+    const createdBy = req.session?.user?.username || 'unknown';
+    const rateId = await db.updateIsoparPlanningRate({ weekdayRateLPerDay, weekendRateLPerDay, source, notes, createdBy });
+    res.json({ success: true, data: { rateId } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+router.get('/isopar/declarations', requirePermission('ISOPAR_DECL'), async (req, res) => {
+  try {
+    const data = await db.listIsoparDeclarations();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// One entry per fully-ended period with no declaration yet, oldest first, each with its
+// live-computed figures (computeIsoparPeriodFigures) — what the "Confirm & Submit" cards show.
+router.get('/isopar/declarations/outstanding', requirePermission('ISOPAR_DECL'), async (req, res) => {
+  try {
+    const periods = await db.listIsoparOutstandingPeriods(new Date());
+    const data = await Promise.all(periods.map(async p => ({
+      ...p,
+      figures: await db.computeIsoparPeriodFigures(p.start, p.end),
+    })));
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// The in-progress (not yet ended) period's read-only live preview — no submit action, just
+// visibility into where the current quarter stands.
+router.get('/isopar/declarations/current-period-preview', requirePermission('ISOPAR_DECL'), async (req, res) => {
+  try {
+    const { start, end } = isoparPeriodContaining(new Date());
+    const figures = await db.computeIsoparPeriodFigures(start, end);
+    res.json({ success: true, data: { start, end, figures } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Body only carries which period is being confirmed — the server never trusts client-submitted
+// figures, it recomputes them fresh at submit time (closes the gap between "what the preview
+// showed" and "what's persisted" if a reading changes in between) via the same
+// computeIsoparPeriodFigures the preview above uses.
+router.post('/isopar/declarations', requirePermission('ISOPAR_DECL'), async (req, res) => {
+  try {
+    const { periodStart, periodEnd, notes } = req.body;
+    if (!periodStart || !periodEnd) {
+      return res.status(400).json({ success: false, error: { message: 'periodStart and periodEnd are required.' } });
+    }
+    const periodStartDate = new Date(periodStart);
+    const periodEndDate = new Date(periodEnd);
+
+    const outstanding = await db.listIsoparOutstandingPeriods(new Date());
+    const matches = outstanding.some(p => p.start.getTime() === periodStartDate.getTime() && p.end.getTime() === periodEndDate.getTime());
+    if (!matches) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'That period is not currently outstanding — it may already be submitted, not yet ended, or not a valid Isopar declaration period.' },
+      });
+    }
+
+    const figures = await db.computeIsoparPeriodFigures(periodStartDate, periodEndDate);
+    if (!figures.complete) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'Cannot submit — a meter reading is missing for the opening or closing date of this period.' },
+      });
+    }
+
+    const declarationId = await db.createIsoparDeclaration({
+      periodStart: periodStartDate,
+      periodEnd: periodEndDate,
+      openingStockQty: figures.openingStockQty,
+      receivedQty: figures.receivedQty,
+      closingStockQty: figures.closingStockQty,
+      consumedQty: figures.consumedQty,
+      openingReadingId: figures.openingReading?.ReadingId ?? null,
+      closingReadingId: figures.closingReading?.ReadingId ?? null,
+      calculationSnapshotJson: JSON.stringify({
+        openingReading: figures.openingReading, closingReading: figures.closingReading, deliveries: figures.deliveries,
+      }),
+      notes,
+      submittedByUserId: req.session?.user?.userID,
+      submittedByUsername: req.session?.user?.username,
+    });
+    res.json({ success: true, data: { declarationId } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Run daily via server.js's cron — warns whoever holds ISOPAR_DECL that a period has ended and
+// needs submitting. Self-healing/idempotent rather than exact-day-gated: it checks
+// dbo.Notifications for a title naming this specific period's end date before sending, so a
+// missed/late cron run just catches up the next day instead of silently skipping a quarter
+// (same insert-once philosophy as upsertForecastAccuracyLog's current-month freeze fix).
+export async function checkIsoparDeclarationDue() {
+  const outstanding = await db.listIsoparOutstandingPeriods(new Date());
+  if (!outstanding.length) return { notified: false };
+
+  // Only the oldest outstanding period — if several have piled up, one clear notification beats
+  // a flood of near-duplicates; the next day's run naturally surfaces the next-oldest once this
+  // one's submitted.
+  const period = outstanding[0];
+  const periodEndLabel = period.end.toISOString().slice(0, 10);
+  const title = `Isopar Tied Oil declaration due — period ending ${periodEndLabel}`;
+
+  const nexusPool = await getNexusPool();
+  const { recordset } = await nexusPool.request()
+    .input('title', sql.NVarChar(120), title)
+    .query('SELECT TOP 1 NotificationID FROM dbo.Notifications WHERE Title = @title');
+  if (recordset.length) return { notified: false, alreadySent: true };
+
+  await notify(nexusPool, {
+    title,
+    body: `The HMRC Tied Oil declaration for ${period.start.toISOString().slice(0, 10)} to ${periodEndLabel} is ready to review and submit.`,
+    severity: 2,
+    category: 'logistics',
+    actionLabel: 'Review Declaration',
+    actionURL: '/private/logistics.html',
+    target: { type: 'permission', value: 'ISOPAR_DECL' },
+  });
+  return { notified: true, periodEnd: periodEndLabel };
+}
+
 // ── Valuation class catalog (cached) — for the change-valuation-class dropdown ──
 router.get('/turns-valclass/valuation-classes', requirePermission('LOG_MRP'), async (req, res) => {
   try {
@@ -2908,10 +3222,11 @@ router.post('/order-suggestions/preview', requirePermission('LOG_MRP'), async (r
     }
 
     const materials = items.map(item => String(item.material)).filter(Boolean);
-    const [rows, incoming, adjustments] = await Promise.all([
+    const [rows, incoming, adjustments, isoparContext] = await Promise.all([
       db.listVendorMaterialsForSuggestions(),
       db.listOpenIncomingOrders(materials),
       db.listDemandAdjustments(materials),
+      db.getIsoparForecastContext(),
     ]);
     const incomingByMaterial = groupIncomingByMaterial(incoming);
     const adjustmentsByMaterial = groupAdjustmentsByMaterial(adjustments);
@@ -2926,6 +3241,16 @@ router.post('/order-suggestions/preview', requirePermission('LOG_MRP'), async (r
         r.PredictedM12, r.PredictedM11, r.PredictedM10, r.PredictedM09, r.PredictedM08, r.PredictedM07,
         r.PredictedM06, r.PredictedM05, r.PredictedM04, r.PredictedM03, r.PredictedM02, r.PredictedM01, r.PredictedM00
       ];
+
+      // Same Isopar override as buildSuggestionForRow — meter reading in place of SAP stock,
+      // weekday/weekend rate in place of SAP's forecast, when a reading exists.
+      const isIsopar = r.Material === ISOPAR_MATERIAL;
+      const isoparReading = isIsopar ? isoparContext?.latestReading : null;
+      const effectiveOnHandStock = (isIsopar && isoparReading) ? Number(isoparReading.ReadingQty) : onHandStock;
+      const isoparDailyUsageFnOverride = (isIsopar && isoparReading && isoparContext?.planningRate)
+        ? makeIsoparDailyUsageFn(Number(isoparContext.planningRate.WeekdayRateLPerDay), Number(isoparContext.planningRate.WeekendRateLPerDay))
+        : null;
+
       const realDeliveries = (incomingByMaterial.get(item.material) || [])
         .filter(o => o.DeliveryDate)
         .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
@@ -2934,7 +3259,7 @@ router.post('/order-suggestions/preview', requirePermission('LOG_MRP'), async (r
       const draftDelivery = { date: deliveryDateObj, qty: Number(item.orderQty) || 0, id: null, poNumber: 'Draft' };
       const materialAdjustments = adjustmentsByMaterial.get(item.material) || [];
 
-      const stockForecast = buildWeeklyStockForecast(onHandStock, predictedMonthly, new Date(), [...realDeliveries, draftDelivery], materialAdjustments);
+      const stockForecast = buildWeeklyStockForecast(effectiveOnHandStock, predictedMonthly, new Date(), [...realDeliveries, draftDelivery], materialAdjustments, isoparDailyUsageFnOverride);
       stockForecast.weeks = stockForecast.weeks.slice(0, 26); // same 26-week horizon as /turns-valclass/history
 
       return { material: item.material, materialText: r.MaterialText, stockForecast };

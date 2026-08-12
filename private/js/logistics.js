@@ -36,6 +36,7 @@ let freightCharts = [];
 let turnsCharts = [];
 let valClassCatalogCache = null;
 let cvcSelections = new Map();
+const ISOPAR_MATERIAL = '10010'; // see the Isopar Tied Oil tile — routes/isoparConstants.js's server-side twin
 
 
 const BUCKETS = [
@@ -137,6 +138,7 @@ function setupTiles() {
       if (fn === 'orderSuggestions')    runOrderSuggestions();
       if (fn === 'inboundLog')         runInboundLog();
       if (fn === 'demandAdjustments')  runDemandAdjustments();
+      if (fn === 'isoparTiedOil')      runIsoparTiedOil();
     });
   });
 
@@ -8584,7 +8586,10 @@ async function daSearchMaterials(q) {
     const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}`);
     const json = await resp.json();
     if (!json.success) throw new Error(json.error?.message || 'Search failed');
-    const rows = json.data.slice(0, 30);
+    // Isopar (10010) is planned off the Isopar Tied Oil tile's own meter-reading/weekday-weekend
+    // rate mechanism, which bypasses log.DemandAdjustment entirely — an adjustment created here
+    // against it would be silently ignored by the forecast, so it's excluded from this picker.
+    const rows = json.data.filter(r => r.material !== ISOPAR_MATERIAL).slice(0, 30);
     if (!rows.length) { results.innerHTML = '<div class="sap-empty">No materials matched.</div>'; return; }
     results.innerHTML = `
       <div style="overflow-x:auto;max-height:240px;overflow-y:auto;margin-top:6px">
@@ -8620,6 +8625,380 @@ async function daDeleteAdjustment(adjustmentId, material) {
     runDemandAdjustments();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Isopar Tied Oil (Material 10010) — daily meter-reading log, weekday/weekend
+// planning rate, and HMRC Tied Oil declarations. See
+// migrations/nexus_operations/20260813090000_isopar_tied_oil.cjs for the
+// schema rationale and routes/performance.js's Isopar route group. Reading
+// entry and the planning rate are gated LOG_MRP (same as the rest of
+// Material Planning); the declaration section only renders for a user
+// holding ISOPAR_DECL — the four declaration routes independently enforce
+// that server-side regardless of what this client-side check shows.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function runIsoparTiedOil() {
+  showResultPanel('Isopar Tied Oil', 'Daily meter-reading log, weekday/weekend planning rate, and HMRC Tied Oil declarations for Material 10010');
+  document.getElementById('result-body').innerHTML = `
+    <div id="it-readings-section" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:14px"></div>
+    <div id="it-rate-section" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:14px"></div>
+    <div id="it-declarations-section" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px"></div>
+  `;
+  itRenderReadingsSection();
+  itRenderRateSection();
+  itRenderDeclarationsSection();
+}
+
+// ── Meter reading log ────────────────────────────────────────────────────
+
+async function itRenderReadingsSection() {
+  const el = document.getElementById('it-readings-section');
+  if (!el) return;
+  el.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading readings…</div>';
+  try {
+    const res = await fetch('/api/performance/isopar/readings');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load readings');
+    itRenderReadingsList(el, json.data);
+  } catch (err) {
+    el.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function itRenderReadingsList(el, readings) {
+  const rows = readings.map(r => {
+    const dateStr = new Date(r.ReadingDate).toISOString().slice(0, 10);
+    return `
+      <tr class="admin-row">
+        <td style="font-family:'JetBrains Mono',monospace">${esc(dateStr)}</td>
+        <td>${Number(r.ReadingQty).toLocaleString()} L</td>
+        <td>${esc(r.Notes || '—')}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn-secondary it-reading-edit" data-id="${esc(String(r.ReadingId))}" style="padding:3px 10px;font-size:11px">Edit</button>
+          <button class="btn-secondary it-reading-delete" data-id="${esc(String(r.ReadingId))}" data-date="${esc(dateStr)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
+        </td>
+      </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Daily Meter Reading Log</div>
+      <button class="btn-submit" id="it-add-reading-btn">+ Add Reading</button>
+    </div>
+    ${readings.length ? `
+      <div style="overflow-x:auto;max-height:280px;overflow-y:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Date</th><th>Reading</th><th>Notes</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : `<div class="sap-empty">No readings logged yet — add today's tank level to get started (backdate the first one to your declaration period's start date).</div>`}
+  `;
+
+  document.getElementById('it-add-reading-btn').addEventListener('click', () => itOpenReadingModal(null));
+  el.querySelectorAll('.it-reading-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = readings.find(x => String(x.ReadingId) === btn.dataset.id);
+      if (r) itOpenReadingModal(r);
+    });
+  });
+  el.querySelectorAll('.it-reading-delete').forEach(btn => {
+    btn.addEventListener('click', () => itDeleteReading(btn.dataset.id, btn.dataset.date));
+  });
+}
+
+// ReadingDate is only editable at creation (see routes/performancesql.js's updateIsoparReading —
+// a wrong date is delete-and-recreate, not an edit), so it's locked on the edit form.
+function itOpenReadingModal(reading) {
+  const isEdit = !!reading;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const dateValue = reading ? new Date(reading.ReadingDate).toISOString().slice(0, 10) : todayStr;
+
+  openModal(`<div class="ps-modal" style="max-width:440px;width:90vw">
+    <div class="ps-modal-header">
+      <div class="ps-modal-title">${isEdit ? 'Edit Meter Reading' : 'Add Meter Reading'}</div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Date</label>
+          <input class="tf-input" type="date" id="it-reading-date" value="${dateValue}" ${isEdit ? 'readonly' : ''}>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Reading (L)</label>
+          <input class="tf-input" type="number" step="0.001" min="0" id="it-reading-qty" value="${reading?.ReadingQty ?? ''}">
+        </div>
+      </div>
+      ${isEdit
+        ? `<div class="toolbar-hint" style="margin:2px 0 10px">Date can't be changed here — delete and re-add if the date itself was wrong.</div>`
+        : `<div class="toolbar-hint" style="margin:2px 0 10px">Backdate this if you're entering a past reading — e.g. the very first reading, dated the start of your first HMRC declaration period.</div>`}
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Notes</label>
+          <input class="tf-input" type="text" id="it-reading-notes" value="${esc(reading?.Notes || '')}">
+        </div>
+      </div>
+      <div id="it-reading-warning"></div>
+      <div id="it-reading-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="it-reading-save-btn">${isEdit ? 'Save Changes' : 'Add Reading'}</button>
+    </div>
+  </div>`);
+
+  if (isEdit) itCheckReadingUsedByDeclaration(reading.ReadingId);
+
+  document.getElementById('it-reading-save-btn').addEventListener('click', async () => {
+    const qty = document.getElementById('it-reading-qty').value;
+    if (qty === '' || Number(qty) < 0) {
+      document.getElementById('it-reading-result').innerHTML = '<div class="sap-error">Reading is required and cannot be negative.</div>';
+      return;
+    }
+    const notes = document.getElementById('it-reading-notes').value.trim() || null;
+    const btn = document.getElementById('it-reading-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const body = isEdit
+        ? { readingQty: qty, notes }
+        : { readingDate: document.getElementById('it-reading-date').value, readingQty: qty, notes };
+      const res = await fetch(isEdit ? `/api/performance/isopar/readings/${reading.ReadingId}` : '/api/performance/isopar/readings', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Save failed');
+      closePickModal();
+      itRenderReadingsSection();
+      itRenderRateSection(); // the actual-vs-configured comparison depends on the reading log
+    } catch (err) {
+      document.getElementById('it-reading-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Reading';
+    }
+  });
+}
+
+// Soft, non-blocking warning only — editing/deleting a reading is always allowed (declarations
+// are frozen snapshots, never re-derived), this just flags that an already-submitted filing
+// won't reflect the change. Silently skipped for a user without ISOPAR_DECL (they can't see
+// declarations anyway) rather than surfacing a 403 from the fetch below.
+async function itCheckReadingUsedByDeclaration(readingId) {
+  if (sessionRole !== 'superadmin' && !userPermissions.includes('ISOPAR_DECL')) return;
+  try {
+    const res = await fetch('/api/performance/isopar/declarations');
+    const json = await res.json();
+    if (!json.success) return;
+    const match = json.data.find(d => String(d.OpeningReadingId) === String(readingId) || String(d.ClosingReadingId) === String(readingId));
+    const warnEl = document.getElementById('it-reading-warning');
+    if (match && warnEl) {
+      warnEl.innerHTML = `<div class="toolbar-hint" style="color:var(--warning,#D97706);margin:2px 0 10px">This reading was used in a declaration already submitted for ${formatDisplayDate(match.PeriodStart)} &rarr; ${formatDisplayDate(match.PeriodEnd)} — editing it here won't change that filing.</div>`;
+    }
+  } catch (_) { /* best-effort — not worth failing the modal over */ }
+}
+
+async function itDeleteReading(readingId, dateLabel) {
+  if (!confirm(`Delete the meter reading for ${dateLabel}? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/performance/isopar/readings/${readingId}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
+    itRenderReadingsSection();
+    itRenderRateSection();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Planning rate ────────────────────────────────────────────────────────
+
+async function itRenderRateSection() {
+  const el = document.getElementById('it-rate-section');
+  if (!el) return;
+  el.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading planning rate…</div>';
+  try {
+    const res = await fetch('/api/performance/isopar/planning-rate');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load planning rate');
+    itRenderRatePanel(el, json.data);
+  } catch (err) {
+    el.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function itRenderRatePanel(el, data) {
+  const { current, actual, recommendation } = data;
+  const actualLine = (actual.weekdayAvgLPerDay != null || actual.weekendAvgLPerDay != null)
+    ? `Actual measured average: ${actual.weekdayAvgLPerDay != null ? (Math.round(actual.weekdayAvgLPerDay * 10) / 10).toLocaleString() + ' L/day weekday' : '—'}, ${actual.weekendAvgLPerDay != null ? (Math.round(actual.weekendAvgLPerDay * 10) / 10).toLocaleString() + ' L/day weekend' : '—'} (from ${actual.sampleIntervals} consecutive-day reading${actual.sampleIntervals === 1 ? '' : 's'})`
+    : 'Not enough consecutive daily readings yet to measure actual consumption.';
+
+  el.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">Planning Rate</div>
+    <div class="tf-row">
+      <div class="tf-field">
+        <label class="tf-label">Weekday (Mon&ndash;Fri) L/day</label>
+        <input class="tf-input" type="number" step="0.01" min="0" id="it-rate-weekday" value="${current?.WeekdayRateLPerDay ?? 450}">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Weekend (Sat&ndash;Sun) L/day</label>
+        <input class="tf-input" type="number" step="0.01" min="0" id="it-rate-weekend" value="${current?.WeekendRateLPerDay ?? 50}">
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-submit" id="it-rate-save-btn">Save Rate</button>
+      </div>
+    </div>
+    <div class="toolbar-hint" style="margin:6px 0">${actualLine}</div>
+    ${recommendation ? `
+      <div style="display:flex;align-items:center;gap:10px;background:rgba(217,119,6,0.1);border-radius:6px;padding:8px 12px;margin-top:6px;flex-wrap:wrap">
+        <div style="font-size:12px;color:var(--warning,#D97706)">Measured consumption suggests ${recommendation.weekdayRateLPerDay.toLocaleString()} L/day weekday / ${recommendation.weekendRateLPerDay.toLocaleString()} L/day weekend — noticeably different from the configured rate.</div>
+        <button type="button" class="btn-secondary" id="it-rate-apply-btn" style="white-space:nowrap;margin-left:auto">Apply Recommended</button>
+      </div>` : ''}
+    <div id="it-rate-result"></div>
+  `;
+
+  document.getElementById('it-rate-save-btn').addEventListener('click', () => itSaveRate(
+    document.getElementById('it-rate-weekday').value, document.getElementById('it-rate-weekend').value, 'Manual'
+  ));
+  const applyBtn = document.getElementById('it-rate-apply-btn');
+  if (applyBtn) {
+    applyBtn.addEventListener('click', () => itSaveRate(recommendation.weekdayRateLPerDay, recommendation.weekendRateLPerDay, 'Recommended'));
+  }
+}
+
+async function itSaveRate(weekdayRateLPerDay, weekendRateLPerDay, source) {
+  const resultEl = document.getElementById('it-rate-result');
+  try {
+    const res = await fetch('/api/performance/isopar/planning-rate', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weekdayRateLPerDay, weekendRateLPerDay, source }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Save failed');
+    itRenderRateSection();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── HMRC declarations ────────────────────────────────────────────────────
+
+function itRenderDeclarationsSection() {
+  const el = document.getElementById('it-declarations-section');
+  if (!el) return;
+  if (sessionRole !== 'superadmin' && !userPermissions.includes('ISOPAR_DECL')) {
+    el.innerHTML = `
+      <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px">HMRC Tied Oil Declarations</div>
+      <div class="toolbar-hint">You don't have permission to view or submit Isopar Tied Oil declarations.</div>`;
+    return;
+  }
+  itLoadDeclarations();
+}
+
+async function itLoadDeclarations() {
+  const el = document.getElementById('it-declarations-section');
+  el.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading declarations…</div>';
+  try {
+    const [outstandingRes, currentRes, historyRes] = await Promise.all([
+      fetch('/api/performance/isopar/declarations/outstanding').then(r => r.json()),
+      fetch('/api/performance/isopar/declarations/current-period-preview').then(r => r.json()),
+      fetch('/api/performance/isopar/declarations').then(r => r.json()),
+    ]);
+    if (!outstandingRes.success) throw new Error(outstandingRes.error?.message || 'Failed to load outstanding periods');
+    if (!currentRes.success) throw new Error(currentRes.error?.message || 'Failed to load the current period');
+    if (!historyRes.success) throw new Error(historyRes.error?.message || 'Failed to load declaration history');
+    itRenderDeclarations(el, outstandingRes.data, currentRes.data, historyRes.data);
+  } catch (err) {
+    el.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function itFiguresTable(figures) {
+  const totalIn = (Number(figures.openingStockQty) || 0) + (Number(figures.receivedQty) || 0);
+  const totalOut = (Number(figures.consumedQty) || 0) + (Number(figures.closingStockQty) || 0);
+  const negativeWarning = (figures.consumedQty != null && figures.consumedQty < 0)
+    ? `<div class="toolbar-hint" style="color:var(--warning,#D97706);margin-top:6px">Consumed figure is negative — worth double-checking the opening/closing readings, though this can still be submitted as-is if it's genuinely what was measured.</div>`
+    : '';
+  return `
+    <table class="pn-batch-table admin-table" style="max-width:480px">
+      <tbody>
+        <tr><td>Stock @ beginning of period</td><td style="text-align:right">${figures.openingStockQty != null ? Number(figures.openingStockQty).toLocaleString() + ' L' : '—'}</td></tr>
+        <tr><td>Stock received into stock</td><td style="text-align:right">${Number(figures.receivedQty || 0).toLocaleString()} L</td></tr>
+        <tr style="font-weight:700"><td>Total</td><td style="text-align:right">${totalIn.toLocaleString()} L</td></tr>
+        <tr><td>Stock consumed in period</td><td style="text-align:right">${figures.consumedQty != null ? Number(figures.consumedQty).toLocaleString() + ' L' : '—'}</td></tr>
+        <tr><td>Stock @ end of period</td><td style="text-align:right">${figures.closingStockQty != null ? Number(figures.closingStockQty).toLocaleString() + ' L' : '—'}</td></tr>
+        <tr style="font-weight:700"><td>Total</td><td style="text-align:right">${totalOut.toLocaleString()} L</td></tr>
+      </tbody>
+    </table>
+    ${!figures.complete ? '<div class="toolbar-hint" style="color:var(--error,#DC2626);margin-top:6px">Missing a meter reading for the opening or closing date of this period — submission is blocked until both exist.</div>' : ''}
+    ${negativeWarning}
+  `;
+}
+
+function itRenderDeclarations(el, outstanding, current, history) {
+  const outstandingHtml = outstanding.length ? outstanding.map((p, i) => `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+      <div style="font-weight:700;margin-bottom:8px">Period ${formatDisplayDate(p.start)} &rarr; ${formatDisplayDate(p.end)} — submission due</div>
+      ${itFiguresTable(p.figures)}
+      <div style="margin-top:10px">
+        <button type="button" class="btn-submit it-submit-declaration-btn" data-i="${i}" ${p.figures.complete ? '' : 'disabled'}>Confirm &amp; Submit</button>
+      </div>
+      <div id="it-submit-result-${i}"></div>
+    </div>`).join('') : '<div class="sap-empty">No declarations currently due.</div>';
+
+  const currentHtml = current?.figures ? `
+    <div style="border:1px dashed var(--border);border-radius:8px;padding:14px;margin-bottom:12px;opacity:.85">
+      <div style="font-weight:700;margin-bottom:8px">Current period ${formatDisplayDate(current.start)} &rarr; ${formatDisplayDate(current.end)} (in progress)</div>
+      ${itFiguresTable(current.figures)}
+      <div class="toolbar-hint" style="margin-top:8px">Submission opens once this period ends on ${formatDisplayDate(current.end)}.</div>
+    </div>` : '';
+
+  const historyRows = history.map(d => `
+    <tr class="admin-row">
+      <td>${formatDisplayDate(d.PeriodStart)} &rarr; ${formatDisplayDate(d.PeriodEnd)}</td>
+      <td style="text-align:right">${Number(d.OpeningStockQty).toLocaleString()} L</td>
+      <td style="text-align:right">${Number(d.ReceivedQty).toLocaleString()} L</td>
+      <td style="text-align:right">${Number(d.ConsumedQty).toLocaleString()} L</td>
+      <td style="text-align:right">${Number(d.ClosingStockQty).toLocaleString()} L</td>
+      <td>${esc(d.SubmittedByUsername || '—')} — ${formatDisplayDate(d.SubmittedAtUtc)}</td>
+    </tr>`).join('');
+
+  el.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">HMRC Tied Oil Declarations</div>
+    ${outstandingHtml}
+    ${currentHtml}
+    <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin:14px 0 8px">History</div>
+    ${history.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Period</th><th>Opening</th><th>Received</th><th>Consumed</th><th>Closing</th><th>Submitted</th></tr></thead>
+          <tbody>${historyRows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No declarations submitted yet.</div>'}
+  `;
+
+  el.querySelectorAll('.it-submit-declaration-btn').forEach(btn => {
+    btn.addEventListener('click', () => itSubmitDeclaration(outstanding[Number(btn.dataset.i)], Number(btn.dataset.i)));
+  });
+}
+
+async function itSubmitDeclaration(period, i) {
+  if (!confirm(`Submit the HMRC Tied Oil declaration for ${formatDisplayDate(period.start)} → ${formatDisplayDate(period.end)}? This is frozen once submitted and cannot be edited afterward.`)) return;
+  const resultEl = document.getElementById(`it-submit-result-${i}`);
+  try {
+    const res = await fetch('/api/performance/isopar/declarations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ periodStart: period.start, periodEnd: period.end }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Submit failed');
+    itLoadDeclarations();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }
 

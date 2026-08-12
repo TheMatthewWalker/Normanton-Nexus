@@ -1,5 +1,7 @@
 import sql from 'mssql';
 import { getNexusOperationsPool, getNexusPool } from '../config.js';
+import { ISOPAR_MATERIAL } from './isoparConstants.js';
+import { isoparPeriodsEndedBefore } from './isoparPeriods.js';
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1516,6 +1518,272 @@ export async function deleteDemandAdjustment(adjustmentId) {
   const pool = await getPool();
   await pool.request().input('adjustmentId', sql.Int, adjustmentId)
     .query('DELETE FROM log.DemandAdjustment WHERE AdjustmentId = @adjustmentId');
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Isopar Tied Oil (Material 10010) — meter-reading-driven planning + HMRC
+// declarations. See migrations/nexus_operations/20260813090000_isopar_tied_oil.cjs
+// for the schema rationale.
+// ══════════════════════════════════════════════════════════════════════════
+
+function isoparRound3(v) { return Math.round((Number(v) || 0) * 1000) / 1000; }
+
+// ── Meter readings — log.IsoparMeterReading ─────────────────────────────────
+
+export async function listIsoparReadings({ from = null, to = null } = {}) {
+  const pool = await getPool();
+  const request = pool.request();
+  const where = [];
+  if (from) { request.input('from', sql.DateTime, from); where.push('ReadingDate >= @from'); }
+  if (to)   { request.input('to',   sql.DateTime, to);   where.push('ReadingDate <= @to'); }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const { recordset } = await request.query(`
+    SELECT ReadingId, ReadingDate, ReadingQty, Notes, CreatedBy, CreatedAtUtc, UpdatedAtUtc
+    FROM log.IsoparMeterReading
+    ${whereSql}
+    ORDER BY ReadingDate DESC
+  `);
+  return recordset;
+}
+
+export async function getLatestIsoparReading() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT TOP 1 ReadingId, ReadingDate, ReadingQty, Notes, CreatedBy, CreatedAtUtc, UpdatedAtUtc
+    FROM log.IsoparMeterReading
+    ORDER BY ReadingDate DESC
+  `);
+  return recordset[0] || null;
+}
+
+// Used to resolve a period's opening/closing stock — the reading on, or the
+// most recent one before, the given date (see computeIsoparPeriodFigures).
+export async function getIsoparReadingOnOrBefore(date) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('date', sql.DateTime, date)
+    .query(`
+      SELECT TOP 1 ReadingId, ReadingDate, ReadingQty, Notes, CreatedBy, CreatedAtUtc, UpdatedAtUtc
+      FROM log.IsoparMeterReading
+      WHERE ReadingDate <= @date
+      ORDER BY ReadingDate DESC
+    `);
+  return recordset[0] || null;
+}
+
+// Reject-duplicate-date, not upsert — an accidental resubmit for a day
+// already logged should surface as an explicit error (mirroring
+// createDemandAdjustment's overlap rejection above), not silently overwrite
+// a different value. UQ_IsoparMeterReading_ReadingDate is the DB-level
+// backstop behind this check.
+export async function createIsoparReading({ readingDate, readingQty, notes, createdBy }) {
+  const pool = await getPool();
+  const { recordset: existing } = await pool.request()
+    .input('readingDate', sql.DateTime, readingDate)
+    .query('SELECT 1 FROM log.IsoparMeterReading WHERE ReadingDate = @readingDate');
+  if (existing.length) {
+    const err = new Error(`A reading already exists for ${new Date(readingDate).toISOString().slice(0, 10)} — edit it instead of adding a second one.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const { recordset } = await pool.request()
+    .input('readingDate', sql.DateTime,      readingDate)
+    .input('readingQty',  sql.Decimal(15, 3), readingQty)
+    .input('notes',       sql.NVarChar(500), notes || null)
+    .input('createdBy',   sql.NVarChar(100), createdBy || null)
+    .query(`
+      INSERT INTO log.IsoparMeterReading (ReadingDate, ReadingQty, Notes, CreatedBy)
+      OUTPUT INSERTED.ReadingId
+      VALUES (@readingDate, @readingQty, @notes, @createdBy)
+    `);
+  return recordset[0].ReadingId;
+}
+
+// ReadingDate is deliberately NOT editable here — reassigning which day a
+// reading belongs to could silently move it across a period boundary or
+// collide with another row. A wrong date is a delete-and-recreate, not an edit.
+export async function updateIsoparReading(readingId, { readingQty, notes }) {
+  const pool = await getPool();
+  await pool.request()
+    .input('readingId',  sql.Int,           readingId)
+    .input('readingQty', sql.Decimal(15, 3), readingQty)
+    .input('notes',      sql.NVarChar(500), notes || null)
+    .query(`
+      UPDATE log.IsoparMeterReading SET
+        ReadingQty = @readingQty, Notes = @notes, UpdatedAtUtc = GETUTCDATE()
+      WHERE ReadingId = @readingId
+    `);
+}
+
+export async function deleteIsoparReading(readingId) {
+  const pool = await getPool();
+  await pool.request().input('readingId', sql.Int, readingId)
+    .query('DELETE FROM log.IsoparMeterReading WHERE ReadingId = @readingId');
+}
+
+// ── Planning rate — log.IsoparPlanningRate (versioned; "current" = latest row) ──
+
+export async function getIsoparPlanningRate() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT TOP 1 RateId, WeekdayRateLPerDay, WeekendRateLPerDay, Source, Notes, CreatedBy, CreatedAtUtc
+    FROM log.IsoparPlanningRate
+    ORDER BY RateId DESC
+  `);
+  return recordset[0] || null;
+}
+
+export async function updateIsoparPlanningRate({ weekdayRateLPerDay, weekendRateLPerDay, source, notes, createdBy }) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('weekdayRate', sql.Decimal(9, 2), weekdayRateLPerDay)
+    .input('weekendRate', sql.Decimal(9, 2), weekendRateLPerDay)
+    .input('source',      sql.NVarChar(20), source || 'Manual')
+    .input('notes',       sql.NVarChar(500), notes || null)
+    .input('createdBy',   sql.NVarChar(100), createdBy || null)
+    .query(`
+      INSERT INTO log.IsoparPlanningRate (WeekdayRateLPerDay, WeekendRateLPerDay, Source, Notes, CreatedBy)
+      OUTPUT INSERTED.RateId
+      VALUES (@weekdayRate, @weekendRate, @source, @notes, @createdBy)
+    `);
+  return recordset[0].RateId;
+}
+
+// ── Received deliveries + period consumption calc ───────────────────────────
+
+// Status IN ('Booked','Received') means "physically arrived", per the same
+// convention documented on markShipmentReceived above; COALESCE'd received
+// date covers both the normal Inbound Log "Mark Received" path
+// (PurchaseOrderShipment.ReceivedAtUtc) and a row manually advanced straight
+// to 'Received' status (PurchaseOrderSuggestion.ReceivedAtUtc).
+export async function listIsoparReceivedDeliveriesInRange(periodStart, periodEndInclusive) {
+  const pool = await getPool();
+  const periodEndExclusive = new Date(periodEndInclusive.getTime() + 86400000);
+  const { recordset } = await pool.request()
+    .input('material', sql.NVarChar(18), ISOPAR_MATERIAL)
+    .input('periodStart', sql.DateTime, periodStart)
+    .input('periodEndExclusive', sql.DateTime, periodEndExclusive)
+    .query(`
+      SELECT p.SuggestionId, p.OrderQty, p.ReceivedQty, p.PoNumber,
+             COALESCE(p.ReceivedAtUtc, s.ReceivedAtUtc) AS ReceivedDate
+      FROM log.PurchaseOrderSuggestion p
+      LEFT JOIN log.PurchaseOrderShipment s ON s.ShipmentId = p.ShipmentId
+      WHERE p.Material = @material
+        AND p.Status IN ('Booked', 'Received')
+        AND COALESCE(p.ReceivedAtUtc, s.ReceivedAtUtc) >= @periodStart
+        AND COALESCE(p.ReceivedAtUtc, s.ReceivedAtUtc) < @periodEndExclusive
+    `);
+  return recordset;
+}
+
+// Shared by both the live "outstanding period" preview and the frozen submit
+// path, so the two can never drift apart. complete:false (missing an
+// opening or closing reading) must block submission — see the /isopar/declarations
+// POST route.
+export async function computeIsoparPeriodFigures(periodStart, periodEnd) {
+  const [openingReading, closingReading, deliveries] = await Promise.all([
+    getIsoparReadingOnOrBefore(periodStart),
+    getIsoparReadingOnOrBefore(periodEnd),
+    listIsoparReceivedDeliveriesInRange(periodStart, periodEnd),
+  ]);
+
+  const receivedQty = isoparRound3(deliveries.reduce((sum, d) => sum + (Number(d.ReceivedQty ?? d.OrderQty) || 0), 0));
+  const openingStockQty = openingReading ? Number(openingReading.ReadingQty) : null;
+  const closingStockQty = closingReading ? Number(closingReading.ReadingQty) : null;
+  const consumedQty = (openingStockQty != null && closingStockQty != null)
+    ? isoparRound3(openingStockQty + receivedQty - closingStockQty)
+    : null;
+
+  return {
+    periodStart, periodEnd, openingReading, closingReading,
+    openingStockQty, closingStockQty, receivedQty, consumedQty, deliveries,
+    complete: openingStockQty != null && closingStockQty != null,
+  };
+}
+
+// ── Forecast integration — one call for buildSuggestionForRow/the history route ──
+
+export async function getIsoparForecastContext() {
+  const [latestReading, planningRate] = await Promise.all([getLatestIsoparReading(), getIsoparPlanningRate()]);
+  return { latestReading, planningRate };
+}
+
+// ── Declarations — log.IsoparDeclaration (frozen once submitted) ────────────
+
+export async function listIsoparDeclarations() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT DeclarationId, PeriodStart, PeriodEnd, OpeningStockQty, ReceivedQty, ClosingStockQty,
+           ConsumedQty, OpeningReadingId, ClosingReadingId, Notes,
+           SubmittedByUserId, SubmittedByUsername, SubmittedAtUtc
+    FROM log.IsoparDeclaration
+    ORDER BY PeriodStart DESC
+  `);
+  return recordset;
+}
+
+export async function getIsoparDeclarationForPeriod(periodStart, periodEnd) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('periodStart', sql.DateTime, periodStart)
+    .input('periodEnd',   sql.DateTime, periodEnd)
+    .query(`
+      SELECT TOP 1 DeclarationId FROM log.IsoparDeclaration
+      WHERE PeriodStart = @periodStart AND PeriodEnd = @periodEnd
+    `);
+  return recordset[0] || null;
+}
+
+// Every period that has fully ended as of `today` but has no matching
+// log.IsoparDeclaration row yet, oldest first. Diffed in JS against the pure
+// isoparPeriodsEndedBefore() list rather than N per-period queries.
+export async function listIsoparOutstandingPeriods(today = new Date()) {
+  const ended = isoparPeriodsEndedBefore(today);
+  if (!ended.length) return [];
+  const declared = await listIsoparDeclarations();
+  const declaredKeys = new Set(declared.map(d => `${new Date(d.PeriodStart).getTime()}_${new Date(d.PeriodEnd).getTime()}`));
+  return ended.filter(p => !declaredKeys.has(`${p.start.getTime()}_${p.end.getTime()}`));
+}
+
+export async function createIsoparDeclaration({
+  periodStart, periodEnd, openingStockQty, receivedQty, closingStockQty, consumedQty,
+  openingReadingId, closingReadingId, calculationSnapshotJson, notes,
+  submittedByUserId, submittedByUsername,
+}) {
+  const existing = await getIsoparDeclarationForPeriod(periodStart, periodEnd);
+  if (existing) {
+    const err = new Error('A declaration for this period has already been submitted.');
+    err.statusCode = 400;
+    throw err;
+  }
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('periodStart',     sql.DateTime,       periodStart)
+    .input('periodEnd',       sql.DateTime,       periodEnd)
+    .input('openingStockQty', sql.Decimal(15, 3), openingStockQty)
+    .input('receivedQty',     sql.Decimal(15, 3), receivedQty)
+    .input('closingStockQty', sql.Decimal(15, 3), closingStockQty)
+    .input('consumedQty',     sql.Decimal(15, 3), consumedQty)
+    .input('openingReadingId', sql.Int, openingReadingId ?? null)
+    .input('closingReadingId', sql.Int, closingReadingId ?? null)
+    .input('calculationSnapshotJson', sql.NVarChar(sql.MAX), calculationSnapshotJson || null)
+    .input('notes',           sql.NVarChar(1000), notes || null)
+    .input('submittedByUserId', sql.Int, submittedByUserId)
+    .input('submittedByUsername', sql.NVarChar(80), submittedByUsername || null)
+    .query(`
+      INSERT INTO log.IsoparDeclaration (
+        PeriodStart, PeriodEnd, OpeningStockQty, ReceivedQty, ClosingStockQty, ConsumedQty,
+        OpeningReadingId, ClosingReadingId, CalculationSnapshotJson, Notes,
+        SubmittedByUserId, SubmittedByUsername
+      )
+      OUTPUT INSERTED.DeclarationId
+      VALUES (
+        @periodStart, @periodEnd, @openingStockQty, @receivedQty, @closingStockQty, @consumedQty,
+        @openingReadingId, @closingReadingId, @calculationSnapshotJson, @notes,
+        @submittedByUserId, @submittedByUsername
+      )
+    `);
+  return recordset[0].DeclarationId;
 }
 
 export async function acceptOrderSuggestion({

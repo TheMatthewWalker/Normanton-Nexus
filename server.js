@@ -60,7 +60,7 @@ import qualityRoutes           from './routes/quality.js';
 import labelsRoutes            from './routes/labels.js';
 import financeRoutes           from './routes/finance.js';
 import notificationsRoutes     from './routes/notifications.js';
-import performanceRoutes       from './routes/performance.js';
+import performanceRoutes, { checkIsoparDeclarationDue } from './routes/performance.js';
 import stagingRoutes           from './routes/staging.js';
 import consignmentRoutes, { runConsignmentSync } from './routes/consignment.js';
 import productionScheduleRoutes, { runProductionScheduleOtifDiff } from './routes/productionschedule.js';
@@ -220,6 +220,19 @@ cron.schedule('20 6 * * *', () => {
   runConsignmentSync()
     .then(results => console.log('[cron] consignment GR + stock sync complete', results))
     .catch(err => console.error('[cron] consignment GR + stock sync failed', err));
+});
+
+// Isopar Tied Oil declaration due-check — once a day at 06:30 (after the 06:20 consignment
+// sync above, clear of the top-of-hour 30-min refresh and the xx:55 warehouse sync).
+// Self-healing, not exact-day-gated: re-checks dbo.Notifications for a title naming the
+// specific outstanding period's end date before sending — see
+// routes/performance.js's checkIsoparDeclarationDue — so a missed/late run just catches
+// up the next day rather than silently skipping the quarter.
+cron.schedule('30 6 * * *', () => {
+  console.log('[cron] checking Isopar Tied Oil declaration due date');
+  checkIsoparDeclarationDue()
+    .then(result => { if (result.notified) console.log('[cron] Isopar declaration notification sent for period ending', result.periodEnd); })
+    .catch(err => console.error('[cron] Isopar declaration due check failed', err));
 });
 
 // Runs `schtasks args...` and resolves { ok, stdout, stderr }, never

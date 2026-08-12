@@ -25,6 +25,7 @@ jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 const db = {
   listOpenIncomingOrders: jest.fn(),
   listDemandAdjustments: jest.fn(),
+  getIsoparForecastContext: jest.fn(),
 };
 jest.unstable_mockModule('../../routes/performancesql.js', () => db);
 
@@ -45,6 +46,7 @@ beforeEach(() => {
   Object.values(db).forEach(fn => fn.mockReset());
   db.listOpenIncomingOrders.mockResolvedValue([]);
   db.listDemandAdjustments.mockResolvedValue([]);
+  db.getIsoparForecastContext.mockResolvedValue({ latestReading: null, planningRate: null });
   jest.useFakeTimers();
   jest.setSystemTime(new Date('2026-01-15T12:00:00.000Z'));
 });
@@ -111,4 +113,34 @@ test('reports a per-week delivery breakdown, which excludeDeliveryIds can filter
   expect(firstWeekExcluded.deliveries).toEqual([]);
   expect(firstWeekExcluded.incomingQty).toBe(0);
   expect(firstWeekExcluded.expectedStock).toBe(firstWeek.expectedStock - 500);
+});
+
+// Isopar (Material 10010) is planned off a manual meter reading + fixed weekday/weekend rate
+// instead of SAP figures — see the Isopar branch inside the /turns-valclass/history route.
+describe('Isopar (Material 10010) override', () => {
+  test('uses the meter reading as currentStock, not SAP StockQty, when a reading exists', async () => {
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-01-15T00:00:00Z', ReadingQty: 5000 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 },
+    });
+    queueSnapshotAndAccuracy([snapshotRow({ Material: '10010', StockQty: 999999, ConsignmentQty: 0 })]);
+
+    const res = await request(appMrp).get('/turns-valclass/history?materials=10010');
+
+    expect(res.status).toBe(200);
+    expect(res.body.stockForecast.currentStock).toBe(5000); // the meter reading, not SAP's 999999
+    expect(res.body.data[0].isoparMeterReading).toMatchObject({ usingMeterReading: true, readingDate: '2026-01-15' });
+  });
+
+  test('falls back to SAP StockQty/ConsignmentQty with a fallbackWarning when no reading exists yet', async () => {
+    db.getIsoparForecastContext.mockResolvedValueOnce({ latestReading: null, planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 } });
+    queueSnapshotAndAccuracy([snapshotRow({ Material: '10010', StockQty: 7000, ConsignmentQty: 500 })]);
+
+    const res = await request(appMrp).get('/turns-valclass/history?materials=10010');
+
+    expect(res.status).toBe(200);
+    expect(res.body.stockForecast.currentStock).toBe(7500);
+    expect(res.body.data[0].isoparMeterReading).toMatchObject({ usingMeterReading: false });
+    expect(res.body.data[0].isoparMeterReading.fallbackWarning).toEqual(expect.stringContaining('No Isopar meter reading'));
+  });
 });

@@ -35,6 +35,7 @@ const db = {
   getVendorMaterialConstraints: jest.fn(),
   getVendorOrderConstraints: jest.fn(),
   acceptOrderSuggestion: jest.fn(),
+  getIsoparForecastContext: jest.fn(),
 };
 jest.unstable_mockModule('../../routes/performancesql.js', () => db);
 
@@ -55,6 +56,7 @@ beforeEach(() => {
   Object.values(db).forEach(fn => fn.mockReset());
   db.listOpenIncomingOrders.mockResolvedValue([]);
   db.listDemandAdjustments.mockResolvedValue([]);
+  db.getIsoparForecastContext.mockResolvedValue({ latestReading: null, planningRate: null });
   jest.useFakeTimers();
   jest.setSystemTime(new Date('2026-01-15T12:00:00.000Z'));
 });
@@ -148,6 +150,57 @@ test('groups same-vendor materials together, sorted by orderByDate, with a combi
   expect(group.combinedQty).toBe(3300); // 2000 + 1300
   expect(group.earliestOrderByDate).toBe('2026-01-14');
   expect(group.moqMet).toBe(true); // 3300 >= the vendor's 3000 combined MOQ
+});
+
+// Isopar (Material 10010) is planned off a manual daily meter reading + a fixed weekday/weekend
+// L/day rate instead of SAP's StockQty/PredictedUsage — see buildSuggestionForRow's Isopar
+// override branch in routes/performance.js.
+describe('Isopar (Material 10010) override', () => {
+  test('uses the latest meter reading as currentStock, not SAP StockQty, when a reading exists', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+      materialRow({ Material: '10010', VendorName: 'Isopar', StockQty: 999999, ConsignmentQty: 0 }),
+    ]);
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-01-15T00:00:00Z', ReadingQty: 5000 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 },
+    });
+
+    const res = await request(appMrp).get('/order-suggestions/vendor/1/build');
+    expect(res.status).toBe(200);
+    const material = res.body.data.materials.find(m => m.material === '10010');
+    expect(material.currentStock).toBe(5000); // the meter reading, not SAP's 999999
+    expect(material.isoparMeterReading).toMatchObject({ usingMeterReading: true, readingDate: '2026-01-15' });
+  });
+
+  test('falls back to SAP StockQty/ConsignmentQty with a fallbackWarning when no reading exists yet', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+      materialRow({ Material: '10010', VendorName: 'Isopar', StockQty: 7000, ConsignmentQty: 500 }),
+    ]);
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: null,
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 },
+    });
+
+    const res = await request(appMrp).get('/order-suggestions/vendor/1/build');
+    expect(res.status).toBe(200);
+    const material = res.body.data.materials.find(m => m.material === '10010');
+    expect(material.currentStock).toBe(7500); // SAP StockQty + ConsignmentQty fallback
+    expect(material.isoparMeterReading).toMatchObject({ usingMeterReading: false });
+    expect(material.isoparMeterReading.fallbackWarning).toEqual(expect.stringContaining('No Isopar meter reading'));
+  });
+
+  test('a non-Isopar material is completely unaffected — isoparMeterReading is null', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([materialRow({ StockQty: 500 })]);
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-01-15T00:00:00Z', ReadingQty: 5000 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 },
+    });
+
+    const res = await request(appMrp).get('/order-suggestions/vendor/1/build');
+    const material = res.body.data.materials.find(m => m.material === 'M1');
+    expect(material.currentStock).toBe(500); // unaffected by the Isopar reading fixture above
+    expect(material.isoparMeterReading).toBeNull();
+  });
 });
 
 test('a DB failure is reported as a 500', async () => {
