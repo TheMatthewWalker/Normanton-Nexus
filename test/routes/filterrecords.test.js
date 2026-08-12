@@ -141,3 +141,30 @@ describe('execution', () => {
     expect(dbRequest.query.mock.calls[0][0]).toBe('SELECT TOP 500 * FROM dbo.EwaldBoxes WHERE BoxID LIKE @val');
   });
 });
+
+// Unfiltered "load table" call (col/mode/val all omitted) -- what
+// private/js/production.js's loadTable() now sends instead of hitting
+// /sql/query directly, since /sql/query is hardcoded to the Nexus database
+// and doesn't know these legacy tables live in NexusArchive.
+describe('unfiltered load (col/mode/val all omitted)', () => {
+  test('runs an unqualified TOP 500 with no WHERE clause and no bound value', async () => {
+    queueResults({ recordset: [{ Batch: 'B1' }] });
+    const res = await request(app).post('/').send({ tableName: 'Batches' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, recordset: [{ Batch: 'B1' }] });
+    expect(dbRequest.query.mock.calls[0][0]).toBe('SELECT TOP 500 * FROM dbo.Batches');
+    expect(dbRequest.input).not.toHaveBeenCalled();
+  });
+
+  test('still 403s a table not on the allowlist', async () => {
+    const res = await request(app).post('/').send({ tableName: 'PortalUsers' });
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('400s a partial filter (col present, mode/val missing) rather than silently treating it as unfiltered', async () => {
+    const res = await request(app).post('/').send({ tableName: 'Batches', col: 'Batch' });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+});

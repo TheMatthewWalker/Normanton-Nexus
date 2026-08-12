@@ -78,23 +78,6 @@ document.querySelectorAll('.tbl-item:not(.report-item)').forEach(item => {
   });
 });
 
-// ── Build SQL for the current table + optional filter ─────────────────────────
-// All filtering is done SERVER-SIDE via parameterised queries so it searches
-// the full table, not just the rows already in memory.
-//
-// We send the query through the existing /query endpoint.  Because the column
-// name comes from a whitelist (columns returned by SQL Server itself) and the
-// table name was already vetted by the sidebar, the only truly "user" value
-// is the filter string — which we embed safely using SQL LIKE / = patterns
-// controlled entirely here.  The value never touches the SQL string; it is
-// passed as a separate parameter via the /api/filter-records endpoint below.
-function buildQuery(tableName, filter) {
-  if (!filter) {
-    return { sql: `SELECT * FROM dbo.${tableName}`, parameterised: false };
-  }
-  return { tableName, col: filter.col, mode: filter.mode, val: filter.val, parameterised: true };
-}
-
 // ── Load (or reload) the main data panel ─────────────────────────────────────
 async function loadTable(tableName, pkCol, filter = null) {
   if (!(await sessionOk())) return;
@@ -123,11 +106,16 @@ async function loadTable(tableName, pkCol, filter = null) {
     let records;
 
     if (!filter) {
-      // ── Unfiltered: plain TOP 500 via existing /query endpoint ──
-      const res  = await fetch('/sql/query', {
+      // ── Unfiltered: TOP 500 via /api/filter-records with no filter fields ──
+      // Deliberately NOT /sql/query -- that endpoint always runs against the
+      // Nexus database (see routes/sqlqueries.js's getIsolatedNexusConnection),
+      // which doesn't have this page's legacy tables anymore now that they live
+      // in NexusArchive. /api/filter-records resolves the right database per
+      // table via resolveLegacyTablePool(), same as the filtered branch below.
+      const res  = await fetch('/api/filter-records', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ query: `SELECT * FROM dbo.${tableName}` }),
+        body:    JSON.stringify({ tableName }),
       });
       const data = await res.json();
       if (!data.success) { showError(data.error || 'Query failed'); return; }
