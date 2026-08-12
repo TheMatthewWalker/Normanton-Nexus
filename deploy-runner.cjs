@@ -107,7 +107,7 @@
  * running no matter what the underlying command does.
  *
  * Usage: node deploy-runner.cjs <DeploymentID>
- * (DeploymentID must already exist in kongsberg.dbo.ScheduledDeployments
+ * (DeploymentID must already exist in Nexus.dbo.ScheduledDeployments
  * with Status = 'running' — the server.js cron checker sets that atomically
  * before spawning this script.)
  */
@@ -365,7 +365,7 @@ async function main() {
 
   const rowResult = await pool.request()
     .input('id', sql.Int, deploymentID)
-    .query('SELECT GitRef FROM kongsberg.dbo.ScheduledDeployments WHERE DeploymentID = @id');
+    .query('SELECT GitRef FROM Nexus.dbo.ScheduledDeployments WHERE DeploymentID = @id');
   const gitRef = rowResult.recordset[0]?.GitRef || 'main';
 
   // Mirrors routes/useradmin.js's audit() helper — logged as 'system' since
@@ -376,7 +376,7 @@ async function main() {
         .input('username',  sql.NVarChar(80),  'system')
         .input('eventType', sql.NVarChar(50),  eventType)
         .input('detail',    sql.NVarChar(500), detail)
-        .query(`INSERT INTO kongsberg.dbo.PortalAuditLog (Username, EventType, Detail)
+        .query(`INSERT INTO Nexus.dbo.PortalAuditLog (Username, EventType, Detail)
                 VALUES (@username, @eventType, @detail)`);
     } catch (err) {
       console.error('[deploy-runner] audit insert failed:', err.message);
@@ -393,7 +393,7 @@ async function main() {
       await pool.request()
         .input('id',  sql.Int, deploymentID)
         .input('err', sql.NVarChar(sql.MAX), String(detail).slice(0, 8000))
-        .query(`UPDATE kongsberg.dbo.ScheduledDeployments
+        .query(`UPDATE Nexus.dbo.ScheduledDeployments
                 SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
                 WHERE DeploymentID = @id`);
       await audit('DEPLOY_FAILED', `Deployment #${deploymentID} failed: ${String(detail).slice(0, 400)}`);
@@ -540,7 +540,7 @@ async function main() {
     await pool.request()
       .input('id',  sql.Int, deploymentID)
       .input('log', sql.NVarChar(sql.MAX), combinedLog.slice(0, 8000))
-      .query(`UPDATE kongsberg.dbo.ScheduledDeployments
+      .query(`UPDATE Nexus.dbo.ScheduledDeployments
               SET Status = 'completed', CompletedAt = GETDATE(), OutputLog = @log
               WHERE DeploymentID = @id`);
     await audit('DEPLOY_COMPLETED',
