@@ -1,8 +1,13 @@
 // routes/productionnexus.js's POST /drumming/entry (the wizard's direct
-// ZF40N backflush path) and POST /drumming/bom — flagged in CLAUDE.md as
-// uncovered. Same axios-mocking setup as productionnexus.mixing.test.js
-// (separate file for the same reason: this file's beforeAll needs axios
-// mocked, which productionnexus.test.js's doesn't set up).
+// ZF40N backflush path) and GET /process/DR/bom-preview — flagged in
+// CLAUDE.md as uncovered. Same axios-mocking setup as
+// productionnexus.mixing.test.js (separate file for the same reason: this
+// file's beforeAll needs axios mocked, which productionnexus.test.js's
+// doesn't set up).
+//
+// GET /process/DR/bom-preview replaces the old POST /drumming/bom (removed
+// — dead code from the UI's perspective, with a stale response shape that
+// never matched the real BomRow fields used everywhere else in this file).
 //
 // Not covered here (documented gap, see CLAUDE.md): POST /drumming/stock
 // and POST /drumming/customer (submitDrumming()'s Make-to-Stock/Make-to-
@@ -49,22 +54,31 @@ function mockProfitCentreOk() {
 
 const validBody = { material: '30005R', coilLengths: [50] };
 
-describe('POST /drumming/bom', () => {
+describe('GET /process/DR/bom-preview', () => {
   test('400s without material', async () => {
-    const res = await request(app).post('/drumming/bom').send({});
+    const res = await request(app).get('/process/DR/bom-preview');
     expect(res.status).toBe(400);
   });
 
-  test('returns the BOM component list', async () => {
-    axiosMock.post.mockResolvedValueOnce({ data: { components: [{ material: 'M1', description: 'Liner', quantityPer: 1 }] } });
-    const res = await request(app).post('/drumming/bom').send({ material: '30005R' });
+  test('400s for a process code outside the BOM checklist (EX/MX untouched)', async () => {
+    const res = await request(app).get('/process/EX/bom-preview?material=30005R');
+    expect(res.status).toBe(400);
+  });
+
+  test('returns the live BOM component list', async () => {
+    axiosMock.request.mockResolvedValueOnce({ data: { success: true, data: [
+      { material: '30005R', plant: '3012', component: 'M1', item: '0010', componentQty: 1, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312' },
+    ] } });
+    const res = await request(app).get('/process/DR/bom-preview?material=30005R');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual([{ material: 'M1', description: 'Liner', quantityPer: 1 }]);
+    expect(res.body.data).toEqual([
+      { material: '30005R', plant: '3012', component: 'M1', item: '0010', componentQty: 1, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312' },
+    ]);
   });
 
   test('502s with a clear message on a SAP failure', async () => {
-    axiosMock.post.mockRejectedValueOnce(new Error('RFC timeout'));
-    const res = await request(app).post('/drumming/bom').send({ material: '30005R' });
+    axiosMock.request.mockRejectedValueOnce(new Error('RFC timeout'));
+    const res = await request(app).get('/process/DR/bom-preview?material=30005R');
     expect(res.status).toBe(502);
     expect(res.body.error).toMatch(/BOM lookup failed/);
   });

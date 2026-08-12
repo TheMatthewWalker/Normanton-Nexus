@@ -75,6 +75,7 @@ function setupTiles() {
       if (fn === 'displayStock') displayStock();
       if (fn === 'blockStock')   openBlockUnblockModal('block');
       if (fn === 'unblockStock') openBlockUnblockModal('unblock');
+      if (fn === 'concessions')  runConcessions();
     });
   });
 
@@ -830,6 +831,104 @@ function closeModal() {
   const overlay = document.getElementById('modal-overlay');
   overlay.classList.add('hidden');
   overlay.innerHTML = '';
+}
+
+// ── Traceability Concessions ─────────────────────────────────────────────────
+// Production raises a concession when a linked traceability batch doesn't
+// match a job's SAP BOM; approving here lets that job proceed (and reroutes
+// its SAP posting to an explicit goods movement naming the actual
+// component instead of the BOM's). Lives under /api/productionnexus (not
+// /api/quality) since the underlying data — prod.TraceabilityConcessions —
+// belongs to the production side; this page just needs QUAL_CONCESSION to
+// review/act on it.
+
+let qConcessionStatus = 'PENDING';
+
+async function runConcessions() {
+  showResultSection('Traceability Concessions', 'Production\'s requests to proceed despite a BOM mismatch');
+  await loadConcessions();
+}
+
+async function loadConcessions() {
+  const body = document.getElementById('result-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+
+  try {
+    const res  = await fetch(`/api/productionnexus/concessions?status=${qConcessionStatus}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load concessions');
+
+    const rows = json.data || [];
+
+    body.innerHTML = `
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        ${['PENDING', 'APPROVED', 'REJECTED'].map(s => `
+          <button class="btn-secondary qc-status-btn${s === qConcessionStatus ? ' qc-status-btn--active' : ''}" data-status="${s}"
+            style="font-size:12px;padding:5px 10px${s === qConcessionStatus ? ';background:var(--accent);color:#fff;border-color:var(--accent)' : ''}">${s.charAt(0) + s.slice(1).toLowerCase()}</button>
+        `).join('')}
+      </div>
+      ${rows.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table" style="width:100%">
+          <thead><tr>
+            <th>Job</th><th>Linked Batch</th><th>Expected Component</th><th>Actual Material</th>
+            <th>Reason</th><th>Raised By</th><th>Raised At</th>${qConcessionStatus === 'PENDING' ? '<th></th>' : '<th>Reviewed By</th>'}
+          </tr></thead>
+          <tbody>${rows.map(r => `
+            <tr>
+              <td class="pn-batch-ref">${esc(r.ProcessCode)}${String(r.RecordID).padStart(8, '0')}</td>
+              <td class="pn-batch-mono">${esc(r.ParentProcessCode)}${String(r.ParentRecordID).padStart(8, '0')}</td>
+              <td class="pn-batch-mono">${esc(r.Component)}</td>
+              <td class="pn-batch-mono">${esc(r.ActualMaterial)}</td>
+              <td style="max-width:260px">${esc(r.Reason)}</td>
+              <td>${esc(r.RaisedByUsername || '—')}</td>
+              <td class="pn-batch-mono">${r.RaisedAt ? new Date(r.RaisedAt).toLocaleString('en-GB') : '—'}</td>
+              ${qConcessionStatus === 'PENDING' ? `
+              <td style="white-space:nowrap">
+                <button class="btn-success-solid qc-approve" data-id="${r.ConcessionID}" style="font-size:11px;padding:4px 8px">Approve</button>
+                <button class="btn-danger-solid qc-reject" data-id="${r.ConcessionID}" style="font-size:11px;padding:4px 8px">Reject</button>
+              </td>` : `<td>${esc(r.ReviewedByUsername || '—')}</td>`}
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : `<div class="sap-error" style="background:none;color:var(--text-muted);border:1px dashed var(--border)">No ${qConcessionStatus.toLowerCase()} concessions.</div>`}
+      <div id="qc-msg" style="font-size:12px;color:var(--error);margin-top:8px"></div>`;
+
+    document.querySelectorAll('.qc-status-btn').forEach(btn => {
+      btn.addEventListener('click', () => { qConcessionStatus = btn.dataset.status; loadConcessions(); });
+    });
+    document.querySelectorAll('.qc-approve').forEach(btn => {
+      btn.addEventListener('click', () => reviewConcession(btn.dataset.id, 'approve'));
+    });
+    document.querySelectorAll('.qc-reject').forEach(btn => {
+      btn.addEventListener('click', () => reviewConcession(btn.dataset.id, 'reject'));
+    });
+
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
+  }
+}
+
+async function reviewConcession(id, action) {
+  const notes = action === 'reject'
+    ? prompt('Reason for rejecting this concession (optional):') || ''
+    : '';
+  if (action === 'reject' && notes === null) return;
+
+  const msg = document.getElementById('qc-msg');
+  if (msg) msg.textContent = '';
+
+  try {
+    const res = await fetch(`/api/productionnexus/concessions/${id}/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || `Failed to ${action} concession`);
+    await loadConcessions();
+  } catch (err) {
+    if (msg) msg.textContent = err.message;
+  }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

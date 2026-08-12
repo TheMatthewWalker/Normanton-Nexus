@@ -363,6 +363,11 @@ const PROCESS_LABELS = {
   FW:'Firewall', PV:'Passenger Vehicle',
 };
 
+// Processes with a downloaded-and-saved BOM checklist for traceability
+// (see renderBomChecklist below) — NOT EX/MX, which keep their existing
+// separate MX-tub-staging-aware picker/check untouched.
+const BOM_CHECKLIST_PROCESSES = new Set(['CO', 'BR', 'CL', 'TW', 'DR']);
+
 async function runLineFloor() {
   // Start auto-refresh if not already running
   if (!refreshTimer) {
@@ -1326,6 +1331,233 @@ async function runReportMaterial() {
   }
 }
 
+// ── BOM Checklist — shared traceability UI for CO / BR / CL / TW / DR ───────
+// Renders the job's BOM as a checklist (one row per distinct component),
+// with every linked batch shown under the component its own material
+// resolves to (green — a real match) or under "Other" (red — not a
+// component of this BOM at all). Presentational grouping only: batches are
+// added exactly like the old free-text tag list (Process Code + Record ID
+// + Add) and automatically sorted into the right row by resolving each
+// one's material — the operator never has to guess which row a batch
+// belongs under. parentBatches stays the same flat {processCode, recordID
+// [, tubID]} array every other part of this app already expects;
+// validateTraceabilityAgainstBom server-side is what actually decides
+// correctness, not which row a batch rendered under here.
+
+const _bomChecklistMaterialCache = new Map(); // `${processCode}${recordID}` -> Material | null
+
+async function _resolveBatchMaterial(processCode, recordID) {
+  const key = `${processCode}${recordID}`;
+  if (_bomChecklistMaterialCache.has(key)) return _bomChecklistMaterialCache.get(key);
+  try {
+    const json = await api(`/batch/${processCode}/${recordID}`);
+    const material = json.data?.Material || null;
+    _bomChecklistMaterialCache.set(key, material);
+    return material;
+  } catch {
+    _bomChecklistMaterialCache.set(key, null);
+    return null;
+  }
+}
+
+// container:      element to render into
+// bomRows:        [{component, componentQty, componentUnit, item, storageLocation}]
+// parentBatches:  shared mutable array [{processCode, recordID, tubID?}] — mutated in place
+// opts: {
+//   processCode:  this job's own process code (excluded from the parent-picker dropdown)
+//   recordID:     the job's own record ID, or null if it doesn't exist yet (pre-save) —
+//                 "Raise concession" is hidden until there's a job to raise one against
+//   readOnly:     true = no add/remove controls (Complete Run's review step); "Raise
+//                 concession" still shows regardless — that's the point of that step
+//   onChange:     called after add/remove, so the caller can re-run its own validation/warnings
+//   onRefresh:    async () => new bomRows — powers the "Refresh BOM" button; omitted = button hidden
+//   beforeAdd:    async (processCode, recordID) => boolean — extra guard run before an add is
+//                 accepted (e.g. Drumming's re-drum reversal check); false/rejection cancels the add
+// }
+async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) {
+  const { processCode, recordID = null, readOnly = false, onChange, onRefresh, beforeAdd } = opts;
+
+  container.innerHTML = `<div class="pn-loading" style="padding:12px 0"><div class="spinner"></div>Checking traceability…</div>`;
+
+  const resolved = await Promise.all(
+    (parentBatches || []).map(async pb => ({
+      pb, material: await _resolveBatchMaterial(String(pb.processCode).toUpperCase(), pb.recordID),
+    }))
+  );
+
+  const componentGroups = new Map(); // component -> { qty, unit, batches: [] }
+  bomRows.forEach(r => {
+    if (!componentGroups.has(r.component))
+      componentGroups.set(r.component, { qty: r.componentQty, unit: r.componentUnit, batches: [] });
+  });
+
+  const other = [];
+  resolved.forEach(entry => {
+    const group = entry.material && componentGroups.get(entry.material);
+    if (group) group.batches.push(entry);
+    else other.push(entry);
+  });
+
+  const tagHtml = ({ pb, material }, ok) => `
+    <span class="bc-tag" data-pc="${esc(pb.processCode)}" data-rid="${pb.recordID}" data-mat="${esc(material || '')}"
+      style="display:inline-flex;align-items:center;gap:5px;background:${ok ? 'rgba(13,148,136,0.1)' : 'rgba(220,38,38,0.08)'};border:1px solid ${ok ? 'var(--accent)' : 'var(--error)'};border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
+      ${ok ? '✓' : '⚠'} ${esc(String(pb.processCode).toUpperCase())}${String(pb.recordID).padStart(8, '0')}${pb.tubID ? ` T${pb.tubID}` : ''}
+      ${material ? `<span style="color:var(--text-muted)">(${esc(material)})</span>` : `<span style="color:var(--error)">(unresolved)</span>`}
+      ${!readOnly ? `<button class="bc-remove" data-pc="${esc(pb.processCode)}" data-rid="${pb.recordID}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>` : ''}
+      ${!ok && recordID ? `<button class="bc-concede" data-comp="" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:3px;cursor:pointer;font-size:10px;padding:1px 4px;margin-left:2px">Raise concession</button>` : ''}
+    </span>`;
+
+  const rowsHtml = [...componentGroups.entries()].map(([component, g]) => `
+    <div class="bc-row" style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+        <span class="pn-batch-mono" style="font-weight:600">${esc(component)}</span>
+        <span style="font-size:11px;color:var(--text-muted)">${g.qty != null ? `${Number(g.qty).toFixed(3)} ${esc(g.unit || '')} per unit` : ''}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px" data-component="${esc(component)}">
+        ${g.batches.length ? g.batches.map(e => tagHtml(e, true)).join(' ')
+          : `<span style="font-size:12px;color:var(--text-muted)">No batch linked yet</span>`}
+      </div>
+    </div>`).join('');
+
+  container.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="font-size:12px;color:var(--text-muted)">Add each input batch this run consumes — it's matched to the BOM automatically.</div>
+      ${onRefresh ? `<button class="btn-secondary" id="bc-refresh" style="font-size:11px;padding:3px 8px">↻ Refresh BOM</button>` : ''}
+    </div>
+    ${!readOnly ? `
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+      <select class="tf-input" id="bc-parent-pc" style="width:150px">
+        ${Object.entries(PROCESS_LABELS).filter(([k]) => k !== processCode).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
+      </select>
+      <input class="tf-input" id="bc-parent-rid" type="number" placeholder="Record ID" style="width:130px">
+      <button class="btn-secondary" id="bc-add-batch">+ Add</button>
+    </div>` : ''}
+    ${componentGroups.size ? rowsHtml : `<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No BOM components found for this material.</div>`}
+    ${other.length ? `
+    <div class="bc-row" style="padding:8px 0">
+      <div style="font-weight:600;font-size:12px;color:var(--error);margin-bottom:4px">Other batches (not in this BOM)</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${other.map(e => tagHtml(e, false)).join(' ')}</div>
+    </div>` : ''}
+    <div id="bc-concede-form"></div>
+    <div id="bc-msg" style="font-size:12px;color:var(--error);margin-top:6px"></div>`;
+
+  if (onRefresh) {
+    document.getElementById('bc-refresh')?.addEventListener('click', async () => {
+      const btn = document.getElementById('bc-refresh');
+      btn.disabled = true; btn.textContent = 'Refreshing…';
+      try {
+        const newBomRows = await onRefresh();
+        await renderBomChecklist(container, newBomRows, parentBatches, opts);
+      } catch (err) {
+        const msg = document.getElementById('bc-msg');
+        if (msg) msg.textContent = `Refresh failed: ${err.message}`;
+        btn.disabled = false; btn.textContent = '↻ Refresh BOM';
+      }
+    });
+  }
+
+  document.getElementById('bc-add-batch')?.addEventListener('click', async () => {
+    const pc  = document.getElementById('bc-parent-pc')?.value;
+    const rid = Number(document.getElementById('bc-parent-rid')?.value);
+    if (!pc || !rid) return;
+    if (beforeAdd) {
+      const msg = document.getElementById('bc-msg');
+      if (msg) msg.textContent = '';
+      const ok = await beforeAdd(pc, rid).catch(err => { if (msg) msg.textContent = err.message; return false; });
+      if (!ok) return;
+    }
+    if (!parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
+      parentBatches.push({ processCode: pc, recordID: rid });
+    onChange?.();
+    await renderBomChecklist(container, bomRows, parentBatches, opts);
+  });
+
+  container.querySelectorAll('.bc-remove').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const idx = parentBatches.findIndex(pb => pb.processCode === btn.dataset.pc && pb.recordID === Number(btn.dataset.rid));
+      if (idx >= 0) parentBatches.splice(idx, 1);
+      onChange?.();
+      await renderBomChecklist(container, bomRows, parentBatches, opts);
+    });
+  });
+
+  container.querySelectorAll('.bc-concede').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tag = btn.closest('.bc-tag');
+      _renderConcedeForm(container, {
+        processCode, recordID,
+        parentProcessCode: tag.dataset.pc, parentRecordID: Number(tag.dataset.rid),
+        actualMaterial: tag.dataset.mat, componentOptions: [...componentGroups.keys()],
+      }, async () => { await renderBomChecklist(container, bomRows, parentBatches, opts); });
+    });
+  });
+}
+
+// Small inline form for raising a concession against one flagged batch —
+// appended into #bc-concede-form rather than a separate modal. Requires a
+// reason; quantity is left blank by default (server defaults it to the
+// standard BOM ratio at posting time — see buildActualComponentList) but
+// can be overridden here if the real consumption differed.
+function _renderConcedeForm(container, ctx, onDone) {
+  const el = container.querySelector('#bc-concede-form');
+  if (!el) return;
+  el.innerHTML = `
+    <div class="bm-section" style="margin-top:10px;background:var(--surface2);border:1px solid var(--error)">
+      <div class="bm-section-title" style="color:var(--error)">Raise Traceability Concession</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+        ${esc(ctx.parentProcessCode)}${String(ctx.parentRecordID).padStart(8, '0')} (${esc(ctx.actualMaterial || 'unresolved')}) needs Quality approval before this job can be completed.
+      </div>
+      <div class="tf-field" style="margin-bottom:8px">
+        <label class="tf-label">This is actually satisfying BOM component</label>
+        <select class="tf-input" id="cf-component">
+          ${ctx.componentOptions.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="tf-field" style="margin-bottom:8px">
+        <label class="tf-label">Reason <span style="color:var(--error)">*</span></label>
+        <textarea class="tf-input" id="cf-reason" rows="2" placeholder="Why is this the correct material despite not matching the BOM?"></textarea>
+      </div>
+      <div class="tf-field" style="margin-bottom:8px">
+        <label class="tf-label">Quantity (optional — leave blank to use the standard BOM ratio)</label>
+        <input class="tf-input" id="cf-quantity" type="number" step="0.001" min="0">
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn-submit" id="cf-submit">Raise Concession</button>
+        <button class="btn-secondary" id="cf-cancel">Cancel</button>
+        <span id="cf-msg" style="font-size:12px;color:var(--error)"></span>
+      </div>
+    </div>`;
+
+  document.getElementById('cf-cancel').addEventListener('click', () => { el.innerHTML = ''; });
+  document.getElementById('cf-submit').addEventListener('click', async () => {
+    const component = document.getElementById('cf-component')?.value;
+    const reason     = document.getElementById('cf-reason')?.value.trim();
+    const quantity   = document.getElementById('cf-quantity')?.value;
+    const msg        = document.getElementById('cf-msg');
+    if (!reason) { msg.textContent = 'A reason is required.'; return; }
+    if (!ctx.actualMaterial) { msg.textContent = 'This batch\'s material could not be resolved — cannot raise a concession for it yet.'; return; }
+
+    const btn = document.getElementById('cf-submit');
+    btn.disabled = true; btn.textContent = 'Raising…';
+    try {
+      await api(`/process/${ctx.processCode}/${ctx.recordID}/concession`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parentProcessCode: ctx.parentProcessCode, parentRecordID: ctx.parentRecordID,
+          component, actualMaterial: ctx.actualMaterial,
+          quantity: quantity ? Number(quantity) : undefined,
+          reason,
+        }),
+      });
+      el.innerHTML = `<div style="font-size:12px;color:var(--accent);margin-top:8px">✓ Concession raised — awaiting Quality approval. This job stays blocked until it's approved.</div>`;
+      onDone?.();
+    } catch (err) {
+      msg.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Raise Concession';
+    }
+  });
+}
+
 // ── METRE PROCESS ENTRY  (EX / CO / BR / CL / TW) ────────────────────────────
 
 async function runMeterProcessEntry(processCode) {
@@ -1383,18 +1615,69 @@ async function runMeterProcessEntry(processCode) {
 // ── New Entry flow ────────────────────────────────────────────────────────────
 
 function runNewEntry(processCode, machines, reasons) {
-  const state = { material: '', machineID: null, parentBatches: [] };
+  const state = { material: '', machineID: null, parentBatches: [], bomRows: [] };
+  const isBomChecklist = BOM_CHECKLIST_PROCESSES.has(processCode);
+
+  const saveNewEntry = async () => {
+    const mat = document.getElementById('ne-material')?.value.trim();
+    const msg = document.getElementById('ne-msg');
+    if (!mat) { msg.textContent = 'Material number is required.'; return; }
+
+    state.material  = mat;
+    state.machineID = Number(document.getElementById('ne-machine')?.value) || null;
+
+    const btn = document.getElementById('ne-save');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    msg.textContent = '';
+
+    try {
+      const json = await api(`/process/${processCode}/draft`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches }),
+      });
+      const d = json.data || {};
+      // Synthetic "open entry" row built entirely from what's already in
+      // hand (the draft response plus this form's own state/closure) —
+      // runCompleteWizard only ever reads RecordID/BatchRef/Material/
+      // MachineName off the entry it's given (see runCompleteRun's picker
+      // above, which passes it a real row from /open-entries the same
+      // shape), so there's no need to re-fetch anything to jump straight
+      // into completing the run that was just created.
+      const machineName = machines.find(m => m.MachineID === state.machineID)?.MachineName
+        || machines.find(m => m.MachineID === state.machineID)?.MachineCode
+        || null;
+      const newEntry = { RecordID: d.recordID, BatchRef: d.batchRef, Material: state.material, MachineName: machineName };
+
+      const warnings = json.warnings || [];
+      document.getElementById('result-body').innerHTML = `
+        <div style="padding:24px;max-width:480px">
+          <div style="font-size:22px;color:var(--accent);margin-bottom:8px">✓</div>
+          <div style="font-size:15px;font-weight:700;margin-bottom:4px">Entry saved</div>
+          <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+            Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete it now, or come back to it later using <strong>Complete Run</strong>.
+          </div>
+          ${warnings.length ? `
+          <div style="background:rgba(217,119,6,0.1);border:1px solid rgba(217,119,6,0.3);border-radius:8px;padding:10px 12px;margin-bottom:16px;font-size:12px;color:#D97706">
+            <strong>⚠ Traceability warning${warnings.length>1?'s':''}:</strong> ${warnings.map(esc).join(' ')}<br>
+            This will block the SAP post at completion unless resolved first — from the Traceability Check step, or raise a concession there if the linked batch is confirmed correct.
+          </div>` : ''}
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-submit" id="ne-complete">&#9654; Complete This Run</button>
+            <button class="btn-secondary" onclick="labelPrint('${processCode}',${d.recordID},this)">🖨 Print Label</button>
+            <button class="btn-secondary" id="ne-another">New Entry</button>
+            <button class="btn-secondary" id="ne-done">Done</button>
+          </div>
+        </div>`;
+      document.getElementById('ne-complete').addEventListener('click', () => runCompleteWizard(processCode, newEntry, machines, reasons));
+      document.getElementById('ne-another').addEventListener('click', () => runNewEntry(processCode, machines, reasons));
+      document.getElementById('ne-done').addEventListener('click', backToTiles);
+    } catch (err) {
+      msg.textContent = err.message;
+      btn.disabled = false; btn.textContent = 'Save & Close';
+    }
+  };
 
   const render = () => {
-    const batchTags = state.parentBatches.length
-      ? state.parentBatches.map((pb, i) =>
-          `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
-            ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
-            <button class="ne-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-          </span>`)
-          .join(' ')
-      : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
-
     document.getElementById('result-body').innerHTML = `
       <div style="padding:20px;max-width:560px">
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">
@@ -1424,6 +1707,8 @@ function runNewEntry(processCode, machines, reasons) {
         </div>
         <div class="bm-section" style="margin-bottom:14px">
           <div class="bm-section-title">Previous Batch Numbers for Traceability</div>
+          ${isBomChecklist ? `
+          <div id="ne-bom-checklist"></div>` : `
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Add each input batch this run consumes.</div>
           <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
             <select class="tf-input" id="ne-parent-pc" style="width:150px">
@@ -1437,7 +1722,7 @@ function runNewEntry(processCode, machines, reasons) {
               <div id="ne-mx-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:260px;overflow-y:auto;z-index:20;box-shadow:0 8px 24px rgba(0,0,0,0.15)"></div>
             </div>` : ''}
           </div>
-          <div id="ne-batch-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          <div id="ne-batch-tags" style="display:flex;flex-wrap:wrap;gap:6px"></div>`}
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <button class="btn-secondary" id="ne-back">&larr; Back</button>
@@ -1445,6 +1730,37 @@ function runNewEntry(processCode, machines, reasons) {
           <span id="ne-msg" style="font-size:12px;color:var(--error)"></span>
         </div>
       </div>`;
+
+    // BOM checklist (CO/BR/CL/TW) — no job record exists yet at this point,
+    // so the checklist runs off a live preview fetched as soon as a
+    // material is entered (blur), re-fetched on every re-render (material
+    // change) below. recordID stays null — "Raise concession" only becomes
+    // available once this job actually exists, at Complete Run.
+    if (isBomChecklist) {
+      const checklistEl = document.getElementById('ne-bom-checklist');
+      const loadBom = async () => {
+        if (!state.material) {
+          checklistEl.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">Enter a material number above to check its BOM.</div>`;
+          return;
+        }
+        try {
+          const json = await api(`/process/${processCode}/bom-preview?material=${encodeURIComponent(state.material)}`);
+          state.bomRows = json.data || [];
+        } catch (err) {
+          checklistEl.innerHTML = `<div style="font-size:12px;color:var(--error)">Unable to download BOM for ${esc(state.material)} — ${esc(err.message)}</div>`;
+          return;
+        }
+        await renderBomChecklist(checklistEl, state.bomRows, state.parentBatches, { processCode, recordID: null });
+      };
+      loadBom();
+      document.getElementById('ne-material')?.addEventListener('blur', e => {
+        const mat = e.target.value.trim();
+        if (mat !== state.material) { state.material = mat; loadBom(); }
+      });
+      document.getElementById('ne-back').addEventListener('click', () => runMeterProcessEntry(processCode));
+      document.getElementById('ne-save').addEventListener('click', saveNewEntry);
+      return;
+    }
 
     const refreshBatchTags = () => {
       const el = document.getElementById('ne-batch-tags');
@@ -1532,64 +1848,7 @@ function runNewEntry(processCode, machines, reasons) {
         if (mxResults && mxPicker && !mxPicker.contains(e.target)) mxResults.style.display = 'none';
       });
     }
-    document.getElementById('ne-save').addEventListener('click', async () => {
-      const mat = document.getElementById('ne-material')?.value.trim();
-      const msg = document.getElementById('ne-msg');
-      if (!mat) { msg.textContent = 'Material number is required.'; return; }
-
-      state.material  = mat;
-      state.machineID = Number(document.getElementById('ne-machine')?.value) || null;
-
-      const btn = document.getElementById('ne-save');
-      btn.disabled = true; btn.textContent = 'Saving…';
-      msg.textContent = '';
-
-      try {
-        const json = await api(`/process/${processCode}/draft`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches }),
-        });
-        const d = json.data || {};
-        // Synthetic "open entry" row built entirely from what's already in
-        // hand (the draft response plus this form's own state/closure) —
-        // runCompleteWizard only ever reads RecordID/BatchRef/Material/
-        // MachineName off the entry it's given (see runCompleteRun's picker
-        // above, which passes it a real row from /open-entries the same
-        // shape), so there's no need to re-fetch anything to jump straight
-        // into completing the run that was just created.
-        const machineName = machines.find(m => m.MachineID === state.machineID)?.MachineName
-          || machines.find(m => m.MachineID === state.machineID)?.MachineCode
-          || null;
-        const newEntry = { RecordID: d.recordID, BatchRef: d.batchRef, Material: state.material, MachineName: machineName };
-
-        const warnings = json.warnings || [];
-        document.getElementById('result-body').innerHTML = `
-          <div style="padding:24px;max-width:480px">
-            <div style="font-size:22px;color:var(--accent);margin-bottom:8px">✓</div>
-            <div style="font-size:15px;font-weight:700;margin-bottom:4px">Entry saved</div>
-            <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
-              Ref: <span class="pn-batch-ref">${esc(d.batchRef||'')}</span> — status Open. Complete it now, or come back to it later using <strong>Complete Run</strong>.
-            </div>
-            ${warnings.length ? `
-            <div style="background:rgba(217,119,6,0.1);border:1px solid rgba(217,119,6,0.3);border-radius:8px;padding:10px 12px;margin-bottom:16px;font-size:12px;color:#D97706">
-              <strong>⚠ Traceability warning${warnings.length>1?'s':''}:</strong> ${warnings.map(esc).join(' ')}<br>
-              This will block the SAP post at completion unless resolved first.
-            </div>` : ''}
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn-submit" id="ne-complete">&#9654; Complete This Run</button>
-              <button class="btn-secondary" onclick="labelPrint('${processCode}',${d.recordID},this)">🖨 Print Label</button>
-              <button class="btn-secondary" id="ne-another">New Entry</button>
-              <button class="btn-secondary" id="ne-done">Done</button>
-            </div>
-          </div>`;
-        document.getElementById('ne-complete').addEventListener('click', () => runCompleteWizard(processCode, newEntry, machines, reasons));
-        document.getElementById('ne-another').addEventListener('click', () => runNewEntry(processCode, machines, reasons));
-        document.getElementById('ne-done').addEventListener('click', backToTiles);
-      } catch (err) {
-        msg.textContent = err.message;
-        btn.disabled = false; btn.textContent = 'Save & Close';
-      }
-    });
+    document.getElementById('ne-save').addEventListener('click', saveNewEntry);
   };
 
   render();
@@ -1900,6 +2159,7 @@ function renderCompletePhase(state, entry, reasons, processCode) {
 
   } else if (state.phase === 4) {
     const isBraiding = processCode === 'BR';
+    const isBomChecklist = BOM_CHECKLIST_PROCESSES.has(processCode);
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
         <div class="bm-section-title">Step 4 — ${isBraiding ? 'Review &amp; Save' : 'Review &amp; Submit'}</div>
@@ -1915,8 +2175,36 @@ function renderCompletePhase(state, entry, reasons, processCode) {
           <div class="pn-batch-mono">Extra operators: ${state.additionalOperators.length ? state.additionalOperators.map(u=>esc(u.username)).join(', ') : 'None'}</div>
           <div class="pn-batch-mono">Scrap: ${state.hasScrap ? state.scrapTotalKG+' KG across '+state.scrapReasons.length+' reason(s)' : 'None'}</div>
         </div>
+        ${isBomChecklist ? `
+        <div class="bm-section" style="margin-bottom:10px">
+          <div class="bm-section-title">Traceability Check</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Batches were linked when this run was started. A mismatch here will block ${isBraiding ? 'saving' : 'the SAP post'} unless a concession is raised and approved.</div>
+          <div id="cr-bom-checklist"><div class="pn-loading" style="padding:8px 0"><div class="spinner"></div>Loading…</div></div>
+        </div>` : ''}
         <div id="cr-submit-result" style="font-size:13px"></div>
       </div>`;
+
+    if (isBomChecklist) {
+      const checklistEl = document.getElementById('cr-bom-checklist');
+      (async () => {
+        try {
+          const [bomJson, traceJson] = await Promise.all([
+            api(`/process/${processCode}/${entry.RecordID}/bom`),
+            api(`/process/${processCode}/${entry.RecordID}/trace`),
+          ]);
+          state.parentBatches = traceJson.data || [];
+          await renderBomChecklist(checklistEl, bomJson.data || [], state.parentBatches, {
+            processCode, recordID: entry.RecordID, readOnly: true,
+            onRefresh: async () => {
+              const r = await api(`/process/${processCode}/${entry.RecordID}/bom/refresh`, { method: 'POST' });
+              return r.data?.bomRows || [];
+            },
+          });
+        } catch (err) {
+          checklistEl.innerHTML = `<div style="font-size:12px;color:var(--error)">Unable to load traceability check — ${esc(err.message)}</div>`;
+        }
+      })();
+    }
   }
 }
 
@@ -4068,6 +4356,8 @@ async function runDrummingEntry() {
     packagingID: '',
     weightKG: '',
     parentBatches: [],
+    bomRows: [],
+    drummingID: null, // set once a blocked submit reveals a real DrummingID exists — see the 'review' step below
     coilLengths: [],
     hasScrap: false, scrapTotalKG: '', scrapReasons: [],
     comments: '',
@@ -4276,64 +4566,64 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
       </div>`;
 
   } else if (step === 'traceability') {
-    const batchTags = state.parentBatches.length
-      ? state.parentBatches.map((pb, i) =>
-          `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
-            ${esc(pb.processCode)}${String(pb.recordID).padStart(8,'0')}
-            <button class="dw-remove-batch" data-idx="${i}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
-           </span>`).join(' ')
-      : `<span style="font-size:12px;color:var(--text-muted)">No batches added yet</span>`;
-
     body.innerHTML = `
       <div class="bm-section" style="margin-bottom:0">
         <div class="bm-section-title">Traceability — Previous Process Batches</div>
         <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add each upstream batch that fed into this drum — including a previous Drumming batch if this is a re-drum. Leave empty if not applicable.</div>
-        <div style="display:flex;gap:6px;margin-bottom:10px">
-          <select class="tf-input" id="dw-parent-pc" style="width:150px">
-            ${Object.entries(PROCESS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
-          </select>
-          <input class="tf-input" id="dw-parent-rid" type="number" placeholder="Record ID" style="width:130px">
-          <button class="btn-secondary" id="dw-add-batch">+ Add</button>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px" id="dw-batch-tags">${batchTags}</div>
-        <div id="dw-batch-warning" style="font-size:12px;color:var(--error)"></div>
+        ${state.drummingID ? `
+        <div style="background:rgba(220,38,38,0.08);border:1px solid var(--error);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--error)">
+          This drum (DR${String(state.drummingID).padStart(8,'0')}) was blocked at submission — an unresolved traceability mismatch is shown below. Raise a concession, or fix the linked batch, then go to Review and submit again.
+        </div>` : ''}
+        <div id="dw-bom-checklist"><div class="pn-loading" style="padding:8px 0"><div class="spinner"></div>Loading…</div></div>
       </div>`;
 
-    document.getElementById('dw-add-batch').addEventListener('click', async () => {
-      const pc  = document.getElementById('dw-parent-pc')?.value;
-      const rid = Number(document.getElementById('dw-parent-rid')?.value);
-      const warningEl = document.getElementById('dw-batch-warning');
-      if (!pc || !rid) return;
-
-      // Instant feedback for a re-drum reference — the authoritative check
-      // runs server-side at submission regardless, but this saves the
-      // operator from filling out the whole wizard only to be rejected.
-      if (pc === 'DR' && warningEl) {
-        warningEl.textContent = 'Checking whether that drum has been reversed…';
-        try {
-          const json = await api(`/drumming/${rid}/reversal-status`);
-          if (!json.data?.isReversed) {
-            warningEl.textContent = `This drum cannot be processed, as the original drum (DR${String(rid).padStart(8,'0')}) has not been correctly reversed yet. Please seek advice from a supervisor.`;
-            return;
-          }
-          warningEl.textContent = '';
-        } catch (err) {
-          warningEl.textContent = `Could not verify DR${String(rid).padStart(8,'0')} — ${err.message}`;
-          return;
-        }
+    (async () => {
+      const checklistEl = document.getElementById('dw-bom-checklist');
+      if (!state.material) {
+        checklistEl.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">Enter a material on the Details step first.</div>`;
+        return;
       }
-
-      if (!state.parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
-        state.parentBatches.push({ processCode: pc, recordID: rid });
-      renderDrummingPhaseBody(state, reasons, packagingOptions);
-    });
-
-    document.querySelectorAll('.dw-remove-batch').forEach(btn => {
-      btn.addEventListener('click', () => {
-        state.parentBatches.splice(Number(btn.dataset.idx), 1);
-        renderDrummingPhaseBody(state, reasons, packagingOptions);
+      try {
+        // Once blocked, a real DrummingID exists — re-render off its
+        // persisted snapshot (and let "Raise concession" work) instead of a
+        // fresh live preview, same as the Complete Run review step does.
+        if (state.drummingID) {
+          const [bomJson, traceJson] = await Promise.all([
+            api(`/process/DR/${state.drummingID}/bom`),
+            api(`/process/DR/${state.drummingID}/trace`),
+          ]);
+          state.bomRows = bomJson.data || [];
+          state.parentBatches = traceJson.data || [];
+        } else {
+          const json = await api(`/process/DR/bom-preview?material=${encodeURIComponent(state.material)}`);
+          state.bomRows = json.data || [];
+        }
+      } catch (err) {
+        checklistEl.innerHTML = `<div style="font-size:12px;color:var(--error)">Unable to download BOM for ${esc(state.material)} — ${esc(err.message)}</div>`;
+        return;
+      }
+      await renderBomChecklist(checklistEl, state.bomRows, state.parentBatches, {
+        processCode: 'DR', recordID: state.drummingID,
+        onRefresh: async () => {
+          if (state.drummingID) {
+            const r = await api(`/process/DR/${state.drummingID}/bom/refresh`, { method: 'POST' });
+            return r.data?.bomRows || [];
+          }
+          const json = await api(`/process/DR/bom-preview?material=${encodeURIComponent(state.material)}`);
+          return json.data || [];
+        },
+        // Instant feedback for a re-drum reference — the authoritative check
+        // runs server-side at submission regardless, but this saves the
+        // operator from filling out the whole wizard only to be rejected.
+        beforeAdd: async (pc, rid) => {
+          if (pc !== 'DR') return true;
+          const json = await api(`/drumming/${rid}/reversal-status`);
+          if (!json.data?.isReversed)
+            throw new Error(`This drum cannot be processed, as the original drum (DR${String(rid).padStart(8,'0')}) has not been correctly reversed yet. Please seek advice from a supervisor.`);
+          return true;
+        },
       });
-    });
+    })();
 
   } else if (step === 'coils') {
     const coilRows = state.coilLengths.map((l, i) => `
@@ -4499,11 +4789,24 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
     const resultEl  = document.getElementById('dw-submit-result');
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
-    const endpoint = state.type === 'customer' ? '/drumming/customer' : '/drumming/stock';
+    // Once a drum has been blocked once, DrummingID already exists —
+    // re-submitting via /drumming/stock|customer would INSERT A SECOND
+    // record. Go through the existing failed-backflush retry endpoint
+    // instead (now concession-aware — see its DR branch), which re-checks
+    // the same block and posts against the SAME record.
+    const usingRetry = !!state.drummingID;
+    const endpoint = usingRetry
+      ? `/failed-backflush/DR/${state.drummingID}/retry`
+      : (state.type === 'customer' ? '/drumming/customer' : '/drumming/stock');
 
     try {
-      const json = await api(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // Raw fetch here (not the api() helper) — a blocked (409) response's
+      // body still carries a real drummingID (the record exists even
+      // though the backflush was refused), and api() discards the body on
+      // any non-success response. Need that ID to let the operator go back
+      // to Traceability and raise a concession against a real job.
+      const r = await fetch('/api/productionnexus' + endpoint, {
+        method: usingRetry ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           material:       state.material,
           shiftID:        state.shiftID,
@@ -4512,6 +4815,7 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
           orderItem:      state.orderItem      || undefined,
           packagingID:    state.packagingID,
           weightKG:       state.weightKG,
+          lengthMetres:   state.coilLengths.reduce((s, l) => s + Number(l), 0),
           parentBatches:  state.parentBatches,
           coilLengths:    state.coilLengths,
           hasScrap:       state.hasScrap,
@@ -4520,16 +4824,36 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
           comments:       state.comments,
         }),
       });
+      const json = await r.json();
 
+      if (!r.ok || json.success === false) {
+        if (json.data?.status === 'BLOCKED' && json.data?.drummingID) {
+          state.drummingID = json.data.drummingID;
+          resultEl.style.color = 'var(--error)';
+          resultEl.innerHTML = `⚠ Blocked — traceability doesn't match this material's BOM.<br>
+            <span style="font-size:12px">${esc(json.error || '')}</span><br>
+            <button class="btn-secondary" id="dw-review-trace" style="margin-top:8px;font-size:12px">← Back to Traceability</button>`;
+          document.getElementById('dw-review-trace')?.addEventListener('click', () => {
+            state.phase = state.type === 'customer' ? 3 : 2; // 'traceability' step index — see dwStepName
+            renderDrummingWizard(state, reasons, packagingOptions);
+          });
+          submitBtn.disabled = false; submitBtn.textContent = 'Submit & Post to SAP';
+          return;
+        }
+        throw new Error(json.error || `Request failed (HTTP ${r.status})`);
+      }
+
+      const drRef = json.data?.drummingID || state.drummingID;
       if (json.data?.status === 'SAP_FAILED') {
         resultEl.style.color = '#D97706';
-        resultEl.innerHTML = `⚠ Saved as DR${String(json.data.drummingID).padStart(8,'0')} but SAP failed.<br>
+        resultEl.innerHTML = `⚠ Saved as DR${String(drRef).padStart(8,'0')} but SAP failed.<br>
           <span style="font-size:12px">${esc(json.data.error)}</span><br>
           <span style="font-size:12px">Now in the Failed Backflush queue for supervisor review.</span>`;
       } else {
         resultEl.style.color = 'var(--accent)';
-        resultEl.innerHTML = `✓ DR${String(json.data.drummingID).padStart(8,'0')} posted successfully.<br>
+        resultEl.innerHTML = `✓ DR${String(drRef).padStart(8,'0')} posted successfully.<br>
           <span style="font-size:12px">MatDoc: ${esc(json.data.materialDocument||'—')}</span>
+          ${json.data.concessionApplied ? `<br><span style="font-size:12px;color:var(--accent)">Posted via approved concession (goods movement).</span>` : ''}
           ${json.data.warning ? `<br><span style="font-size:12px;color:#D97706">⚠ ${esc(json.data.warning)}</span>` : ''}`;
       }
       submitBtn.disabled = false; submitBtn.textContent = 'Submit & Post to SAP';

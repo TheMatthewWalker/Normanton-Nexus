@@ -785,6 +785,20 @@ router.post('/process/:processCode/draft', async (req, res) => {
     if (code === 'EX') {
       const problems = await validateMxTubLinks(pool, material, parentBatches).catch(() => []);
       warnings = problems.map(p => p.reason);
+    } else if (BOM_VALIDATED_PROCESSES.has(code)) {
+      // Download and save the BOM into the job the moment its material is
+      // known, then warn (non-blocking, matching the EX/MX precedent above)
+      // on any traceability link whose own material isn't a component of it
+      // — see validateTraceabilityAgainstBom. Hard-blocked later at
+      // completion time, not here (see /process/:processCode/complete).
+      try {
+        const bomRows = await fetchBom(material);
+        await persistBomSnapshot(pool, code, recordID, material, bomRows);
+        const problems = await validateTraceabilityAgainstBom(pool, parentBatches, bomRows);
+        warnings = problems.map(p => p.reason);
+      } catch (err) {
+        warnings = [`Unable to download BOM for ${material} — SAP BOM lookup failed (${err.message}). Traceability cannot be verified yet.`];
+      }
     }
 
     res.status(201).json({ success: true, data: { recordID, batchRef }, ...(warnings.length ? { warnings } : {}) });
@@ -965,6 +979,42 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
 
     await writeEvent(pool, code, recordID, 'STARTED', `${code} completed: ${material} ${length.toFixed(3)} M`, 0, uid);
 
+    // BOM-vs-traceability hard block — CO/BR/CL/TW (not EX, which has its
+    // own separate MX-tub-staging-aware check below). Re-reads the actual
+    // linked parents fresh from prod.ProductionTrace (don't trust anything
+    // computed at draft time — a link may have been added/removed since)
+    // and the job's persisted BOM snapshot (its latest batch — see
+    // "Refresh BOM"), so a since-corrected BOM is picked up here too. An
+    // APPROVED concession clears its own specific mismatch; anything still
+    // unresolved blocks completion outright — applies to BR too even though
+    // it never posts its own backflush (see the early return just below):
+    // BR still consumes real raw material, and a wrong-material link there
+    // is exactly as much a traceability problem as on any other process.
+    //
+    // bomRows/jobConcessions are hoisted here (not just block-scoped) so the
+    // backflush section below can reuse them to decide whether this job's
+    // SAP post needs to go via the explicit goods-movement path instead of
+    // the normal automatic backflush.
+    let bomRows = [];
+    let jobConcessions = [];
+    if (BOM_VALIDATED_PROCESSES.has(code)) {
+      const traceRows = await pool.request()
+        .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, recordID)
+        .query(`SELECT ParentProcessCode AS processCode, ParentRecordID AS recordID
+                FROM prod.ProductionTrace WHERE ChildProcessCode=@cc AND ChildRecordID=@cr`);
+
+      bomRows = await latestBomSnapshot(pool, code, recordID);
+      const problems = await validateTraceabilityAgainstBom(pool, traceRows.recordset, bomRows);
+      const blocking = await unresolvedProblems(pool, code, recordID, problems);
+
+      if (blocking.length) {
+        const errMsg = `Blocked: ${blocking.map(p => p.reason).join(' ')} Raise a concession from the traceability screen, or use "Refresh BOM" if SAP's BOM has since been corrected.`;
+        return await markSapFailed(res, req, pool, code, cfg, recordID, batchRef, length, errMsg, uid);
+      }
+
+      if (problems.length) jobConcessions = await approvedConcessions(pool, code, recordID);
+    }
+
     if (code === 'BR') {
       return res.status(200).json({ success: true, data: { recordID, batchRef, status: 'COMPLETE' } });
     }
@@ -996,6 +1046,45 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
     }
 
     try {
+      // Concession-covered jobs bypass the normal automatic BOM-driven
+      // backflush entirely and post every component explicitly instead
+      // (correct ones included) — see buildActualComponentList. Avoids the
+      // automatic backflush also silently consuming the original wrong BOM
+      // material on top of the explicit posting.
+      if (jobConcessions.length) {
+        const components = buildActualComponentList(bomRows, jobConcessions, length);
+        const gmRaw = await sapPost('/api/production/goods-movement-backflush', {
+          Material:   material,
+          Header:     batchRef,
+          Components: components,
+        });
+        const { documentNumber: sapMatDoc } = parseGoodsMovement(gmRaw);
+        audit('SAP_OK', req.session?.user?.username, `'${batchRef}' BACKFLUSHED (concession, goods movement) - Material Document = '${sapMatDoc}'`, req);
+
+        await pool.request()
+          .input('pc',   sql.NVarChar(5),   code)
+          .input('rid',  sql.Int,           recordID)
+          .input('type', sql.NVarChar(20),  'BACKFLUSH')
+          .input('qty',  sql.Decimal(12,3), length)
+          .input('doc',  sql.NVarChar(10),  sapMatDoc)
+          .input('uid',  sql.Int,           uid)
+          .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+        await writeEvent(pool, code, recordID, 'SAP_POST',
+          `Backflush posted via concession goods movement — MatDoc: ${sapMatDoc}. Components: ${components.map(c => `${c.Material} x${c.Quantity}`).join(', ')}.`, 0, uid);
+
+        for (const c of jobConcessions) {
+          await pool.request()
+            .input('id', sql.Int, c.ConcessionID).input('doc', sql.NVarChar(10), sapMatDoc)
+            .query(`UPDATE prod.TraceabilityConcessions SET AppliedAt=GETDATE(), MaterialDocumentSAP=@doc WHERE ConcessionID=@id`);
+        }
+
+        return res.status(200).json({
+          success: true,
+          data: { recordID, batchRef, materialDocument: sapMatDoc, status: 'COMPLETE', concessionApplied: true },
+        });
+      }
+
       const sapRaw = await sapPost('/api/production/backflush', {
         Material:  material,
         Quantity:  length,
@@ -1217,6 +1306,134 @@ async function apportionMxExpectedConsumption(pool, code, recordID, extrudedMate
         .query(`UPDATE prod.ProductionTrace SET ExpectedConsumptionKG = @kg WHERE TraceID = @id`);
     }
   }
+}
+
+// ── BOM-validated traceability — CO / BR / CL / TW / DR ──────────────────────
+// Generalizes validateMxTubLinks's "does the linked parent's material really
+// belong to this job's BOM" check to any parent link (not just MX tubs), for
+// the five processes that get a downloaded-and-saved BOM snapshot. EX/MX keep
+// their own separate, tub-staging-aware check above — deliberately not
+// touched or merged with this (see the approved plan).
+const BOM_VALIDATED_PROCESSES = new Set(['CO', 'BR', 'CL', 'TW', 'DR']);
+
+// Live BOM lookup for `material` — the finished/produced good, same role as
+// `extrudedMaterial` in validateMxTubLinks. Shared by the preview endpoint
+// and the persist-at-creation step so both hit SAP exactly once per call.
+async function fetchBom(material) {
+  const bomRaw = await sapGet('/api/production/bom', { Material: material });
+  return bomRaw?.data ?? bomRaw ?? [];
+}
+
+// Persists a fetched BOM snapshot into prod.ProductionBom for a job. Never
+// deletes a prior batch — see the /bom/refresh route — so DownloadedAt always
+// distinguishes the creation-time snapshot from any later refresh, keeping
+// "what BOM was this job built against" intact for audit even after a
+// refresh changes what validation uses going forward.
+async function persistBomSnapshot(pool, code, recordID, material, bomRows) {
+  for (const r of bomRows) {
+    await pool.request()
+      .input('pc',   sql.NVarChar(5),   code)
+      .input('rid',  sql.Int,           recordID)
+      .input('mat',  sql.NVarChar(18),  material)
+      .input('comp', sql.NVarChar(18),  r.component)
+      .input('item', sql.NVarChar(4),   r.item ?? null)
+      .input('qty',  sql.Decimal(12, 4), r.componentQty ?? null)
+      .input('unit', sql.NVarChar(3),   r.componentUnit ?? null)
+      .input('sloc', sql.NVarChar(4),   r.storageLocation ?? null)
+      .query(`INSERT INTO prod.ProductionBom
+                (ProcessCode,RecordID,Material,Component,Item,ComponentQty,ComponentUnit,StorageLocation)
+              VALUES (@pc,@rid,@mat,@comp,@item,@qty,@unit,@sloc)`);
+  }
+}
+
+// Reads back the LATEST persisted BOM batch for a job (MAX(DownloadedAt) —
+// see persistBomSnapshot/the refresh route for why old batches aren't
+// deleted on refresh). Returned shape matches fetchBom's live rows
+// (component/componentQty/componentUnit/item/storageLocation) so both feed
+// the same validation/rendering code paths interchangeably.
+async function latestBomSnapshot(pool, code, recordID) {
+  const r = await pool.request()
+    .input('pc', sql.NVarChar(5), code).input('rid', sql.Int, recordID)
+    .query(`SELECT Component AS component, ComponentQty AS componentQty, ComponentUnit AS componentUnit,
+                   Item AS item, StorageLocation AS storageLocation
+            FROM prod.ProductionBom
+            WHERE ProcessCode=@pc AND RecordID=@rid
+              AND DownloadedAt = (SELECT MAX(DownloadedAt) FROM prod.ProductionBom WHERE ProcessCode=@pc AND RecordID=@rid)`);
+  return r.recordset;
+}
+
+// Generalization of validateMxTubLinks's core check (same problems[] /
+// never-throws contract) to any parent link, for CO/BR/CL/TW/DR. Resolves
+// each linked parent's own Material (same table lookup as
+// resolveTraceabilityMaterials) and checks it belongs to bomRows' component
+// set — NOT whether it was linked under the "right" checklist row on the
+// client, which is purely presentational grouping.
+async function validateTraceabilityAgainstBom(pool, parentBatches, bomRows) {
+  const bomMaterials = new Set(bomRows.map(r => r.component));
+  const problems = [];
+  for (const pb of parentBatches || []) {
+    if (!pb.processCode || !pb.recordID) continue;
+    let cfg;
+    try { cfg = processConfig(pb.processCode.toUpperCase()); } catch { continue; }
+    const r = await pool.request().input('id', sql.Int, Number(pb.recordID))
+      .query(`SELECT Material FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
+    const mat   = r.recordset[0]?.Material;
+    const label = `${pb.processCode.toUpperCase()}${String(pb.recordID).padStart(8, '0')}`;
+    if (!mat) { problems.push({ ...pb, reason: `${label} not found.` }); continue; }
+    if (!bomMaterials.has(mat)) {
+      problems.push({ ...pb, material: mat, reason: `${label}'s material (${mat}) is not a component of this job's BOM.` });
+    }
+  }
+  return problems;
+}
+
+// Filters problems[] down to those NOT covered by an APPROVED concession —
+// this is what actually gates completion/posting. "Covered" means an
+// approved prod.TraceabilityConcessions row exists for that exact parent
+// link (ParentProcessCode/ParentRecordID).
+async function unresolvedProblems(pool, code, recordID, problems) {
+  const out = [];
+  for (const p of problems) {
+    if (!p.processCode || !p.recordID) { out.push(p); continue; }
+    const c = await pool.request()
+      .input('pc',   sql.NVarChar(5), code).input('rid',  sql.Int, recordID)
+      .input('ppc',  sql.NVarChar(5), p.processCode.toUpperCase())
+      .input('prid', sql.Int,         Number(p.recordID))
+      .query(`SELECT TOP 1 1 AS x FROM prod.TraceabilityConcessions
+              WHERE ProcessCode=@pc AND RecordID=@rid AND ParentProcessCode=@ppc AND ParentRecordID=@prid AND Status=N'APPROVED'`);
+    if (!c.recordset.length) out.push(p);
+  }
+  return out;
+}
+
+// Fetches every APPROVED concession for a job — used to build the explicit
+// goods-movement component list when posting under a concession (see
+// buildActualComponentList) and to decide whether a job's posting should be
+// redirected away from the normal automatic backflush at all.
+async function approvedConcessions(pool, code, recordID) {
+  const r = await pool.request()
+    .input('pc', sql.NVarChar(5), code).input('rid', sql.Int, recordID)
+    .query(`SELECT ConcessionID, Component, ActualMaterial, Quantity
+            FROM prod.TraceabilityConcessions
+            WHERE ProcessCode=@pc AND RecordID=@rid AND Status=N'APPROVED'`);
+  return r.recordset;
+}
+
+// Builds the full explicit component list SapServer's goods-movement-backflush
+// endpoint needs, for a job posting under one or more approved concessions —
+// per the approved plan's "full replacement" decision: EVERY component is
+// posted explicitly (correct ones included), not just the mismatched one, so
+// the normal automatic BOM-driven backflush never also silently consumes the
+// original wrong material on top of this explicit posting.
+function buildActualComponentList(bomRows, concessions, totalQty) {
+  return bomRows.map(row => {
+    const concession = concessions.find(c => c.Component === row.component);
+    const material = concession ? concession.ActualMaterial : row.component;
+    const quantity = concession && concession.Quantity != null
+      ? Number(concession.Quantity)
+      : Math.round(Number(row.componentQty || 0) * Number(totalQty) * 1000) / 1000;
+    return { Material: material, Quantity: quantity, Unit: row.componentUnit, StorageLocation: row.storageLocation };
+  });
 }
 
 async function writeEvent(pool, processCode, recordId, eventType, message, severity, userId) {
@@ -2485,21 +2702,236 @@ router.post('/mixing/entry', async (req, res) => {
   });
 });
 
-// ── DRUMMING — BOM validation ─────────────────────────────────────────────────
-
-router.post('/drumming/bom', async (req, res) => {
-  const { material } = req.body;
+// ── BOM download & validation — CO / BR / CL / TW / DR ──────────────────────
+// Live preview, used before a job record exists (building the checklist
+// while still filling in the New Entry form / Drumming wizard). Replaces the
+// old POST /drumming/bom, which was dead code from the UI's perspective and
+// had a stale response shape (result.components / {material,description,
+// quantityPer}) that never matched the real BomRow shape used everywhere
+// else in this file.
+router.get('/process/:processCode/bom-preview', async (req, res) => {
+  const code     = req.params.processCode.toUpperCase();
+  const material = String(req.query.material || '').trim();
+  if (!BOM_VALIDATED_PROCESSES.has(code))
+    return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
   if (!material) return res.status(400).json({ success: false, error: 'material is required.' });
   try {
-    const result = await sapPost('/api/production/bom', { material });
-    // SapServer returns: { components: [{ material, description, quantityPer }] }
-    res.json({ success: true, data: result.components || result.data || [] });
+    const bomRows = await fetchBom(material);
+    res.json({ success: true, data: bomRows });
   } catch (err) {
     const msg = err.response?.data?.error || err.message;
     res.status(502).json({ success: false, error: `BOM lookup failed: ${msg}` });
   }
 });
 
+// Persisted snapshot for an existing job — the LATEST batch (see
+// persistBomSnapshot/latestBomSnapshot). Used once a draft/record exists
+// (e.g. reopening Complete Run) so the checklist and validation re-render
+// against what was actually saved, not a possibly-since-changed live BOM.
+router.get('/process/:processCode/:recordID/bom', async (req, res) => {
+  const code     = req.params.processCode.toUpperCase();
+  const recordID = Number(req.params.recordID);
+  if (!BOM_VALIDATED_PROCESSES.has(code))
+    return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+  try {
+    const pool    = await getNexusOperationsPool();
+    const bomRows = await latestBomSnapshot(pool, code, recordID);
+    res.json({ success: true, data: bomRows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Re-downloads the BOM from SAP and appends a new snapshot batch — for when
+// the real fix for a mismatch was correcting the BOM in SAP, not raising a
+// concession. Never deletes the prior batch (see persistBomSnapshot) so the
+// original creation-time snapshot stays intact for audit; the new batch
+// becomes what validation uses going forward. Re-runs
+// validateTraceabilityAgainstBom against the fresh rows so the caller can
+// immediately see which problems (if any) the refresh resolved.
+router.post('/process/:processCode/:recordID/bom/refresh', async (req, res) => {
+  const code     = req.params.processCode.toUpperCase();
+  const recordID = Number(req.params.recordID);
+  if (!BOM_VALIDATED_PROCESSES.has(code))
+    return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+  try {
+    const cfg  = processConfig(code);
+    const pool = await getNexusOperationsPool();
+    const uid  = userId(req);
+
+    const jobRow = await pool.request().input('id', sql.Int, recordID)
+      .query(`SELECT Material FROM ${cfg.table} WHERE ${cfg.pk} = @id`);
+    const material = jobRow.recordset[0]?.Material;
+    if (!material) return res.status(404).json({ success: false, error: 'Job not found.' });
+
+    const bomRows = await fetchBom(material);
+    await persistBomSnapshot(pool, code, recordID, material, bomRows);
+    await writeEvent(pool, code, recordID, 'NOTE',
+      `BOM re-downloaded from SAP (refresh) — ${bomRows.length} component(s).`, 0, uid);
+
+    const traceRows = await pool.request()
+      .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, recordID)
+      .query(`SELECT ParentProcessCode AS processCode, ParentRecordID AS recordID
+              FROM prod.ProductionTrace WHERE ChildProcessCode=@cc AND ChildRecordID=@cr`);
+    const problems = await validateTraceabilityAgainstBom(pool, traceRows.recordset, bomRows);
+
+    res.json({ success: true, data: { bomRows, problems } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// The parent-batch links already saved against a job — used by the
+// Complete Run wizard's read-only Traceability Check step to re-render the
+// BOM checklist for a job whose batches were linked back at draft time
+// (this endpoint isn't scoped to BOM_VALIDATED_PROCESSES since it's just a
+// plain read of prod.ProductionTrace, useful for any process code).
+router.get('/process/:processCode/:recordID/trace', async (req, res) => {
+  try {
+    const code     = req.params.processCode.toUpperCase();
+    const recordID = Number(req.params.recordID);
+    const pool     = await getNexusOperationsPool();
+    const r = await pool.request()
+      .input('cc', sql.NVarChar(5), code).input('cr', sql.Int, recordID)
+      .query(`SELECT ParentProcessCode AS processCode, ParentRecordID AS recordID, ParentTubID AS tubID
+              FROM prod.ProductionTrace WHERE ChildProcessCode=@cc AND ChildRecordID=@cr`);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Traceability Concessions — Production raises, Quality approves ──────────
+// Modeled on the existing scrap-approval flow (POST /scrap/approve below):
+// raise a pending row, notify the approver role, separate gated
+// approve/reject endpoints. See unresolvedProblems/buildActualComponentList
+// above for how an APPROVED concession actually unblocks and reroutes a
+// job's SAP posting.
+
+router.post('/process/:processCode/:recordID/concession', async (req, res) => {
+  const code     = req.params.processCode.toUpperCase();
+  const recordID = Number(req.params.recordID);
+  if (!BOM_VALIDATED_PROCESSES.has(code))
+    return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+  const { parentProcessCode, parentRecordID, component, actualMaterial, quantity, reason } = req.body;
+  if (!parentProcessCode || !parentRecordID || !component || !actualMaterial || !String(reason || '').trim())
+    return res.status(400).json({ success: false, error: 'parentProcessCode, parentRecordID, component, actualMaterial and reason are required.' });
+
+  try {
+    const pool = await getNexusOperationsPool();
+    const uid  = userId(req);
+    const ppc  = parentProcessCode.toUpperCase();
+
+    const existing = await pool.request()
+      .input('pc', sql.NVarChar(5), code).input('rid', sql.Int, recordID)
+      .input('ppc', sql.NVarChar(5), ppc).input('prid', sql.Int, Number(parentRecordID))
+      .query(`SELECT TOP 1 ConcessionID FROM prod.TraceabilityConcessions
+              WHERE ProcessCode=@pc AND RecordID=@rid AND ParentProcessCode=@ppc AND ParentRecordID=@prid AND Status IN (N'PENDING', N'APPROVED')`);
+    if (existing.recordset.length)
+      return res.status(409).json({ success: false, error: 'A concession for this link is already pending or approved.' });
+
+    const ins = await pool.request()
+      .input('pc',     sql.NVarChar(5),   code)
+      .input('rid',     sql.Int,           recordID)
+      .input('ppc',     sql.NVarChar(5),   ppc)
+      .input('prid',    sql.Int,           Number(parentRecordID))
+      .input('comp',    sql.NVarChar(18),  component)
+      .input('mat',     sql.NVarChar(18),  actualMaterial)
+      .input('qty',     sql.Decimal(12,4), quantity != null && quantity !== '' ? Number(quantity) : null)
+      .input('reason',  sql.NVarChar(500), String(reason).trim())
+      .input('uid',     sql.Int,           uid)
+      .query(`INSERT INTO prod.TraceabilityConcessions
+                (ProcessCode,RecordID,ParentProcessCode,ParentRecordID,Component,ActualMaterial,Quantity,Reason,RaisedByUserID)
+              OUTPUT INSERTED.ConcessionID
+              VALUES (@pc,@rid,@ppc,@prid,@comp,@mat,@qty,@reason,@uid)`);
+    const concessionID = ins.recordset[0].ConcessionID;
+
+    await writeEvent(pool, code, recordID, 'NOTE',
+      `Traceability concession raised for ${ppc}${String(parentRecordID).padStart(8, '0')} (${component} → ${actualMaterial}): ${reason}`, 1, uid);
+
+    const batchRef = `${code}${String(recordID).padStart(8, '0')}`;
+    const username = req.session?.user?.username || `user #${uid}`;
+    getNexusPool().then(kPool => notify(kPool, {
+      title:       'Traceability Concession Raised',
+      body:        `${batchRef} — ${component} traceability shows ${actualMaterial} instead. Raised by ${username}: ${reason}`,
+      severity:    1,
+      category:    'quality',
+      actionLabel: 'Review Concession',
+      actionURL:   '/private/quality.html',
+      target:      { type: 'permission', value: 'QUAL_CONCESSION' },
+    })).catch(() => {});
+
+    res.status(201).json({ success: true, data: { concessionID } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/concessions', requirePermission('QUAL_CONCESSION'), async (req, res) => {
+  try {
+    const status = String(req.query.status || 'PENDING').toUpperCase();
+    const pool   = await getNexusOperationsPool();
+    const r = await pool.request().input('status', sql.NVarChar(20), status)
+      .query(`SELECT c.*, pu.Username AS RaisedByUsername, ru.Username AS ReviewedByUsername
+              FROM prod.TraceabilityConcessions c
+              LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = c.RaisedByUserID
+              LEFT JOIN Nexus.dbo.PortalUsers ru ON ru.UserID = c.ReviewedByUserID
+              WHERE c.Status = @status
+              ORDER BY c.RaisedAt DESC`);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+async function reviewConcession(req, res, status) {
+  const id    = Number(req.params.id);
+  const notes = String(req.body?.notes || '').trim();
+  try {
+    const pool = await getNexusOperationsPool();
+    const uid  = userId(req);
+
+    const cur = await pool.request().input('id', sql.Int, id)
+      .query(`SELECT * FROM prod.TraceabilityConcessions WHERE ConcessionID=@id`);
+    const row = cur.recordset[0];
+    if (!row) return res.status(404).json({ success: false, error: 'Concession not found.' });
+    if (row.Status !== 'PENDING')
+      return res.status(409).json({ success: false, error: `This concession is already ${row.Status.toLowerCase()}.` });
+
+    await pool.request()
+      .input('id', sql.Int, id).input('status', sql.NVarChar(20), status)
+      .input('uid', sql.Int, uid).input('notes', sql.NVarChar(500), notes || null)
+      .query(`UPDATE prod.TraceabilityConcessions
+              SET Status=@status, ReviewedByUserID=@uid, ReviewedAt=GETDATE(), ReviewNotes=@notes
+              WHERE ConcessionID=@id`);
+
+    await writeEvent(pool, row.ProcessCode, row.RecordID, 'NOTE',
+      `Traceability concession ${status.toLowerCase()} for ${row.ParentProcessCode}${String(row.ParentRecordID).padStart(8, '0')}${notes ? ` — ${notes}` : ''}`, 1, uid);
+
+    const batchRef = `${row.ProcessCode}${String(row.RecordID).padStart(8, '0')}`;
+    const raiser = await pool.request().input('id', sql.Int, row.RaisedByUserID)
+      .query(`SELECT Username FROM Nexus.dbo.PortalUsers WHERE UserID=@id`);
+    const raiserUsername = raiser.recordset[0]?.Username;
+
+    if (raiserUsername) {
+      getNexusPool().then(kPool => notify(kPool, {
+        title:       status === 'APPROVED' ? 'Concession Approved' : 'Concession Rejected',
+        body:        `${batchRef} — your concession for ${row.Component} was ${status.toLowerCase()}${notes ? `: ${notes}` : '.'}`,
+        severity:    status === 'APPROVED' ? 0 : 2,
+        category:    'production',
+        actionLabel: 'Open Batch',
+        actionURL:   '/private/production-nexus.html',
+        target:      { type: 'user', value: raiserUsername },
+      })).catch(() => {});
+    }
+
+    res.json({ success: true, data: { concessionID: id, status } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+}
+
+router.post('/concessions/:id/approve', requirePermission('QUAL_CONCESSION'), (req, res) => reviewConcession(req, res, 'APPROVED'));
+router.post('/concessions/:id/reject',  requirePermission('QUAL_CONCESSION'), (req, res) => reviewConcession(req, res, 'REJECTED'));
 
 // ── DRUMMING — full wizard submission + SAP backflush ────────────────────────
 
@@ -2727,6 +3159,20 @@ async function submitDrumming(req, res, entryType) {
 
   const drummingID = ins.recordset[0].DrummingID;
 
+  // Download and save the BOM into the job the moment its material is known
+  // (Drumming has no separate draft step — this is the earliest point a
+  // record/recordID exists to save it against). A failed lookup here isn't
+  // fatal to record creation — it just means the pre-backflush block below
+  // treats every traceability link as unverifiable and blocks on it, same
+  // as any other BOM-lookup failure.
+  let drBomRows = [];
+  try {
+    drBomRows = await fetchBom(material);
+    await persistBomSnapshot(pool, 'DR', drummingID, material, drBomRows);
+  } catch (err) {
+    await writeEvent(pool, 'DR', drummingID, 'NOTE', `BOM download failed: ${err.message}`, 1, uid).catch(() => {});
+  }
+
   for (let i = 0; i < coilLengths.length; i++) {
     await pool.request()
       .input('did', sql.Int,           drummingID)
@@ -2767,6 +3213,30 @@ async function submitDrumming(req, res, entryType) {
 
   const drumRef = `DR-${String(drummingID).padStart(8, '0')}`;
 
+  // BOM-vs-traceability hard block — checked BEFORE any SAP posting at all
+  // (including the braid-consumption backflush below), so a blocked
+  // submission never partially posts to SAP. Re-reads the actual linked
+  // parents fresh from prod.ProductionTrace and the just-persisted BOM
+  // snapshot. An APPROVED concession clears its own specific mismatch;
+  // anything still unresolved blocks the whole submission — this replaces
+  // the old post-hoc, never-blocking bomMismatch check further below (kept
+  // in place as defense-in-depth; it should now rarely fire).
+  const drTraceRows = await pool.request()
+    .input('cc', sql.NVarChar(5), 'DR').input('cr', sql.Int, drummingID)
+    .query(`SELECT ParentProcessCode AS processCode, ParentRecordID AS recordID
+            FROM prod.ProductionTrace WHERE ChildProcessCode=@cc AND ChildRecordID=@cr`);
+
+  const drProblems = await validateTraceabilityAgainstBom(pool, drTraceRows.recordset, drBomRows);
+  const drBlocking = await unresolvedProblems(pool, 'DR', drummingID, drProblems);
+
+  if (drBlocking.length) {
+    const errMsg = `Blocked: ${drBlocking.map(p => p.reason).join(' ')} Raise a concession from the traceability screen, or use "Refresh BOM" if SAP's BOM has since been corrected.`;
+    await pool.request().input('rid', sql.Int, drummingID).query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
+    await writeEvent(pool, 'DR', drummingID, 'SAP_FAIL', errMsg, 2, uid);
+    return res.status(409).json({ success: false, data: { drummingID, batchRef: drumRef, status: 'BLOCKED' }, error: errMsg });
+  }
+  const drConcessions = drProblems.length ? await approvedConcessions(pool, 'DR', drummingID) : [];
+
   try {
     // Resolve what each traceability link the operator entered actually
     // points at (see resolveTraceabilityMaterials above) — SapServer needs
@@ -2804,45 +3274,83 @@ async function submitDrumming(req, res, entryType) {
       }
     }
 
-    const sapRaw = await sapPost('/api/production/drumming-backflush', {
-      Material:              material,
-      Quantity:              totalLength,
-      Header:                drumRef,
-      Customer:              customerNumber || '',
-      PackCode:              packagingID,
-      WeightKG:              Number(weightKG),
-      TraceabilityMaterials: traceMaterials,
-    });
+    let sapMatDoc, sapBatch = null, messageNumber = null, message = '', rcBatch = null, rcPack = null;
+    let bomMismatch = false, expectedComponents = [], actualComponents = [];
+    let concessionApplied = false;
 
-    const {
-      documentNumber: sapMatDoc, batch: sapBatch, rcBatch, rcPack,
-      messageNumber, message, bomMismatch, expectedComponents, actualComponents,
-    } = parseDrumBackflush(sapRaw);
-    audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'${sapBatch ? ` - Batch = '${sapBatch}'` : ''}`, req);
+    if (drConcessions.length) {
+      // Concession-covered — bypass the normal automatic BOM-driven
+      // backflush entirely and post every component explicitly instead
+      // (correct ones included) — see buildActualComponentList. Avoids the
+      // automatic backflush also silently consuming the original wrong BOM
+      // material on top of this explicit posting.
+      const components = buildActualComponentList(drBomRows, drConcessions, totalLength);
+      const gmRaw = await sapPost('/api/production/goods-movement-backflush', {
+        Material: material, Header: drumRef, Components: components,
+      });
+      ({ documentNumber: sapMatDoc } = parseGoodsMovement(gmRaw));
+      concessionApplied = true;
+      audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED (concession, goods movement) - Material Document = '${sapMatDoc}'`, req);
 
-    if (messageNumber === '190') {
-      await logBackflushAlert(pool, 'DR', drummingID, drumRef, sapMatDoc, messageNumber, message);
-      await writeEvent(pool, 'DR', drummingID, 'NOTE',
-        `SAP 190: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+      await pool.request()
+        .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
+        .input('type',sql.NVarChar(20),  'BACKFLUSH')
+        .input('qty', sql.Decimal(12,3), totalLength)
+        .input('doc', sql.NVarChar(10),  sapMatDoc)
+        .input('uid', sql.Int,           uid)
+        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,1,@uid)`);
+
+      await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
+        `Backflush posted via concession goods movement — MatDoc: ${sapMatDoc}. Components: ${components.map(c => `${c.Material} x${c.Quantity}`).join(', ')}.`, 0, uid);
+
+      for (const c of drConcessions) {
+        await pool.request()
+          .input('id', sql.Int, c.ConcessionID).input('doc', sql.NVarChar(10), sapMatDoc)
+          .query(`UPDATE prod.TraceabilityConcessions SET AppliedAt=GETDATE(), MaterialDocumentSAP=@doc WHERE ConcessionID=@id`);
+      }
+    } else {
+      const sapRaw = await sapPost('/api/production/drumming-backflush', {
+        Material:              material,
+        Quantity:              totalLength,
+        Header:                drumRef,
+        Customer:              customerNumber || '',
+        PackCode:              packagingID,
+        WeightKG:              Number(weightKG),
+        TraceabilityMaterials: traceMaterials,
+      });
+
+      ({
+        documentNumber: sapMatDoc, batch: sapBatch, rcBatch, rcPack,
+        messageNumber, message, bomMismatch, expectedComponents, actualComponents,
+      } = parseDrumBackflush(sapRaw));
+      audit('SAP_OK', req.session?.user?.username, `'${drumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'${sapBatch ? ` - Batch = '${sapBatch}'` : ''}`, req);
+
+      if (messageNumber === '190') {
+        await logBackflushAlert(pool, 'DR', drummingID, drumRef, sapMatDoc, messageNumber, message);
+        await writeEvent(pool, 'DR', drummingID, 'NOTE',
+          `SAP 190: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+      }
+
+      await pool.request()
+        .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
+        .input('type',sql.NVarChar(20),  'BACKFLUSH')
+        .input('qty', sql.Decimal(12,3), totalLength)
+        .input('doc', sql.NVarChar(10),  sapMatDoc)
+        .input('batch',sql.NVarChar(10), sapBatch || null)
+        .input('uid', sql.Int,           uid)
+        .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,SAPBatchNumber,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,@batch,1,@uid)`);
+
+      await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
+        `Backflush posted — MatDoc: ${sapMatDoc}${sapBatch ? `, Batch: ${sapBatch}` : ''}${messageNumber === '190' ? ' (190: no components consumed)' : ''}${rcBatch && rcBatch !== '0' ? ` — Z_ZPRODBATCH_MAINT RC_BATCH=${rcBatch}` : ''}${rcPack && rcPack !== '0' ? ` RC_PACK=${rcPack}` : ''}`, 0, uid);
     }
 
-    await pool.request()
-      .input('pc',  sql.NVarChar(5),   'DR').input('rid', sql.Int, drummingID)
-      .input('type',sql.NVarChar(20),  'BACKFLUSH')
-      .input('qty', sql.Decimal(12,3), totalLength)
-      .input('doc', sql.NVarChar(10),  sapMatDoc)
-      .input('batch',sql.NVarChar(10), sapBatch || null)
-      .input('uid', sql.Int,           uid)
-      .query(`INSERT INTO prod.SAPPostings (ProcessCode,ProcessRecordID,PostingType,Quantity,UnitOfMeasure,MaterialDocumentSAP,SAPBatchNumber,IsSuccess,PostedByUserID) VALUES (@pc,@rid,@type,@qty,'M',@doc,@batch,1,@uid)`);
-
-    await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
-      `Backflush posted — MatDoc: ${sapMatDoc}${sapBatch ? `, Batch: ${sapBatch}` : ''}${messageNumber === '190' ? ' (190: no components consumed)' : ''}${rcBatch && rcBatch !== '0' ? ` — Z_ZPRODBATCH_MAINT RC_BATCH=${rcBatch}` : ''}${rcPack && rcPack !== '0' ? ` RC_PACK=${rcPack}` : ''}`, 0, uid);
-
-    // BOM vs traceability mismatch — never blocks (the drum is already
-    // produced by this point), but the wrong raw material may have been
-    // recorded against it, so flag it loudly: log it against the drum,
-    // warn the operator in the response, and alert PROD_SUPERVISOR with
-    // enough detail to go investigate.
+    // BOM vs traceability mismatch — defense-in-depth only now that the
+    // pre-backflush hard block above catches this before SAP is ever
+    // called; kept here (never blocks, by design) in case SapServer's own
+    // internal check catches something this portal-side check couldn't.
+    // Never fires for the concession path above, which doesn't call
+    // drumming-backflush (and therefore SapServer's own internal check) at
+    // all — bomMismatch stays false in that branch.
     let bomWarning;
     if (bomMismatch) {
       const expectedText = expectedComponents?.length ? expectedComponents.join(', ') : '(no components found)';
@@ -2909,6 +3417,7 @@ async function submitDrumming(req, res, entryType) {
       success: true,
       data: {
         drummingID, materialDocument: sapMatDoc, batch: sapBatch, bomMismatch: !!bomMismatch, status: 'COMPLETE',
+        concessionApplied,
         ...((sapWarning || bomWarning || stockSyncWarning) ? { warning: [sapWarning, bomWarning, stockSyncWarning].filter(Boolean).join(' ') } : {}),
       },
     });
@@ -3719,24 +4228,62 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
 
       await writeEvent(pool, 'DR', id, 'NOTE', `Retry by supervisor ${uid}`, 0, uid);
 
-      const entryType = d.EntryType || 'stock';
-      const sapRaw = await sapPost(`/drumming/${entryType}`, {
-        Material:    d.Material,
-        TotalLength: d.LengthMetres,
-        WeightKG:    d.WeightKG    || 0,
-        Header:      d.DrumRef,
-        Packaging:   d.PackagingType  || '',
-        Customer:    d.CustomerID     || '',
-        Order:       d.SalesOrderSAP  || '',
-      });
+      // BOM-vs-traceability re-check — a drum can land in this queue
+      // specifically because it was BLOCKED (not a real SAP failure) by the
+      // pre-backflush check in submitDrumming; re-check fresh here (a
+      // concession may have been approved since, or "Refresh BOM" may have
+      // resolved it) before retrying, same gate as the original submission.
+      const drTraceRows = await pool.request()
+        .input('cc', sql.NVarChar(5), 'DR').input('cr', sql.Int, id)
+        .query(`SELECT ParentProcessCode AS processCode, ParentRecordID AS recordID
+                FROM prod.ProductionTrace WHERE ChildProcessCode=@cc AND ChildRecordID=@cr`);
+      const drBomRows  = await latestBomSnapshot(pool, 'DR', id);
+      const drProblems = await validateTraceabilityAgainstBom(pool, drTraceRows.recordset, drBomRows);
+      const drBlocking = await unresolvedProblems(pool, 'DR', id, drProblems);
 
-      const { documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw);
-      audit('SAP_OK', req.session?.user?.username, `'${d.DrumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+      if (drBlocking.length) {
+        const errMsg = `Still blocked: ${drBlocking.map(p => p.reason).join(' ')} Raise a concession from the traceability screen, or use "Refresh BOM" if SAP's BOM has since been corrected.`;
+        return res.status(409).json({ success: false, data: { drummingID: id, status: 'BLOCKED' }, error: errMsg });
+      }
+      const drConcessions = drProblems.length ? await approvedConcessions(pool, 'DR', id) : [];
 
-      if (messageNumber === '190') {
-        await logBackflushAlert(pool, 'DR', id, d.DrumRef, sapMatDoc, messageNumber, message);
-        await writeEvent(pool, 'DR', id, 'NOTE',
-          `SAP 190 on retry: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+      let sapMatDoc, messageNumber = null, message = '';
+      let concessionApplied = false;
+
+      if (drConcessions.length) {
+        const components = buildActualComponentList(drBomRows, drConcessions, d.LengthMetres);
+        const gmRaw = await sapPost('/api/production/goods-movement-backflush', {
+          Material: d.Material, Header: d.DrumRef, Components: components,
+        });
+        ({ documentNumber: sapMatDoc } = parseGoodsMovement(gmRaw));
+        concessionApplied = true;
+        audit('SAP_OK', req.session?.user?.username, `'${d.DrumRef}' BACKFLUSHED (concession, goods movement, retry) - Material Document = '${sapMatDoc}'`, req);
+
+        for (const c of drConcessions) {
+          await pool.request()
+            .input('cid', sql.Int, c.ConcessionID).input('doc', sql.NVarChar(10), sapMatDoc)
+            .query(`UPDATE prod.TraceabilityConcessions SET AppliedAt=GETDATE(), MaterialDocumentSAP=@doc WHERE ConcessionID=@cid`);
+        }
+      } else {
+        const entryType = d.EntryType || 'stock';
+        const sapRaw = await sapPost(`/drumming/${entryType}`, {
+          Material:    d.Material,
+          TotalLength: d.LengthMetres,
+          WeightKG:    d.WeightKG    || 0,
+          Header:      d.DrumRef,
+          Packaging:   d.PackagingType  || '',
+          Customer:    d.CustomerID     || '',
+          Order:       d.SalesOrderSAP  || '',
+        });
+
+        ({ documentNumber: sapMatDoc, messageNumber, message } = parseSapBackflush(sapRaw));
+        audit('SAP_OK', req.session?.user?.username, `'${d.DrumRef}' BACKFLUSHED - Material Document = '${sapMatDoc}'`, req);
+
+        if (messageNumber === '190') {
+          await logBackflushAlert(pool, 'DR', id, d.DrumRef, sapMatDoc, messageNumber, message);
+          await writeEvent(pool, 'DR', id, 'NOTE',
+            `SAP 190 on retry: No component consumption — MatDoc: ${sapMatDoc}. Flagged for data review.`, 1, uid);
+        }
       }
 
       await pool.request()
@@ -3749,7 +4296,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
         .query(`UPDATE prod.Drumming SET Status=4 WHERE DrummingID=@id`);
 
       await writeEvent(pool, 'DR', id, 'SAP_POST',
-        `Retry succeeded — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
+        `Retry succeeded${concessionApplied ? ' via concession goods movement' : ''} — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
 
       try {
         await sapPost('/api/production/label', {
@@ -3762,7 +4309,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       return res.json({
         success: true,
         data: {
-          materialDocument: sapMatDoc, status: 'COMPLETE',
+          materialDocument: sapMatDoc, status: 'COMPLETE', concessionApplied,
           ...(messageNumber === '190' ? { warning: 'SAP 190: posted but no components consumed — flagged for data review.' } : {}),
         },
       });
@@ -4580,6 +5127,26 @@ function parseSapBackflush(result) {
   }
 
   throw new Error(message || `SAP backflush rejected: ${type} ${messageClass} ${messageNumber}`);
+}
+
+// Validates SapServer's POST /api/production/goods-movement-backflush
+// response (BAPI_GOODSMVT_CREATE, used in place of the normal automatic
+// backflush for a concession-covered job — see buildActualComponentList).
+// Same ApiResponse<T> envelope as every other SapServer call in this file;
+// GoodsMovementResponse itself carries { materialDocument, success,
+// messages: [{type, message}] } — same success/messages shape as
+// StockAdjustmentResponse on the SapServer side.
+function parseGoodsMovement(result) {
+  if (result?.success === false) {
+    throw new Error(result.error || result.message || 'SAP server error');
+  }
+  const data = result?.data ?? result;
+  if (!data?.success || !data?.materialDocument) {
+    const msg = (data?.messages || []).map(m => m.message).filter(Boolean).join(' ')
+      || 'Goods movement rejected — no material document returned.';
+    throw new Error(msg);
+  }
+  return { documentNumber: data.materialDocument };
 }
 
 // Validates the combined drumming-backflush response (SapServer's
