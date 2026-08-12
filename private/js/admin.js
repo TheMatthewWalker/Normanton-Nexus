@@ -489,12 +489,24 @@ async function rejectUser() {
 let allAuditLoaded = false;
 
 async function loadAudit() {
-  const tbody  = document.getElementById('audit-tbody');
-  const filter = document.getElementById('audit-filter').value;
+  const tbody    = document.getElementById('audit-tbody');
+  const event    = document.getElementById('audit-filter').value;
+  const username = document.getElementById('audit-username').value.trim();
+  const detail   = document.getElementById('audit-detail').value.trim();
+  const from     = document.getElementById('audit-from').value;
+  const to       = document.getElementById('audit-to').value;
   tbody.innerHTML = '<tr><td colspan="5" class="loading-cell"><div class="spinner"></div> Loading…</td></tr>';
 
   try {
-    const url  = '/api/admin/audit' + (filter ? '?event=' + encodeURIComponent(filter) : '');
+    const params = new URLSearchParams();
+    if (event)    params.set('event', event);
+    if (username) params.set('username', username);
+    if (detail)   params.set('detail', detail);
+    if (from)     params.set('from', from);
+    if (to)       params.set('to', to);
+
+    const qs   = params.toString();
+    const url  = '/api/admin/audit' + (qs ? '?' + qs : '');
     const data = await api(url);
     allAuditLoaded = true;
 
@@ -517,9 +529,29 @@ async function loadAudit() {
   }
 }
 
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
 document.getElementById('audit-filter')?.addEventListener('change', () => {
   if (allAuditLoaded) loadAudit();
 });
+document.getElementById('audit-from')?.addEventListener('change', () => {
+  if (allAuditLoaded) loadAudit();
+});
+document.getElementById('audit-to')?.addEventListener('change', () => {
+  if (allAuditLoaded) loadAudit();
+});
+document.getElementById('audit-username')?.addEventListener('input', debounce(() => {
+  if (allAuditLoaded) loadAudit();
+}, 350));
+document.getElementById('audit-detail')?.addEventListener('input', debounce(() => {
+  if (allAuditLoaded) loadAudit();
+}, 350));
 
 // ── Permission Definitions (superadmin only) ──────────────────────────────────
 let allPermissionsLoaded = false;

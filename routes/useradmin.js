@@ -19,7 +19,7 @@
  *   POST /users/bulk-create            — mass-create accounts from an imported list (superadmin only)
  *   POST /users/bulk-departments       — grant one or more departments to many users at once
  *   POST /users/bulk-status            — set active/locked/idle-timeout status on many users at once
- *   GET  /audit                        — audit log, optionally filtered by event type
+ *   GET  /audit                        — audit log, optionally filtered by event type, username, detail text and/or date range
  *
  * Permission definition endpoints (superadmin only):
  *   GET    /permissions                — list all permission definitions
@@ -790,7 +790,7 @@ router.post('/users/bulk-status', async (req, res) => {
 
 // ── GET /audit ────────────────────────────────────────────────────────────────
 router.get('/audit', async (req, res) => {
-  const { event } = req.query;
+  const { event, username, detail, from, to } = req.query;
 
   const VALID_EVENTS = [
     'LOGIN_OK','LOGIN_FAIL','LOGOUT','REGISTER',
@@ -806,15 +806,40 @@ router.get('/audit', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid event filter' });
   }
 
+  const fromDate = from ? new Date(from) : null;
+  const toDate   = to   ? new Date(to)   : null;
+  if ((from && isNaN(fromDate)) || (to && isNaN(toDate))) {
+    return res.status(400).json({ success: false, error: 'Invalid date filter' });
+  }
+
   try {
     const pool    = await getNexusPool();
     const request = pool.request();
 
-    let whereClause = '';
+    const clauses = [];
     if (event) {
       request.input('event', sql.NVarChar(50), event);
-      whereClause = 'WHERE EventType = @event';
+      clauses.push('EventType = @event');
     }
+    if (username) {
+      request.input('username', sql.NVarChar(80), `%${username}%`);
+      clauses.push('Username LIKE @username');
+    }
+    if (detail) {
+      request.input('detail', sql.NVarChar(500), `%${detail}%`);
+      clauses.push('Detail LIKE @detail');
+    }
+    if (fromDate) {
+      request.input('from', sql.DateTime, fromDate);
+      clauses.push('EventTime >= @from');
+    }
+    if (toDate) {
+      // treat a bare date as inclusive of the whole day
+      request.input('to', sql.DateTime, toDate);
+      clauses.push('EventTime < DATEADD(day, 1, @to)');
+    }
+
+    const whereClause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
     const result = await request.query(`
       SELECT TOP 500

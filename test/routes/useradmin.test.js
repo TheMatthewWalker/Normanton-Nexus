@@ -404,6 +404,27 @@ describe('GET /audit', () => {
     const res = await request(appAsAdmin).get('/audit?event=LOGIN_FAIL');
     expect(res.status).toBe(200);
   });
+
+  test('filters by username and detail as LIKE searches', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(appAsAdmin).get('/audit?username=jdoe&detail=locked');
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('username', 'NVarChar(80)', '%jdoe%');
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', '%locked%');
+  });
+
+  test('filters by a from/to date range, treating "to" as inclusive of the whole day', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(appAsAdmin).get('/audit?from=2026-08-01&to=2026-08-10');
+    expect(res.status).toBe(200);
+    expect(dbRequest.query.mock.calls[0][0]).toMatch(/EventTime >= @from/);
+    expect(dbRequest.query.mock.calls[0][0]).toMatch(/EventTime < DATEADD\(day, 1, @to\)/);
+  });
+
+  test('400s on an unparseable date filter', async () => {
+    const res = await request(appAsAdmin).get('/audit?from=not-a-date');
+    expect(res.status).toBe(400);
+  });
 });
 
 describe('permission definition endpoints — superadmin only', () => {

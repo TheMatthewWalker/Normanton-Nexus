@@ -436,6 +436,10 @@
             <div class="section-sub">All login attempts and administrative actions</div>
           </div>
           <div class="section-actions">
+            <input type="text" id="audit-username" class="search-input search-input--sm" placeholder="Username…" aria-label="Filter by username">
+            <input type="text" id="audit-detail" class="search-input search-input--sm" placeholder="Search detail…" aria-label="Filter by detail text">
+            <input type="date" id="audit-from" class="filter-select date-input" aria-label="From date">
+            <input type="date" id="audit-to" class="filter-select date-input" aria-label="To date">
             <select id="audit-filter" class="filter-select" aria-label="Filter audit events">
               <option value="">All events</option>
               <option value="LOGIN_OK">Successful logins</option>

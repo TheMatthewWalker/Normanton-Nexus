@@ -178,6 +178,7 @@ body {
 }
 .section-actions {
   display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  flex-wrap: wrap; justify-content: flex-end;
 }
 
 /* ── PENDING CARDS ───────────────────────────────────────────────────────── */
@@ -314,7 +315,9 @@ tbody td:last-child { border-right: none; }
   transition: border-color 0.15s;
 }
 .search-input { min-width: 240px; }
-.search-input:focus, .filter-select:focus { border-color: var(--accent); }
+.search-input--sm { min-width: 160px; }
+.date-input { min-width: 130px; }
+.search-input:focus, .filter-select:focus, .date-input:focus { border-color: var(--accent); }
 
 /* ── AUDIT TABLE EVENT TYPES ─────────────────────────────────────────────── */
 .event-badge {
