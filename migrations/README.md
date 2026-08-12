@@ -176,11 +176,9 @@ npm run migrate:production_archive_live
 
 This runs the same 27 `CREATE TABLE` statements (no defaults/uniques/checks/
 indexes/FKs — none of these legacy tables ever had any) that already ran
-clean against the test server. **Schema only** — no data has been moved from
-Kongsberg into these tables yet; that's a deliberately separate, much
-higher-stakes step (~558,000 rows across the 27 tables, dominated by `Coils`
-at ~190K) that hasn't been decided on yet (copy vs. move, when to delete the
-Kongsberg originals if ever).
+clean against the test server. **Schema only** — the actual data move from
+Kongsberg into these tables was resolved copy-only and executed 2026-08-12;
+see the dated entry near the bottom of this file (`scripts/archive-legacy-tables.js`).
 
 ### The `datetime2` SQL Server 2005 incompatibility applies here too
 
@@ -248,3 +246,40 @@ Apply with:
 ```bash
 npm run migrate:nexus_operations_live
 ```
+
+## 2026-08-12 — datacenter move: Nexus/NexusOperations data copy + legacy Kongsberg-table archive
+
+With the new datacenter server (`eudc-sql-app`) up, the schema-only `nexus`/
+`nexus_operations`/`nexus_archive` migrations were run fresh against it
+(brand-new empty databases there, so no baselining dance needed — that
+procedure above only applies to a target where the schema already exists
+under the same object names, which was only ever true for `GATEWAYHO`).
+
+Two one-shot Node scripts (`Normanton-Nexus/scripts/`) then did the actual
+data moves, both **copy-only** — nothing was deleted or modified on
+`GATEWAYHO`:
+
+- **`copy-data-to-new-server.js`** — copies all of `Nexus` and
+  `NexusOperations` (GATEWAYHO, via `config.js`'s own pools) to
+  `eudc-sql-app` (via the `MIGRATE_DB_*` target — `scripts/lib/
+  migrateTargetConnection.js`).
+- **`archive-legacy-tables.js`** — resolves the "copy vs. move, ~558,000
+  rows" question flagged above: **copy-only**, rows stay in the source too.
+  Source correction worth recording here since it wasn't obvious going in:
+  these legacy tables were never inside `Nexus` — when `Nexus`'s own schema
+  was extracted, they were deliberately excluded ("split out, not part of
+  this migration", per the Status section above), so they're still sitting
+  in the original, separate, still-live `kongsberg` database on `GATEWAYHO`
+  (the same one `config.json`'s otherwise-unused `sqlConfig.database` field
+  points at). The script's source is `kongsberg`, not `Nexus`.
+
+Both scripts share a bulk-copy engine (`scripts/lib/tableCopy.js`) that works
+around two node-mssql pitfalls hit while building this: building a bulk
+`sql.Table` by hand loses DECIMAL/NUMERIC precision/scale unless done via
+`Table.fromRecordset` (silently corrupts any non-integer value, surfaces as
+`Invalid data for type 'numeric'`), and a failed bulk load can leave its
+pooled connection unusable for every later table sharing that connection
+(surfaces as a cascade of `Transaction has been aborted`) — worked around by
+giving each table's bulk step its own short-lived connection. Both scripts
+are safe to re-run: any table whose target row count already matches its
+source is skipped.
