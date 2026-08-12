@@ -241,7 +241,7 @@ describe('POST /generate — consignment (no-invoice) fallback', () => {
   test('uses the delivery number as invoice number and prices from A005/KONP when VBFA has nothing', async () => {
     mockSapFetch({
       '/api/customs/lips': [{ deliveryNumber: '0082900001', itemNumber: '000010', materialNumber: 'CP1166', quantity: '100' }],
-      '/api/customs/likp': [{ deliveryNumber: '0082900001', incoterms: 'DDP', consigneeCode: '0000363533' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082900001', incoterms: 'DDP', consigneeCode: '0000363533', goodsIssueDate: '18.05.2026' }],
       '/api/customs/vbfa': [], // no billing document — consignment shipment
       '/api/customs/marc': [{ materialNumber: 'CP1166', commodityCode: '39173900', countryOfOrigin: 'GB' }],
       '/api/customs/kna1': [{ customerCode: '0000363533', name: 'Imperial auto Slovakia S.R.O', vatNumber: 'SK2120170316', destinationCountry: 'SK' }],
@@ -257,7 +257,26 @@ describe('POST /generate — consignment (no-invoice) fallback', () => {
     expect(dataRow[4]).toBe('82900001'); // Invoice Number — placeholder = delivery number
     expect(dataRow[5]).toBe('EUR');      // Currency, from the condition record
     expect(dataRow[6]).toBe(1250);       // Sales Value = 12.50 / 1 * 100
-    expect(dataRow[15]).toBe('');        // Invoice Date — blank, no real invoice
+    // Invoice Date — falls back to LIKP's goods issue date (WADAT_IST),
+    // since a consignment shipment has no real invoice/ERDAT to source one from.
+    expect(dataRow[15]).toEqual(new Date(2026, 4, 18));
+  });
+
+  test('leaves Invoice Date blank when LIKP itself has no goods issue date either', async () => {
+    mockSapFetch({
+      '/api/customs/lips': [{ deliveryNumber: '0082900003', itemNumber: '000010', materialNumber: 'CP1166', quantity: '100' }],
+      '/api/customs/likp': [{ deliveryNumber: '0082900003', incoterms: 'DDP', consigneeCode: '0000363533' }], // no goodsIssueDate
+      '/api/customs/vbfa': [],
+      '/api/customs/consignment-price': [{ customerCode: '0000363533', materialNumber: 'CP1166', rate: '12,50', currency: 'EUR', pricingUnit: '1' }],
+    });
+
+    const buffer = await buildShipmentsUpload([['82900003', '15003', new Date(2026, 4, 20), 20]]);
+    const res = await postUpload(app, buffer);
+
+    expect(res.status).toBe(200);
+    const wb = await loadWorkbookFromResponse(res);
+    const dataRow = wb.getWorksheet('CUSTOMS').getRow(2).values.slice(1);
+    expect(dataRow[15]).toBe('');
   });
 
   test('warns (but does not fail) when neither an invoice nor a consignment price is found', async () => {

@@ -399,9 +399,13 @@ async function buildCustomsReportRows(shipmentRows, sapData) {
       // No real invoice exists for a consignment shipment — the delivery
       // number itself is used as the placeholder Invoice Number regardless
       // of whether a customs price is found below, matching the workbook
-      // macro's own behavior.
+      // macro's own behavior. Invoice Date falls back to the delivery's own
+      // goods issue date (LIKP-WADAT_IST) instead — there's no VBFA billing
+      // document (and so no ERDAT) for a consignment shipment to source a
+      // date from otherwise.
       row.invoiceNumber = row.deliveryNumber;
-      row.invoiceDate = null;
+      const likpRow = likpByDelivery.get(row.deliveryKey) || null;
+      row.invoiceDate = likpRow ? parseSapDate(likpRow.goodsIssueDate) : null;
 
       const price = priceByPair.get(pairKey(row));
       if (price) {
