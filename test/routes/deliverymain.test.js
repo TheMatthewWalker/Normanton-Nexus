@@ -15,6 +15,9 @@ import { operatorUser } from '../helpers/fixtures/users.js';
 const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
 jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 
+const axiosMock = { get: jest.fn(), post: jest.fn() };
+jest.unstable_mockModule('axios', () => ({ default: axiosMock }));
+
 jest.unstable_mockModule('../../routes/sap.js', () => ({
   makeSapToken: jest.fn(() => 'fake-sap-token'),
   sapAgent: null,
@@ -40,6 +43,8 @@ beforeAll(async () => {
 beforeEach(() => {
   resetMockSql({ pool, request: dbRequest, connect });
   reverseStagedPackageMock.mockReset();
+  axiosMock.get.mockReset();
+  axiosMock.post.mockReset();
 });
 
 function queueResults(...results) {
@@ -172,5 +177,38 @@ describe('PATCH /:deliveryId/uncomplete', () => {
     const res = await request(app).patch('/1/uncomplete');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true });
+  });
+});
+
+describe('POST /:deliveryId/stage-batch', () => {
+  test('400s when material or batch is missing', async () => {
+    const res = await request(app).post('/1/stage-batch').send({ material: '30005R' });
+    expect(res.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('audits success with the created TR number in the detail', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500007777' } },
+    });
+    queueResults({ recordset: [] }); // the audit insert
+
+    const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
+
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('TR 4500007777'));
+  });
+
+  test('audits and surfaces a 422 when SapServer rejects the staging', async () => {
+    axiosMock.post.mockRejectedValueOnce({
+      response: { data: { success: false, error: { message: 'SAP rejected the transfer order.' } } },
+    });
+    queueResults({ recordset: [] }); // the audit insert
+
+    const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('SAP rejected the transfer order.');
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('failed'));
   });
 });

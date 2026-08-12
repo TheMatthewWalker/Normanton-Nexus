@@ -1,14 +1,19 @@
 // routes/quality.js proxies quality-block/unblock calls to SapServer via
-// axios (mocked here — no DB access in this file at all). The real logic
-// worth testing beyond the proxy plumbing is POST /bulk's SAP-format
+// axios (mocked here). /block and /unblock also write a fire-and-forget
+// audit entry via config.js's auditQuery, so mssql is mocked too. The real
+// logic worth testing beyond the proxy plumbing is POST /bulk's SAP-format
 // quantity parsing ("10.875,000" -> 10875), its WM-vs-non-WM storage-type/
 // bin field selection, and its Server-Sent-Events progress stream.
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
 import request from 'supertest';
+import { createMockSql, resetMockSql } from '../helpers/mockPool.js';
 import { buildTestApp } from '../helpers/testApp.js';
 import { operatorUser } from '../helpers/fixtures/users.js';
+
+const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
+jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 
 const axiosMock = { get: jest.fn(), post: jest.fn() };
 jest.unstable_mockModule('axios', () => ({ default: axiosMock }));
@@ -26,6 +31,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  resetMockSql({ pool, request: dbRequest, connect });
+  dbRequest.query.mockResolvedValue({ recordset: [] }); // audit inserts always succeed unless overridden
   axiosMock.get.mockReset();
   axiosMock.post.mockReset();
 });
@@ -64,6 +71,18 @@ describe('POST /block and /unblock', () => {
     expect(axiosMock.post.mock.calls[0][1]).toMatchObject({ Material: 'M1', Username: qualUser.username });
   });
 
+  // ToBlockedMessage/ToNonBlockedMessage are SapServer's free-text SAP RETURN
+  // messages for the two WHM transfer-order legs — there's no separate
+  // structured TR number field, so the audit detail carries them verbatim.
+  test('/block audits success with the transfer-order leg messages in the detail', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { toBlockedMessage: 'Transfer order 0000123456 created', mb1bMessage: 'Posted' } },
+    });
+    const res = await request(appQual).post('/block').send({ Material: 'M1', Batch: 'B1' });
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('0000123456'));
+  });
+
   test('/unblock 403s without QUAL_BLOCKING', async () => {
     const res = await request(app).post('/unblock').send({});
     expect(res.status).toBe(403);
@@ -75,17 +94,27 @@ describe('POST /block and /unblock', () => {
     expect(axiosMock.post.mock.calls[0][1]).toMatchObject({ Material: 'M2', Username: qualUser.username });
   });
 
+  test('/unblock audits success with the transfer-order leg messages in the detail', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { toNonBlockedMessage: 'Transfer order 0000123457 created', mb1bMessage: 'Posted' } },
+    });
+    const res = await request(appQual).post('/unblock').send({ Material: 'M2', Batch: 'B2' });
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('0000123457'));
+  });
+
   // SapServer now returns a structured error: { code, message } (rather than
   // always 200/success:true) when the MB11 block/unblock leg is rejected by
   // SAP — unwrap .message so the operator sees SAP's real reason instead of
   // "[object Object]" (private/js/quality.js does `new Error(json.error)`).
-  test('/block unwraps SapServer\'s structured 422 error object to a plain message', async () => {
+  test('/block unwraps SapServer\'s structured 422 error object to a plain message and audits the failure', async () => {
     axiosMock.post.mockRejectedValueOnce({
       response: { status: 422, data: { success: false, error: { code: '422', message: 'E M7 021 Deficit of SL stock' } } },
     });
     const res = await request(appQual).post('/block').send({ Material: 'M1' });
     expect(res.status).toBe(422);
     expect(res.body.error).toBe('E M7 021 Deficit of SL stock');
+    expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('E M7 021 Deficit of SL stock'));
   });
 });
 

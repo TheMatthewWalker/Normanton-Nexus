@@ -6,8 +6,8 @@
  * Block and Unblock additionally require the QUAL_BLOCKING permission.
  *
  * GET  /display   — query quality/blocked stock (StockRow[])
- * POST /block     — block stock via MB1B + transfer orders
- * POST /unblock   — unblock stock via MB1B + transfer orders
+ * POST /block     — block stock via MB1B + transfer orders; audits success/failure
+ * POST /unblock   — unblock stock via MB1B + transfer orders; audits success/failure
  */
 
 import express from 'express';
@@ -15,7 +15,7 @@ import axios   from 'axios';
 import https   from 'https';
 import jwt     from 'jsonwebtoken';
 import fs      from 'fs';
-import { sapConfig, sapServerSecret } from '../config.js';
+import { sapConfig, sapServerSecret, auditQuery } from '../config.js';
 import { requirePermission }          from '../middleware/auth.js';
 
 const router = express.Router();
@@ -37,18 +37,21 @@ function sapHeaders() {
   return { Authorization: `Bearer ${makeSapToken()}`, 'Content-Type': 'application/json' };
 }
 
+// A rejected block/unblock (MB11 or a WHM transfer-order leg) comes back
+// from SapServer as a 422 with error: { code, message } — unwrap .message so
+// the operator sees SAP's real reason instead of "[object Object]"
+// (private/js/quality.js does `new Error(json.error)`).
+function sapErrorMessage(err) {
+  const d = err.response?.data;
+  return (typeof d === 'string' ? d : null)
+      || d?.error?.message || d?.error || d?.message || d?.title
+      || (d?.errors ? JSON.stringify(d.errors) : null)
+      || err.message;
+}
+
 function sapError(err, res) {
-  const d      = err.response?.data;
   const status = err.response?.status || 502;
-  // A rejected block/unblock (MB11 or a WHM transfer-order leg) comes back
-  // from SapServer as a 422 with error: { code, message } — unwrap
-  // .message so the operator sees SAP's real reason instead of
-  // "[object Object]" (private/js/quality.js does `new Error(json.error)`).
-  const msg    = (typeof d === 'string' ? d : null)
-              || d?.error?.message || d?.error || d?.message || d?.title
-              || (d?.errors ? JSON.stringify(d.errors) : null)
-              || err.message;
-  res.status(status).json({ success: false, error: msg });
+  res.status(status).json({ success: false, error: sapErrorMessage(err) });
 }
 
 // ── GET /display ──────────────────────────────────────────────────────────────
@@ -62,32 +65,59 @@ router.get('/display', async (req, res) => {
   } catch (err) { sapError(err, res); }
 });
 
+// Builds the audit detail from a QualityMb1bResponse — its two WHM
+// transfer-order legs (ToBlockedMessage/ToNonBlockedMessage) are free-text
+// SAP RETURN messages rather than a structured TR number field (unlike
+// /api/sap/warehouse/transfer-order's transferOrderNumber), but SAP's own
+// "Transfer order NNNNNNNNNN created" message text carries the TR number,
+// so surfacing both messages verbatim is the closest equivalent here.
+function qualityAuditDetail(action, body, data) {
+  const parts = [
+    `Material ${body.Material || ''}`,
+    body.Batch ? `Batch ${body.Batch}` : null,
+    data?.mb1bMessage,
+    data?.toBlockedMessage,
+    data?.toNonBlockedMessage,
+  ].filter(Boolean);
+  return `Quality ${action} succeeded - ${parts.join(' | ')}`;
+}
+
 // ── POST /block ───────────────────────────────────────────────────────────────
 // Username is taken from the portal session and injected into the SAP body as
 // QualityMb1bRequest.Username — the frontend never sends it.
 router.post('/block', requirePermission('QUAL_BLOCKING'), async (req, res) => {
+  const username = req.session.user.username;
+  const body = { ...req.body, Username: username };
   try {
-    const body = { ...req.body, Username: req.session.user.username };
     const response = await axios.post(
       `${sapConfig.url}/api/quality/block`,
       body,
       { timeout: 60000, httpsAgent: sapAgent, headers: sapHeaders() }
     );
+    await auditQuery('SAP_OK', username, qualityAuditDetail('block', body, response.data?.data), req);
     res.json(response.data);
-  } catch (err) { sapError(err, res); }
+  } catch (err) {
+    await auditQuery('SAP_ERROR', username, `Quality block failed for material ${body.Material || ''} - ${sapErrorMessage(err)}`, req);
+    sapError(err, res);
+  }
 });
 
 // ── POST /unblock ─────────────────────────────────────────────────────────────
 router.post('/unblock', requirePermission('QUAL_BLOCKING'), async (req, res) => {
+  const username = req.session.user.username;
+  const body = { ...req.body, Username: username };
   try {
-    const body = { ...req.body, Username: req.session.user.username };
     const response = await axios.post(
       `${sapConfig.url}/api/quality/unblock`,
       body,
       { timeout: 60000, httpsAgent: sapAgent, headers: sapHeaders() }
     );
+    await auditQuery('SAP_OK', username, qualityAuditDetail('unblock', body, response.data?.data), req);
     res.json(response.data);
-  } catch (err) { sapError(err, res); }
+  } catch (err) {
+    await auditQuery('SAP_ERROR', username, `Quality unblock failed for material ${body.Material || ''} - ${sapErrorMessage(err)}`, req);
+    sapError(err, res);
+  }
 });
 
 // ── POST /bulk ─────────────────────────────────────────────────────────────────

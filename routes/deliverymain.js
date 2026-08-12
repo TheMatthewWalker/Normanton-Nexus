@@ -1,7 +1,7 @@
 import express from 'express';
 import sql from 'mssql';
 import axios from 'axios';
-import { sapConfig, getNexusOperationsPool } from '../config.js';
+import { sapConfig, getNexusOperationsPool, auditQuery } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
 import { makeSapToken, sapAgent } from './sap.js';
 import { reverseStagedPackage } from './sapStaging.js';
@@ -721,11 +721,20 @@ router.post('/:deliveryId/stage-batch', async (req, res) => {
 
         const body = response.data;
         if (!body?.success) {
-            return res.status(422).json({ success: false, error: body?.error?.message || body?.data?.error || 'SAP staging failed' });
+            const message = body?.error?.message || body?.data?.error || 'SAP staging failed';
+            await auditQuery('SAP_ERROR', req.session?.user?.username,
+                `Picksheet #${deliveryId} stage batch ${batch}/${material} failed - ${message}`, req);
+            return res.status(422).json({ success: false, error: message });
         }
+
+        const trNumber = body.data?.transferOrderNumber;
+        await auditQuery('SAP_OK', req.session?.user?.username,
+            `Picksheet #${deliveryId} stage batch ${batch}/${material} succeeded${trNumber ? ` - TR ${trNumber}` : ''}`, req);
 
         res.json({ success: true, data: body.data });
     } catch (err) {
+        await auditQuery('SAP_ERROR', req.session?.user?.username,
+            `Picksheet #${req.params.deliveryId} stage batch ${req.body?.batch || ''}/${req.body?.material || ''} failed - ${err.message}`, req);
         res.status(err.statusCode || 500).json({ success: false, error: err.message });
     }
 });
