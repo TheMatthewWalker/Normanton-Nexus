@@ -48,6 +48,27 @@ const DRILLDOWN = {
   ],
 };
 
+// ── Column lists for the filter bar's column dropdown ────────────────────────
+// One entry per sidebar "main" table (data-table in production.html), in
+// their real column order (pulled from INFORMATION_SCHEMA.COLUMNS against
+// the live database — see also each table's own definition in
+// migrations/nexus_archive/20260804120000_initial_schema.cjs for Batches/
+// Ewald/Mixing/Extrusion/Convo/Firewall/archive, and NexusOperations' log
+// schema for Staging). Static rather than fetched per click: these are
+// legacy tables whose schema doesn't change, and fetching it would mean
+// running a query before the user has even chosen a filter — exactly the
+// up-front cost this filter bar exists to avoid.
+const TABLE_COLUMNS = {
+  Batches:   ['Area', 'Batch', 'BatchID', 'Material', 'Operator', 'Customer', 'TotalLength', 'Shift', 'Test', 'DrumWeight', 'CreationDate', 'Drum', 'SAP', 'Mat_IN', 'Mat_OUT', 'Comment'],
+  Ewald:     ['ID', 'Drum', 'CreationDate', 'CreationTime', 'Shift', 'Material', 'TotalQty', 'BoxCount', 'Firewall', 'Operator', 'Machine', 'Comment'],
+  Mixing:    ['MixingID', 'MixCode', 'TotalWeight', 'Shift', 'Operator', 'SupplierBatch', 'BatchTub', 'CreationDate', 'CreationTime', 'Comment', 'CreationDateParsed'],
+  Extrusion: ['ExtBatch', 'Material', 'Meters', 'Operator', 'CreationDate', 'CreationTime', 'StartDate', 'StartTime', 'StopTime', 'MaterialDocument', 'Comment', 'StopDate', 'Preforms', 'ProductionNumber', 'Inspector', 'Setter'],
+  Convo:     ['ConvoID', 'RunDate', 'StartTime', 'StopTime', 'Operator', 'Machine', 'Material', 'Meters', 'InspectionDate', 'MaterialDocument', 'Comment'],
+  Firewall:  ['Material', 'SAPBatch', 'FailedQty', 'ReasonCode', 'MatDoc', 'ErrorMessage', 'Comment'],
+  Staging:   ['Material', 'Quantity', 'Batch', 'CreationTime', 'DeliveryTime', 'DeliveryLoc', 'StagingID', 'Complete', 'DeliveredQty'],
+  archive:   ['Area', 'Batch', 'BatchID', 'Material', 'Operator', 'Customer', 'TotalLength', 'Shift', 'Test', 'DrumWeight', 'CreationDate', 'Drum', 'SAP', 'Mat_IN', 'Mat_OUT'],
+};
+
 // ── Session management ────────────────────────────────────────────────────────
 setInterval(async () => {
   const d = await fetch('/session-check').then(r => r.json());
@@ -61,6 +82,10 @@ async function sessionOk() {
 }
 
 // ── Sidebar — table items only (report items handled separately below) ──────
+// Selecting a table no longer loads it immediately — some of these tables
+// are large (Coils alone is ~190K rows) and an unconditional TOP 500 pull
+// was the slow part users were hitting on every click. Instead this shows
+// the filter bar and waits for "Apply Filter" or the explicit "Load All".
 document.querySelectorAll('.tbl-item:not(.report-item)').forEach(item => {
   item.addEventListener('click', () => {
     document.querySelectorAll('.tbl-item').forEach(i => i.classList.remove('active'));
@@ -74,8 +99,63 @@ document.querySelectorAll('.tbl-item:not(.report-item)').forEach(item => {
     if (typeof reportChart4 !== 'undefined' && reportChart4) { reportChart4.destroy(); reportChart4 = null; }
     document.getElementById('report-panel').style.display = 'none';
     document.getElementById('data-panel').style.display   = '';
-    loadTable(item.dataset.table, item.dataset.pk || null);
+    showFilterGate(item.dataset.table, item.dataset.pk || null);
   });
+});
+
+// ── Show the filter bar for a newly-selected table, without loading data ────
+function showFilterGate(tableName, pkCol) {
+  currentTable = tableName;
+  currentPK    = pkCol;
+  currentRows  = [];
+
+  if (activeDT) { try { activeDT.destroy(); } catch (_) {} activeDT = null; }
+
+  document.getElementById('toolbar').style.display = 'flex';
+  document.getElementById('toolbar-title').textContent = tableName;
+  document.getElementById('row-badge').textContent = '—';
+  document.getElementById('toolbar-hint').textContent =
+    'Enter a filter and click Apply, or Load All to fetch every row';
+
+  document.getElementById('filter-bar').classList.add('visible');
+  const colSelect = document.getElementById('filter-col');
+  colSelect.innerHTML = (TABLE_COLUMNS[tableName] || [])
+    .map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  document.getElementById('filter-val').value = '';
+  document.getElementById('filter-mode').value = 'contains';
+  document.getElementById('filter-active-badge').classList.remove('visible');
+
+  document.getElementById('data-panel').innerHTML = `
+    <div class="placeholder">
+      <div class="placeholder-hex"><img src="./images/logo256.png" alt="Kongsberg Logo"></div>
+      <div class="placeholder-line1">${esc(tableName)}</div>
+      <div class="placeholder-line2">Enter a filter above and click Apply, or click Load All</div>
+    </div>`;
+}
+
+// ── Filter bar actions ───────────────────────────────────────────────────────
+function applyMainFilter() {
+  if (!currentTable) return;
+  const col = document.getElementById('filter-col').value;
+  const mode = document.getElementById('filter-mode').value;
+  const val = document.getElementById('filter-val').value;
+
+  if (!col) { alert('No column available to filter on for this table — click Load All instead.'); return; }
+
+  activeFilter = { col, mode, val };
+  document.getElementById('filter-active-badge').classList.add('visible');
+  loadTable(currentTable, currentPK, activeFilter);
+}
+
+function loadAllUnfiltered() {
+  if (!currentTable) return;
+  activeFilter = null;
+  document.getElementById('filter-active-badge').classList.remove('visible');
+  loadTable(currentTable, currentPK, null);
+}
+
+document.getElementById('filter-val').addEventListener('keydown', e => {
+  if (e.key === 'Enter') applyMainFilter();
 });
 
 // ── Load (or reload) the main data panel ─────────────────────────────────────
@@ -476,6 +556,7 @@ document.querySelectorAll('.report-item').forEach(item => {
 
     // Hide table UI, show report panel
     document.getElementById('toolbar').style.display      = 'none';
+    document.getElementById('filter-bar').classList.remove('visible');
     document.getElementById('data-panel').style.display   = 'none';
     document.getElementById('report-panel').style.display = 'flex';
 

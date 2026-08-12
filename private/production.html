@@ -160,7 +160,22 @@
       <button class="btn-export-xlsx" id="btn-export-xlsx" onclick="exportXLSX()">Export XLSX + Related</button>
     </div>
 
-    <!-- Filter bar removed — per-column filters are now built into each table header -->
+    <!-- Filter bar: gates the initial load on large legacy tables — a table
+         click shows this instead of loading immediately; loading happens
+         only on "Apply Filter" or the explicit "Load All" escape hatch. -->
+    <div class="filter-bar" id="filter-bar">
+      <span class="filter-label">Filter</span>
+      <select id="filter-col"></select>
+      <select id="filter-mode">
+        <option value="contains">Contains</option>
+        <option value="exact">Exact match</option>
+        <option value="starts">Starts with</option>
+      </select>
+      <input type="text" id="filter-val" placeholder="Value…" autocomplete="off">
+      <button class="btn-filter-search" onclick="applyMainFilter()">Apply Filter</button>
+      <button class="btn-filter-clear visible" onclick="loadAllUnfiltered()">Load All</button>
+      <span class="filter-active-badge" id="filter-active-badge">FILTERED</span>
+    </div>
 
     <!-- Data output -->
     <div class="data-panel" id="data-panel">

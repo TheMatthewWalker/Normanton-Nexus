@@ -13,13 +13,17 @@
  * Body: { tableName, col?, mode?, val? }
  *   tableName        — must be in ALLOWED_TABLES
  *   col, mode, val    — all three together for a filtered query; omit all
- *                        three for an unfiltered TOP 500 (a partial set is
- *                        rejected as a 400, not silently ignored)
+ *                        three for an unfiltered load of the whole table (a
+ *                        partial set is rejected as a 400, not silently
+ *                        ignored)
  *   col               — column name, validated against a strict regex
  *   mode              — "contains" | "exact" | "starts"
  *   val               — the search value (bound as a SQL parameter — never interpolated)
  *
- * Returns up to 500 matching rows.
+ * No row cap — returns every matching row. The frontend's filter bar exists
+ * specifically so a load is never triggered without the user asking for it
+ * first (see private/js/production.js), so there's no longer an "accidental
+ * full table scan" case this needs to guard against with a silent TOP N.
  *
  * Mount in server.js:
  *   import filterRecordsRoutes from './routes/filterrecords.js';
@@ -66,8 +70,8 @@ router.post('/', async (req, res) => {
   }
 
   // col/mode/val are all-or-nothing: all three omitted means "unfiltered
-  // TOP 500"; any one present without the other two is a 400, not silently
-  // treated as unfiltered.
+  // full-table load"; any one present without the other two is a 400, not
+  // silently treated as unfiltered.
   const hasFilter = col !== undefined || mode !== undefined || (val !== undefined && val !== null);
 
   if (hasFilter && (!col || !mode || val === undefined || val === null)) {
@@ -121,7 +125,7 @@ router.post('/', async (req, res) => {
     const { getPool, schema } = resolveLegacyTablePool(tableName);
     const pool    = await getPool();
     const request = pool.request();
-    let query = `SELECT TOP 500 * FROM ${schema}.${tableName}`;
+    let query = `SELECT * FROM ${schema}.${tableName}`;
     if (hasFilter) {
       request.input('val', sqlType, useEquals && sqlType === sql.BigInt ? num : sqlVal);
       query += ` WHERE ${col} ${operator} @val`;
