@@ -15,7 +15,7 @@
       actually commit the deletes.
    ============================================================ */
 
-USE [Production];
+USE [NexusOperations];
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
@@ -24,7 +24,7 @@ DECLARE @Cutoff INT;
 DECLARE @n INT;
 
 SET @Commit = 0;
-SET @Cutoff = NULL;  -- TODO: set to the first real BraidingID before running
+SET @Cutoff = 6;  -- TODO: set to the first real BraidingID before running
 
 IF @Cutoff IS NULL
 BEGIN
