@@ -94,6 +94,10 @@ function setupTiles() {
       if (fn === 'stagingBinRestrictions') runStagingBinRestrictions();
       if (fn === 'zdelflagWarnings') runZdelflagWarnings();
       if (fn === 'stockInvestigations') runStockInvestigations();
+      if (fn === 'ptfeCycleCount')  runPtfeCycleCount();
+      if (fn === 'rawMaterialCount') runRawMaterialCount();
+      if (fn === 'productionCount') runProductionCount();
+      if (fn === 'finishedGoodsCount') runFinishedGoodsCount();
     });
   });
 
@@ -937,10 +941,115 @@ function wsmRenderStockInvestigationsHome() {
     </div>
     <div id="si-investigation-card">
       <div class="sap-loading"><div class="spinner"></div>Loading holding-bin stock…</div>
-    </div>`;
+    </div>
+    <div id="si-stockcount-disc-card" style="margin-top:28px"></div>`;
 
   document.getElementById('si-disc-open-btn').addEventListener('click', () => wsmRunDiscrepancyScan());
   siRefreshInvestigationCard();
+  siRefreshStockCountDiscrepancies();
+}
+
+// ── Stock Count Discrepancies (fed by Finished Goods Count's guided scan) ─────
+//
+// Separate from Batch Discrepancies above (a live SAP scan) — this reads
+// log.StockCountDiscrepancy, the holding area Finished Goods Count writes to
+// when a batch is scanned in the wrong bin or confirmed missing from one.
+
+async function siRefreshStockCountDiscrepancies() {
+  const container = document.getElementById('si-stockcount-disc-card');
+  if (!container) return;
+  container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading Stock Count discrepancies…</div>';
+  try {
+    const json = await scApi('/discrepancies');
+    siRenderStockCountDiscrepancies(json.data || []);
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function siRenderStockCountDiscrepancies(rows) {
+  const container = document.getElementById('si-stockcount-disc-card');
+  if (!container) return;
+
+  if (!rows.length) {
+    container.innerHTML = `
+      <div class="wsm-panel-title">Stock Count Discrepancies</div>
+      <div class="wsm-panel-sub">Batches Finished Goods Count found in the wrong bin, or missing from where SAP expects them.</div>
+      <div class="wsm-empty">No open Stock Count discrepancies.</div>`;
+    return;
+  }
+
+  const rowsHtml = rows.map(r => `
+    <tr class="pn-row" data-id="${r.DiscrepancyId}">
+      <td>${r.Kind === 'WrongBin' ? '<span style="color:#B45309;font-weight:700">Wrong Bin</span>' : '<span style="color:#DC2626;font-weight:700">Missing</span>'}</td>
+      <td><strong>${esc(r.Material)}</strong></td>
+      <td>${esc(r.Batch)}</td>
+      <td>${esc([r.ExpectedStorageType, r.ExpectedBin].filter(Boolean).join('/') || '—')}</td>
+      <td>${esc([r.FoundStorageType, r.FoundBin].filter(Boolean).join('/') || '—')}</td>
+      <td>
+        ${r.Kind === 'WrongBin' && sessionPermissions.includes('LOG_SUPER') ? `<button type="button" class="btn-submit sc-disc-move-btn" data-id="${r.DiscrepancyId}">Move to Found Bin</button>` : ''}
+        ${sessionPermissions.includes('LOG_SUPER') ? `<button type="button" class="btn-secondary sc-disc-holding-btn" data-id="${r.DiscrepancyId}" style="margin-left:6px">To Holding</button>
+        <button type="button" class="btn-secondary sc-disc-manual-btn" data-id="${r.DiscrepancyId}" style="margin-left:6px">Manual TO</button>` : ''}
+      </td>
+    </tr>`).join('');
+
+  container.innerHTML = `
+    <div class="wsm-panel-title">Stock Count Discrepancies (${rows.length})</div>
+    <div class="wsm-panel-sub">Batches Finished Goods Count found in the wrong bin, or missing from where SAP expects them.</div>
+    <div class="wsm-mass-table-wrap">
+      <table class="wsm-mass-table">
+        <thead><tr><th>Kind</th><th>Material</th><th>Batch</th><th>SAP Expected</th><th>Found In</th><th></th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    <div id="sc-disc-action-result" style="margin-top:10px"></div>
+  `;
+
+  container.querySelectorAll('.sc-disc-move-btn').forEach(btn => btn.addEventListener('click', () => scDiscResolveMove(btn.dataset.id)));
+  container.querySelectorAll('.sc-disc-holding-btn').forEach(btn => btn.addEventListener('click', () => scDiscResolveHolding(btn.dataset.id)));
+  container.querySelectorAll('.sc-disc-manual-btn').forEach(btn => btn.addEventListener('click', () => scDiscManualTo(btn.dataset.id)));
+}
+
+async function scDiscResolveMove(id) {
+  if (!confirm('Move this batch from where SAP thinks it is to where it was actually found?')) return;
+  const resultEl = document.getElementById('sc-disc-action-result');
+  try {
+    const json = await scApi(`/discrepancies/${id}/resolve-move`, { method: 'POST' });
+    if (resultEl) resultEl.innerHTML = `<div class="toolbar-hint">Resolved — TO ${esc(json.data.transferOrderNumber || '')} created.</div>`;
+    siRefreshStockCountDiscrepancies();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scDiscResolveHolding(id) {
+  if (!confirm('Move this batch to the holding bin (999/TEMP) pending write-off?')) return;
+  const resultEl = document.getElementById('sc-disc-action-result');
+  try {
+    const json = await scApi(`/discrepancies/${id}/resolve-holding`, { method: 'POST' });
+    if (resultEl) resultEl.innerHTML = `<div class="toolbar-hint">Moved to holding — TO ${esc(json.data.transferOrderNumber || '')} created.</div>`;
+    siRefreshStockCountDiscrepancies();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scDiscManualTo(id) {
+  const storageType = prompt('Destination storage type (where you actually found/moved it to):');
+  if (!storageType) return;
+  const bin = prompt('Destination bin:');
+  if (!bin) return;
+  const resultEl = document.getElementById('sc-disc-action-result');
+  try {
+    const json = await scApi(`/discrepancies/${id}/manual-to`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ destinationStorageType: storageType.trim(), destinationBin: bin.trim() }),
+    });
+    if (resultEl) resultEl.innerHTML = `<div class="toolbar-hint">Resolved — TO ${esc(json.data.transferOrderNumber || '')} created.</div>`;
+    siRefreshStockCountDiscrepancies();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
 }
 
 async function wsmRunDiscrepancyScan() {
@@ -5984,5 +6093,628 @@ async function zdReprocess(deliveryId, btn) {
     alert(err.message);
     btn.disabled = false;
     btn.textContent = originalText;
+  }
+}
+
+// ── Stock Count (Weekly PTFE Cycle Count / Full Warehouse Raw Material Scan /
+// Production Count) ──────────────────────────────────────────────────────────
+//
+// Shared entry-form + line-table renderer across the three document-backed
+// count types (PTFE_WEEKLY/RAW_MATERIAL/PRODUCTION) — they differ only in
+// which location fields the entry form shows and whether "Start New Count"/
+// bin-completion are available. Finished Goods Count is a separate guided-
+// scan pipeline with no approval/posting, built in its own stage. See
+// routes/stockcount.js for the backing API.
+
+async function scApi(path, opts) {
+  const r = await fetch('/api/stockcount' + path, opts);
+  let json = null;
+  try { json = await r.json(); } catch { /* non-JSON body */ }
+  if (json?.success === false || !r.ok) {
+    throw new Error(json?.error || `Request failed (HTTP ${r.status})`);
+  }
+  return json;
+}
+
+function scFormatDate(value) {
+  return value ? new Date(value).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+}
+
+const SC_STATUS_LABEL = {
+  Open: 'Open', PendingApproval: 'Pending Approval', Approved: 'Approved',
+  Rejected: 'Rejected', Posted: 'Posted', Cancelled: 'Cancelled', Closed: 'Closed',
+};
+const SC_STATUS_COLOR = {
+  Open: '#2563EB', PendingApproval: '#B45309', Approved: '#059669',
+  Rejected: '#DC2626', Posted: '#059669', Cancelled: '#6B7280', Closed: '#6B7280',
+};
+function scStatusBadge(status) {
+  return `<span style="color:${SC_STATUS_COLOR[status] || '#6B7280'};font-weight:700">${esc(SC_STATUS_LABEL[status] || status)}</span>`;
+}
+
+// ── Weekly PTFE Cycle Count ────────────────────────────────────────────────────
+
+async function runPtfeCycleCount() {
+  if (!await checkSession()) return;
+  showResultPanel('Weekly PTFE Cycle Count', 'This week’s cycle count — enter material, quantity & location');
+  try {
+    const json = await scApi('/counts/current-ptfe');
+    scRenderCountDetail(json.data, 'runPtfeCycleCount');
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Full Warehouse Raw Material Scan ──────────────────────────────────────────
+
+async function runRawMaterialCount() {
+  if (!await checkSession()) return;
+  showResultPanel('Full Warehouse Raw Material Scan', 'Storage Location 1710 — supervisor-initiated counts');
+  await scRenderCountList('RAW_MATERIAL', '1710', 'runRawMaterialCount');
+}
+
+// ── Production Count ───────────────────────────────────────────────────────────
+
+async function runProductionCount() {
+  if (!await checkSession()) return;
+  showResultPanel('Production Count', 'Storage Location 1716 — supervisor-initiated counts (non-batch-managed materials only)');
+  await scRenderCountList('PRODUCTION', '1716', 'runProductionCount');
+}
+
+async function scRenderCountList(countType, defaultStorageLocation, backFn) {
+  try {
+    const json = await scApi(`/counts?type=${countType}`);
+    const counts = json.data || [];
+
+    const startForm = sessionPermissions.includes('LOG_SUPER') ? `
+      <div class="tf-section-label">Start New Count</div>
+      <form class="tf-row" id="sc-start-form" data-storage-location="${esc(defaultStorageLocation)}" data-count-type="${esc(countType)}" data-back-fn="${esc(backFn)}">
+        <div class="tf-field">
+          <label class="tf-label">Storage Location <span class="tf-req">*</span></label>
+          <input class="tf-input" name="storageLocation" value="${esc(defaultStorageLocation)}" required>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Ticket Number <span class="tf-optional">(optional — paper count reference)</span></label>
+          <input class="tf-input" name="ticketNumber" placeholder="e.g. TKT-1042">
+        </div>
+        <div class="tf-field" style="align-self:flex-end">
+          <button class="btn-run" type="submit">Start Count</button>
+        </div>
+      </form>
+      <div id="sc-start-result"></div>
+    ` : '';
+
+    const rows = counts.length ? counts.map(c => `
+      <tr class="admin-row sc-count-row" style="cursor:pointer" data-id="${c.CountId}">
+        <td>#${c.CountId}</td>
+        <td>${scStatusBadge(c.Status)}</td>
+        <td>${esc(c.TicketNumber || '—')}</td>
+        <td>${esc(c.CreatedBy || '—')}</td>
+        <td>${scFormatDate(c.CreatedAtUtc)}</td>
+      </tr>`).join('') : `<tr><td colspan="5" class="sap-empty">No counts yet.</td></tr>`;
+
+    document.getElementById('result-body').innerHTML = `
+      ${startForm}
+      <div class="tf-section-label">Counts</div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Count</th><th>Status</th><th>Ticket</th><th>Started By</th><th>Started</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+
+    const startFormEl = document.getElementById('sc-start-form');
+    if (startFormEl) startFormEl.addEventListener('submit', scSubmitStartCount);
+
+    document.querySelectorAll('.sc-count-row').forEach(tr => {
+      tr.addEventListener('click', async () => {
+        try {
+          const detailJson = await scApi(`/counts/${tr.dataset.id}`);
+          scRenderCountDetail(detailJson.data, backFn);
+        } catch (err) {
+          alert(err.message);
+        }
+      });
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scSubmitStartCount(e) {
+  e.preventDefault();
+  const form = e.target;
+  const countType = form.dataset.countType;
+  const backFn = form.dataset.backFn;
+  const storageLocation = form.storageLocation.value.trim();
+  const ticketNumber = form.ticketNumber.value.trim();
+  const resultEl = document.getElementById('sc-start-result');
+
+  try {
+    await scApi('/counts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ countType, storageLocation, ticketNumber: ticketNumber || undefined }),
+    });
+    window[backFn]?.();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Count detail (entry form + lines) — shared across all three types ─────────
+
+async function scReloadCountDetail(countId, backFn) {
+  const json = await scApi(backFn === 'runPtfeCycleCount' ? '/counts/current-ptfe' : `/counts/${countId}`);
+  scRenderCountDetail(json.data, backFn);
+}
+
+function scRenderCountDetail(doc, backFn) {
+  const isOpen = doc.Status === 'Open';
+  const lines = doc.lines || [];
+  const invalidCount = lines.filter(l => l.IsInvalidMaterial).length;
+
+  const locationField = doc.CountType === 'PTFE_WEEKLY'
+    ? `<div class="tf-field">
+        <label class="tf-label">Location <span class="tf-req">*</span></label>
+        <select class="tf-input" name="namedLocation" id="sc-named-location" required><option value="">Loading…</option></select>
+      </div>`
+    : doc.CountType === 'RAW_MATERIAL'
+    ? `<div class="tf-field"><label class="tf-label">Storage Type <span class="tf-req">*</span></label><input class="tf-input" name="storageType" maxlength="3" required></div>
+       <div class="tf-field"><label class="tf-label">Bin <span class="tf-req">*</span></label><input class="tf-input" name="bin" maxlength="10" required></div>`
+    : '';
+
+  const entryForm = isOpen ? `
+    <div class="tf-section-label">Add Line</div>
+    <form class="tf-row" id="sc-line-form">
+      <div class="tf-field"><label class="tf-label">Material <span class="tf-req">*</span></label><input class="tf-input" name="material" required></div>
+      ${locationField}
+      <div class="tf-field"><label class="tf-label">Counted Qty <span class="tf-req">*</span></label><input class="tf-input" type="number" step="any" min="0" name="countedQty" required></div>
+      <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">+ Add Line</button></div>
+    </form>
+    <div id="sc-line-result"></div>
+  ` : '';
+
+  const linesRows = lines.length ? lines.map(l => `
+    <tr class="pn-row${l.IsInvalidMaterial ? ' sc-invalid-row' : ''}">
+      <td><strong>${esc(l.Material)}</strong>${l.MaterialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(l.MaterialText)}</div>` : ''}${l.IsInvalidMaterial ? '<div style="font-size:11px;color:#DC2626;font-weight:700">Invalid material</div>' : ''}</td>
+      <td>${esc(l.NamedLocation || [l.StorageType, l.Bin].filter(Boolean).join('/') || '—')}</td>
+      <td>${Number(l.CountedQty).toLocaleString()} ${esc(l.Uom || '')}</td>
+      <td>${l.SapQty != null ? Number(l.SapQty).toLocaleString() : '—'}</td>
+      <td>${l.VarianceQty != null ? `<span style="color:${Number(l.VarianceQty) === 0 ? 'inherit' : (Number(l.VarianceQty) > 0 ? '#059669' : '#DC2626')};font-weight:${Number(l.VarianceQty) === 0 ? 400 : 700}">${Number(l.VarianceQty) > 0 ? '+' : ''}${Number(l.VarianceQty).toLocaleString()}</span>` : '—'}</td>
+    </tr>`).join('') : `<tr><td colspan="5" class="sap-empty">No lines entered yet.</td></tr>`;
+
+  const rejectionNotice = doc.Status === 'Rejected' ? `
+    <div class="sap-error" style="margin-bottom:12px">
+      Rejected by finance: ${esc(doc.RejectionReason || '')}
+      ${sessionPermissions.includes('LOG_SUPER') ? `<button class="btn-run" type="button" id="sc-reopen-btn" style="margin-left:12px">Reopen for correction</button>` : ''}
+    </div>` : '';
+
+  const locationMapLink = doc.CountType === 'PTFE_WEEKLY' && sessionPermissions.includes('LOG_SUPER')
+    ? `<button class="btn-back-tiles" type="button" id="sc-manage-locations-btn" style="margin-left:8px">Manage Location Mapping</button>` : '';
+
+  // Accuracy stat — warehouse-facing (was stock in the right place/quantity),
+  // deliberately separate from finance's value-of-variance framing on the
+  // Stock Adjustments tile (routes/stockcountsql.js's getCountReportByMaterial
+  // feeds that one instead).
+  const comparedLines = lines.filter(l => l.VarianceQty !== null && l.VarianceQty !== undefined);
+  const accurateLines = comparedLines.filter(l => Number(l.VarianceQty) === 0);
+  const accuracyPct = comparedLines.length ? Math.round((accurateLines.length / comparedLines.length) * 100) : null;
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-row" style="margin-bottom:10px">
+      <div class="tf-field"><label class="tf-label">Count</label><div>#${doc.CountId}</div></div>
+      <div class="tf-field"><label class="tf-label">Status</label><div>${scStatusBadge(doc.Status)}</div></div>
+      ${doc.StorageLocation ? `<div class="tf-field"><label class="tf-label">Storage Location</label><div>${esc(doc.StorageLocation)}</div></div>` : ''}
+      ${doc.TicketNumber ? `<div class="tf-field"><label class="tf-label">Ticket</label><div>${esc(doc.TicketNumber)}</div></div>` : ''}
+      ${doc.WeekStartDate ? `<div class="tf-field"><label class="tf-label">Week</label><div>${scFormatDate(doc.WeekStartDate)}</div></div>` : ''}
+      ${accuracyPct !== null ? `<div class="tf-field"><label class="tf-label">Stock Accuracy</label><div style="color:${accuracyPct === 100 ? '#059669' : (accuracyPct >= 90 ? '#B45309' : '#DC2626')};font-weight:700">${accuracyPct}% <span style="font-weight:400;color:var(--text-secondary,#666)">(${accurateLines.length}/${comparedLines.length} lines matched SAP)</span></div></div>` : ''}
+    </div>
+    ${rejectionNotice}
+    ${entryForm}
+    <div class="tf-section-label">Lines ${invalidCount ? `<span style="color:#DC2626">— ${invalidCount} invalid material line${invalidCount === 1 ? '' : 's'} must be corrected before submission</span>` : ''}</div>
+    <div style="overflow-x:auto;margin-bottom:14px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Location</th><th>Counted</th><th>SAP Qty</th><th>Variance</th></tr></thead>
+        <tbody>${linesRows}</tbody>
+      </table>
+    </div>
+    ${invalidCount ? `<div id="sc-invalid-materials"></div>` : ''}
+    ${isOpen ? `<button class="btn-run" type="button" id="sc-submit-btn">Submit for Approval</button> ${locationMapLink}` : (locationMapLink ? `<div>${locationMapLink}</div>` : '')}
+  `;
+
+  if (doc.CountType === 'PTFE_WEEKLY' && isOpen) scLoadLocationOptions();
+
+  const lineForm = document.getElementById('sc-line-form');
+  if (lineForm) lineForm.addEventListener('submit', (e) => scSubmitLine(e, doc, backFn));
+
+  const submitBtn = document.getElementById('sc-submit-btn');
+  if (submitBtn) submitBtn.addEventListener('click', () => scSubmitCountForApproval(doc, backFn));
+
+  const reopenBtn = document.getElementById('sc-reopen-btn');
+  if (reopenBtn) reopenBtn.addEventListener('click', () => scReopenCount(doc, backFn));
+
+  const manageBtn = document.getElementById('sc-manage-locations-btn');
+  if (manageBtn) manageBtn.addEventListener('click', () => scRenderLocationMapAdmin(backFn));
+
+  if (invalidCount) scRenderInvalidMaterials(doc, backFn);
+}
+
+async function scLoadLocationOptions() {
+  const select = document.getElementById('sc-named-location');
+  if (!select) return;
+  try {
+    const json = await scApi('/location-map');
+    const rows = json.data || [];
+    select.innerHTML = rows.length
+      ? `<option value="">Select a location…</option>${rows.map(r => `<option value="${esc(r.NamedLocation)}">${esc(r.NamedLocation)}</option>`).join('')}`
+      : `<option value="">No locations mapped yet — ask a supervisor</option>`;
+  } catch (err) {
+    select.innerHTML = `<option value="">Failed to load locations</option>`;
+  }
+}
+
+async function scSubmitLine(e, doc, backFn) {
+  e.preventDefault();
+  const form = e.target;
+  const resultEl = document.getElementById('sc-line-result');
+  const body = {
+    material: form.material.value.trim(),
+    countedQty: form.countedQty.value,
+  };
+  if (form.namedLocation) body.namedLocation = form.namedLocation.value;
+  if (form.storageType)   body.storageType   = form.storageType.value.trim();
+  if (form.bin)            body.bin           = form.bin.value.trim();
+
+  try {
+    const json = await scApi(`/counts/${doc.CountId}/lines`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (json.data.redirectToFinishedGoodsCount) {
+      alert(`${body.material} is batch-managed — this material should be entered via Finished Goods Count instead. The line has still been saved here for the record.`);
+    } else if (json.data.isInvalidMaterial) {
+      alert(`"${body.material}" did not validate against the material master — it has been saved but will need correcting in the Invalid Materials section below before this count can be submitted.`);
+    }
+    await scReloadCountDetail(doc.CountId, backFn);
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scSubmitCountForApproval(doc, backFn) {
+  if (!confirm('Submit this count for finance approval? No more lines can be added once submitted.')) return;
+  try {
+    await scApi(`/counts/${doc.CountId}/submit`, { method: 'POST' });
+    await scReloadCountDetail(doc.CountId, backFn);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function scReopenCount(doc, backFn) {
+  try {
+    await scApi(`/counts/${doc.CountId}/reopen`, { method: 'POST' });
+    await scReloadCountDetail(doc.CountId, backFn);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── Invalid Materials — fuzzy-match correction ────────────────────────────────
+
+async function scRenderInvalidMaterials(doc, backFn) {
+  const container = document.getElementById('sc-invalid-materials');
+  if (!container) return;
+  try {
+    const json = await scApi(`/counts/${doc.CountId}/invalid-lines`);
+    const lines = json.data || [];
+
+    container.innerHTML = `
+      <div class="tf-section-label">Invalid Materials</div>
+      <div style="overflow-x:auto;margin-bottom:14px">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Entered As</th><th>Counted Qty</th><th>Suggestions</th><th>Correct To</th></tr></thead>
+          <tbody>
+            ${lines.map(l => `
+              <tr class="pn-row" data-line-id="${l.LineId}">
+                <td><strong>${esc(l.Material)}</strong></td>
+                <td>${Number(l.CountedQty).toLocaleString()}</td>
+                <td>${(l.suggestions || []).map(s => `<button type="button" class="btn-back-tiles sc-suggestion-btn" data-line-id="${l.LineId}" data-material="${esc(s.material)}" style="margin:2px">${esc(s.material)}${s.materialText ? ` — ${esc(s.materialText)}` : ''}</button>`).join('') || '<span class="toolbar-hint">No close matches found</span>'}</td>
+                <td>
+                  <input class="tf-input sc-correct-input" data-line-id="${l.LineId}" style="width:120px" placeholder="Correct material">
+                  <button type="button" class="btn-run sc-correct-btn" data-line-id="${l.LineId}">Save</button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+
+    container.querySelectorAll('.sc-suggestion-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const input = container.querySelector(`.sc-correct-input[data-line-id="${btn.dataset.lineId}"]`);
+        if (input) input.value = btn.dataset.material;
+      });
+    });
+
+    container.querySelectorAll('.sc-correct-btn').forEach(btn => {
+      btn.addEventListener('click', () => scCorrectInvalidLine(doc, backFn, btn.dataset.lineId, container));
+    });
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scCorrectInvalidLine(doc, backFn, lineId, container) {
+  const input = container.querySelector(`.sc-correct-input[data-line-id="${lineId}"]`);
+  const material = input?.value.trim();
+  if (!material) { alert('Enter the correct material code first.'); return; }
+  try {
+    await scApi(`/counts/${doc.CountId}/invalid-lines/${lineId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ material }),
+    });
+    await scReloadCountDetail(doc.CountId, backFn);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ── PTFE Location Mapping admin (LOG_SUPER) ───────────────────────────────────
+
+async function scRenderLocationMapAdmin(backFn) {
+  showResultPanel('PTFE Location Mapping', 'Named locations on the cycle-count sheet → SAP storage type/bin — validated against SAP (LAGP) on save');
+  try {
+    const json = await scApi('/location-map');
+    scRenderLocationMapTable(json.data || [], backFn);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function scRenderLocationMapTable(rows, backFn) {
+  const existingNames = ['PTFE', 'YARD', 'CONTAINER 1', 'CONTAINER 2', 'WAREHOUSE'];
+  const byName = Object.fromEntries(rows.map(r => [r.NamedLocation, r]));
+  const names = Array.from(new Set([...existingNames, ...rows.map(r => r.NamedLocation)]));
+
+  document.getElementById('result-body').innerHTML = `
+    <button class="btn-back-tiles" type="button" id="sc-back-to-count">← Back to Count</button>
+    <div style="overflow-x:auto;margin-top:10px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Named Location</th><th>Storage Type</th><th>Bin</th><th></th></tr></thead>
+        <tbody>
+          ${names.map(name => {
+            const existing = byName[name];
+            return `
+              <tr class="pn-row" data-name="${esc(name)}">
+                <td><strong>${esc(name)}</strong></td>
+                <td><input class="tf-input sc-map-storagetype" data-name="${esc(name)}" maxlength="3" value="${esc(existing?.StorageType || '')}" style="width:70px"></td>
+                <td><input class="tf-input sc-map-bin" data-name="${esc(name)}" maxlength="10" value="${esc(existing?.Bin || '')}" style="width:110px"></td>
+                <td><button type="button" class="btn-run sc-map-save" data-name="${esc(name)}">Save</button></td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div id="sc-map-result"></div>
+  `;
+
+  document.getElementById('sc-back-to-count').addEventListener('click', () => window[backFn]?.());
+  document.querySelectorAll('.sc-map-save').forEach(btn => {
+    btn.addEventListener('click', () => scSaveLocationMap(btn.dataset.name, backFn));
+  });
+}
+
+async function scSaveLocationMap(name, backFn) {
+  const storageType = document.querySelector(`.sc-map-storagetype[data-name="${CSS.escape(name)}"]`)?.value.trim();
+  const bin = document.querySelector(`.sc-map-bin[data-name="${CSS.escape(name)}"]`)?.value.trim();
+  const resultEl = document.getElementById('sc-map-result');
+  if (!storageType || !bin) { alert('Storage type and bin are both required.'); return; }
+
+  try {
+    await scApi(`/location-map/${encodeURIComponent(name)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storageType, bin }),
+    });
+    await scRenderLocationMapAdmin(backFn);
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Finished Goods Count (guided batch/bin scan) ──────────────────────────────
+//
+// Separate pipeline from the PTFE/Raw Material/Production counts above — no
+// document/line/approval flow, no SAP posting. Mismatches are recorded as
+// discrepancies resolved via Transfer Order from the Stock Investigations
+// tile's new "Stock Count Discrepancies" panel, below.
+
+let fgBatchMap    = {};   // batch -> material, downloaded once per session load
+let fgScanStep    = 'batch';
+let fgPendingBatch = null;
+let fgToastTimer   = null;
+
+async function runFinishedGoodsCount() {
+  if (!await checkSession()) return;
+  showResultPanel('Finished Goods Count', 'Guided batch & bin scan against SAP warehouse management');
+  try {
+    const sessionJson = await scApi('/fg/session/current');
+    if (!sessionJson.data) { fgRenderNoSession(); return; }
+    await fgLoadBatches();
+    fgRenderScanUI(sessionJson.data);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function fgRenderNoSession() {
+  const canStart = sessionPermissions.includes('LOG_SUPER');
+  document.getElementById('result-body').innerHTML = `
+    <div class="sap-empty">No Finished Goods Count session is currently open.</div>
+    ${canStart ? `
+      <div class="tf-section-label">Start Count Session</div>
+      <form class="tf-row" id="fg-start-form">
+        <div class="tf-field"><label class="tf-label">Storage Location <span class="tf-req">*</span></label><input class="tf-input" name="storageLocation" required></div>
+        <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">Start Session</button></div>
+      </form>
+      <div id="fg-start-result"></div>
+    ` : '<div class="toolbar-hint">Ask a warehouse supervisor to start one.</div>'}
+  `;
+  const form = document.getElementById('fg-start-form');
+  if (form) form.addEventListener('submit', fgSubmitStartSession);
+}
+
+async function fgSubmitStartSession(e) {
+  e.preventDefault();
+  const storageLocation = e.target.storageLocation.value.trim();
+  const resultEl = document.getElementById('fg-start-result');
+  try {
+    await scApi('/fg/session/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storageLocation }),
+    });
+    runFinishedGoodsCount();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function fgLoadBatches() {
+  const json = await scApi('/fg/batches');
+  fgBatchMap = {};
+  (json.data || []).forEach(row => {
+    if (row.batch && !fgBatchMap[row.batch]) fgBatchMap[row.batch] = row.material;
+  });
+}
+
+function fgRenderScanUI(session) {
+  fgScanStep = 'batch';
+  fgPendingBatch = null;
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-row" style="margin-bottom:14px">
+      <div class="tf-field"><label class="tf-label">Session</label><div>#${session.CountId} — Storage Location ${esc(session.StorageLocation)} (${Object.keys(fgBatchMap).length} batches downloaded)</div></div>
+      ${sessionPermissions.includes('LOG_SUPER') ? `<div class="tf-field" style="align-self:flex-end"><button class="btn-back-tiles" type="button" id="fg-end-btn">End Count Session</button></div>` : ''}
+    </div>
+
+    <div class="tf-section-label" id="fg-scan-label">Scan Batch Number</div>
+    <form id="fg-scan-form" class="tf-row" autocomplete="off">
+      <div class="tf-field"><input class="tf-input" id="fg-scan-input" autocomplete="off" placeholder="Scan or type…"></div>
+    </form>
+    <div id="fg-scan-toast"></div>
+
+    <div class="tf-section-label" style="margin-top:24px">Confirm Bin Fully Scanned</div>
+    <div class="toolbar-hint" style="margin-bottom:8px">Once every batch physically in a bin has been scanned, confirm it here — anything SAP still shows in that bin that was never scanned gets sent to Stock Investigations as missing.</div>
+    <form id="fg-confirm-form" class="tf-row">
+      <div class="tf-field"><label class="tf-label">Storage Type</label><input class="tf-input" name="storageType" maxlength="3" required></div>
+      <div class="tf-field"><label class="tf-label">Bin</label><input class="tf-input" name="bin" maxlength="10" required></div>
+      <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">Confirm Bin</button></div>
+    </form>
+    <div id="fg-confirm-result"></div>
+  `;
+
+  document.getElementById('fg-scan-form').addEventListener('submit', fgHandleScanStep);
+  document.getElementById('fg-confirm-form').addEventListener('submit', fgHandleConfirmBin);
+  const endBtn = document.getElementById('fg-end-btn');
+  if (endBtn) endBtn.addEventListener('click', () => fgEndSession(session.CountId));
+  fgFocusScanInput();
+}
+
+function fgFocusScanInput() {
+  const input = document.getElementById('fg-scan-input');
+  if (input) { input.value = ''; input.focus(); }
+}
+
+// Two-step scan cycle (batch, then bin) — a single focused input per step,
+// keyboard-wedge-scanner friendly (submits on Enter). Auto-advances back to
+// the batch step after every scan, correct or not, so the operator never
+// has to click anything mid-run.
+function fgHandleScanStep(e) {
+  e.preventDefault();
+  const input = document.getElementById('fg-scan-input');
+  const value = input.value.trim();
+  if (!value) return;
+
+  if (fgScanStep === 'batch') {
+    const material = fgBatchMap[value];
+    if (!material) {
+      fgShowToast(`Batch "${value}" isn't in the downloaded batch list for this session — check it's a valid finished-goods batch.`, false);
+      fgFocusScanInput();
+      return;
+    }
+    fgPendingBatch = { batch: value, material };
+    fgScanStep = 'bin';
+    document.getElementById('fg-scan-label').textContent = `Batch ${value} — Scan Bin`;
+    fgFocusScanInput();
+    return;
+  }
+
+  fgSubmitScan(fgPendingBatch.material, fgPendingBatch.batch, value);
+}
+
+async function fgSubmitScan(material, batch, binValue) {
+  // Accepts "STORAGETYPE BIN" / "STORAGETYPE/BIN" / "STORAGETYPE-BIN" — same
+  // separators a warehouse bin label barcode would encode.
+  const parts = binValue.split(/[\s/-]+/).filter(Boolean);
+  const scannedStorageType = parts.length > 1 ? parts[0] : '';
+  const scannedBin = parts.length > 1 ? parts.slice(1).join('') : parts[0];
+
+  const resetToStep1 = () => {
+    fgScanStep = 'batch';
+    fgPendingBatch = null;
+    document.getElementById('fg-scan-label').textContent = 'Scan Batch Number';
+    fgFocusScanInput();
+  };
+
+  if (!scannedStorageType || !scannedBin) {
+    fgShowToast('Enter both storage type and bin, e.g. "FG1 B01".', false);
+    resetToStep1();
+    return;
+  }
+
+  try {
+    const json = await scApi('/fg/scan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ material, batch, scannedStorageType, scannedBin }),
+    });
+    const { outcome, expectedStorageType, expectedBin } = json.data;
+    if (outcome === 'CorrectBin') {
+      fgShowToast(`✓ ${batch} confirmed in ${scannedStorageType}/${scannedBin}`, true);
+    } else {
+      fgShowToast(`✕ ${batch} scanned in ${scannedStorageType}/${scannedBin} — SAP expects ${expectedBin ? `${expectedStorageType}/${expectedBin}` : 'a different bin'}. Sent to Stock Investigations.`, false);
+    }
+  } catch (err) {
+    fgShowToast(err.message, false);
+  }
+
+  resetToStep1();
+}
+
+// Non-modal toast — a blocking alert()/modal here would break the
+// scan-scan-scan rhythm the auto-advance is built for.
+function fgShowToast(message, success) {
+  const el = document.getElementById('fg-scan-toast');
+  if (!el) return;
+  el.innerHTML = `<div style="margin-top:10px;padding:10px 14px;border-radius:6px;font-weight:600;background:${success ? '#DCFCE7' : '#FEE2E2'};color:${success ? '#166534' : '#991B1B'}">${esc(message)}</div>`;
+  clearTimeout(fgToastTimer);
+  fgToastTimer = setTimeout(() => { el.innerHTML = ''; }, 4000);
+}
+
+async function fgHandleConfirmBin(e) {
+  e.preventDefault();
+  const form = e.target;
+  const storageType = form.storageType.value.trim();
+  const bin = form.bin.value.trim();
+  const resultEl = document.getElementById('fg-confirm-result');
+  try {
+    const json = await scApi(`/fg/bins/${encodeURIComponent(storageType)}/${encodeURIComponent(bin)}/confirm`, { method: 'POST' });
+    resultEl.innerHTML = `<div class="toolbar-hint">Bin confirmed — ${json.data.missingCount} batch(es) not scanned here were sent to Stock Investigations as missing.</div>`;
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function fgEndSession(countId) {
+  if (!confirm('End this Finished Goods Count session? This lifts the transfer-request block for its storage location.')) return;
+  try {
+    await scApi(`/fg/session/${countId}/end`, { method: 'POST' });
+    runFinishedGoodsCount();
+  } catch (err) {
+    alert(err.message);
   }
 }

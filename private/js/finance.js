@@ -6,10 +6,18 @@ let currentResult = [];
 let rawRows       = {};  // keyed by material for breakdown lookup
 
 // ── Session check on load ─────────────────────────────────────────────────────
+let sessionPermissions = [];
 (async () => {
   const d = await fetch('/session-check').then(r => r.json());
   if (!d.loggedIn) { window.location.href = '/'; return; }
   document.getElementById('session-user').textContent = d.username;
+  sessionPermissions = d.permissions || [];
+  // Stock Adjustments is the first FIN_STOCK_APPROVE-gated tile on this page —
+  // hidden by default in the HTML, shown here rather than relying on the
+  // server to omit it, matching warehouse.html's #supervisor-section pattern.
+  if (sessionPermissions.includes('FIN_STOCK_APPROVE')) {
+    document.getElementById('stock-adjustments-tile')?.classList.remove('hidden');
+  }
 })();
 
 // ── Tile click handlers ───────────────────────────────────────────────────────
@@ -19,6 +27,7 @@ document.querySelectorAll('.sap-tile--live').forEach(tile => {
     if (tile.dataset.fn === 'actualCosts')     showActualCostsForm();
     if (tile.dataset.fn === 'glGroupConfig')    showGlGroupConfig();
     if (tile.dataset.fn === 'profitCenterData') showProfitCenterForm();
+    if (tile.dataset.fn === 'stockAdjustments') runStockAdjustments();
   });
 });
 
@@ -1265,5 +1274,158 @@ async function deleteGlGroup(id, groups) {
     renderGlGroupList();
   } catch (err) {
     alert(`Error: ${err.message}`);
+  }
+}
+
+// ── Stock Adjustments (Stock Count approval) ──────────────────────────────────
+//
+// Approves/rejects submitted Weekly PTFE/Raw Material/Production stock
+// counts — approve triggers routes/stockcount.js's 711/712 posting via
+// SapServer's existing stock-adjustment endpoint. Tile visibility is gated
+// client-side on FIN_STOCK_APPROVE (see the session-check block above); the
+// real enforcement is the server-side requirePermission on
+// POST /counts/:id/approve|reject.
+
+async function scfApi(path, opts) {
+  const r = await fetch('/api/stockcount' + path, opts);
+  let json = null;
+  try { json = await r.json(); } catch { /* non-JSON body */ }
+  if (json?.success === false || !r.ok) {
+    throw new Error(json?.error || `Request failed (HTTP ${r.status})`);
+  }
+  return json;
+}
+
+async function runStockAdjustments() {
+  if (!await checkSession()) return;
+  showResultPanel('Stock Adjustments', 'Stock Count Results — counts pending finance approval');
+  await scfRenderPendingCounts();
+}
+
+async function scfRenderPendingCounts() {
+  try {
+    const json = await scfApi('/counts?status=PendingApproval');
+    const counts = json.data || [];
+
+    if (!counts.length) {
+      document.getElementById('result-body').innerHTML = '<div class="sap-empty">No stock counts are currently pending approval.</div>';
+      return;
+    }
+
+    // Pull each pending count's material-level report up front so the
+    // totals row and the per-count Net Value column don't need a second
+    // click round-trip on first render.
+    const reports = await Promise.all(counts.map(c => scfApi(`/counts/${c.CountId}/report`).then(r => r.data).catch(() => [])));
+
+    let totalGain = 0, totalLoss = 0;
+    reports.forEach(rows => rows.forEach(r => {
+      const v = Number(r.TotalVarianceValue) || 0;
+      if (v > 0) totalGain += v; else totalLoss += Math.abs(v);
+    }));
+
+    const rows = counts.map((c, i) => {
+      const netValue = (reports[i] || []).reduce((sum, r) => sum + (Number(r.TotalVarianceValue) || 0), 0);
+      const location = c.StorageLocation
+        || (c.WeekStartDate ? `PTFE (week of ${new Date(c.WeekStartDate).toLocaleDateString('en-GB')})` : '—');
+      return `
+        <tr class="admin-row scf-count-row" style="cursor:pointer" data-id="${c.CountId}">
+          <td>#${c.CountId}</td>
+          <td>${esc(c.CountType.replace('_', ' '))}</td>
+          <td>${esc(location)}</td>
+          <td>${esc(c.TicketNumber || '—')}</td>
+          <td>${esc(c.SubmittedBy || '—')}</td>
+          <td style="color:${netValue >= 0 ? '#059669' : '#DC2626'};font-weight:700">${netValue >= 0 ? '+' : ''}£${netValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+        </tr>`;
+    }).join('');
+
+    document.getElementById('result-body').innerHTML = `
+      <div class="tf-row" style="margin-bottom:14px">
+        <div class="tf-field"><label class="tf-label">Total Gains</label><div style="color:#059669;font-weight:700">+£${totalGain.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
+        <div class="tf-field"><label class="tf-label">Total Losses</label><div style="color:#DC2626;font-weight:700">-£${totalLoss.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
+        <div class="tf-field"><label class="tf-label">Pending Counts</label><div>${counts.length}</div></div>
+      </div>
+      <div class="tf-section-label">Stock Count Results — Pending Approval</div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Count</th><th>Type</th><th>Location</th><th>Ticket</th><th>Submitted By</th><th>Net Value</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div id="scf-detail"></div>
+    `;
+
+    document.querySelectorAll('.scf-count-row').forEach(tr => {
+      tr.addEventListener('click', () => scfRenderCountDetail(Number(tr.dataset.id)));
+    });
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scfRenderCountDetail(countId) {
+  const container = document.getElementById('scf-detail');
+  if (!container) return;
+  container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const reportJson = await scfApi(`/counts/${countId}/report`);
+    const report = reportJson.data || [];
+
+    const rows = report.length ? report.map(r => `
+      <tr class="pn-row">
+        <td><strong>${esc(r.Material)}</strong>${r.MaterialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText)}</div>` : ''}</td>
+        <td>${Number(r.TotalCountedQty).toLocaleString()} ${esc(r.Uom || '')}</td>
+        <td>${r.TotalSapQty != null ? Number(r.TotalSapQty).toLocaleString() : '—'}</td>
+        <td style="color:${Number(r.TotalVarianceValue) >= 0 ? '#059669' : '#DC2626'};font-weight:700">${Number(r.TotalVarianceValue) >= 0 ? '+' : ''}£${Number(r.TotalVarianceValue || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+      </tr>`).join('') : '<tr><td colspan="4" class="sap-empty">No variance lines on this count.</td></tr>';
+
+    container.innerHTML = `
+      <div class="tf-section-label">Count #${countId} — Grouped by Material</div>
+      <div style="overflow-x:auto;margin-bottom:14px">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Counted</th><th>SAP Qty</th><th>Value</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <button class="btn-run" type="button" id="scf-approve-btn">Approve</button>
+      <button class="btn-back-tiles" type="button" id="scf-reject-btn" style="margin-left:8px">Reject</button>
+      <div id="scf-action-result" style="margin-top:10px"></div>
+    `;
+
+    document.getElementById('scf-approve-btn').addEventListener('click', () => scfApprove(countId));
+    document.getElementById('scf-reject-btn').addEventListener('click', () => scfReject(countId));
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scfApprove(countId) {
+  if (!confirm('Approve this count? This posts the resulting 711/712 SAP goods movements immediately.')) return;
+  const resultEl = document.getElementById('scf-action-result');
+  try {
+    const json = await scfApi(`/counts/${countId}/approve`, { method: 'POST' });
+    const { allSucceeded, results, postedLineCount } = json.data;
+    if (allSucceeded) {
+      alert(`Approved — ${postedLineCount} adjustment${postedLineCount === 1 ? '' : 's'} posted to SAP.`);
+      await scfRenderPendingCounts();
+    } else {
+      const failed = results.filter(r => !r.success);
+      if (resultEl) resultEl.innerHTML = `<div class="sap-error">Approved, but ${failed.length} of ${results.length} SAP postings failed: ${failed.map(f => `${esc(f.material)} (${esc(f.error)})`).join('; ')}. The count remains Approved (not fully Posted) — check with IT/SAP support before retrying.</div>`;
+    }
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scfReject(countId) {
+  const reason = prompt('Reason for rejecting this count (sent to the warehouse supervisors):');
+  if (!reason || !reason.trim()) return;
+  const resultEl = document.getElementById('scf-action-result');
+  try {
+    await scfApi(`/counts/${countId}/reject`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: reason.trim() }),
+    });
+    await scfRenderPendingCounts();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }

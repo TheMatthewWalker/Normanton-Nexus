@@ -76,6 +76,8 @@ Jest, run under Node's native ESM support (`transform: {}` in `package.json`'s `
   | `20 * * * *` | `sessionStore.cleanupExpired()` | Housekeeping — deletes expired `PortalSessions` rows |
   | `10 6 * * *` | `runProductionScheduleOtifDiff()` | Diffs `AgreementSnapshot` vs `OrderFulfillmentTracking` for OTIF tracking |
   | `20 6 * * *` | `runConsignmentSync()` | Vendor consignment GR + stock snapshot sync |
+  | `30 6 * * *` | `checkIsoparDeclarationDue()` | Notifies `ISOPAR_DECL` when an HMRC Tied Oil declaration period is due |
+  | `56 5 * * 1` | `checkWeeklyPtfeCycleCountDue()` (`routes/stockcount.js`) | Creates the week's PTFE Cycle Count document (Mondays only) |
   | `* * * * *` | scheduled-deploy checker | Described above |
 - Graceful shutdown handles `SIGINT`/`SIGTERM` explicitly (Windows Service stop emulates SIGINT unreliably) with an 8s force-exit fallback.
 

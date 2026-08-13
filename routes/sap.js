@@ -7,6 +7,7 @@ import sql     from 'mssql';
 import { sapConfig, sapServerSecret, getNexusPool, getNexusOperationsPool } from '../config.js';
 import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
+import { assertTransfersAllowed, TransferBlockedError } from '../lib/stockCountGuard.js';
 
 // Use a pinned certificate when connecting over HTTPS; fall back to no custom agent for HTTP (dev).
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
@@ -403,6 +404,8 @@ router.post("/warehouse/transfer-order", async (req, res) => {
     const params = req.body;
 
     try {
+        await assertTransfersAllowed(params.StorageLocation);
+
         const response = await axios.post(
             `${sapConfig.url}/api/warehouse/transfer-order`,
             params,
@@ -427,6 +430,10 @@ router.post("/warehouse/transfer-order", async (req, res) => {
         res.json({ success: true, data: rows, ...(redrum ? { redrum } : {}) });
 
     } catch (err) {
+        if (err instanceof TransferBlockedError) {
+            await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Transfer order blocked for material ${params.Material || ''}`, err.message), req);
+            return res.status(409).json({ success: false, error: err.message });
+        }
         const status  = err.response?.status  ?? 500;
         const message = err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Transfer order failed for material ${params.Material || ''}`, message), req);
@@ -464,6 +471,8 @@ router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'),
     const sapPath = kind === 'consignment' ? '/api/warehouse/consignment-mb1b' : '/api/warehouse/transfer-order';
 
     try {
+        if (kind === 'transfer') await assertTransfersAllowed(payload?.StorageLocation);
+
         const response = await axios.post(`${sapConfig.url}${sapPath}`, payload, {
             timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
         });
@@ -485,6 +494,10 @@ router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'),
         res.json({ success: true, data: body.data, ...(redrum ? { redrum } : {}) });
 
     } catch (err) {
+        if (err instanceof TransferBlockedError) {
+            await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} blocked for material ${payload?.Material || ''}`, err.message), req);
+            return res.status(409).json({ success: false, error: err.message });
+        }
         const status  = err.response?.status  ?? 500;
         const message = err.response?.data?.error?.message ?? err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} failed for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`, message), req);
@@ -751,12 +764,20 @@ router.get('/warehouse/tr-cleanup-candidates', async (req, res) => {
 // operator's routine manual LT04 entry, not a supervisor-only action.
 //
 // Body: { TrNumber, Material, Quantity, DestinationType, DestinationBin,
-// PalletOrBatch, Reference? } — matches SapServer's CreateLt04Request.
+// PalletOrBatch, Reference?, StorageLocation? } — matches SapServer's
+// CreateLt04Request, plus an optional StorageLocation used ONLY for the
+// stock-count transfer guard below (stripped before forwarding to
+// SapServer, whose CreateLt04Request has no such field) — the frontend
+// already has it on hand from the open-TR row this action was launched
+// from (GET /warehouse/open-transfer-requirements). Older/unaware callers
+// that omit it simply skip the guard rather than failing closed.
 // ---------------------------------------------------------------------------
 router.post('/warehouse/create-lt04', async (req, res) => {
-    const params = req.body;
+    const { StorageLocation, ...params } = req.body;
 
     try {
+        await assertTransfersAllowed(StorageLocation);
+
         const response = await axios.post(
             `${sapConfig.url}/api/warehouse/create-lt04`,
             params,
@@ -770,6 +791,10 @@ router.post('/warehouse/create-lt04', async (req, res) => {
         res.json({ success: true, data: body.data });
 
     } catch (err) {
+        if (err instanceof TransferBlockedError) {
+            await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `LT04 blocked for TR ${params.TrNumber || ''}`, err.message), req);
+            return res.status(409).json({ success: false, error: err.message });
+        }
         const status  = err.response?.status  ?? 500;
         const message = err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `LT04 failed for TR ${params.TrNumber || ''}`, message), req);

@@ -210,6 +210,32 @@ describe('POST /warehouse/transfer-order', () => {
     expect(res.status).toBe(422);
     expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('Transfer order failed'));
   });
+
+  // lib/stockCountGuard.js — a Raw Material/Production/Finished Goods count
+  // active against the same storage location blocks this endpoint with a
+  // 409 before ever calling SapServer.
+  test('409s and never calls SapServer when an active count blocks the storage location', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 5, CountType: 'RAW_MATERIAL', Status: 'Open' }],
+    });
+
+    const res = await request(app).post('/warehouse/transfer-order').send({ Material: '30005R', StorageLocation: '1710' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toContain('RAW_MATERIAL count #5');
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('does not block when no StorageLocation is given', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500009999', messages: [] } },
+    });
+
+    const res = await request(app).post('/warehouse/transfer-order').send({ Material: '30005R' });
+
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('POST /warehouse/batch-cleanup-transfer', () => {
@@ -250,6 +276,69 @@ describe('POST /warehouse/batch-cleanup-transfer', () => {
     expect(res.status).toBe(200);
     const detailCall = dbRequest.input.mock.calls.find(c => c[0] === 'detail');
     expect(detailCall[2]).not.toContain('TR ');
+  });
+
+  test('409s a transfer clean-up when an active count blocks the storage location', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 7, CountType: 'PRODUCTION', Status: 'PendingApproval' }],
+    });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer')
+      .send({ kind: 'transfer', payload: { Material: '30005R', StorageLocation: '1716' } });
+
+    expect(res.status).toBe(409);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('does not check the guard for a consignment clean-up (not a bin-to-bin transfer)', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, mb1bMessage: 'Posted', toNonConsignMessage: '', toConsignMessage: '' } },
+    });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer')
+      .send({ kind: 'consignment', payload: { Material: '30005R', StorageLocation: '1716' } });
+
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('POST /warehouse/create-lt04', () => {
+  test('passes StorageLocation to the guard but never forwards it to SapServer', async () => {
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: { transferOrderNumber: '4500007777' } } });
+
+    const res = await request(app)
+      .post('/warehouse/create-lt04')
+      .send({ TrNumber: '123', Material: '30005R', StorageLocation: '1710' });
+
+    expect(res.status).toBe(200);
+    const [, sentBody] = axiosMock.post.mock.calls[0];
+    expect(sentBody).not.toHaveProperty('StorageLocation');
+  });
+
+  test('409s when an active count blocks the given StorageLocation', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 9, CountType: 'RAW_MATERIAL', Status: 'Open' }],
+    });
+
+    const res = await request(app)
+      .post('/warehouse/create-lt04')
+      .send({ TrNumber: '123', Material: '30005R', StorageLocation: '1710' });
+
+    expect(res.status).toBe(409);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('skips the guard (does not fail closed) when StorageLocation is omitted', async () => {
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: { transferOrderNumber: '4500007778' } } });
+
+    const res = await request(app)
+      .post('/warehouse/create-lt04')
+      .send({ TrNumber: '123', Material: '30005R' });
+
+    expect(res.status).toBe(200);
+    expect(axiosMock.post).toHaveBeenCalled();
   });
 });
 

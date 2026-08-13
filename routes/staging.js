@@ -20,6 +20,7 @@ import { sapConfig, sapServerSecret, getNexusPool } from '../config.js';
 import { maybeReverseBatchManagedReturn } from '../lib/redrumReversal.js';
 import { requirePermission } from '../middleware/auth.js';
 import { notify } from '../lib/notify.js';
+import { assertTransfersAllowed } from '../lib/stockCountGuard.js';
 import * as db from './stagingsql.js';
 import { getConversionQty } from './materialRequestUnits.js';
 
@@ -80,7 +81,13 @@ async function fetchLquaStock({ material, batch, storageType, bin }) {
 
 // SapServer's existing POST /api/warehouse/transfer-order (L_TO_CREATE_SINGLE) —
 // same endpoint private/js/warehouse.js's Stock Transfer tool already uses.
+// Guarded by the stock-count transfer block here directly (not inherited
+// from routes/sap.js's proxy — Staging Post calls SapServer straight, per
+// this file's own header comment), since this is the one place in this
+// file that actually moves stock.
 async function createSapTransferOrder(body) {
+  await assertTransfersAllowed(body.StorageLocation);
+
   const response = await axios.post(`${sapConfig.url}/api/warehouse/transfer-order`, body, {
     timeout: 60000,
     httpsAgent: sapAgent,

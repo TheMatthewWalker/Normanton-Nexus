@@ -342,6 +342,24 @@ describe('POST /requests/:id/deliver', () => {
     expect(axiosMock.post).not.toHaveBeenCalled();
   });
 
+  // lib/stockCountGuard.js — Staging Post calls SapServer's transfer-order
+  // endpoint directly (not through routes/sap.js's proxy), so this guard is
+  // wired into createSapTransferOrder itself rather than inherited.
+  test('422s and audits STAGING_DELIVER_SAP_ERROR when an active count blocks the storage location', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce(openRequest);
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 3, CountType: 'RAW_MATERIAL', Status: 'Open' }],
+    });
+
+    const res = await request(app).post('/requests/1/deliver').send(validBody);
+
+    expect(res.status).toBe(422);
+    expect(res.body.error.message).toMatch(/RAW_MATERIAL count #3/);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+    expect(auditedEventTypes()).toEqual(['STAGING_DELIVER_SAP_ERROR']);
+    expect(db.recordStagingDelivery).not.toHaveBeenCalled();
+  });
+
   test('422s and audits STAGING_DELIVER_SAP_ERROR when the SAP call itself throws', async () => {
     db.getStagingRequestById.mockResolvedValueOnce(openRequest);
     axiosMock.post.mockRejectedValueOnce(new Error('RFC timeout'));

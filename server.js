@@ -62,6 +62,7 @@ import financeRoutes           from './routes/finance.js';
 import notificationsRoutes     from './routes/notifications.js';
 import performanceRoutes, { checkIsoparDeclarationDue } from './routes/performance.js';
 import stagingRoutes           from './routes/staging.js';
+import stockCountRoutes, { checkWeeklyPtfeCycleCountDue } from './routes/stockcount.js';
 import consignmentRoutes, { runConsignmentSync } from './routes/consignment.js';
 import productionScheduleRoutes, { runProductionScheduleOtifDiff } from './routes/productionschedule.js';
 import salesRoutes              from './routes/sales.js';
@@ -233,6 +234,21 @@ cron.schedule('30 6 * * *', () => {
   checkIsoparDeclarationDue()
     .then(result => { if (result.notified) console.log('[cron] Isopar declaration notification sent for period ending', result.periodEnd); })
     .catch(err => console.error('[cron] Isopar declaration due check failed', err));
+});
+
+// Weekly PTFE Cycle Count — creates the week's count document every Monday
+// at 05:56, one minute after the existing hourly xx:55 sync above so the two
+// don't fire in the same second. Idempotent (checkWeeklyPtfeCycleCountDue ->
+// getOrCreatePtfeCountForWeek, filtered-unique-index-backed) — this is a
+// convenience pre-warm, not the only creation path: routes/stockcount.js's
+// GET /counts/current-ptfe lazily creates it too, so a missed Monday run
+// (there's no daily fallback here, unlike the Isopar check above) still
+// self-heals the moment anyone opens the tile.
+cron.schedule('56 5 * * 1', () => {
+  console.log('[cron] checking weekly PTFE cycle count');
+  checkWeeklyPtfeCycleCountDue()
+    .then(result => { if (result.created) console.log('[cron] weekly PTFE cycle count created, CountId', result.countId); })
+    .catch(err => console.error('[cron] weekly PTFE cycle count check failed', err));
 });
 
 // Runs `schtasks args...` and resolves { ok, stdout, stderr }, never
@@ -470,6 +486,7 @@ app.use('/api/finance',       requireLogin,   financeRoutes);
 app.use('/api/notifications', requireLogin,   notificationsRoutes);
 app.use('/api/performance', requireLogin, performanceRoutes);
 app.use('/api/staging', requireLogin, stagingRoutes);
+app.use('/api/stockcount', requireLogin, stockCountRoutes);
 app.use('/api/consignment', requireLogin, consignmentRoutes);
 app.use('/api/production-schedule', requireLogin, productionScheduleRoutes);
 app.use('/api/sales',               requireLogin, salesRoutes);

@@ -127,6 +127,58 @@
         </div>
       </div>
 
+      <!-- Stock Count -->
+      <div class="pn-section">
+        <div class="pn-section-hdr">Stock Count</div>
+        <div class="tile-grid">
+
+          <div class="sap-tile sap-tile--live" data-fn="ptfeCycleCount">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Weekly PTFE Cycle Count</div>
+            <div class="tile-desc">Auto-created every Monday &mdash; enter material, quantity &amp; location and compare against SAP</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="finishedGoodsCount">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="6" height="6" rx="1"/><rect x="15" y="4" width="6" height="6" rx="1"/><path d="M6 10v4a2 2 0 002 2h2"/><path d="M18 10v10"/><path d="M12 20h9"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Finished Goods Count</div>
+            <div class="tile-desc">Guided batch &amp; bin scan against SAP warehouse management</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="rawMaterialCount">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 3h18v6H3z"/><path d="M3 9v12h18V9"/><line x1="9" y1="14" x2="15" y2="14"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Full Warehouse Raw Material Scan</div>
+            <div class="tile-desc">Supervisor-initiated full count of Storage Location 1710, valued against SAP standard price</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="productionCount">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 21V9l8-6 8 6v12"/><path d="M9 21v-6h6v6"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Production Count</div>
+            <div class="tile-desc">Supervisor-initiated count of Storage Location 1716 (non-batch-managed)</div>
+          </div>
+
+        </div>
+      </div>
+
       <!-- Picking Operations -->
       <div class="pn-section">
         <div class="pn-section-hdr">Picking Operations</div>
