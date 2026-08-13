@@ -2907,6 +2907,71 @@ router.delete('/isopar/readings/:readingId', requirePermission('LOG_MRP'), async
   }
 });
 
+// Rebuilds the live Isopar forecast (latest meter reading + weekday/weekend rate + any real
+// pending deliveries already accepted for it) and flags whether it implies running out
+// (expectedStock <= 0) or overfilling the tank (expectedStock > MaxStockCapacityQty). Called by
+// the frontend after every reading save/edit/delete, and on tile load — the "warn me if the
+// prediction changes after each manual stock level entry" requirement. Returns null when
+// there's nothing to flag (or no reading/rate configured yet to check against).
+//
+// Bounded to a near-term window rather than the full 13-month horizon: with no pending delivery,
+// an unconstrained forecast will ALWAYS eventually hit zero (nothing replenishes it on its own),
+// which would make this "risk" permanently true and useless as a warning. ORDER_REVIEW_HORIZON_DAYS
+// (14 days — the same "how far ahead is a shortage worth surfacing" window the rest of MRP uses)
+// is the default check window, extended out to cover whatever pending delivery lands furthest
+// away (plus a short buffer) so an overfill risk tied to a later delivery is still caught.
+async function computeIsoparStockRisk() {
+  const [isoparContext, incoming] = await Promise.all([
+    db.getIsoparForecastContext(),
+    db.listOpenIncomingOrders([ISOPAR_MATERIAL]),
+  ]);
+  const { latestReading, planningRate } = isoparContext;
+  if (!latestReading || !planningRate) return null;
+
+  const onHandStock = Number(latestReading.ReadingQty);
+  const dailyUsageFnOverride = makeIsoparDailyUsageFn(Number(planningRate.WeekdayRateLPerDay), Number(planningRate.WeekendRateLPerDay));
+  const incomingDeliveries = incoming
+    .filter(o => o.DeliveryDate)
+    .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
+
+  // predictedMonthly is irrelevant here (dailyUsageFnOverride replaces it entirely) — the
+  // 13-zero array is only there to size buildWeeklyStockForecast's usual 13-month horizon.
+  const forecast = buildWeeklyStockForecast(onHandStock, new Array(13).fill(0), new Date(), incomingDeliveries, [], dailyUsageFnOverride);
+  const maxCapacity = planningRate.MaxStockCapacityQty != null ? Number(planningRate.MaxStockCapacityQty) : null;
+
+  const reviewHorizonEnd = addDaysUtc(new Date(), ORDER_REVIEW_HORIZON_DAYS);
+  const latestDeliveryDate = incomingDeliveries.length
+    ? new Date(Math.max(...incomingDeliveries.map(d => d.date.getTime())))
+    : null;
+  const horizonEnd = (latestDeliveryDate && latestDeliveryDate > reviewHorizonEnd)
+    ? addDaysUtc(latestDeliveryDate, 7)
+    : reviewHorizonEnd;
+  const weeksInWindow = forecast.weeks.filter(w => new Date(w.weekEnding + 'T00:00:00Z') <= horizonEnd);
+
+  const stockoutWeek = onHandStock <= 0 ? { weekEnding: forecast.asOfDate } : weeksInWindow.find(w => w.expectedStock <= 0);
+  const overCapacityWeek = maxCapacity != null
+    ? (onHandStock > maxCapacity ? { weekEnding: forecast.asOfDate } : weeksInWindow.find(w => w.expectedStock > maxCapacity))
+    : null;
+
+  if (!stockoutWeek && !overCapacityWeek) return null;
+  return {
+    asOfDate: forecast.asOfDate,
+    currentStock: onHandStock,
+    maxStockCapacityQty: maxCapacity,
+    stockoutDate: stockoutWeek ? stockoutWeek.weekEnding : null,
+    overCapacityDate: overCapacityWeek ? overCapacityWeek.weekEnding : null,
+  };
+}
+
+router.get('/isopar/stock-risk', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const risk = await computeIsoparStockRisk();
+    res.json({ success: true, data: risk });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // The "actual" block is the measured average consumption from real readings + receipts (only
 // strictly-consecutive 1-day-apart reading pairs are used — simple and hand-verifiable, a
 // missed day just isn't counted rather than interpolated). "recommendation" is present only
@@ -2964,14 +3029,23 @@ router.get('/isopar/planning-rate', requirePermission('LOG_MRP'), async (req, re
   }
 });
 
+// Partial updates are allowed — a field left out carries forward from the current row rather
+// than being reset (see updateIsoparPlanningRate's merge). "Apply Recommended Rate" only sends
+// weekday/weekend; the settings form's own Save button sends all three.
 router.put('/isopar/planning-rate', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const { weekdayRateLPerDay, weekendRateLPerDay, source, notes } = req.body;
-    if (weekdayRateLPerDay == null || Number(weekdayRateLPerDay) < 0 || weekendRateLPerDay == null || Number(weekendRateLPerDay) < 0) {
-      return res.status(400).json({ success: false, error: { message: 'weekdayRateLPerDay and weekendRateLPerDay are required and cannot be negative.' } });
+    const { weekdayRateLPerDay, weekendRateLPerDay, maxStockCapacityQty, source, notes } = req.body;
+    if (weekdayRateLPerDay != null && Number(weekdayRateLPerDay) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'weekdayRateLPerDay cannot be negative.' } });
+    }
+    if (weekendRateLPerDay != null && Number(weekendRateLPerDay) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'weekendRateLPerDay cannot be negative.' } });
+    }
+    if (maxStockCapacityQty != null && Number(maxStockCapacityQty) < 0) {
+      return res.status(400).json({ success: false, error: { message: 'maxStockCapacityQty cannot be negative.' } });
     }
     const createdBy = req.session?.user?.username || 'unknown';
-    const rateId = await db.updateIsoparPlanningRate({ weekdayRateLPerDay, weekendRateLPerDay, source, notes, createdBy });
+    const rateId = await db.updateIsoparPlanningRate({ weekdayRateLPerDay, weekendRateLPerDay, maxStockCapacityQty, source, notes, createdBy });
     res.json({ success: true, data: { rateId } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });

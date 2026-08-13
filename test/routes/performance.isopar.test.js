@@ -219,3 +219,80 @@ describe('POST /isopar/declarations', () => {
     expect(db.computeIsoparPeriodFigures).not.toHaveBeenCalled(); // history never recomputes
   });
 });
+
+// GET /isopar/stock-risk — rebuilds the live forecast from the meter reading + planning rate +
+// any real pending Isopar deliveries, and flags a stockout or tank-overfill risk. Tank capacity
+// 7000L, reorder at 2000L, fixed 5000L orders (see migrations/nexus_operations/20260814090000_
+// isopar_inventory_policy.cjs) — 2000+5000=7000 by design, so risk should only surface when the
+// forecast disagrees with that plan (e.g. a reading confirms consumption has diverged).
+describe('GET /isopar/stock-risk', () => {
+  test('returns null when there is no meter reading yet — nothing to check', async () => {
+    db.getIsoparForecastContext.mockResolvedValueOnce({ latestReading: null, planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50, MaxStockCapacityQty: 7000 } });
+    db.listOpenIncomingOrders.mockResolvedValueOnce([]);
+
+    const res = await request(appMrp).get('/isopar/stock-risk');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeNull();
+  });
+
+  test('returns null when the near-term (14-day) forecast never breaches 0 or the tank capacity', async () => {
+    // A freshly topped-up tank at exactly the 7000L cap comfortably outlasts the 14-day review
+    // window at ~400 L/day average — no pending delivery needed to stay safe that soon.
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-11-15T00:00:00Z', ReadingQty: 7000 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50, MaxStockCapacityQty: 7000 },
+    });
+    db.listOpenIncomingOrders.mockResolvedValueOnce([]);
+
+    const res = await request(appMrp).get('/isopar/stock-risk');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeNull();
+  });
+
+  test('does NOT flag a stockout far outside the review window just because nothing is pending yet', async () => {
+    // 5000L with nothing on order will eventually hit zero (in ~3 weeks), but that's well past
+    // the 14-day near-term window this check cares about — the standard Order Suggestions engine
+    // (breach-date + lead-time) is what surfaces that kind of longer-range "due soon" case.
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-11-15T00:00:00Z', ReadingQty: 5000 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50, MaxStockCapacityQty: 7000 },
+    });
+    db.listOpenIncomingOrders.mockResolvedValueOnce([]);
+
+    const res = await request(appMrp).get('/isopar/stock-risk');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeNull();
+  });
+
+  test('flags a stockout risk when current stock is already at/below 0', async () => {
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-11-15T00:00:00Z', ReadingQty: 0 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50, MaxStockCapacityQty: 7000 },
+    });
+    db.listOpenIncomingOrders.mockResolvedValueOnce([]);
+
+    const res = await request(appMrp).get('/isopar/stock-risk');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ currentStock: 0, stockoutDate: expect.any(String), overCapacityDate: null });
+  });
+
+  test('flags an overcapacity risk when a pending delivery would push stock above MaxStockCapacityQty', async () => {
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-11-15T00:00:00Z', ReadingQty: 6000 }, // higher than usual at reorder time
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50, MaxStockCapacityQty: 7000 },
+    });
+    // A 5000L delivery lands imminently, on top of 6000L already on hand — well over the 7000L cap.
+    db.listOpenIncomingOrders.mockResolvedValueOnce([
+      { SuggestionId: 1, Material: '10010', OrderQty: 5000, DeliveryDate: '2026-11-16T00:00:00Z', Status: 'Ordered' },
+    ]);
+
+    const res = await request(appMrp).get('/isopar/stock-risk');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ stockoutDate: null, overCapacityDate: expect.any(String), maxStockCapacityQty: 7000 });
+  });
+
+  test('requires LOG_MRP', async () => {
+    const res = await request(app).get('/isopar/stock-risk');
+    expect(res.status).toBe(403);
+  });
+});

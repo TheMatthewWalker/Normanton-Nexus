@@ -8642,6 +8642,7 @@ async function daDeleteAdjustment(adjustmentId, material) {
 async function runIsoparTiedOil() {
   showResultPanel('Isopar Tied Oil', 'Daily meter-reading log, weekday/weekend planning rate, and HMRC Tied Oil declarations for Material 10010');
   document.getElementById('result-body').innerHTML = `
+    <div id="it-risk-banner"></div>
     <div id="it-readings-section" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:14px"></div>
     <div id="it-rate-section" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:14px"></div>
     <div id="it-declarations-section" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px"></div>
@@ -8649,6 +8650,35 @@ async function runIsoparTiedOil() {
   itRenderReadingsSection();
   itRenderRateSection();
   itRenderDeclarationsSection();
+  itCheckStockRisk();
+}
+
+// Rebuilds the live stockout/tank-overfill check (routes/performance.js's
+// computeIsoparStockRisk) and shows/clears a banner at the top of the tile. Called on tile
+// load and again after every reading save/edit/delete, since a new manual reading is exactly
+// what would change the prediction — "warn me if the prediction changes after each manual
+// stock level entry where we will have too much or run out."
+async function itCheckStockRisk() {
+  const el = document.getElementById('it-risk-banner');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/performance/isopar/stock-risk');
+    const json = await res.json();
+    if (!json.success) { el.innerHTML = ''; return; }
+    const risk = json.data;
+    if (!risk) { el.innerHTML = ''; return; }
+
+    const messages = [];
+    if (risk.stockoutDate) messages.push(`projected to <strong>run out around ${esc(formatDisplayDate(risk.stockoutDate))}</strong> with nothing due to arrive in time`);
+    if (risk.overCapacityDate) messages.push(`projected to <strong>exceed the ${Number(risk.maxStockCapacityQty).toLocaleString()}L tank capacity around ${esc(formatDisplayDate(risk.overCapacityDate))}</strong> once a pending delivery lands`);
+
+    el.innerHTML = `
+      <div class="sap-error" style="margin-bottom:14px">
+        Isopar stock warning — currently ${Number(risk.currentStock).toLocaleString()}L on hand, ${messages.join(', and ')}. Check the Order Suggestions tile and any pending Isopar orders.
+      </div>`;
+  } catch (_) {
+    el.innerHTML = ''; // best-effort — never block the rest of the tile over this
+  }
 }
 
 // ── Meter reading log ────────────────────────────────────────────────────
@@ -8774,6 +8804,7 @@ function itOpenReadingModal(reading) {
       closePickModal();
       itRenderReadingsSection();
       itRenderRateSection(); // the actual-vs-configured comparison depends on the reading log
+      itCheckStockRisk(); // this reading is exactly what could change the prediction
     } catch (err) {
       document.getElementById('it-reading-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
       btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Reading';
@@ -8807,6 +8838,7 @@ async function itDeleteReading(readingId, dateLabel) {
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     itRenderReadingsSection();
     itRenderRateSection();
+    itCheckStockRisk();
   } catch (err) {
     alert(err.message);
   }
@@ -8845,6 +8877,10 @@ function itRenderRatePanel(el, data) {
         <label class="tf-label">Weekend (Sat&ndash;Sun) L/day</label>
         <input class="tf-input" type="number" step="0.01" min="0" id="it-rate-weekend" value="${current?.WeekendRateLPerDay ?? 50}">
       </div>
+      <div class="tf-field">
+        <label class="tf-label">Tank Capacity (L)</label>
+        <input class="tf-input" type="number" step="1" min="0" id="it-rate-capacity" value="${current?.MaxStockCapacityQty ?? 7000}">
+      </div>
       <div class="tf-field" style="justify-content:flex-end">
         <label class="tf-label">&nbsp;</label>
         <button type="button" class="btn-submit" id="it-rate-save-btn">Save Rate</button>
@@ -8860,25 +8896,34 @@ function itRenderRatePanel(el, data) {
   `;
 
   document.getElementById('it-rate-save-btn').addEventListener('click', () => itSaveRate(
-    document.getElementById('it-rate-weekday').value, document.getElementById('it-rate-weekend').value, 'Manual'
+    document.getElementById('it-rate-weekday').value,
+    document.getElementById('it-rate-weekend').value,
+    'Manual',
+    document.getElementById('it-rate-capacity').value
   ));
   const applyBtn = document.getElementById('it-rate-apply-btn');
   if (applyBtn) {
+    // Only the rate is recommended — omit maxStockCapacityQty entirely so the backend's merge
+    // carries the currently-configured tank capacity forward unchanged (see
+    // updateIsoparPlanningRate's merge behavior).
     applyBtn.addEventListener('click', () => itSaveRate(recommendation.weekdayRateLPerDay, recommendation.weekendRateLPerDay, 'Recommended'));
   }
 }
 
-async function itSaveRate(weekdayRateLPerDay, weekendRateLPerDay, source) {
+async function itSaveRate(weekdayRateLPerDay, weekendRateLPerDay, source, maxStockCapacityQty) {
   const resultEl = document.getElementById('it-rate-result');
   try {
+    const body = { weekdayRateLPerDay, weekendRateLPerDay, source };
+    if (maxStockCapacityQty !== undefined) body.maxStockCapacityQty = maxStockCapacityQty;
     const res = await fetch('/api/performance/isopar/planning-rate', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ weekdayRateLPerDay, weekendRateLPerDay, source }),
+      body: JSON.stringify(body),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Save failed');
     itRenderRateSection();
+    itCheckStockRisk(); // the capacity/rate just changed — re-evaluate the warning banner
   } catch (err) {
     if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }

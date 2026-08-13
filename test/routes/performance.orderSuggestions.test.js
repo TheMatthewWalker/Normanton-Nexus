@@ -201,6 +201,50 @@ describe('Isopar (Material 10010) override', () => {
     expect(material.currentStock).toBe(500); // unaffected by the Isopar reading fixture above
     expect(material.isoparMeterReading).toBeNull();
   });
+
+  // Isopar's inventory policy (migrations/nexus_operations/20260814090000_isopar_inventory_policy.cjs):
+  // reorder at the 2000L safety floor (VendorMaterial.MinSafetyStockQty), order exactly 5000L
+  // every time (MaterialMoqQty === MaterialMaxQty === 5000, the same exact-quantity pattern
+  // Raaj Ratna's combined MOQ uses), tank capacity 7000L. A reading below the 2000L floor should
+  // surface as an Overdue, dueNow suggestion for exactly 5000L — "make the suggestions for me"
+  // and "delivery as soon as possible once stock drops below 2000L".
+  test('a reading below the 2000L reorder point surfaces an Overdue suggestion for exactly 5000L', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+      materialRow({
+        Material: '10010', VendorName: 'Isopar', StockQty: 999999, ConsignmentQty: 0,
+        MinSafetyStockQty: 2000, MaterialMoqQty: 5000, MaterialMaxQty: 5000, LeadTimeDaysOverride: 15,
+      }),
+    ]);
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-01-15T00:00:00Z', ReadingQty: 1800 }, // below the 2000L floor
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 },
+    });
+
+    const res = await request(appMrp).get('/order-suggestions');
+    expect(res.status).toBe(200);
+    const material = res.body.data[0].materials.find(m => m.material === '10010');
+    expect(material).toMatchObject({ urgency: 'Overdue', dueNow: true, suggestedQty: 5000, currentStock: 1800 });
+  });
+
+  test('even a very large computed shortfall still snaps to exactly one 5000L lot, never a multiple', async () => {
+    // A much lower reading (deep into shortfall) would, under the generic coverage-days formula,
+    // compute a raw qty well above 5000 — enforceMaterialQty's moq===max exact-quantity clamp
+    // must still force it down to precisely one lot, not round up to 10000/15000/etc.
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+      materialRow({
+        Material: '10010', VendorName: 'Isopar', StockQty: 999999, ConsignmentQty: 0,
+        MinSafetyStockQty: 2000, MaterialMoqQty: 5000, MaterialMaxQty: 5000, LeadTimeDaysOverride: 15,
+      }),
+    ]);
+    db.getIsoparForecastContext.mockResolvedValueOnce({
+      latestReading: { ReadingId: 1, ReadingDate: '2026-01-15T00:00:00Z', ReadingQty: 0 },
+      planningRate: { WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50 },
+    });
+
+    const res = await request(appMrp).get('/order-suggestions');
+    const material = res.body.data[0].materials.find(m => m.material === '10010');
+    expect(material.suggestedQty).toBe(5000);
+  });
 });
 
 test('a DB failure is reported as a 500', async () => {

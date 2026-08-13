@@ -1626,25 +1626,37 @@ export async function deleteIsoparReading(readingId) {
 export async function getIsoparPlanningRate() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
-    SELECT TOP 1 RateId, WeekdayRateLPerDay, WeekendRateLPerDay, Source, Notes, CreatedBy, CreatedAtUtc
+    SELECT TOP 1 RateId, WeekdayRateLPerDay, WeekendRateLPerDay, MaxStockCapacityQty, Source, Notes, CreatedBy, CreatedAtUtc
     FROM log.IsoparPlanningRate
     ORDER BY RateId DESC
   `);
   return recordset[0] || null;
 }
 
-export async function updateIsoparPlanningRate({ weekdayRateLPerDay, weekendRateLPerDay, source, notes, createdBy }) {
+// Versioned (insert-only, "current" = latest row) — a field omitted from a given update must
+// carry forward the current row's value rather than reset to NULL, since a buyer editing just
+// the weekday rate shouldn't silently blank out the tank capacity. Callers may pass only the
+// field(s) they're actually changing.
+export async function updateIsoparPlanningRate({ weekdayRateLPerDay, weekendRateLPerDay, maxStockCapacityQty, source, notes, createdBy }) {
+  const current = await getIsoparPlanningRate();
+  const merged = {
+    weekdayRateLPerDay: weekdayRateLPerDay ?? current?.WeekdayRateLPerDay ?? 0,
+    weekendRateLPerDay: weekendRateLPerDay ?? current?.WeekendRateLPerDay ?? 0,
+    maxStockCapacityQty: maxStockCapacityQty ?? current?.MaxStockCapacityQty ?? null,
+  };
+
   const pool = await getPool();
   const { recordset } = await pool.request()
-    .input('weekdayRate', sql.Decimal(9, 2), weekdayRateLPerDay)
-    .input('weekendRate', sql.Decimal(9, 2), weekendRateLPerDay)
-    .input('source',      sql.NVarChar(20), source || 'Manual')
-    .input('notes',       sql.NVarChar(500), notes || null)
-    .input('createdBy',   sql.NVarChar(100), createdBy || null)
+    .input('weekdayRate',  sql.Decimal(9, 2),  merged.weekdayRateLPerDay)
+    .input('weekendRate',  sql.Decimal(9, 2),  merged.weekendRateLPerDay)
+    .input('maxCapacity',  sql.Decimal(15, 3), merged.maxStockCapacityQty)
+    .input('source',       sql.NVarChar(20), source || 'Manual')
+    .input('notes',        sql.NVarChar(500), notes || null)
+    .input('createdBy',    sql.NVarChar(100), createdBy || null)
     .query(`
-      INSERT INTO log.IsoparPlanningRate (WeekdayRateLPerDay, WeekendRateLPerDay, Source, Notes, CreatedBy)
+      INSERT INTO log.IsoparPlanningRate (WeekdayRateLPerDay, WeekendRateLPerDay, MaxStockCapacityQty, Source, Notes, CreatedBy)
       OUTPUT INSERTED.RateId
-      VALUES (@weekdayRate, @weekendRate, @source, @notes, @createdBy)
+      VALUES (@weekdayRate, @weekendRate, @maxCapacity, @source, @notes, @createdBy)
     `);
   return recordset[0].RateId;
 }

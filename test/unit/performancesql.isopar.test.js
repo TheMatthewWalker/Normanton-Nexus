@@ -71,11 +71,25 @@ describe('getIsoparPlanningRate / updateIsoparPlanningRate', () => {
   });
 
   test('updateIsoparPlanningRate inserts a new version rather than updating in place', async () => {
-    dbRequest.query.mockResolvedValueOnce({ recordset: [{ RateId: 4 }] });
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [] }) // getIsoparPlanningRate (no current row) — merge step
+      .mockResolvedValueOnce({ recordset: [{ RateId: 4 }] }); // INSERT ... OUTPUT
     const id = await db.updateIsoparPlanningRate({ weekdayRateLPerDay: 480, weekendRateLPerDay: 60, source: 'Recommended', createdBy: 'tester' });
     expect(id).toBe(4);
-    const query = dbRequest.query.mock.calls[0][0];
+    const query = dbRequest.query.mock.calls[1][0];
     expect(query).toMatch(/INSERT INTO log\.IsoparPlanningRate/);
+  });
+
+  test('a partial update (e.g. rate only) carries forward the current row\'s other fields rather than nulling them', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ RateId: 3, WeekdayRateLPerDay: 450, WeekendRateLPerDay: 50, MaxStockCapacityQty: 7000 }] }) // current row
+      .mockResolvedValueOnce({ recordset: [{ RateId: 4 }] });
+
+    // Only weekday/weekend rate supplied — no maxStockCapacityQty — mirrors "Apply Recommended Rate".
+    await db.updateIsoparPlanningRate({ weekdayRateLPerDay: 480, weekendRateLPerDay: 60, source: 'Recommended' });
+
+    const maxCapacityInput = dbRequest.input.mock.calls.find(call => call[0] === 'maxCapacity');
+    expect(maxCapacityInput[2]).toBe(7000); // carried forward, not null
   });
 });
 
