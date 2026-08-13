@@ -984,8 +984,8 @@ function siRenderStockCountDiscrepancies(rows) {
       <td>${r.Kind === 'WrongBin' ? '<span style="color:#B45309;font-weight:700">Wrong Bin</span>' : '<span style="color:#DC2626;font-weight:700">Missing</span>'}</td>
       <td><strong>${esc(r.Material)}</strong></td>
       <td>${esc(r.Batch)}</td>
-      <td>${esc([r.ExpectedStorageType, r.ExpectedBin].filter(Boolean).join('/') || '—')}</td>
-      <td>${esc([r.FoundStorageType, r.FoundBin].filter(Boolean).join('/') || '—')}</td>
+      <td>${fgAreaCell(r.ExpectedStorageType, r.ExpectedBin)}</td>
+      <td>${fgAreaCell(r.FoundStorageType, r.FoundBin)}</td>
       <td>
         ${r.Kind === 'WrongBin' && sessionPermissions.includes('LOG_SUPER') ? `<button type="button" class="btn-submit sc-disc-move-btn" data-id="${r.DiscrepancyId}">Move to Found Bin</button>` : ''}
         ${sessionPermissions.includes('LOG_SUPER') ? `<button type="button" class="btn-secondary sc-disc-holding-btn" data-id="${r.DiscrepancyId}" style="margin-left:6px">To Holding</button>
@@ -6132,6 +6132,22 @@ function scStatusBadge(status) {
   return `<span style="color:${SC_STATUS_COLOR[status] || '#6B7280'};font-weight:700">${esc(SC_STATUS_LABEL[status] || status)}</span>`;
 }
 
+// Finished Goods (LQUA storage location 1711) storage-type → friendly area
+// label, confirmed by the warehouse supervisor — anything not in this map is
+// a system-generated/misconfigured storage type, not a real FG area, so it's
+// deliberately labelled "Discrepancy" rather than left as a bare SAP code.
+const FG_STORAGE_TYPE_LABEL = { '916': 'Picked', 'RO': 'Warehouse', 'FR': 'Cut Piece Boxes', '901': 'Production' };
+function fgStorageTypeLabel(code) {
+  if (!code) return '—';
+  return FG_STORAGE_TYPE_LABEL[code] || 'Discrepancy';
+}
+function fgAreaCell(storageType, bin) {
+  if (!storageType && !bin) return '—';
+  const label = fgStorageTypeLabel(storageType);
+  const isDiscrepancy = storageType && !FG_STORAGE_TYPE_LABEL[storageType];
+  return `${esc([storageType, bin].filter(Boolean).join('/'))} <span style="color:${isDiscrepancy ? '#DC2626' : 'var(--text-secondary,#666)'};font-size:11px">(${esc(label)})</span>`;
+}
+
 // ── Weekly PTFE Cycle Count ────────────────────────────────────────────────────
 
 async function runPtfeCycleCount() {
@@ -6550,7 +6566,7 @@ function fgRenderNoSession() {
     ${canStart ? `
       <div class="tf-section-label">Start Count Session</div>
       <form class="tf-row" id="fg-start-form">
-        <div class="tf-field"><label class="tf-label">Storage Location <span class="tf-req">*</span></label><input class="tf-input" name="storageLocation" required></div>
+        <div class="tf-field"><label class="tf-label">Storage Location <span class="tf-req">*</span></label><input class="tf-input" name="storageLocation" value="1711" required></div>
         <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">Start Session</button></div>
       </form>
       <div id="fg-start-result"></div>
@@ -6574,12 +6590,43 @@ async function fgSubmitStartSession(e) {
   }
 }
 
+let fgBatchRows = []; // raw downloaded rows, kept alongside fgBatchMap for the by-area summary below
+
 async function fgLoadBatches() {
   const json = await scApi('/fg/batches');
+  fgBatchRows = json.data || [];
   fgBatchMap = {};
-  (json.data || []).forEach(row => {
+  fgBatchRows.forEach(row => {
     if (row.batch && !fgBatchMap[row.batch]) fgBatchMap[row.batch] = row.material;
   });
+}
+
+// "Reports" breakdown by storage type — see FG_STORAGE_TYPE_LABEL above.
+// Anything outside the four known areas is flagged as a Discrepancy so it's
+// visible before the operator even starts scanning, not just after.
+function fgRenderAreaSummary() {
+  const byType = {};
+  fgBatchRows.forEach(row => {
+    const key = row.storageType || '—';
+    byType[key] = byType[key] || { count: 0, qty: 0 };
+    byType[key].count += 1;
+    byType[key].qty += Number(row.availableQty) || 0;
+  });
+  const rows = Object.entries(byType).sort(([a], [b]) => a.localeCompare(b)).map(([type, stats]) => `
+    <tr class="pn-row">
+      <td>${fgAreaCell(type, '')}</td>
+      <td>${stats.count.toLocaleString()}</td>
+      <td>${stats.qty.toLocaleString()}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="tf-section-label" style="margin-top:24px">Downloaded Stock by Area</div>
+    <div style="overflow-x:auto;margin-bottom:14px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Storage Type</th><th>Batches</th><th>Total Qty</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="3" class="sap-empty">No batch-managed stock downloaded.</td></tr>'}</tbody>
+      </table>
+    </div>`;
 }
 
 function fgRenderScanUI(session) {
@@ -6591,6 +6638,7 @@ function fgRenderScanUI(session) {
       <div class="tf-field"><label class="tf-label">Session</label><div>#${session.CountId} — Storage Location ${esc(session.StorageLocation)} (${Object.keys(fgBatchMap).length} batches downloaded)</div></div>
       ${sessionPermissions.includes('LOG_SUPER') ? `<div class="tf-field" style="align-self:flex-end"><button class="btn-back-tiles" type="button" id="fg-end-btn">End Count Session</button></div>` : ''}
     </div>
+    ${fgRenderAreaSummary()}
 
     <div class="tf-section-label" id="fg-scan-label">Scan Batch Number</div>
     <form id="fg-scan-form" class="tf-row" autocomplete="off">

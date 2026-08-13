@@ -282,10 +282,38 @@ describe('POST /counts/:id/lines', () => {
     expect(res.body.error).toMatch(/No SAP bin mapping configured for location "YARD"/);
   });
 
-  test('PRODUCTION: flags a batch-managed material and signals redirectToFinishedGoodsCount', async () => {
+  // PRODUCTION sums MARD@1716 (SapServer's im-stock endpoint — 1716 has no
+  // WM/bin concept and never appears in LQUA) with LQUA@1710/SA/PTFE
+  // (material already issued to production physically sits there), and
+  // separately probes LQUA for the material anywhere at all to detect
+  // batch-managed materials that should redirect to Finished Goods Count.
+  test('PRODUCTION: sums MARD@1716 and LQUA@1710/SA/PTFE for the comparison qty', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 3, CountType: 'PRODUCTION', Status: 'Open', StorageLocation: '1716' });
+    db.searchMaterialForCount.mockResolvedValueOnce({ material: '40002', uom: 'EA' });
+    axiosMock.get
+      .mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 20 }] } })   // im-stock @ 1716
+      .mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 5 }] } })    // LQUA @ 1710/SA/PTFE
+      .mockResolvedValueOnce({ data: { success: true, data: [] } });                       // broad LQUA (batch check)
+    db.addCountLine.mockResolvedValueOnce(11);
+
+    const res = await request(app).post('/counts/3/lines').send({ material: '40002', countedQty: 20 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.sapQty).toBe(25);
+    expect(axiosMock.get.mock.calls[0][0]).toContain('/api/warehouse/im-stock');
+    expect(axiosMock.get.mock.calls[0][1].params).toMatchObject({ material: '40002', storageLocation: '1716' });
+    expect(axiosMock.get.mock.calls[1][0]).toContain('/api/warehouse/stock');
+    expect(axiosMock.get.mock.calls[1][1].params).toMatchObject({ material: '40002', storageType: 'SA', bin: 'PTFE', storageLocation: '1710' });
+    expect(db.addCountLine).toHaveBeenCalledWith('3', expect.objectContaining({ sapQty: 25, storageType: null, bin: null }));
+  });
+
+  test('PRODUCTION: flags a batch-managed material (found anywhere in LQUA) and signals redirectToFinishedGoodsCount', async () => {
     db.getCountDocument.mockResolvedValueOnce({ CountId: 3, CountType: 'PRODUCTION', Status: 'Open', StorageLocation: '1716' });
     db.searchMaterialForCount.mockResolvedValueOnce({ material: '40001', materialText: 'FG Item', uom: 'EA' });
-    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 50, batch: 'B123' }] } });
+    axiosMock.get
+      .mockResolvedValueOnce({ data: { success: true, data: [] } })                                       // im-stock @ 1716 — nothing
+      .mockResolvedValueOnce({ data: { success: true, data: [] } })                                       // LQUA @ 1710/SA/PTFE — nothing
+      .mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 50, batch: 'B123' }] } });   // broad LQUA — found with a batch
     db.addCountLine.mockResolvedValueOnce(10);
 
     const res = await request(app).post('/counts/3/lines').send({ material: '40001', countedQty: 50 });
@@ -294,17 +322,15 @@ describe('POST /counts/:id/lines', () => {
     expect(res.body.data).toMatchObject({ isBatchManaged: true, redirectToFinishedGoodsCount: true });
     expect(db.addCountLine).toHaveBeenCalledWith('3', expect.objectContaining({ isBatchManaged: true }));
   });
+});
 
-  test('PRODUCTION: does not query storageType/bin (no WM concept at 1716)', async () => {
-    db.getCountDocument.mockResolvedValueOnce({ CountId: 3, CountType: 'PRODUCTION', Status: 'Open', StorageLocation: '1716' });
-    db.searchMaterialForCount.mockResolvedValueOnce({ material: '40002' });
-    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 20 }] } });
-    db.addCountLine.mockResolvedValueOnce(11);
-
-    await request(app).post('/counts/3/lines').send({ material: '40002', countedQty: 20 });
-
-    expect(axiosMock.get.mock.calls[0][1].params).toMatchObject({ material: '40002', storageLocation: '1716' });
-    expect(axiosMock.get.mock.calls[0][1].params.storageType).toBeUndefined();
+describe('POST /counts/:id/lines — Raw Material SA exclusion', () => {
+  test('400s when entering storage type SA for a Raw Material Count (already issued to production)', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 1, CountType: 'RAW_MATERIAL', Status: 'Open', StorageLocation: '1710' });
+    const res = await request(app).post('/counts/1/lines').send({ material: '30005R', storageType: 'sa', bin: 'PTFE', countedQty: 10 });
+    expect(res.status).toBe(400);
+    expect(axiosMock.get).not.toHaveBeenCalled();
+    expect(db.addCountLine).not.toHaveBeenCalled();
   });
 });
 

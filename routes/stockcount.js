@@ -156,28 +156,56 @@ async function fetchSapStock({ material, storageType, bin, storageLocation, excl
   return body.data || [];
 }
 
+// MARD-based (inventory-managed-only) stock — storage location 1716
+// (Production Count) has no WM/bin concept and never appears in LQUA,
+// confirmed against the real SAP system; see SapServer's
+// WarehouseHelpers.BuildImStockRequest/GetImStock.
+async function fetchSapImStock({ material, storageLocation }) {
+  const response = await axios.get(`${sapConfig.url}/api/warehouse/im-stock`, {
+    params: { material, storageLocation, rowCount: 9999 },
+    timeout: 30000,
+    httpsAgent: sapAgent,
+    headers: { Authorization: `Bearer ${makeSapToken()}` },
+  });
+  const body = response.data;
+  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  return body.data || [];
+}
+
+function sumQty(rows) {
+  return rows.reduce((sum, r) => sum + (Number(r.availableQty) || 0), 0);
+}
+
 // Resolves the SAP comparison quantity (and, for Production Count, whether
 // the material turns out to be batch-managed) for one count line, branching
 // on the document's CountType — the three ways this feature compares a
 // counted line against SAP:
 //   PTFE_WEEKLY  — named location resolves via the supervisor-maintained
-//                  location map to a SAP bin, LGTYP 'SA' excluded.
+//                  location map to a SAP bin, LGTYP 'SA' excluded (that bin
+//                  type holds material already issued to production, not
+//                  real countable raw-material stock).
 //   RAW_MATERIAL — operator-entered storage type/bin, scoped to the count's
-//                  storage location (1710).
-//   PRODUCTION   — no WM/bin concept (storage location 1716, inventory-
-//                  managed only) — material + storage location only. Any
-//                  row with a non-blank batch flags the material as
-//                  batch-managed, so the route can steer the operator to
-//                  Finished Goods Count instead (see StockAdjustmentModels.cs's
-//                  StorageType doc comment for the matching SA/PTFE posting-
-//                  side caveat, still unverified against a real SAP system).
+//                  storage location (1710). Storage type 'SA' is rejected
+//                  outright (see the 400 check in POST /counts/:id/lines)
+//                  for the same reason PTFE excludes it.
+//   PRODUCTION   — storage location 1716 is inventory-managed only (MARD,
+//                  confirmed against the real SAP system — LQUA never has
+//                  1716 rows). Material issued to production also
+//                  physically sits in storage type 'SA'/bin 'PTFE' under
+//                  storage location 1710 (WM-managed) — the comparison sums
+//                  MARD@1716 + LQUA@1710/SA/PTFE for this reason. Batch-
+//                  managed detection is a separate, broader LQUA lookup (any
+//                  location) since a batch-managed material may have zero
+//                  stock in either of those two specific places right now —
+//                  see StockAdjustmentModels.cs's StorageType doc comment in
+//                  SapServer for the matching posting-side note.
 async function resolveSapComparisonForLine(doc, { material, namedLocation, storageType, bin }) {
   if (doc.CountType === 'PTFE_WEEKLY') {
     const mapEntry = await db.getLocationMapEntry(namedLocation);
     if (!mapEntry) throw new Error(`No SAP bin mapping configured for location "${namedLocation}" — ask a supervisor to add it first.`);
     const rows = await fetchSapStock({ material, storageType: mapEntry.StorageType, bin: mapEntry.Bin, excludeStorageType: 'SA' });
     return {
-      sapQty: rows.reduce((sum, r) => sum + (Number(r.availableQty) || 0), 0),
+      sapQty: sumQty(rows),
       storageType: mapEntry.StorageType, bin: mapEntry.Bin, isBatchManaged: false,
     };
   }
@@ -185,17 +213,21 @@ async function resolveSapComparisonForLine(doc, { material, namedLocation, stora
   if (doc.CountType === 'RAW_MATERIAL') {
     const rows = await fetchSapStock({ material, storageType, bin, storageLocation: doc.StorageLocation });
     return {
-      sapQty: rows.reduce((sum, r) => sum + (Number(r.availableQty) || 0), 0),
+      sapQty: sumQty(rows),
       storageType, bin, isBatchManaged: false,
     };
   }
 
   if (doc.CountType === 'PRODUCTION') {
-    const rows = await fetchSapStock({ material, storageLocation: doc.StorageLocation });
+    const [mardRows, saRows, anyLquaRows] = await Promise.all([
+      fetchSapImStock({ material, storageLocation: doc.StorageLocation }),
+      fetchSapStock({ material, storageType: 'SA', bin: 'PTFE', storageLocation: '1710' }),
+      fetchSapStock({ material }),
+    ]);
     return {
-      sapQty: rows.reduce((sum, r) => sum + (Number(r.availableQty) || 0), 0),
+      sapQty: sumQty(mardRows) + sumQty(saRows),
       storageType: null, bin: null,
-      isBatchManaged: rows.some(r => r.batch && String(r.batch).trim() !== ''),
+      isBatchManaged: anyLquaRows.some(r => r.batch && String(r.batch).trim() !== ''),
     };
   }
 
@@ -297,6 +329,16 @@ router.post('/counts/:id/lines', async (req, res) => {
     const doc = await db.getCountDocument(countId);
     if (!doc) return res.status(404).json({ success: false, error: 'Count not found' });
     if (doc.Status !== 'Open') return res.status(400).json({ success: false, error: `Count is ${doc.Status}, not open for entry` });
+
+    // Storage type 'SA' holds material already issued to production, not
+    // real raw-material warehouse stock — it's excluded from PTFE's
+    // comparison automatically (ExcludeStorageType) but Raw Material Count
+    // takes an operator-entered bin directly, so reject it outright here
+    // rather than silently comparing against a bin that was never really
+    // "raw material" in the first place.
+    if (doc.CountType === 'RAW_MATERIAL' && String(storageType || '').toUpperCase() === 'SA') {
+      return res.status(400).json({ success: false, error: "Storage type 'SA' holds material already issued to production — it doesn't belong in a Raw Material Count." });
+    }
 
     const materialInfo = await db.searchMaterialForCount(material);
     const isInvalidMaterial = !materialInfo;
