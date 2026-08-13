@@ -22,9 +22,6 @@ const db = {
   searchMaterialForCount: jest.fn(),
   searchMaterialsForCount: jest.fn(),
   fuzzyMatchMaterial: jest.fn(),
-  listLocationMap: jest.fn(),
-  upsertLocationMap: jest.fn(),
-  getLocationMapEntry: jest.fn(),
   listCountDocuments: jest.fn(),
   getCountDocument: jest.fn(),
   createCountDocument: jest.fn(),
@@ -112,44 +109,6 @@ describe('GET /materials/:material/validate', () => {
   });
 });
 
-describe('GET /location-map', () => {
-  test('lists the active mapping', async () => {
-    db.listLocationMap.mockResolvedValueOnce([{ NamedLocation: 'PTFE', StorageType: 'PTF', Bin: 'B01' }]);
-    const res = await request(app).get('/location-map');
-    expect(res.status).toBe(200);
-    expect(res.body.data).toHaveLength(1);
-  });
-});
-
-describe('PUT /location-map/:namedLocation', () => {
-  test('is rejected for a user without LOG_SUPER', async () => {
-    const res = await request(app).put('/location-map/PTFE').send({ storageType: 'PTF', bin: 'B01' });
-    expect(res.status).toBe(403);
-    expect(axiosMock.get).not.toHaveBeenCalled();
-  });
-
-  test('400s when storageType or bin is missing', async () => {
-    const res = await request(appLogSuper).put('/location-map/PTFE').send({ storageType: 'PTF' });
-    expect(res.status).toBe(400);
-    expect(axiosMock.get).not.toHaveBeenCalled();
-  });
-
-  test('422s when the bin is not registered in SAP LAGP under that storage type', async () => {
-    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['SA', 'PDR'] } }); // no 'PTF'
-    const res = await request(appLogSuper).put('/location-map/PTFE').send({ storageType: 'PTF', bin: 'B01' });
-    expect(res.status).toBe(422);
-    expect(db.upsertLocationMap).not.toHaveBeenCalled();
-  });
-
-  test('saves the mapping when SAP confirms the bin/storage-type combination', async () => {
-    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['PTF', 'SA'] } });
-    db.upsertLocationMap.mockResolvedValueOnce(11);
-    const res = await request(appLogSuper).put('/location-map/PTFE').send({ storageType: 'PTF', bin: 'B01' });
-    expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ mapId: 11 });
-    expect(db.upsertLocationMap).toHaveBeenCalledWith('PTFE', { storageType: 'PTF', bin: 'B01', updatedBy: logSuperUser.username });
-  });
-});
 
 describe('GET /counts/current-ptfe', () => {
   test('lazily creates the week\'s count and returns it with lines', async () => {
@@ -256,30 +215,39 @@ describe('POST /counts/:id/lines', () => {
     expect(db.addCountLine).toHaveBeenCalledWith('1', expect.objectContaining({ sapQty: 95, storageType: 'PDR', bin: 'B01' }));
   });
 
-  test('PTFE_WEEKLY: resolves the named location through the location map, excludes bin type SA', async () => {
+  test('PTFE_WEEKLY: 400s when storageType or bin is missing', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 2, CountType: 'PTFE_WEEKLY', Status: 'Open' });
+    const res = await request(app).post('/counts/2/lines').send({ material: '10000', countedQty: 10 });
+    expect(res.status).toBe(400);
+    expect(axiosMock.get).not.toHaveBeenCalled();
+  });
+
+  test('PTFE_WEEKLY: 422s when the free-typed bin is not registered in SAP LAGP', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 2, CountType: 'PTFE_WEEKLY', Status: 'Open' });
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['SA', 'PDR'] } }); // no 'PTF'
+
+    const res = await request(app).post('/counts/2/lines').send({ material: '10000', storageType: 'PTF', bin: 'B02', countedQty: 10 });
+
+    expect(res.status).toBe(422);
+    expect(db.searchMaterialForCount).not.toHaveBeenCalled();
+    expect(db.addCountLine).not.toHaveBeenCalled();
+  });
+
+  test('PTFE_WEEKLY: validates the free-typed bin against SAP LAGP, then compares against LQUA excluding bin type SA', async () => {
     db.getCountDocument.mockResolvedValueOnce({ CountId: 2, CountType: 'PTFE_WEEKLY', Status: 'Open', StorageLocation: null });
+    axiosMock.get
+      .mockResolvedValueOnce({ data: { success: true, data: ['PTF', 'SA'] } })      // bin-storage-types (LAGP)
+      .mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 350 }] } }); // LQUA comparison
     db.searchMaterialForCount.mockResolvedValueOnce({ material: '10000', materialText: 'Teflon', uom: 'KG', unitPrice: 1 });
-    db.getLocationMapEntry.mockResolvedValueOnce({ StorageType: 'PTF', Bin: 'B02' });
-    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 350 }] } });
     db.addCountLine.mockResolvedValueOnce(9);
 
-    const res = await request(app).post('/counts/2/lines').send({ material: '10000', namedLocation: 'PTFE', countedQty: 340 });
+    const res = await request(app).post('/counts/2/lines').send({ material: '10000', storageType: 'PTF', bin: 'B02', countedQty: 340 });
 
     expect(res.status).toBe(200);
     expect(res.body.data.sapQty).toBe(350);
-    expect(db.getLocationMapEntry).toHaveBeenCalledWith('PTFE');
-    expect(axiosMock.get.mock.calls[0][1].params).toMatchObject({ material: '10000', storageType: 'PTF', bin: 'B02', excludeStorageType: 'SA' });
-  });
-
-  test('PTFE_WEEKLY: 500s with a clear message when the named location has no mapping', async () => {
-    db.getCountDocument.mockResolvedValueOnce({ CountId: 2, CountType: 'PTFE_WEEKLY', Status: 'Open' });
-    db.searchMaterialForCount.mockResolvedValueOnce({ material: '10000' });
-    db.getLocationMapEntry.mockResolvedValueOnce(null);
-
-    const res = await request(app).post('/counts/2/lines').send({ material: '10000', namedLocation: 'YARD', countedQty: 10 });
-
-    expect(res.status).toBe(500);
-    expect(res.body.error).toMatch(/No SAP bin mapping configured for location "YARD"/);
+    expect(axiosMock.get.mock.calls[0][0]).toContain('/api/warehouse/bin-storage-types');
+    expect(axiosMock.get.mock.calls[1][1].params).toMatchObject({ material: '10000', storageType: 'PTF', bin: 'B02', excludeStorageType: 'SA' });
+    expect(db.addCountLine).toHaveBeenCalledWith('2', expect.objectContaining({ sapQty: 350, storageType: 'PTF', bin: 'B02' }));
   });
 
   // PRODUCTION sums MARD@1716 (SapServer's im-stock endpoint — 1716 has no

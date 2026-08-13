@@ -1,5 +1,8 @@
 'use strict';
-// Stock Count feature — see the approved plan for full rationale. Five tables, all log.*:
+// Stock Count feature — see the approved plan for full rationale. Four tables, all log.*
+// (a fifth, StockCountLocationMap, was tried for the PTFE Weekly Cycle Count's named
+// locations but replaced with free-typed bins validated live against SAP LAGP instead —
+// see the PTFE_WEEKLY branch of routes/stockcount.js's resolveSapComparisonForLine):
 //
 // log.StockCountDocument — header row for PTFE_WEEKLY / RAW_MATERIAL / PRODUCTION counts
 // (full submit -> finance-approve/reject -> 711/712-post lifecycle), and ALSO used as a
@@ -16,11 +19,6 @@
 // log.IsoparDeclaration's CalculationSnapshotJson. IsInvalidMaterial is a denormalized flag
 // (recomputed on every material-code correction) rather than a live join, so the "does this
 // count have any invalid lines" completion gate is a single indexed lookup.
-//
-// log.StockCountLocationMap — PTFE_WEEKLY only. The cycle-count sheet uses named locations
-// ("PTFE","YARD","CONTAINER 1","CONTAINER 2","WAREHOUSE") rather than raw SAP bin codes;
-// supervisor-editable, each entry validated against SAP LAGP (WarehouseHelpers.BinExists)
-// before saving.
 //
 // log.StockCountFgScan — Finished Goods Count's scan audit trail. "Correct" is evaluated per
 // the *scanned* bin against LQUA, not against one fixed "expected bin" — a batch legitimately
@@ -141,33 +139,6 @@ CREATE NONCLUSTERED INDEX IX_StockCountLine_CountId ON log.StockCountLine (Count
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_StockCountLine_Material' AND object_id = OBJECT_ID('log.StockCountLine'))
 CREATE NONCLUSTERED INDEX IX_StockCountLine_Material ON log.StockCountLine (Material)`);
 
-  // ── log.StockCountLocationMap ───────────────────────────────────────────
-  await knex.raw(`
-IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'log.StockCountLocationMap') AND type = 'U')
-CREATE TABLE log.StockCountLocationMap (
-    MapId INT IDENTITY(1,1) NOT NULL
-,   NamedLocation NVARCHAR(50) NOT NULL
-,   StorageType NVARCHAR(3) NOT NULL
-,   Bin NVARCHAR(10) NOT NULL
-,   IsActive BIT NOT NULL
-,   UpdatedBy NVARCHAR(100) NULL
-,   UpdatedAtUtc DATETIME NOT NULL
-,   CONSTRAINT PK_StockCountLocationMap PRIMARY KEY (MapId)
-)`);
-
-  await knex.raw(`
-IF NOT EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = 'DF_StockCountLocationMap_IsActive')
-ALTER TABLE log.StockCountLocationMap ADD CONSTRAINT DF_StockCountLocationMap_IsActive DEFAULT (1) FOR IsActive`);
-
-  await knex.raw(`
-IF NOT EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = 'DF_StockCountLocationMap_UpdatedAtUtc')
-ALTER TABLE log.StockCountLocationMap ADD CONSTRAINT DF_StockCountLocationMap_UpdatedAtUtc DEFAULT (getutcdate()) FOR UpdatedAtUtc`);
-
-  await knex.raw(`
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UQ_StockCountLocationMap_Location' AND object_id = OBJECT_ID('log.StockCountLocationMap'))
-CREATE UNIQUE NONCLUSTERED INDEX UQ_StockCountLocationMap_Location ON log.StockCountLocationMap (NamedLocation)
-  WHERE IsActive = 1`);
-
   // ── log.StockCountFgScan ────────────────────────────────────────────────
   await knex.raw(`
 IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'log.StockCountFgScan') AND type = 'U')
@@ -252,10 +223,6 @@ DROP TABLE log.StockCountDiscrepancy`);
   await knex.raw(`
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'log.StockCountFgScan') AND type = 'U')
 DROP TABLE log.StockCountFgScan`);
-
-  await knex.raw(`
-IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'log.StockCountLocationMap') AND type = 'U')
-DROP TABLE log.StockCountLocationMap`);
 
   await knex.raw(`
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'log.StockCountLine') AND type = 'U')

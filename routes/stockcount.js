@@ -9,8 +9,9 @@
 // from routes/sap.js — same per-file convention as staging.js/
 // productionnexus.js/quality.js.
 //
-// This file covers material validation/fuzzy-match, the PTFE named-location
-// map, count entry (material/qty/location, compared live against SAP LQUA),
+// This file covers material validation/fuzzy-match, count entry (material/
+// qty/free-typed storage type+bin, compared live against SAP LQUA — PTFE's
+// bin is validated against SAP LAGP at entry time, same as Raw Material's),
 // the Invalid Materials correction flow, Raw Material bin completion, the
 // submit -> finance-approve/reject -> 711/712-post pipeline shared by
 // PTFE_WEEKLY/RAW_MATERIAL/PRODUCTION counts, and Finished Goods Count's
@@ -65,10 +66,10 @@ function actor(req) {
 }
 
 // Reuses the existing GET /api/warehouse/bin-storage-types (LAGP lookup, no
-// SapServer change needed) to validate a location-map entry: a bin that
-// isn't registered in LAGP at all comes back with an empty array; a bin that
-// exists but under a different storage type comes back with that type
-// missing from the array.
+// SapServer change needed) to validate a free-typed storage type/bin (PTFE
+// Weekly Cycle Count line entry) — a bin that isn't registered in LAGP at
+// all comes back with an empty array; a bin that exists but under a
+// different storage type comes back with that type missing from the array.
 async function binHasStorageType(bin, storageType) {
   const response = await axios.get(`${sapConfig.url}/api/warehouse/bin-storage-types`, {
     params: { bin },
@@ -105,42 +106,6 @@ router.get('/materials/:material/validate', async (req, res) => {
   }
 });
 
-// ── Location map (PTFE Weekly Cycle Count only) ──────────────────────────────
-
-router.get('/location-map', async (req, res) => {
-  try {
-    const rows = await db.listLocationMap();
-    res.json({ success: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-router.put('/location-map/:namedLocation', requirePermission('LOG_SUPER'), async (req, res) => {
-  const { namedLocation } = req.params;
-  const { storageType, bin } = req.body;
-  if (!storageType || !bin) {
-    return res.status(400).json({ success: false, error: 'storageType and bin are required' });
-  }
-
-  try {
-    const paddedBin = String(bin).trim();
-    const exists = await binHasStorageType(paddedBin, storageType);
-    if (!exists) {
-      return res.status(422).json({
-        success: false,
-        error: `Bin ${storageType}/${bin} was not found in SAP (LAGP) — check the storage type and bin and try again.`,
-      });
-    }
-
-    const mapId = await db.upsertLocationMap(namedLocation, { storageType, bin: paddedBin, updatedBy: actor(req) });
-    await audit('STOCKCOUNT_OK', actor(req), `Location map "${namedLocation}" -> ${storageType}/${bin}`, req);
-    res.json({ success: true, data: { mapId } });
-  } catch (err) {
-    await audit('STOCKCOUNT_ERROR', actor(req), `Location map update failed for "${namedLocation}": ${err.message}`, req);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 // ── SAP stock lookup (comparison source for line entry) ──────────────────────
 
@@ -180,10 +145,12 @@ function sumQty(rows) {
 // the material turns out to be batch-managed) for one count line, branching
 // on the document's CountType — the three ways this feature compares a
 // counted line against SAP:
-//   PTFE_WEEKLY  — named location resolves via the supervisor-maintained
-//                  location map to a SAP bin, LGTYP 'SA' excluded (that bin
-//                  type holds material already issued to production, not
-//                  real countable raw-material stock).
+//   PTFE_WEEKLY  — operator-entered (free-typed, not a supervisor-maintained
+//                  map) storage type/bin, validated against SAP LAGP before
+//                  this is ever called (see the PUT.../lines check below),
+//                  LGTYP 'SA' excluded (that bin type holds material already
+//                  issued to production, not real countable raw-material
+//                  stock).
 //   RAW_MATERIAL — operator-entered storage type/bin, scoped to the count's
 //                  storage location (1710). Storage type 'SA' is rejected
 //                  outright (see the 400 check in POST /counts/:id/lines)
@@ -199,14 +166,12 @@ function sumQty(rows) {
 //                  stock in either of those two specific places right now —
 //                  see StockAdjustmentModels.cs's StorageType doc comment in
 //                  SapServer for the matching posting-side note.
-async function resolveSapComparisonForLine(doc, { material, namedLocation, storageType, bin }) {
+async function resolveSapComparisonForLine(doc, { material, storageType, bin }) {
   if (doc.CountType === 'PTFE_WEEKLY') {
-    const mapEntry = await db.getLocationMapEntry(namedLocation);
-    if (!mapEntry) throw new Error(`No SAP bin mapping configured for location "${namedLocation}" — ask a supervisor to add it first.`);
-    const rows = await fetchSapStock({ material, storageType: mapEntry.StorageType, bin: mapEntry.Bin, excludeStorageType: 'SA' });
+    const rows = await fetchSapStock({ material, storageType, bin, excludeStorageType: 'SA' });
     return {
       sapQty: sumQty(rows),
-      storageType: mapEntry.StorageType, bin: mapEntry.Bin, isBatchManaged: false,
+      storageType, bin, isBatchManaged: false,
     };
   }
 
@@ -320,7 +285,7 @@ router.post('/counts', requirePermission('LOG_SUPER'), async (req, res) => {
 
 router.post('/counts/:id/lines', async (req, res) => {
   const countId = req.params.id;
-  const { material, namedLocation, storageType, bin, countedQty } = req.body;
+  const { material, storageType, bin, countedQty } = req.body;
   if (!material || countedQty === undefined || countedQty === null) {
     return res.status(400).json({ success: false, error: 'material and countedQty are required' });
   }
@@ -340,12 +305,29 @@ router.post('/counts/:id/lines', async (req, res) => {
       return res.status(400).json({ success: false, error: "Storage type 'SA' holds material already issued to production — it doesn't belong in a Raw Material Count." });
     }
 
+    // PTFE Weekly Cycle Count takes a free-typed bin (no supervisor-
+    // maintained location map) — validated live against SAP LAGP here,
+    // independent of material validity, so a typo'd bin is caught
+    // immediately rather than silently producing a nonsense variance.
+    if (doc.CountType === 'PTFE_WEEKLY') {
+      if (!storageType || !bin) {
+        return res.status(400).json({ success: false, error: 'storageType and bin are required' });
+      }
+      const exists = await binHasStorageType(String(bin).trim(), storageType);
+      if (!exists) {
+        return res.status(422).json({
+          success: false,
+          error: `Bin ${storageType}/${bin} was not found in SAP (LAGP) — check the storage type and bin and try again.`,
+        });
+      }
+    }
+
     const materialInfo = await db.searchMaterialForCount(material);
     const isInvalidMaterial = !materialInfo;
 
     let sapQty = null, resolvedStorageType = storageType || null, resolvedBin = bin || null, isBatchManaged = false;
     if (!isInvalidMaterial) {
-      const comparison = await resolveSapComparisonForLine(doc, { material, namedLocation, storageType, bin });
+      const comparison = await resolveSapComparisonForLine(doc, { material, storageType, bin });
       sapQty = comparison.sapQty;
       resolvedStorageType = comparison.storageType;
       resolvedBin = comparison.bin;
@@ -356,7 +338,6 @@ router.post('/counts/:id/lines', async (req, res) => {
       material,
       materialText: materialInfo?.materialText,
       uom: materialInfo?.uom,
-      namedLocation,
       storageType: resolvedStorageType,
       bin: resolvedBin,
       countedQty: Number(countedQty),

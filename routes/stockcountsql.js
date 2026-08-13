@@ -109,57 +109,6 @@ export async function fuzzyMatchMaterial(material, { maxDistance = 2, limit = 5 
     .slice(0, limit);
 }
 
-// ── Location map (PTFE Weekly Cycle Count only) ──────────────────────────────
-
-export async function listLocationMap() {
-  const pool = await getPool();
-  const { recordset } = await pool.request().query(`
-    SELECT MapId, NamedLocation, StorageType, Bin, IsActive, UpdatedBy, UpdatedAtUtc
-    FROM log.StockCountLocationMap
-    WHERE IsActive = 1
-    ORDER BY NamedLocation
-  `);
-  return recordset;
-}
-
-export async function getLocationMapEntry(namedLocation) {
-  const pool = await getPool();
-  const { recordset } = await pool.request()
-    .input('namedLocation', sql.NVarChar(50), namedLocation)
-    .query(`
-      SELECT MapId, NamedLocation, StorageType, Bin
-      FROM log.StockCountLocationMap
-      WHERE NamedLocation = @namedLocation AND IsActive = 1
-    `);
-  return recordset[0] || null;
-}
-
-// Upsert by NamedLocation — the caller (routes/stockcount.js) must validate
-// StorageType/Bin against SAP LAGP before calling this; this layer only
-// persists what it's given. Deactivates any prior active row for the same
-// name rather than updating in place, so UpdatedBy/UpdatedAtUtc always
-// reflect a real change and old mappings stay in the table for audit.
-export async function upsertLocationMap(namedLocation, { storageType, bin, updatedBy }) {
-  const pool = await getPool();
-  await pool.request()
-    .input('namedLocation', sql.NVarChar(50), namedLocation)
-    .query(`
-      UPDATE log.StockCountLocationMap SET IsActive = 0
-      WHERE NamedLocation = @namedLocation AND IsActive = 1
-    `);
-  const { recordset } = await pool.request()
-    .input('namedLocation', sql.NVarChar(50), namedLocation)
-    .input('storageType',   sql.NVarChar(3),  storageType)
-    .input('bin',            sql.NVarChar(10), bin)
-    .input('updatedBy',       sql.NVarChar(100), updatedBy || null)
-    .query(`
-      INSERT INTO log.StockCountLocationMap (NamedLocation, StorageType, Bin, UpdatedBy)
-      OUTPUT INSERTED.MapId
-      VALUES (@namedLocation, @storageType, @bin, @updatedBy)
-    `);
-  return recordset[0].MapId;
-}
-
 // ── Count documents — reads ──────────────────────────────────────────────────
 
 export async function getCountDocument(countId) {

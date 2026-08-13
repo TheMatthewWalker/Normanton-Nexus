@@ -1,11 +1,10 @@
 // routes/stockcountsql.js — DB layer for the Stock Count feature. Covers
 // the fuzzy-match Levenshtein logic (pure, exercised through the exported
 // function against a mocked snapshot result set), the variance/value
-// computation in addCountLine, the location-map deactivate-then-insert
-// upsert, and getOrCreatePtfeCountForWeek's idempotent/race-collision paths.
-// SAP calls, notification, and reporting queries are exercised via
-// test/routes/stockcount.test.js instead — this file is pure SQL-shape and
-// computation coverage.
+// computation in addCountLine, and getOrCreatePtfeCountForWeek's idempotent/
+// race-collision paths. SAP calls, notification, and reporting queries are
+// exercised via test/routes/stockcount.test.js instead — this file is pure
+// SQL-shape and computation coverage.
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
@@ -73,19 +72,6 @@ describe('fuzzyMatchMaterial', () => {
   });
 });
 
-describe('upsertLocationMap', () => {
-  test('deactivates any prior row for the name, then inserts a fresh active one', async () => {
-    dbRequest.query
-      .mockResolvedValueOnce({ recordset: [] }) // the deactivate UPDATE
-      .mockResolvedValueOnce({ recordset: [{ MapId: 11 }] }); // the INSERT
-
-    const mapId = await db.upsertLocationMap('PTFE', { storageType: 'PTF', bin: 'B01', updatedBy: 'j.smith' });
-
-    expect(mapId).toBe(11);
-    expect(dbRequest.query).toHaveBeenNthCalledWith(1, expect.stringContaining('UPDATE log.StockCountLocationMap SET IsActive = 0'));
-    expect(dbRequest.query).toHaveBeenNthCalledWith(2, expect.stringContaining('INSERT INTO log.StockCountLocationMap'));
-  });
-});
 
 describe('addCountLine', () => {
   test('computes VarianceQty and VarianceValue from CountedQty/SapQty/UnitPrice', async () => {
