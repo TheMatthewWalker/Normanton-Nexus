@@ -3538,12 +3538,23 @@ async function runScrapReversal() {
       }
 
       btn.disabled = true;
-      if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = `Sending ${selected.length} request${selected.length!==1?'s':''} to SAP…`; }
+      const total = selected.length;
+      let ok = 0, fail = 0, done = 0;
+      btn.textContent = `Reversing… 0/${total}`;
+      if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = `Sending ${total} request${total!==1?'s':''} to SAP — waiting on responses…`; }
 
-      let ok = 0, fail = 0;
-      for (const { id, doc } of selected) {
+      selected.forEach(({ id }) => {
         const rowEl = document.getElementById(`${prefix}-row-${id}`);
-        btn.textContent = `Reversing… ${ok+fail+1}/${selected.length}`;
+        if (rowEl) rowEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px">…</span>`;
+      });
+
+      // Fire every reversal at once instead of awaiting one at a time before
+      // sending the next — this is still one HTTP request per document (the
+      // endpoint isn't a bulk one), just not serialized. Each ~15s SAP call
+      // updates its own row and the running counter the moment its own
+      // response lands, independent of the others still in flight.
+      await Promise.all(selected.map(async ({ id, doc }) => {
+        const rowEl = document.getElementById(`${prefix}-row-${id}`);
         try {
           const res = await api('/scrap-reversal/reverse', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3560,7 +3571,8 @@ async function runScrapReversal() {
           if (rowEl) rowEl.innerHTML =
             `<span style="color:var(--error);font-size:11px" title="${esc(err.message)}">✗ ${esc(err.message)}</span>`;
         }
-      }
+        btn.textContent = `Reversing… ${++done}/${total}`;
+      }));
 
       if (msg) {
         msg.style.color = fail ? '#D97706' : 'var(--accent)';

@@ -4874,7 +4874,12 @@ router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), asy
 
     let raw;
     try {
-      raw = await sapPost('/api/production/scrap/reverse', { MaterialDocument: String(materialDocument) });
+      // 120s, not the 30s default — the Scrap Reversal UI now fires every
+      // selected document's reversal concurrently rather than one at a time
+      // (see production-nexus.js's scrap-reversal wireTable handler), so a
+      // document queued behind several ~15s-each reversals on the same
+      // SapServer worker thread may not even start until well past 30s.
+      raw = await sapPost('/api/production/scrap/reverse', { MaterialDocument: String(materialDocument) }, 120000);
     } catch (sapErr) {
       const d = sapErr.response?.data;
       // M7/067 from SapServer non-2xx response — already reversed in SAP, sync DB
