@@ -94,6 +94,7 @@ function setupTiles() {
       if (fn === 'stagingBinRestrictions') runStagingBinRestrictions();
       if (fn === 'zdelflagWarnings') runZdelflagWarnings();
       if (fn === 'stockInvestigations') runStockInvestigations();
+      if (fn === 'stockCountAdmin') runStockCountAdmin();
       if (fn === 'ptfeCycleCount')  runPtfeCycleCount();
       if (fn === 'rawMaterialCount') runRawMaterialCount();
       if (fn === 'productionCount') runProductionCount();
@@ -6178,6 +6179,19 @@ async function zdReprocess(deliveryId, btn) {
 // bin-completion are available. Finished Goods Count is a separate guided-
 // scan pipeline with no approval/posting, built in its own stage. See
 // routes/stockcount.js for the backing API.
+//
+// The same render functions back two different homes: the operator-facing
+// tiles (Full Warehouse Raw Material Scan / Production Count / Finished
+// Goods Count — pure entry/scanning, no start/close/reopen controls) and
+// the supervisor-only "Stock Count Administration" tile (start/close/reopen
+// counts and Finished Goods sessions — see runStockCountAdmin below).
+// scContainerId/scIsAdmin are set once by whichever entry point is called
+// and read by every render/handler in between, rather than threading a
+// container id and an admin flag through every function signature — safe
+// because only one Stock Count view is ever mounted in the DOM at a time.
+let scContainerId = 'result-body';
+let scIsAdmin     = false;
+function scResultBody() { return document.getElementById(scContainerId); }
 
 async function scApi(path, opts) {
   const r = await fetch('/api/stockcount' + path, opts);
@@ -6225,20 +6239,26 @@ function fgAreaCell(storageType, bin) {
 
 async function runPtfeCycleCount() {
   if (!await checkSession()) return;
+  scContainerId = 'result-body'; scIsAdmin = false;
   showResultPanel('Weekly PTFE Cycle Count', 'This week’s cycle count — enter material, quantity & location');
   try {
     const json = await scApi('/counts/current-ptfe');
     scRenderCountDetail(json.data, 'runPtfeCycleCount');
   } catch (err) {
-    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    scResultBody().innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }
 
 // ── Full Warehouse Raw Material Scan ──────────────────────────────────────────
+//
+// Operator-facing — entry only (pick an open count, add lines). Starting a
+// new count and closing (submitting) it are supervisor actions, moved to
+// the "Stock Count Administration" tile — see runStockCountAdmin below.
 
 async function runRawMaterialCount() {
   if (!await checkSession()) return;
-  showResultPanel('Full Warehouse Raw Material Scan', 'Storage Location 1710 — supervisor-initiated counts');
+  scContainerId = 'result-body'; scIsAdmin = false;
+  showResultPanel('Full Warehouse Raw Material Scan', 'Storage Location 1710 — enter material, quantity & bin against an open count');
   await scRenderCountList('RAW_MATERIAL', '1710', 'runRawMaterialCount');
 }
 
@@ -6246,16 +6266,21 @@ async function runRawMaterialCount() {
 
 async function runProductionCount() {
   if (!await checkSession()) return;
-  showResultPanel('Production Count', 'Storage Location 1716 — supervisor-initiated counts (non-batch-managed materials only)');
+  scContainerId = 'result-body'; scIsAdmin = false;
+  showResultPanel('Production Count', 'Storage Location 1716 — enter material & quantity against an open count (non-batch-managed materials only)');
   await scRenderCountList('PRODUCTION', '1716', 'runProductionCount');
 }
 
 async function scRenderCountList(countType, defaultStorageLocation, backFn) {
+  const body = scResultBody();
   try {
-    const json = await scApi(`/counts?type=${countType}`);
+    // Operators only ever need to see counts they can currently add lines
+    // to; the admin view (scIsAdmin) lists every status so a supervisor can
+    // see what's pending/closed too.
+    const json = await scApi(`/counts?type=${countType}${scIsAdmin ? '' : '&status=Open'}`);
     const counts = json.data || [];
 
-    const startForm = sessionPermissions.includes('LOG_SUPER') ? `
+    const startForm = scIsAdmin ? `
       <div class="tf-section-label">Start New Count</div>
       <form class="tf-row" id="sc-start-form" data-storage-location="${esc(defaultStorageLocation)}" data-count-type="${esc(countType)}" data-back-fn="${esc(backFn)}">
         <div class="tf-field">
@@ -6275,9 +6300,9 @@ async function scRenderCountList(countType, defaultStorageLocation, backFn) {
         <td>${scStatusBadge(c.Status)}</td>
         <td>${esc(c.CreatedBy || '—')}</td>
         <td>${scFormatDate(c.CreatedAtUtc)}</td>
-      </tr>`).join('') : `<tr><td colspan="4" class="sap-empty">No counts yet.</td></tr>`;
+      </tr>`).join('') : `<tr><td colspan="4" class="sap-empty">${scIsAdmin ? 'No counts yet.' : 'No open counts right now — ask a supervisor to start one.'}</td></tr>`;
 
-    document.getElementById('result-body').innerHTML = `
+    body.innerHTML = `
       ${startForm}
       <div class="tf-section-label">Counts</div>
       <div style="overflow-x:auto">
@@ -6290,7 +6315,7 @@ async function scRenderCountList(countType, defaultStorageLocation, backFn) {
     const startFormEl = document.getElementById('sc-start-form');
     if (startFormEl) startFormEl.addEventListener('submit', scSubmitStartCount);
 
-    document.querySelectorAll('.sc-count-row').forEach(tr => {
+    body.querySelectorAll('.sc-count-row').forEach(tr => {
       tr.addEventListener('click', async () => {
         try {
           const detailJson = await scApi(`/counts/${tr.dataset.id}`);
@@ -6301,7 +6326,7 @@ async function scRenderCountList(countType, defaultStorageLocation, backFn) {
       });
     });
   } catch (err) {
-    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }
 
@@ -6374,10 +6399,15 @@ function scRenderCountDetail(doc, backFn) {
       <td>${l.VarianceQty != null ? `<span style="color:${Number(l.VarianceQty) === 0 ? 'inherit' : (Number(l.VarianceQty) > 0 ? '#059669' : '#DC2626')};font-weight:${Number(l.VarianceQty) === 0 ? 400 : 700}">${Number(l.VarianceQty) > 0 ? '+' : ''}${Number(l.VarianceQty).toLocaleString()}</span>` : '—'}</td>
     </tr>`).join('') : `<tr><td colspan="${hasTicketPerLine ? 6 : 5}" class="sap-empty">No lines entered yet.</td></tr>`;
 
+  // Reopen (like Submit below) is a Stock Count Administration action —
+  // only rendered when reached via that tile (scIsAdmin), not the
+  // operator-facing entry tile, even for a supervisor who happens to be
+  // browsing there. Server-side permission enforcement (POST
+  // /counts/:id/reopen is LOG_SUPER-gated) is the real backstop either way.
   const rejectionNotice = doc.Status === 'Rejected' ? `
     <div class="sap-error" style="margin-bottom:12px">
       Rejected by finance: ${esc(doc.RejectionReason || '')}
-      ${sessionPermissions.includes('LOG_SUPER') ? `<button class="btn-submit" type="button" id="sc-reopen-btn" style="margin-left:12px">Reopen for correction</button>` : ''}
+      ${scIsAdmin ? `<button class="btn-submit" type="button" id="sc-reopen-btn" style="margin-left:12px">Reopen for correction</button>` : ''}
     </div>` : '';
 
   // Accuracy stat — warehouse-facing (was stock in the right place/quantity),
@@ -6388,7 +6418,13 @@ function scRenderCountDetail(doc, backFn) {
   const accurateLines = comparedLines.filter(l => Number(l.VarianceQty) === 0);
   const accuracyPct = comparedLines.length ? Math.round((accurateLines.length / comparedLines.length) * 100) : null;
 
-  document.getElementById('result-body').innerHTML = `
+  // Submitting (closing) RAW_MATERIAL/PRODUCTION is a supervisor action —
+  // only shown via the Stock Count Administration tile (scIsAdmin). PTFE
+  // stays open to any operator (cron-created, not supervisor-initiated —
+  // see routes/stockcount.js's POST /counts/:id/submit comment).
+  const canSubmitHere = doc.CountType === 'PTFE_WEEKLY' || scIsAdmin;
+
+  scResultBody().innerHTML = `
     <div class="tf-row" style="margin-bottom:10px">
       <div class="tf-field"><label class="tf-label">Count</label><div>#${doc.CountId}</div></div>
       <div class="tf-field"><label class="tf-label">Status</label><div>${scStatusBadge(doc.Status)}</div></div>
@@ -6406,7 +6442,7 @@ function scRenderCountDetail(doc, backFn) {
       </table>
     </div>
     ${invalidCount ? `<div id="sc-invalid-materials"></div>` : ''}
-    ${isOpen ? `<button class="btn-submit" type="button" id="sc-submit-btn">Submit for Approval</button>` : ''}
+    ${isOpen && canSubmitHere ? `<button class="btn-submit" type="button" id="sc-submit-btn">Submit for Approval</button>` : ''}
   `;
 
   const lineForm = document.getElementById('sc-line-form');
@@ -6550,35 +6586,14 @@ async function runFinishedGoodsCount() {
   }
 }
 
+// Starting a session is a Stock Count Administration action (see
+// scaRenderFgSessionAdmin) — this operator-facing tile just reports there
+// isn't one open yet, it never offers to start one itself.
 function fgRenderNoSession() {
-  const canStart = sessionPermissions.includes('LOG_SUPER');
   document.getElementById('result-body').innerHTML = `
     <div class="sap-empty">No Finished Goods Count session is currently open.</div>
-    ${canStart ? `
-      <div class="tf-section-label">Start Count Session</div>
-      <form class="tf-row" id="fg-start-form">
-        <div class="tf-field"><label class="tf-label">Storage Location <span class="tf-req">*</span></label><input class="tf-input" name="storageLocation" value="1711" required></div>
-        <div class="tf-field" style="align-self:flex-end"><button class="btn-submit" type="submit">Start Session</button></div>
-      </form>
-      <div id="fg-start-result"></div>
-    ` : '<div class="toolbar-hint">Ask a warehouse supervisor to start one.</div>'}
+    <div class="toolbar-hint">Ask a warehouse supervisor to start one from Stock Count Administration.</div>
   `;
-  const form = document.getElementById('fg-start-form');
-  if (form) form.addEventListener('submit', fgSubmitStartSession);
-}
-
-async function fgSubmitStartSession(e) {
-  e.preventDefault();
-  const storageLocation = e.target.storageLocation.value.trim();
-  const resultEl = document.getElementById('fg-start-result');
-  try {
-    await scApi('/fg/session/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storageLocation }),
-    });
-    runFinishedGoodsCount();
-  } catch (err) {
-    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-  }
 }
 
 let fgBatchRows = []; // raw downloaded rows, kept alongside fgBatchMap for the by-area summary below
@@ -6624,10 +6639,12 @@ function fgRenderScanUI(session) {
   fgScanStep = 'batch';
   fgPendingBatch = null;
 
+  // Ending the session is a Stock Count Administration action (see
+  // scaRenderFgSessionAdmin) — not offered from this operator-facing scan
+  // screen, even for a supervisor who happens to be scanning here too.
   document.getElementById('result-body').innerHTML = `
     <div class="tf-row" style="margin-bottom:14px">
       <div class="tf-field"><label class="tf-label">Session</label><div>#${session.CountId} — Storage Location ${esc(session.StorageLocation)} (${Object.keys(fgBatchMap).length} batches downloaded)</div></div>
-      ${sessionPermissions.includes('LOG_SUPER') ? `<div class="tf-field" style="align-self:flex-end"><button class="btn-back-tiles" type="button" id="fg-end-btn">End Count Session</button></div>` : ''}
     </div>
     ${fgRenderAreaSummary()}
 
@@ -6649,8 +6666,6 @@ function fgRenderScanUI(session) {
 
   document.getElementById('fg-scan-form').addEventListener('submit', fgHandleScanStep);
   document.getElementById('fg-confirm-form').addEventListener('submit', fgHandleConfirmBin);
-  const endBtn = document.getElementById('fg-end-btn');
-  if (endBtn) endBtn.addEventListener('click', () => fgEndSession(session.CountId));
   fgFocusScanInput();
 }
 
@@ -6748,12 +6763,183 @@ async function fgHandleConfirmBin(e) {
   }
 }
 
-async function fgEndSession(countId) {
-  if (!confirm('End this Finished Goods Count session? This lifts the transfer-request block for its storage location.')) return;
+// ── Stock Count Administration (supervisor-only tile) ─────────────────────────
+//
+// Everything an operator's entry tile deliberately doesn't show: starting
+// and closing (submitting) Raw Material/Production counts, starting/ending
+// Finished Goods sessions, and the warehouse-facing Stock Count Accuracy
+// report. Lives in #supervisor-section (LOG_SUPER-only, same as Stock
+// Investigations) — see setupSupervisorSection. Reuses scRenderCountList/
+// scRenderCountDetail with scContainerId='sca-subview'/scIsAdmin=true so a
+// supervisor gets the Start/Submit/Reopen controls those functions hide
+// from the operator tiles.
+
+async function runStockCountAdmin() {
+  if (!await checkSession()) return;
+  showResultPanel('Stock Count Administration', 'Start and close counts, manage Finished Goods sessions, and view the accuracy report — supervisor only');
+  scaRenderHome();
+}
+
+function scaRenderHome() {
+  document.getElementById('result-body').innerHTML = `
+    <div class="tf-row" style="flex-wrap:wrap;margin-bottom:20px">
+      <button type="button" class="btn-submit" id="sca-raw-material-btn">Raw Material Counts</button>
+      <button type="button" class="btn-submit" id="sca-production-btn">Production Counts</button>
+      <button type="button" class="btn-submit" id="sca-fg-btn">Finished Goods Sessions</button>
+      <button type="button" class="btn-submit" id="sca-reports-btn">Stock Count Accuracy Report</button>
+    </div>
+    <div id="sca-subview"></div>
+  `;
+  document.getElementById('sca-raw-material-btn').addEventListener('click', scaRenderRawMaterialAdmin);
+  document.getElementById('sca-production-btn').addEventListener('click', scaRenderProductionAdmin);
+  document.getElementById('sca-fg-btn').addEventListener('click', scaRenderFgSessionAdmin);
+  document.getElementById('sca-reports-btn').addEventListener('click', scaRenderAccuracyReport);
+}
+
+async function scaRenderRawMaterialAdmin() {
+  document.getElementById('sca-subview').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  scContainerId = 'sca-subview'; scIsAdmin = true;
+  await scRenderCountList('RAW_MATERIAL', '1710', 'scaRenderRawMaterialAdmin');
+}
+
+async function scaRenderProductionAdmin() {
+  document.getElementById('sca-subview').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  scContainerId = 'sca-subview'; scIsAdmin = true;
+  await scRenderCountList('PRODUCTION', '1716', 'scaRenderProductionAdmin');
+}
+
+async function scaRenderFgSessionAdmin() {
+  const container = document.getElementById('sca-subview');
+  container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
   try {
-    await scApi(`/fg/session/${countId}/end`, { method: 'POST' });
-    runFinishedGoodsCount();
+    const json = await scApi('/fg/session/current');
+    scaRenderFgSessionAdminView(json.data);
   } catch (err) {
-    alert(err.message);
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }
+
+function scaRenderFgSessionAdminView(session) {
+  const container = document.getElementById('sca-subview');
+
+  if (!session) {
+    container.innerHTML = `
+      <div class="sap-empty">No Finished Goods Count session is currently open.</div>
+      <div class="tf-section-label">Start Count Session</div>
+      <form class="tf-row" id="sca-fg-start-form">
+        <div class="tf-field"><label class="tf-label">Storage Location <span class="tf-req">*</span></label><input class="tf-input" name="storageLocation" value="1711" required></div>
+        <div class="tf-field" style="align-self:flex-end"><button class="btn-submit" type="submit">Start Session</button></div>
+      </form>
+      <div id="sca-fg-start-result"></div>
+    `;
+    document.getElementById('sca-fg-start-form').addEventListener('submit', scaSubmitFgStartSession);
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="tf-row" style="margin-bottom:14px">
+      <div class="tf-field"><label class="tf-label">Session</label><div>#${session.CountId} — Storage Location ${esc(session.StorageLocation)}</div></div>
+      <div class="tf-field"><label class="tf-label">Started</label><div>${scFormatDate(session.CreatedAtUtc)} by ${esc(session.CreatedBy || '—')}</div></div>
+    </div>
+    <button class="btn-back-tiles" type="button" id="sca-fg-end-btn">End Count Session</button>
+    <div id="sca-fg-end-result" style="margin-top:10px"></div>
+  `;
+  document.getElementById('sca-fg-end-btn').addEventListener('click', () => scaEndFgSession(session.CountId));
+}
+
+async function scaSubmitFgStartSession(e) {
+  e.preventDefault();
+  const storageLocation = e.target.storageLocation.value.trim();
+  const resultEl = document.getElementById('sca-fg-start-result');
+  try {
+    await scApi('/fg/session/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storageLocation }),
+    });
+    scaRenderFgSessionAdmin();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function scaEndFgSession(countId) {
+  if (!confirm('End this Finished Goods Count session? This lifts the transfer-request block for its storage location.')) return;
+  const resultEl = document.getElementById('sca-fg-end-result');
+  try {
+    await scApi(`/fg/session/${countId}/end`, { method: 'POST' });
+    scaRenderFgSessionAdmin();
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Stock Count Accuracy Report (warehouse-facing — was stock in the right
+// place/quantity, separate from finance's value-of-variance framing on the
+// Stock Adjustments tile) ──────────────────────────────────────────────────
+
+async function scaRenderAccuracyReport() {
+  const container = document.getElementById('sca-subview');
+  container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const json = await scApi('/reports/warehouse-accuracy');
+    scaRenderAccuracyReportView(json.data);
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function scaAccuracyColor(pct) {
+  if (pct === null) return 'inherit';
+  return pct === 100 ? '#059669' : (pct >= 90 ? '#B45309' : '#DC2626');
+}
+
+function scaRenderAccuracyReportView(data) {
+  const container = document.getElementById('sca-subview');
+  const { overall, counts, byLocation } = data;
+  const overallPct = overall.TotalLines ? Math.round((overall.AccurateLines / overall.TotalLines) * 100) : null;
+
+  const countsRows = counts.length ? counts.map(c => {
+    const pct = c.TotalLines ? Math.round((c.AccurateLines / c.TotalLines) * 100) : null;
+    return `
+      <tr class="pn-row">
+        <td>#${c.CountId}</td>
+        <td>${esc(c.CountType.replace('_', ' '))}</td>
+        <td>${esc(c.StorageLocation || '—')}</td>
+        <td>${scStatusBadge(c.Status)}</td>
+        <td>${scFormatDate(c.SubmittedAtUtc)}</td>
+        <td style="color:${scaAccuracyColor(pct)};font-weight:700">${pct !== null ? pct + '%' : '—'} <span style="font-weight:400;color:var(--text-secondary,#666)">(${c.AccurateLines}/${c.TotalLines})</span></td>
+      </tr>`;
+  }).join('') : `<tr><td colspan="6" class="sap-empty">No submitted counts yet.</td></tr>`;
+
+  const locationRows = byLocation.length ? byLocation.slice(0, 20).map(l => {
+    const discPct = l.TotalLines ? Math.round((l.DiscrepancyLines / l.TotalLines) * 100) : 0;
+    return `
+      <tr class="pn-row">
+        <td>${esc([l.StorageType, l.Bin].filter(Boolean).join('/') || '—')}</td>
+        <td>${l.TotalLines}</td>
+        <td>${l.DiscrepancyLines}</td>
+        <td style="color:${discPct > 0 ? '#DC2626' : 'inherit'};font-weight:${discPct > 0 ? 700 : 400}">${discPct}%</td>
+      </tr>`;
+  }).join('') : `<tr><td colspan="4" class="sap-empty">No data yet.</td></tr>`;
+
+  container.innerHTML = `
+    <div class="tf-row" style="margin-bottom:14px">
+      <div class="tf-field"><label class="tf-label">Overall Accuracy</label><div style="color:${scaAccuracyColor(overallPct)};font-weight:700;font-size:18px">${overallPct !== null ? overallPct + '%' : '—'}</div></div>
+      <div class="tf-field"><label class="tf-label">Lines Compared</label><div>${overall.TotalLines}</div></div>
+    </div>
+    <div class="tf-section-label">Accuracy by Count</div>
+    <div style="overflow-x:auto;margin-bottom:20px">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Count</th><th>Type</th><th>Location</th><th>Status</th><th>Submitted</th><th>Accuracy</th></tr></thead>
+        <tbody>${countsRows}</tbody>
+      </table>
+    </div>
+    <div class="tf-section-label">Worst Locations (highest discrepancy rate)</div>
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Location</th><th>Lines</th><th>Discrepancies</th><th>Discrepancy Rate</th></tr></thead>
+        <tbody>${locationRows}</tbody>
+      </table>
+    </div>
+  `;
+}
+

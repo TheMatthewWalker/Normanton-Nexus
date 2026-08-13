@@ -1302,13 +1302,25 @@ async function runStockAdjustments() {
   await scfRenderPendingCounts();
 }
 
+const scfReportsToolbar = `
+  <div style="margin-bottom:16px">
+    <button type="button" class="btn-back-tiles" id="scf-reports-btn">View Gains/Losses Report</button>
+  </div>`;
+
+function scfBindReportsButton() {
+  document.getElementById('scf-reports-btn')?.addEventListener('click', scfRenderHistoryReport);
+}
+
 async function scfRenderPendingCounts() {
   try {
     const json = await scfApi('/counts?status=PendingApproval');
     const counts = json.data || [];
 
     if (!counts.length) {
-      document.getElementById('result-body').innerHTML = '<div class="sap-empty">No stock counts are currently pending approval.</div>';
+      document.getElementById('result-body').innerHTML = `
+        ${scfReportsToolbar}
+        <div class="sap-empty">No stock counts are currently pending approval.</div>`;
+      scfBindReportsButton();
       return;
     }
 
@@ -1338,6 +1350,7 @@ async function scfRenderPendingCounts() {
     }).join('');
 
     document.getElementById('result-body').innerHTML = `
+      ${scfReportsToolbar}
       <div class="tf-row" style="margin-bottom:14px">
         <div class="tf-field"><label class="tf-label">Total Gains</label><div style="color:#059669;font-weight:700">+£${totalGain.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
         <div class="tf-field"><label class="tf-label">Total Losses</label><div style="color:#DC2626;font-weight:700">-£${totalLoss.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
@@ -1353,12 +1366,105 @@ async function scfRenderPendingCounts() {
       <div id="scf-detail"></div>
     `;
 
+    scfBindReportsButton();
     document.querySelectorAll('.scf-count-row').forEach(tr => {
       tr.addEventListener('click', () => scfRenderCountDetail(Number(tr.dataset.id)));
     });
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
+}
+
+// ── Gains/Losses history report — every count that reached Approved/Posted,
+// not just what's currently pending ────────────────────────────────────────
+
+async function scfRenderHistoryReport() {
+  document.getElementById('result-body').innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const json = await scfApi('/reports/finance');
+    scfRenderHistoryReportView(json.data);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function scfMoney(value) {
+  const n = Number(value) || 0;
+  return `${n >= 0 ? '+' : ''}£${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function scfFormatDate(value) {
+  return value ? new Date(value).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+}
+
+function scfRenderHistoryReportView(data) {
+  const { totals, byMaterial, byBin, counts } = data;
+  const net = (Number(totals.TotalGain) || 0) + (Number(totals.TotalLoss) || 0);
+
+  const materialRows = byMaterial.length ? byMaterial.slice(0, 20).map(m => `
+    <tr class="pn-row">
+      <td><strong>${esc(m.Material)}</strong>${m.MaterialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.MaterialText)}</div>` : ''}</td>
+      <td style="color:${Number(m.NetValue) >= 0 ? '#059669' : '#DC2626'};font-weight:700">${scfMoney(m.NetValue)}</td>
+    </tr>`).join('') : '<tr><td colspan="2" class="sap-empty">No data yet.</td></tr>';
+
+  const binRows = byBin.length ? byBin.slice(0, 20).map(b => `
+    <tr class="pn-row">
+      <td>${esc([b.StorageType, b.Bin].filter(Boolean).join('/') || '—')}</td>
+      <td style="color:${Number(b.NetValue) >= 0 ? '#059669' : '#DC2626'};font-weight:700">${scfMoney(b.NetValue)}</td>
+    </tr>`).join('') : '<tr><td colspan="2" class="sap-empty">No data yet.</td></tr>';
+
+  const countRows = counts.length ? counts.map(c => `
+    <tr class="pn-row">
+      <td>#${c.CountId}</td>
+      <td>${esc(c.CountType.replace('_', ' '))}</td>
+      <td>${esc(c.StorageLocation || '—')}</td>
+      <td>${esc(c.Status)}</td>
+      <td>${scfFormatDate(c.PostedAtUtc || c.ApprovedAtUtc || c.RejectedAtUtc)}</td>
+      <td style="color:${Number(c.NetValue) >= 0 ? '#059669' : '#DC2626'};font-weight:700">${scfMoney(c.NetValue)}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="sap-empty">No completed counts yet.</td></tr>';
+
+  document.getElementById('result-body').innerHTML = `
+    <button type="button" class="btn-back-tiles" id="scf-back-to-pending-btn" style="margin-bottom:16px">← Back to Pending Approval</button>
+    <div class="tf-row" style="margin-bottom:14px">
+      <div class="tf-field"><label class="tf-label">Total Gains</label><div style="color:#059669;font-weight:700">${scfMoney(totals.TotalGain)}</div></div>
+      <div class="tf-field"><label class="tf-label">Total Losses</label><div style="color:#DC2626;font-weight:700">${scfMoney(totals.TotalLoss)}</div></div>
+      <div class="tf-field"><label class="tf-label">Net</label><div style="color:${net >= 0 ? '#059669' : '#DC2626'};font-weight:700">${scfMoney(net)}</div></div>
+    </div>
+
+    <div class="tf-row" style="align-items:flex-start">
+      <div style="flex:1;min-width:280px">
+        <div class="tf-section-label">Worst Offenders — Material</div>
+        <div style="overflow-x:auto;margin-bottom:20px">
+          <table class="pn-batch-table admin-table">
+            <thead><tr><th>Material</th><th>Net Value</th></tr></thead>
+            <tbody>${materialRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div style="flex:1;min-width:280px">
+        <div class="tf-section-label">Worst Offenders — Bin</div>
+        <div style="overflow-x:auto;margin-bottom:20px">
+          <table class="pn-batch-table admin-table">
+            <thead><tr><th>Bin</th><th>Net Value</th></tr></thead>
+            <tbody>${binRows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="tf-section-label">Count History</div>
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Count</th><th>Type</th><th>Location</th><th>Status</th><th>Decided</th><th>Net Value</th></tr></thead>
+        <tbody>${countRows}</tbody>
+      </table>
+    </div>
+  `;
+
+  document.getElementById('scf-back-to-pending-btn').addEventListener('click', () => {
+    showResultPanel('Stock Adjustments', 'Stock Count Results — counts pending finance approval');
+    scfRenderPendingCounts();
+  });
 }
 
 async function scfRenderCountDetail(countId) {

@@ -35,6 +35,8 @@ const db = {
   updateCountStatus: jest.fn(),
   getCountReportByMaterial: jest.fn(),
   getCountReportByMaterialAndBin: jest.fn(),
+  getFinanceReport: jest.fn(),
+  getWarehouseAccuracyReport: jest.fn(),
   getOrCreatePtfeCountForWeek: jest.fn(),
   getActiveFgSession: jest.fn(),
   recordFgScan: jest.fn(),
@@ -392,10 +394,21 @@ describe('POST /counts/:id/submit', () => {
     expect(res.status).toBe(400);
   });
 
+  // Closing (submitting) RAW_MATERIAL/PRODUCTION is supervisor-only — these
+  // are supervisor-initiated counts, so operators who only entered lines
+  // shouldn't also decide the count is finished. PTFE_WEEKLY stays open to
+  // any operator (covered separately below).
+  test('403s a non-supervisor trying to submit a Raw Material count', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 1, CountType: 'RAW_MATERIAL', Status: 'Open' });
+    const res = await request(app).post('/counts/1/submit');
+    expect(res.status).toBe(403);
+    expect(db.updateCountStatus).not.toHaveBeenCalled();
+  });
+
   test('422s while invalid material lines remain', async () => {
     db.getCountDocument.mockResolvedValueOnce({ CountId: 1, CountType: 'RAW_MATERIAL', Status: 'Open' });
     db.countHasInvalidLines.mockResolvedValueOnce(true);
-    const res = await request(app).post('/counts/1/submit');
+    const res = await request(appLogSuper).post('/counts/1/submit');
     expect(res.status).toBe(422);
     expect(db.updateCountStatus).not.toHaveBeenCalled();
   });
@@ -404,11 +417,11 @@ describe('POST /counts/:id/submit', () => {
     db.getCountDocument.mockResolvedValueOnce({ CountId: 1, CountType: 'RAW_MATERIAL', Status: 'Open' });
     db.countHasInvalidLines.mockResolvedValueOnce(false);
     db.countHasIncompleteBins.mockResolvedValueOnce(true);
-    const res = await request(app).post('/counts/1/submit');
+    const res = await request(appLogSuper).post('/counts/1/submit');
     expect(res.status).toBe(422);
   });
 
-  test('does not check bin completeness for PTFE_WEEKLY/PRODUCTION', async () => {
+  test('does not check bin completeness for PTFE_WEEKLY/PRODUCTION, and PTFE_WEEKLY needs no supervisor permission', async () => {
     db.getCountDocument.mockResolvedValueOnce({ CountId: 2, CountType: 'PTFE_WEEKLY', Status: 'Open' });
     db.countHasInvalidLines.mockResolvedValueOnce(false);
     db.updateCountStatus.mockResolvedValueOnce(true);
@@ -425,10 +438,10 @@ describe('POST /counts/:id/submit', () => {
     db.countHasIncompleteBins.mockResolvedValueOnce(false);
     db.updateCountStatus.mockResolvedValueOnce(true);
 
-    const res = await request(app).post('/counts/1/submit');
+    const res = await request(appLogSuper).post('/counts/1/submit');
 
     expect(res.status).toBe(200);
-    expect(db.updateCountStatus).toHaveBeenCalledWith('1', 'PendingApproval', expect.objectContaining({ submittedBy: 'j.smith' }));
+    expect(db.updateCountStatus).toHaveBeenCalledWith('1', 'PendingApproval', expect.objectContaining({ submittedBy: logSuperUser.username }));
     expect(notifyMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       target: { type: 'permission', value: 'FIN_STOCK_APPROVE' },
     }));
@@ -792,5 +805,41 @@ describe('POST /discrepancies/:id/manual-to', () => {
     expect(res.status).toBe(200);
     expect(axiosMock.post.mock.calls[0][1]).toMatchObject({ DestinationType: 'FG1', DestinationBin: 'B09' });
     expect(db.resolveDiscrepancy).toHaveBeenCalledWith('3', 'ResolvedMoved', expect.objectContaining({ resolutionTransferOrderNumber: 'TO902' }));
+  });
+});
+
+describe('GET /reports/finance', () => {
+  test('is rejected for a user without FIN_STOCK_APPROVE', async () => {
+    const res = await request(app).get('/reports/finance');
+    expect(res.status).toBe(403);
+    expect(db.getFinanceReport).not.toHaveBeenCalled();
+  });
+
+  test('passes from/to through and returns the report', async () => {
+    db.getFinanceReport.mockResolvedValueOnce({ totals: { TotalGain: 100, TotalLoss: -40 }, byMaterial: [], byBin: [], counts: [] });
+
+    const res = await request(appFinance).get('/reports/finance').query({ from: '2026-01-01', to: '2026-02-01' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.totals).toEqual({ TotalGain: 100, TotalLoss: -40 });
+    expect(db.getFinanceReport).toHaveBeenCalledWith({ from: '2026-01-01', to: '2026-02-01' });
+  });
+});
+
+describe('GET /reports/warehouse-accuracy', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).get('/reports/warehouse-accuracy');
+    expect(res.status).toBe(403);
+    expect(db.getWarehouseAccuracyReport).not.toHaveBeenCalled();
+  });
+
+  test('passes from/to through and returns the report', async () => {
+    db.getWarehouseAccuracyReport.mockResolvedValueOnce({ overall: { TotalLines: 10, AccurateLines: 9 }, counts: [], byLocation: [] });
+
+    const res = await request(appLogSuper).get('/reports/warehouse-accuracy').query({ from: '2026-01-01', to: '2026-02-01' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.overall).toEqual({ TotalLines: 10, AccurateLines: 9 });
+    expect(db.getWarehouseAccuracyReport).toHaveBeenCalledWith({ from: '2026-01-01', to: '2026-02-01' });
   });
 });

@@ -379,6 +379,126 @@ export async function getCountReportByMaterialAndBin(countId) {
   return recordset;
 }
 
+// ── Historical reporting (across every count, not just one) ─────────────────
+//
+// Feeds the finance "Stock Adjustments" tile's gain/loss history and the
+// warehouse-facing Stock Count Accuracy report — separate from
+// getCountReportByMaterial/getCountReportByMaterialAndBin above, which are
+// both scoped to a single count. Date range filters on SubmittedAtUtc (the
+// point a count left 'Open' and became "final" from a reporting point of
+// view) — present on everything except still-in-progress Open counts, which
+// neither report includes anyway.
+
+function addDateRangeFilter(request, where, column, { from, to } = {}) {
+  if (from) { where.push(`${column} >= @from`); request.input('from', sql.DateTime, new Date(from)); }
+  if (to)   { where.push(`${column} <  @to`);   request.input('to',   sql.DateTime, new Date(to)); }
+}
+
+// Value of gains/losses across every count that reached an approval
+// decision (Approved/Posted). Rejected counts are deliberately excluded
+// here — they never had a real financial impact — unlike
+// getWarehouseAccuracyReport below, which cares whether the physical count
+// matched SAP regardless of what finance later decided.
+export async function getFinanceReport({ from, to } = {}) {
+  const pool = await getPool();
+
+  const totalsRequest = pool.request();
+  const totalsWhere = [`d.Status IN ('Approved','Posted')`, `l.VarianceValue IS NOT NULL`];
+  addDateRangeFilter(totalsRequest, totalsWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: totalsRows } = await totalsRequest.query(`
+    SELECT
+      SUM(CASE WHEN l.VarianceValue > 0 THEN l.VarianceValue ELSE 0 END) AS TotalGain,
+      SUM(CASE WHEN l.VarianceValue < 0 THEN l.VarianceValue ELSE 0 END) AS TotalLoss
+    FROM log.StockCountLine l JOIN log.StockCountDocument d ON d.CountId = l.CountId
+    WHERE ${totalsWhere.join(' AND ')}
+  `);
+
+  const byMaterialRequest = pool.request();
+  const byMaterialWhere = [`d.Status IN ('Approved','Posted')`, `l.VarianceValue IS NOT NULL`];
+  addDateRangeFilter(byMaterialRequest, byMaterialWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: byMaterial } = await byMaterialRequest.query(`
+    SELECT l.Material, MAX(l.MaterialText) AS MaterialText,
+           SUM(l.VarianceValue) AS NetValue, SUM(ABS(l.VarianceValue)) AS AbsValue
+    FROM log.StockCountLine l JOIN log.StockCountDocument d ON d.CountId = l.CountId
+    WHERE ${byMaterialWhere.join(' AND ')}
+    GROUP BY l.Material
+    ORDER BY AbsValue DESC
+  `);
+
+  const byBinRequest = pool.request();
+  const byBinWhere = [`d.Status IN ('Approved','Posted')`, `l.VarianceValue IS NOT NULL`];
+  addDateRangeFilter(byBinRequest, byBinWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: byBin } = await byBinRequest.query(`
+    SELECT l.StorageType, l.Bin,
+           SUM(l.VarianceValue) AS NetValue, SUM(ABS(l.VarianceValue)) AS AbsValue
+    FROM log.StockCountLine l JOIN log.StockCountDocument d ON d.CountId = l.CountId
+    WHERE ${byBinWhere.join(' AND ')}
+    GROUP BY l.StorageType, l.Bin
+    ORDER BY AbsValue DESC
+  `);
+
+  const countsRequest = pool.request();
+  const countsWhere = [`d.Status IN ('Approved','Posted','Rejected')`];
+  addDateRangeFilter(countsRequest, countsWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: counts } = await countsRequest.query(`
+    SELECT d.CountId, d.CountType, d.StorageLocation, d.Status,
+           d.SubmittedAtUtc, d.ApprovedAtUtc, d.PostedAtUtc, d.RejectedAtUtc,
+           SUM(l.VarianceValue) AS NetValue
+    FROM log.StockCountDocument d LEFT JOIN log.StockCountLine l ON l.CountId = d.CountId
+    WHERE ${countsWhere.join(' AND ')}
+    GROUP BY d.CountId, d.CountType, d.StorageLocation, d.Status,
+             d.SubmittedAtUtc, d.ApprovedAtUtc, d.PostedAtUtc, d.RejectedAtUtc
+    ORDER BY d.CountId DESC
+  `);
+
+  return { totals: totalsRows[0] || { TotalGain: 0, TotalLoss: 0 }, byMaterial, byBin, counts };
+}
+
+// Counting accuracy (was stock in the right place/quantity) across every
+// count that was at least submitted — includes Rejected counts, unlike
+// getFinanceReport above, since a rejected count still tells you whether
+// the physical count matched SAP, which is the whole point here.
+export async function getWarehouseAccuracyReport({ from, to } = {}) {
+  const pool = await getPool();
+
+  const overallRequest = pool.request();
+  const overallWhere = [`d.Status IN ('PendingApproval','Approved','Rejected','Posted')`, `l.VarianceQty IS NOT NULL`];
+  addDateRangeFilter(overallRequest, overallWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: overallRows } = await overallRequest.query(`
+    SELECT COUNT(*) AS TotalLines,
+           SUM(CASE WHEN l.VarianceQty = 0 THEN 1 ELSE 0 END) AS AccurateLines
+    FROM log.StockCountLine l JOIN log.StockCountDocument d ON d.CountId = l.CountId
+    WHERE ${overallWhere.join(' AND ')}
+  `);
+
+  const countsRequest = pool.request();
+  const countsWhere = [`d.Status IN ('PendingApproval','Approved','Rejected','Posted')`, `l.VarianceQty IS NOT NULL`];
+  addDateRangeFilter(countsRequest, countsWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: counts } = await countsRequest.query(`
+    SELECT d.CountId, d.CountType, d.StorageLocation, d.Status, d.SubmittedAtUtc,
+           COUNT(l.LineId) AS TotalLines,
+           SUM(CASE WHEN l.VarianceQty = 0 THEN 1 ELSE 0 END) AS AccurateLines
+    FROM log.StockCountDocument d JOIN log.StockCountLine l ON l.CountId = d.CountId
+    WHERE ${countsWhere.join(' AND ')}
+    GROUP BY d.CountId, d.CountType, d.StorageLocation, d.Status, d.SubmittedAtUtc
+    ORDER BY d.CountId DESC
+  `);
+
+  const byLocationRequest = pool.request();
+  const byLocationWhere = [`d.Status IN ('PendingApproval','Approved','Rejected','Posted')`, `l.VarianceQty IS NOT NULL`];
+  addDateRangeFilter(byLocationRequest, byLocationWhere, 'd.SubmittedAtUtc', { from, to });
+  const { recordset: byLocation } = await byLocationRequest.query(`
+    SELECT l.StorageType, l.Bin, COUNT(*) AS TotalLines,
+           SUM(CASE WHEN l.VarianceQty <> 0 THEN 1 ELSE 0 END) AS DiscrepancyLines
+    FROM log.StockCountLine l JOIN log.StockCountDocument d ON d.CountId = l.CountId
+    WHERE ${byLocationWhere.join(' AND ')}
+    GROUP BY l.StorageType, l.Bin
+    ORDER BY (SUM(CASE WHEN l.VarianceQty <> 0 THEN 1.0 ELSE 0 END) / COUNT(*)) DESC
+  `);
+
+  return { overall: overallRows[0] || { TotalLines: 0, AccurateLines: 0 }, counts, byLocation };
+}
+
 // ── Finished Goods Count — session (reuses StockCountDocument as a pure
 // active-session marker, no lines/approval fields — see the migration's
 // header comment) ────────────────────────────────────────────────────────────

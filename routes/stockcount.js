@@ -65,6 +65,18 @@ function actor(req) {
   return req.session?.user?.username || 'unknown';
 }
 
+// Same semantics as middleware/auth.js's requirePermission, used inline
+// rather than as route middleware where the gate depends on the request
+// body/loaded document rather than being uniform for the whole route (e.g.
+// closing a RAW_MATERIAL/PRODUCTION count is supervisor-only, but PTFE's
+// isn't — both go through the same POST /counts/:id/submit route).
+function hasPermission(req, code) {
+  const user = req.session?.user;
+  if (!user) return false;
+  if (user.role === 'superadmin') return true;
+  return Array.isArray(user.permissions) && user.permissions.includes(code);
+}
+
 // Reuses the existing GET /api/warehouse/bin-storage-types (LAGP lookup, no
 // SapServer change needed) to validate a free-typed storage type/bin (PTFE
 // Weekly Cycle Count line entry) — a bin that isn't registered in LAGP at
@@ -259,6 +271,26 @@ router.get('/counts/:id/report', async (req, res) => {
   }
 });
 
+// ── Historical reports (across every count) ───────────────────────────────────
+
+router.get('/reports/finance', requirePermission('FIN_STOCK_APPROVE'), async (req, res) => {
+  try {
+    const data = await db.getFinanceReport({ from: req.query.from, to: req.query.to });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/reports/warehouse-accuracy', requirePermission('LOG_SUPER'), async (req, res) => {
+  try {
+    const data = await db.getWarehouseAccuracyReport({ from: req.query.from, to: req.query.to });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Count documents — supervisor-initiated (Raw Material / Production) ───────
 
 router.post('/counts', requirePermission('LOG_SUPER'), async (req, res) => {
@@ -421,12 +453,22 @@ router.post('/counts/:id/bins/:storageType/:bin/complete', requirePermission('LO
 
 // ── Submit / approve / reject ─────────────────────────────────────────────────
 
+// Closing (submitting) a count is a supervisor action for RAW_MATERIAL/
+// PRODUCTION — these are supervisor-initiated counts in the first place
+// (POST /counts is already LOG_SUPER-gated), and operators entering lines
+// shouldn't also be the ones deciding a count is finished. PTFE_WEEKLY is
+// deliberately left open to any operator — it's cron-created, not
+// supervisor-initiated, and doesn't need the same gatekeeping.
 router.post('/counts/:id/submit', async (req, res) => {
   const countId = req.params.id;
   try {
     const doc = await db.getCountDocument(countId);
     if (!doc) return res.status(404).json({ success: false, error: 'Count not found' });
     if (doc.Status !== 'Open') return res.status(400).json({ success: false, error: `Count is already ${doc.Status}` });
+
+    if ((doc.CountType === 'RAW_MATERIAL' || doc.CountType === 'PRODUCTION') && !hasPermission(req, 'LOG_SUPER')) {
+      return res.status(403).json({ success: false, error: 'Requires permission: LOG_SUPER' });
+    }
 
     if (await db.countHasInvalidLines(countId)) {
       return res.status(422).json({ success: false, error: 'This count has invalid material lines that must be corrected before it can be submitted.' });
