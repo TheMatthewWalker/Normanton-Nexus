@@ -23,6 +23,7 @@ let trackedRows = [];
 let selectedTrackedIds = new Set();
 let trackedSearchQuery = '';
 let inboundShipmentRows = [];
+let inboundLogSearchQuery = '';
 let latestShipment = null;
 let currentShipmentView = null;
 let approvedForwarders = null;
@@ -10883,9 +10884,6 @@ async function runInboundLog() {
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load shipments');
     inboundShipmentRows = json.data || [];
-    const badge = document.getElementById('result-row-badge');
-    badge.textContent = `${inboundShipmentRows.length} shipments`;
-    badge.classList.remove('hidden');
     renderInboundLog();
   } catch (err) {
     document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
@@ -10945,14 +10943,64 @@ function ilSortByReceived(rows) {
   return [...rows].sort((a, b) => new Date(b.ReceivedAtUtc).getTime() - new Date(a.ReceivedAtUtc).getTime());
 }
 
+// Single free-text box matching across every field an operator might
+// actually have in hand when looking for a shipment — vendor, tracking
+// number, container number, bill of lading, material (from either linked
+// tracked orders or, for a Manual Inbound Shipment, log.ManualInboundItem —
+// see OrderMaterials/ManualMaterials' comment in listOrderShipments), PO
+// number, and supplier reference — plus the shipment's own reference, since
+// that's the first thing shown and the most obvious thing to search by.
+// Same "search everything in one box" shape as Tracked Orders' osMatchesSearch.
+function ilMatchesSearch(s, query) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return [
+    s.ShipmentReference, s.Suppliers, s.TrackingNumber, s.ContainerNumber, s.BillOfLading,
+    s.OrderMaterials, s.ManualMaterials, s.PoNumbers, s.SupplierReferences,
+  ].some(field => String(field || '').toLowerCase().includes(needle));
+}
+
+// Mirrors Tracked Orders' osApplySearch — live client-side filter (the full
+// shipment list is already in memory), with focus/caret preserved across
+// the re-render so typing feels uninterrupted.
+function ilApplySearch() {
+  const input = document.getElementById('il-search-input');
+  inboundLogSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  renderInboundLog();
+  const newInput = document.getElementById('il-search-input');
+  if (newInput) {
+    newInput.focus();
+    if (caret != null) newInput.setSelectionRange(caret, caret);
+  }
+}
+
 function renderInboundLog() {
-  const addBtnHtml = `<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+  const query = inboundLogSearchQuery.trim();
+  const rows = query ? inboundShipmentRows.filter(s => ilMatchesSearch(s, query)) : inboundShipmentRows;
+
+  const badge = document.getElementById('result-row-badge');
+  badge.textContent = query ? `${rows.length} of ${inboundShipmentRows.length} matching` : `${inboundShipmentRows.length} shipments`;
+  badge.classList.remove('hidden');
+
+  const toolbarHtml = `<div class="lg-actions" style="margin-bottom:10px">
+    <input class="tf-input" id="il-search-input" type="text"
+           placeholder="Search vendor, tracking, container, B/L, material, PO, supplier ref…"
+           value="${esc(inboundLogSearchQuery)}" oninput="ilApplySearch()" style="max-width:340px">
+    <div class="toolbar-spacer"></div>
     <button type="button" class="btn-secondary" id="il-manual-btn">+ Manual Shipment</button>
   </div>`;
 
   if (!inboundShipmentRows.length) {
-    document.getElementById('result-body').innerHTML = addBtnHtml +
+    document.getElementById('result-body').innerHTML = toolbarHtml +
       '<div class="sap-empty">No inbound shipments yet — create one from Tracked Orders by selecting order lines, or add a Manual Shipment above.</div>';
+    document.getElementById('il-manual-btn').addEventListener('click', openManualInboundShipmentModal);
+    return;
+  }
+
+  if (!rows.length) {
+    document.getElementById('result-body').innerHTML = toolbarHtml +
+      `<div class="sap-empty">No shipments match "${esc(query)}".</div>`;
     document.getElementById('il-manual-btn').addEventListener('click', openManualInboundShipmentModal);
     return;
   }
@@ -10974,13 +11022,17 @@ function renderInboundLog() {
 
   const tableHead = '<thead><tr><th>Reference</th><th>Supplier</th><th>Haulier</th><th>Mode</th><th>Dispatch</th><th>ETA</th><th>Tracking</th><th>Orders</th><th>Status</th></tr></thead>';
 
+  // While a search is active, every matching bucket renders already
+  // expanded — same reasoning as Tracked Orders' collapsedCls: the point of
+  // searching is to surface matches immediately, not make the user open a
+  // bucket that defaults closed (Completed/Cancelled) to find them.
   const sections = IL_BUCKET_DEFS.map(bd => {
-    const rawRows = inboundShipmentRows.filter(s => ilBucketFor(s) === bd.key);
+    const rawRows = rows.filter(s => ilBucketFor(s) === bd.key);
     const bucketRows = bd.key === 'cancelled' ? ilSortByCancelled(rawRows)
       : bd.key === 'completed' ? ilSortByReceived(rawRows)
       : ilSortByEta(rawRows);
     if (!bucketRows.length) return '';
-    const collapsed = bd.defaultOpen ? '' : ' ps-section--collapsed';
+    const collapsed = (bd.defaultOpen || query) ? '' : ' ps-section--collapsed';
     return `<div class="ps-section${collapsed}" data-group-key="${bd.key}">
       <div class="ps-section-header">
         <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
@@ -10994,7 +11046,7 @@ function renderInboundLog() {
     </div>`;
   }).join('');
 
-  document.getElementById('result-body').innerHTML = addBtnHtml + `<div class="ps-sections">${sections}</div>`;
+  document.getElementById('result-body').innerHTML = toolbarHtml + `<div class="ps-sections">${sections}</div>`;
 
   document.getElementById('il-manual-btn').addEventListener('click', openManualInboundShipmentModal);
   document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));

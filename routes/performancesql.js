@@ -2066,7 +2066,39 @@ export async function listOrderShipments() {
         JOIN log.Vendor v ON v.VendorId = p2.VendorId
         WHERE p2.ShipmentId = s.ShipmentId
         FOR XML PATH('')
-      ), 1, 2, '') AS Suppliers
+      ), 1, 2, '') AS Suppliers,
+      -- The remaining four are for the Inbound Log's search box
+      -- (ilMatchesSearch in logistics.js) — distinct, comma-joined, same
+      -- FOR XML PATH convention as Suppliers above. Materials come from two
+      -- different places depending on shipment type: linked tracked orders
+      -- for a normal shipment, log.ManualInboundItem for a Manual Inbound
+      -- Shipment (IsManual — those aren't linked to any
+      -- PurchaseOrderSuggestion at all, see openManualInboundShipmentModal's
+      -- comment), so both are pulled and the search box checks either.
+      STUFF((
+        SELECT DISTINCT ', ' + p3.Material
+        FROM log.PurchaseOrderSuggestion p3
+        WHERE p3.ShipmentId = s.ShipmentId
+        FOR XML PATH('')
+      ), 1, 2, '') AS OrderMaterials,
+      STUFF((
+        SELECT DISTINCT ', ' + m.Material
+        FROM log.ManualInboundItem m
+        WHERE m.ShipmentId = s.ShipmentId AND m.Removed = 0
+        FOR XML PATH('')
+      ), 1, 2, '') AS ManualMaterials,
+      STUFF((
+        SELECT DISTINCT ', ' + p4.PoNumber
+        FROM log.PurchaseOrderSuggestion p4
+        WHERE p4.ShipmentId = s.ShipmentId AND p4.PoNumber IS NOT NULL
+        FOR XML PATH('')
+      ), 1, 2, '') AS PoNumbers,
+      STUFF((
+        SELECT DISTINCT ', ' + p5.SupplierReference
+        FROM log.PurchaseOrderSuggestion p5
+        WHERE p5.ShipmentId = s.ShipmentId AND p5.SupplierReference IS NOT NULL
+        FOR XML PATH('')
+      ), 1, 2, '') AS SupplierReferences
     FROM log.PurchaseOrderShipment s
     ORDER BY s.CreatedAtUtc DESC
   `);
