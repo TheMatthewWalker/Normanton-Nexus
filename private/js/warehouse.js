@@ -873,12 +873,17 @@ async function wsmRefreshAfterTransfer() {
 //     the exact transfer orders needed to zero every bin out, then execute
 //     them all in one confirmed batch.
 //   - Card 2 (multiple bins, doesn't net to zero): resolve one batch at a
-//     time — either consolidate every other bin's positive stock into one
-//     chosen bin, or park one instance in the holding bin awaiting
-//     investigation (picked up by the Stock in Investigation card below). A
-//     holding-bin row is hidden from this card's bin list/count (it's there
-//     on purpose) unless it happens to be part of a batch that nets to zero,
-//     in which case Card 1 already claims it instead.
+//     time, in a modal (rather than an inline panel, which was easy to lose
+//     track of below a long flagged-batch table) — either consolidate every
+//     other bin's positive stock into one chosen bin, or park one instance in
+//     the holding bin awaiting investigation (picked up by the Stock in
+//     Investigation card below). A holding-bin row is excluded from this
+//     card's active-bin list/count and from what Consolidate can move
+//     into/out of (it's there on purpose) unless it happens to be part of a
+//     batch that nets to zero, in which case Card 1 already claims it
+//     instead — but it's still shown, read-only, in the resolve modal, so the
+//     quantity already sitting in holding is never hidden while deciding
+//     which bin to consolidate the rest into.
 // Both action paths call the LOG_SUPER-gated /api/sap/warehouse/batch-cleanup-transfer
 // (or its -bulk sibling, for the multi-move flows below) route rather than
 // the ungated single/mass transfer proxy used elsewhere in Stock Management,
@@ -1385,7 +1390,7 @@ function wsmRenderCard2List(card2) {
   if (!container) return;
   if (!card2.length) { container.innerHTML = ''; return; }
 
-  const rowsHtml = card2.map(g => `<tr>
+  const rowsHtml = card2.map(g => `<tr data-batch="${esc(g.batch)}">
     <td>${esc(g.batch)}</td>
     <td>${esc(g.rows[0]?.material || '')}</td>
     <td>${g.nonHolding.length}</td>
@@ -1396,31 +1401,54 @@ function wsmRenderCard2List(card2) {
   container.innerHTML = `
     <div class="wsm-panel-title" style="margin-top:8px">Multiple Bins, Non-Zero</div>
     <div class="wsm-mass-table-wrap">
-      <table class="wsm-mass-table">
+      <table class="wsm-mass-table" id="wsm-disc-card2-table">
         <thead><tr><th>Batch</th><th>Material</th><th>Active Bins</th><th>Subtotal</th><th></th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
-    </div>
-    <div id="wsm-disc-resolve-panel"></div>`;
+    </div>`;
 
   container.querySelectorAll('.wsm-disc-resolve-btn').forEach(btn => {
-    btn.addEventListener('click', () => wsmRenderResolvePanel(card2.find(g => g.batch === btn.dataset.batch)));
+    btn.addEventListener('click', () => wsmOpenResolveModal(card2.find(g => g.batch === btn.dataset.batch), card2));
   });
 }
 
-function wsmResolveSubText(group, holdingRows) {
-  return `Subtotal ${Math.round(group.subtotal * 1000) / 1000} across ${group.nonHolding.length} active bin(s)${holdingRows.length ? ` · ${holdingRows.length} already in holding (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), excluded here` : ''}`;
+// Removes one resolved batch's row from the Card 2 (Multiple Bins, Non-Zero)
+// table in place — same "don't wait for a full rescan" idiom Card 3 already
+// uses for its own row removal — so a fully consolidated batch disappears
+// from the list immediately and can't accidentally be resolved twice.
+function wsmRemoveCard2Row(card2, batch) {
+  const idx = card2.findIndex(g => g.batch === batch);
+  if (idx !== -1) card2.splice(idx, 1);
+  const tr = document.querySelector(`#wsm-disc-card2-table tr[data-batch="${CSS.escape(batch)}"]`);
+  if (tr) tr.remove();
 }
 
-function wsmRenderResolvePanel(group) {
-  const panel = document.getElementById('wsm-disc-resolve-panel');
-  if (!panel || !group) return;
-
+function wsmResolveSubText(group) {
   const holdingRows = group.rows.filter(wsmIsHolding);
-  // Rows are keyed by wsmRowId rather than array index so that removing one
-  // row in place (see wsmMoveToHolding) never shifts what an already-checked
-  // radio or a data attribute refers to.
-  const rowsHtml = group.nonHolding.map(r => {
+  const holdingQty  = holdingRows.reduce((s, r) => s + r.availableQty, 0);
+  return `Subtotal ${Math.round(group.subtotal * 1000) / 1000} across ${group.nonHolding.length} active bin(s)` +
+    (holdingRows.length ? ` · ${Math.round(holdingQty * 1000) / 1000} already in holding (${WSM_HOLDING_TYPE}/${WSM_HOLDING_BIN}), shown below` : '');
+}
+
+// Builds the resolve table's rows: the batch's holding-bin (999/TEMP) row(s)
+// first — shown so the quantity already parked in holding is never hidden
+// while picking which bin to consolidate into, but not selectable/actionable
+// here, since holding is a destination Move to Holding sends stock TO, not
+// something this table's Consolidate action merges FROM — followed by the
+// active (non-holding) bins, same as before. Rows are keyed by wsmRowId
+// rather than array index so that removing one row in place (see
+// wsmMoveToHolding) never shifts what an already-checked radio or a data
+// attribute refers to.
+function wsmResolveRowsHtml(group) {
+  const holdingRows = group.rows.filter(wsmIsHolding);
+  const holdingHtml = holdingRows.map(r => `<tr class="wsm-row--holding" data-row-id="${esc(wsmRowId(r))}">
+      <td></td>
+      <td class="wsm-mono">${esc(r.storageType)}/${esc(r.bin)}</td>
+      <td>${Math.round(r.availableQty * 1000) / 1000}</td>
+      <td>Already in holding</td>
+    </tr>`).join('');
+
+  const activeHtml = group.nonHolding.map(r => {
     const id = wsmRowId(r);
     return `<tr data-row-id="${esc(id)}">
       <td><input type="radio" name="wsm-resolve-target" value="${esc(id)}"></td>
@@ -1430,33 +1458,71 @@ function wsmRenderResolvePanel(group) {
     </tr>`;
   }).join('');
 
-  panel.innerHTML = `
-    <div class="wsm-resolve-box">
-      <div class="wsm-panel-title">Resolve Batch ${esc(group.batch)}</div>
-      <div class="wsm-panel-sub" id="wsm-resolve-sub">${wsmResolveSubText(group, holdingRows)}</div>
-      <div class="wsm-mass-table-wrap">
-        <table class="wsm-mass-table" id="wsm-resolve-table">
-          <thead><tr><th>Keep</th><th>Bin</th><th>Qty</th><th></th></tr></thead>
-          <tbody>${rowsHtml}</tbody>
-        </table>
-      </div>
-      <div id="wsm-resolve-precheck"></div>
-      <div class="tf-actions">
-        <div id="wsm-resolve-result"></div>
-        <button type="button" class="btn-submit" id="wsm-resolve-consolidate-btn">Consolidate Into Selected Bin</button>
-      </div>
-    </div>`;
+  return holdingHtml + activeHtml;
+}
 
-  document.getElementById('wsm-resolve-consolidate-btn').addEventListener('click', () => wsmConsolidateGroup(group));
-  panel.querySelectorAll('input[name="wsm-resolve-target"]').forEach(radio => {
+// (Re)renders the resolve table's body and rewires its listeners — used both
+// when the modal first opens and after a Move to Holding action changes
+// what's active vs. already in holding.
+function wsmRenderResolveTable(group) {
+  const tbody = document.querySelector('#wsm-resolve-table tbody');
+  if (!tbody) return;
+  tbody.innerHTML = wsmResolveRowsHtml(group);
+  tbody.querySelectorAll('input[name="wsm-resolve-target"]').forEach(radio => {
     radio.addEventListener('change', () => wsmRenderConsolidatePrecheck(group));
   });
-  panel.querySelectorAll('.wsm-resolve-holding-btn').forEach(btn => {
+  tbody.querySelectorAll('.wsm-resolve-holding-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const row = group.nonHolding.find(r => wsmRowId(r) === btn.dataset.rowId);
       wsmMoveToHolding(group, row);
     });
   });
+}
+
+// Opens the Card 2 resolve flow as a modal overlay rather than an inline
+// panel below the (potentially long) flagged-batch table — otherwise easy to
+// scroll past without noticing. `card2` is passed through so a fully
+// consolidated batch can be spliced out of the underlying list and its row
+// dropped from the on-page table the instant it's resolved (see
+// wsmConsolidateGroup), without waiting for a full Rescan.
+function wsmOpenResolveModal(group, card2) {
+  if (!group) return;
+  document.getElementById('wsm-resolve-modal')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id        = 'wsm-resolve-modal';
+  overlay.className = 'wsm-resolve-overlay';
+  overlay.innerHTML = `
+    <div class="wsm-resolve-modal">
+      <div class="wsm-resolve-modal-hdr">
+        <div class="wsm-panel-title">Resolve Batch ${esc(group.batch)}</div>
+        <button type="button" class="wsm-resolve-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="wsm-panel-sub" id="wsm-resolve-sub">${wsmResolveSubText(group)}</div>
+      <div class="wsm-mass-table-wrap">
+        <table class="wsm-mass-table" id="wsm-resolve-table">
+          <thead><tr><th>Keep</th><th>Bin</th><th>Qty</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="wsm-resolve-precheck"></div>
+      <div class="tf-actions">
+        <div id="wsm-resolve-result"></div>
+        <button type="button" class="btn-secondary" id="wsm-resolve-cancel">Close</button>
+        <button type="button" class="btn-submit" id="wsm-resolve-consolidate-btn">Consolidate Into Selected Bin</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('.wsm-resolve-close').addEventListener('click', close);
+  overlay.querySelector('#wsm-resolve-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  document.getElementById('wsm-resolve-consolidate-btn').addEventListener('click', () => wsmConsolidateGroup(group, card2));
+
+  wsmRenderResolveTable(group);
 }
 
 // Shared by the live pre-consolidate check and the actual Consolidate action,
@@ -1517,7 +1583,7 @@ function wsmRenderConsolidatePrecheck(group) {
     </div>`;
 }
 
-async function wsmConsolidateGroup(group) {
+async function wsmConsolidateGroup(group, card2) {
   const radio    = document.querySelector('input[name="wsm-resolve-target"]:checked');
   const resultEl = document.getElementById('wsm-resolve-result');
   if (!radio) { resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ Pick a bin to keep first.</div>`; return; }
@@ -1566,9 +1632,25 @@ async function wsmConsolidateGroup(group) {
     note.textContent = `${skipped.length} row(s) left untouched (negative qty or different stock category/special stock).`;
     resultEl.appendChild(note);
   }
+
+  if (fail === 0) {
+    // Fully resolved — the progress banner's "✓ All N succeeded." is the
+    // brief success message; leave it up for a moment, then close the modal
+    // and drop this batch from the Multiple Bins, Non-Zero list in place, so
+    // it can't be pressed a second time and the list visibly shrinks without
+    // needing a full Rescan.
+    if (consolidateBtn) consolidateBtn.textContent = 'Done';
+    setTimeout(() => {
+      document.getElementById('wsm-resolve-modal')?.remove();
+      wsmRemoveCard2Row(card2, group.batch);
+    }, 1000);
+    return;
+  }
+
   if (consolidateBtn) consolidateBtn.textContent = 'Done — press Rescan above to refresh';
-  // Not auto-rescanning here either — wsmRunDiscrepancyScan() would replace
-  // this whole panel (and the message above) before it can be read.
+  // Left open on any failure, unlike the fully-successful path above — the
+  // modal isn't auto-closed so the failure breakdown stays readable, and
+  // Rescan afterwards will reflect whatever actually landed in SAP.
 }
 
 async function wsmMoveToHolding(group, row) {
@@ -1602,19 +1684,22 @@ async function wsmMoveToHolding(group, row) {
     return;
   }
 
-  // Success — remove just this row, in place: splice it out of the group's
-  // in-memory data and drop only its <tr> from the resolve table, rather than
-  // re-rendering the whole panel/dashboard. Keeps the page exactly where it
-  // was scrolled to, and the row that moved is simply gone rather than the
-  // whole screen resetting.
+  // Success — drop the row from the active list, and fold its quantity into
+  // the matching holding-bin row (same material/batch/location/stock status
+  // — see wsmCategoryKey) so the "already in holding" total the resolve
+  // table shows stays accurate for the rest of this session, not just what
+  // was already parked there when the batch was first scanned.
   const idx = group.nonHolding.findIndex(r => wsmRowId(r) === rowId);
   if (idx !== -1) group.nonHolding.splice(idx, 1);
 
-  const tr = document.querySelector(`#wsm-resolve-table tr[data-row-id="${CSS.escape(rowId)}"]`);
-  if (tr) tr.remove();
+  const holdingMatch = group.rows.find(r => wsmIsHolding(r) && wsmCategoryKey(r) === wsmCategoryKey(row));
+  if (holdingMatch) holdingMatch.availableQty += row.availableQty;
+  else group.rows.push({ ...row, storageType: WSM_HOLDING_TYPE, bin: WSM_HOLDING_BIN });
+
+  wsmRenderResolveTable(group);
 
   const subEl = document.getElementById('wsm-resolve-sub');
-  if (subEl) subEl.textContent = wsmResolveSubText(group, group.rows.filter(wsmIsHolding));
+  if (subEl) subEl.textContent = wsmResolveSubText(group);
 
   if (resultEl) resultEl.innerHTML = `<div class="tf-success tf-inline-error">Moved ${row.availableQty} from ${esc(row.storageType)}/${esc(row.bin)} to holding.</div>`;
 

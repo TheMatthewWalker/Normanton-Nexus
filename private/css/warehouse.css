@@ -1619,6 +1619,46 @@ body::before {
   margin-bottom: 20px;
 }
 
+/* Resolve panel as a modal overlay (Card 2 — Multiple Bins, Non-Zero) rather
+   than an inline panel below a potentially long flagged-batch table, so it's
+   never scrolled out of view. Wider than .wc-overlay/.wc-modal (used for
+   simple confirm/prompt dialogs) since this holds a full bin table. */
+.wsm-resolve-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(15,25,45,0.6);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: fadeIn 0.12s ease;
+  padding: 24px;
+}
+.wsm-resolve-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px;
+  max-width: 720px; width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(15,25,45,0.35);
+  animation: fadeUp 0.15s ease both;
+}
+.wsm-resolve-modal-hdr {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px;
+}
+.wsm-resolve-close {
+  background: transparent; border: none; cursor: pointer;
+  font-size: 20px; line-height: 1; color: var(--text-dim); padding: 2px 4px;
+}
+.wsm-resolve-close:hover { color: var(--accent); }
+
+/* Holding-bin (999/TEMP) row shown for visibility inside the resolve modal —
+   not selectable as a consolidate target/source, just there so the quantity
+   already parked in holding is never hidden while picking a bin to
+   consolidate into. */
+.wsm-row--holding td { color: var(--text-muted); font-style: italic; }
+
 /* ── Progress banner ──────────────────────────────────────────────────────
    Shared by mass transfer, zero-sum clean-up and consolidate — anywhere a
    loop of one-POST-per-line runs client-side and needs a live counter plus
