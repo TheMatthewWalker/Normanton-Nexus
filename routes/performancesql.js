@@ -1887,8 +1887,31 @@ export async function listOrderSuggestionsTracked() {
 // PoNumber AND PoItemNumber). COALESCE means leaving it blank on every
 // other save (qty/status/etc.) never wipes a value that's already set,
 // whichever caller set it.
+// Locks a Tracked Orders row once it's Completed (Status 'Received', or the
+// retired 'Booked' — see the STATUS LIFECYCLE ADDENDUM in
+// sql/migrate_order_shipments.sql) against updateOrderSuggestionStatus,
+// deleteOrderSuggestion, and assignOrderShipment — the general-purpose edit
+// paths Tracked Orders' row Save/Delete/Assign Shipment controls use.
+// Deliberately NOT applied to updateOrderSuggestionPoItem below: that's the
+// one edit meant to still work on a completed order, from inside its
+// Inbound Shipment, to retry a goods receipt that didn't post. The only way
+// back out of this lock is Undo Received (undoShipmentReceived) on the
+// order's shipment.
+async function assertOrderEditable(pool, suggestionId) {
+  const { recordset } = await pool.request()
+    .input('suggestionId', sql.Int, suggestionId)
+    .query('SELECT Status FROM log.PurchaseOrderSuggestion WHERE SuggestionId = @suggestionId');
+  if (!recordset[0]) { const err = new Error('Tracked order not found.'); err.statusCode = 404; throw err; }
+  if (recordset[0].Status === 'Received' || recordset[0].Status === 'Booked') {
+    const err = new Error('This order has already been received and is locked — use Undo Received on its Inbound Shipment to reverse it first.');
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 export async function updateOrderSuggestionStatus(suggestionId, { status, poNumber, poItemNumber, notes, supplierReference, orderQty, deliveryDate, readyToCollectDate }) {
   const pool = await getPool();
+  await assertOrderEditable(pool, suggestionId);
   await pool.request()
     .input('suggestionId',      sql.Int, suggestionId)
     .input('status',            sql.NVarChar(20),  status)
@@ -1913,6 +1936,25 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
     `);
 }
 
+// Sets just PoItemNumber — the Inbound Shipment detail's SAP GR retry
+// control (isd-po-item-save in logistics.js), for a line whose goods
+// receipt didn't post because it had a PO number but no item number
+// (postGoodsReceiptToSap's noPo case). Kept separate from the general
+// updateOrderSuggestionStatus above specifically so it's NOT covered by
+// assertOrderEditable's completed-order lock — this is the one edit meant
+// to keep working on an already-Received line, since that's exactly the
+// state a line needing this fix is in.
+export async function updateOrderSuggestionPoItem(suggestionId, poItemNumber) {
+  const pool = await getPool();
+  await pool.request()
+    .input('suggestionId', sql.Int, suggestionId)
+    .input('poItemNumber', sql.NVarChar(5), poItemNumber || null)
+    .query(`
+      UPDATE log.PurchaseOrderSuggestion SET PoItemNumber = @poItemNumber, UpdatedAtUtc = GETUTCDATE()
+      WHERE SuggestionId = @suggestionId
+    `);
+}
+
 // Hard-deletes a tracked order outright — distinct from setting
 // Status='Cancelled', which just hides the row from listOrderSuggestionsTracked
 // (see that function's WHERE clause) while keeping it for audit. This is for
@@ -1924,6 +1966,7 @@ export async function updateOrderSuggestionStatus(suggestionId, { status, poNumb
 // simply reflect one fewer line afterwards, same as if it were never linked.
 export async function deleteOrderSuggestion(suggestionId) {
   const pool = await getPool();
+  await assertOrderEditable(pool, suggestionId);
   const { recordset } = await pool.request()
     .input('suggestionId', sql.Int, suggestionId)
     .query('DELETE FROM log.PurchaseOrderSuggestion OUTPUT DELETED.SuggestionId WHERE SuggestionId = @suggestionId');
@@ -2216,6 +2259,7 @@ export async function removeManualInboundItem(itemId) {
 // link an order to it.
 export async function assignOrderShipment(suggestionId, shipmentId) {
   const pool = await getPool();
+  await assertOrderEditable(pool, suggestionId);
 
   if (shipmentId) {
     const { recordset } = await pool.request()
@@ -2271,9 +2315,16 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
 }
 
 // Marks a shipment received (Inbound Log's "Mark Received" action) and
-// bulk-flips every non-cancelled order on it to 'Booked' — see
-// sql/migrate_order_shipments.sql's STATUS LIFECYCLE ADDITION note for why
-// this is a distinct status from 'Received', not a reuse of it.
+// bulk-flips every non-cancelled order on it straight to 'Received' — see
+// sql/migrate_order_shipments.sql's STATUS LIFECYCLE ADDITION note (and its
+// later addendum) for the intermediate 'Booked' status this used to set,
+// since retired: collapsed back into 'Received' at the product owner's
+// request rather than kept as a manual "SAP GR confirmed" gate. 'Booked'
+// itself is left in the Status enum/OS_STATUS_OPTIONS (logistics.js) and
+// still recognized everywhere a query checks for it, purely so any
+// already-existing 'Booked' rows keep behaving exactly like 'Received' ones
+// (see the Tracked Orders "Completed" bucket and the OTIF query above) —
+// nothing writes 'Booked' anymore.
 //
 // receivedQuantities is an optional { [suggestionId]: qty } map — the
 // operator's confirmed-received quantity per order line, so a short or
@@ -2296,12 +2347,11 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
 // portal — and every line is recorded as skipped instead of attempted.
 //
 // A single line's SAP failure does NOT stop the others, or stop the
-// shipment/remaining lines being marked Booked — 'Booked' has always meant
+// shipment/remaining lines being marked Received — 'Received' means
 // "physically arrived and logged as received", independent of whether SAP
-// posting itself succeeded (see the STATUS LIFECYCLE note); the per-line
-// outcome (documentNumber/error/skipped) is stamped onto the order row and
-// returned so a failure can be seen and retried without blocking receiving
-// the rest of the shipment.
+// posting itself succeeded; the per-line outcome (documentNumber/error/
+// skipped) is stamped onto the order row and returned so a failure can be
+// seen and retried without blocking receiving the rest of the shipment.
 export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt, receivedQuantities, skipSap, postGoodsReceipt } = {}) {
   const pool = await getPool();
   const { recordset: shipmentRows } = await pool.request()
@@ -2359,7 +2409,7 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
       .input('sapGrSkipped',         sql.Bit, sapResult.skipped ? 1 : 0)
       .query(`
         UPDATE log.PurchaseOrderSuggestion SET
-          Status = 'Booked', ReceivedQty = @receivedQty,
+          Status = 'Received', ReceivedQty = @receivedQty,
           SapMaterialDocument = @sapMaterialDocument, SapGrError = @sapGrError, SapGrSkipped = @sapGrSkipped,
           UpdatedAtUtc = GETUTCDATE()
         WHERE SuggestionId = @suggestionId

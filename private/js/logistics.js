@@ -9843,6 +9843,16 @@ function osRenderTrackedList(tracked) {
     : `${tracked.length} tracked`;
   document.getElementById('result-row-badge').classList.remove('hidden');
 
+  // Completed (Received, or the retired Booked — see the STATUS LIFECYCLE
+  // ADDENDUM in sql/migrate_order_shipments.sql) rows render fully
+  // read-only: no qty/due-date/status/PO/supplier-ref inputs, no Save/
+  // Delete, no reassigning the shipment — matches assertOrderEditable's
+  // server-side lock in performancesql.js (updateOrderSuggestionStatus/
+  // deleteOrderSuggestion/assignOrderShipment all reject a completed row),
+  // so nothing rendered here can actually succeed anyway. The shipment cell
+  // still opens the Inbound Shipment detail (openInboundShipmentDetail) —
+  // not the Assign Shipment modal — since that's where the one remaining
+  // way to touch a completed order lives: Undo Received.
   const renderTrackedRow = (t) => {
     // Whichever date is actually actionable/shown gets edited — same
     // ReadyToCollectDate-for-spot-PO-else-DeliveryDate split as
@@ -9852,6 +9862,30 @@ function osRenderTrackedList(tracked) {
     // alone.
     const isSpotDue = t.IsSpotPo && t.ReadyToCollectDate;
     const dueValue  = daDateInputValue(isSpotDue ? t.ReadyToCollectDate : t.DeliveryDate);
+    const isCompleted = t.Status === 'Received' || t.Status === 'Booked';
+
+    if (isCompleted) {
+      return `
+      <tr class="admin-row">
+        <td class="lg-check-cell"></td>
+        <td><strong>${esc(t.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(t.MaterialText || '')}</div></td>
+        <td>${esc(t.VendorName)}</td>
+        <td>${Number(t.OrderQty).toLocaleString()}</td>
+        <td>${formatDisplayDate(t.OrderDate)}</td>
+        <td>${formatDisplayDate(dueValue)}</td>
+        <td>Received</td>
+        <td>${esc(t.PoNumber || '-')}${t.PoItemNumber ? ` / ${esc(t.PoItemNumber)}` : ''}</td>
+        <td>${esc(t.SupplierReference || '-')}</td>
+        <td>
+          <button class="btn-secondary os-shipment-view-btn" data-shipment-id="${t.ShipmentId}" style="padding:3px 8px;font-size:11px;white-space:nowrap" title="${esc([t.Haulier, t.ModeOfTransport, t.ShipmentTrackingNumber].filter(Boolean).join(' · '))}">
+            ${esc(t.ShipmentReference || t.Haulier || 'View shipment')}
+          </button>
+          <button class="btn-secondary os-invoice-btn" data-shipment-id="${t.ShipmentId}" data-shipment-ref="${esc(t.ShipmentReference || '')}" style="padding:3px 8px;font-size:11px;white-space:nowrap;margin-left:4px">Invoice</button>
+        </td>
+        <td style="text-align:right"><span class="toolbar-hint" style="white-space:nowrap">Reverse via shipment</span></td>
+      </tr>`;
+    }
+
     return `
     <tr class="admin-row">
       <td class="lg-check-cell"><input type="checkbox" class="lg-check os-check" data-id="${t.SuggestionId}"></td>
@@ -9888,21 +9922,32 @@ function osRenderTrackedList(tracked) {
 
   const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
 
-  // Four-level hierarchy: bucket (Needs Booking / Needs Shipment / Assigned
-  // to Shipment / Cancelled) -> supplier -> order rows. Needs Booking comes
-  // first and takes priority over everything except Cancelled — an order
-  // that's just been accepted (Status still 'Accepted') hasn't actually
-  // been sent to the supplier yet, and previously fell straight into Needs
-  // Shipment alongside orders that were already placed, making it easy to
-  // forget the "tell the supplier" step entirely. It gets the red/priority
-  // dot since a forgotten order is the costliest mistake here. Every level
-  // starts collapsed — the point is to let the user open exactly one
-  // supplier at a time rather than face the whole list, reusing the
-  // ps-section pattern from Open Deliveries, nested this time.
+  // Five-level hierarchy: bucket (Needs Booking / Needs Shipment / Assigned
+  // to Shipment / Completed / Cancelled) -> supplier -> order rows. Needs
+  // Booking comes first and takes priority over everything except
+  // Cancelled/Completed — an order that's just been accepted (Status still
+  // 'Accepted') hasn't actually been sent to the supplier yet, and
+  // previously fell straight into Needs Shipment alongside orders that were
+  // already placed, making it easy to forget the "tell the supplier" step
+  // entirely. It gets the red/priority dot since a forgotten order is the
+  // costliest mistake here. Every level starts collapsed — the point is to
+  // let the user open exactly one supplier at a time rather than face the
+  // whole list, reusing the ps-section pattern from Open Deliveries, nested
+  // this time.
+  //
+  // Completed (Status 'Received', or the retired 'Booked' — see the STATUS
+  // LIFECYCLE ADDENDUM in sql/migrate_order_shipments.sql) used to stay in
+  // Assigned to Shipment forever once Mark Received flipped its status,
+  // since that bucket only ever checked "has a shipment", not whether that
+  // shipment had actually arrived. Split out so a received order stops
+  // looking like it still needs attention; renderTrackedRow above renders
+  // these rows locked read-only, matching assertOrderEditable's server-side
+  // lock in performancesql.js.
   const BUCKET_DEFS = [
     { key: 'needsBooking', label: 'Needs Booking',        dot: 'priority', match: t => t.Status === 'Accepted' },
-    { key: 'needs',        label: 'Needs Shipment',       dot: 'backlog',  match: t => t.Status !== 'Cancelled' && t.Status !== 'Accepted' && !t.ShipmentId },
-    { key: 'assigned',     label: 'Assigned to Shipment', dot: 'today',    match: t => t.Status !== 'Cancelled' && t.Status !== 'Accepted' && !!t.ShipmentId },
+    { key: 'needs',        label: 'Needs Shipment',       dot: 'backlog',  match: t => t.Status === 'Ordered' && !t.ShipmentId },
+    { key: 'assigned',     label: 'Assigned to Shipment', dot: 'week',     match: t => t.Status === 'Ordered' && !!t.ShipmentId },
+    { key: 'completed',    label: 'Completed',            dot: 'today',    match: t => t.Status === 'Received' || t.Status === 'Booked' },
     { key: 'cancelled',    label: 'Cancelled',            dot: 'other',    match: t => t.Status === 'Cancelled' },
   ];
 
@@ -9995,6 +10040,13 @@ function osRenderTrackedList(tracked) {
       const t = rows.find(x => String(x.SuggestionId) === btn.dataset.id);
       if (t) openAssignShipmentModal(t);
     });
+  });
+  // Completed rows' shipment button opens the Inbound Shipment detail
+  // (read-only line list + Undo Received) instead of Assign Shipment — see
+  // renderTrackedRow's comment for why a completed order can't be
+  // reassigned from here.
+  document.querySelectorAll('.os-shipment-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => openInboundShipmentDetail(Number(btn.dataset.shipmentId)));
   });
   document.querySelectorAll('.os-invoice-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -11150,7 +11202,7 @@ async function openManualInboundShipmentModal() {
 // Detail/edit view for one inbound shipment — header fields (editable via
 // PUT), linked order lines (read-only except for a per-line Qty Received
 // input while the shipment is still open), and Mark Received when not yet
-// received. Mark Received bulk-flips every linked order to 'Booked' server
+// received. Mark Received bulk-flips every linked order to 'Received' server
 // side (markShipmentReceived) using the confirmed Qty Received per line and
 // calls the SAP goods-receipt placeholder — see that function's comment in
 // performancesql.js.
@@ -11232,16 +11284,9 @@ async function refreshInboundShipmentDetail(shipmentId) {
       // SAP GR cell instead of an always-visible column, keeping the table
       // narrow enough to read without scrolling horizontally.
       const missingPoItemOnly = !isCancelled && !o.SapMaterialDocument && o.SapGrSkipped && o.PoNumber && !o.PoItemNumber;
-      // Status/PoNumber/SupplierReference/Notes ride along as data
-      // attributes so isd-po-item-save can send the full row state on PUT —
-      // updateOrderSuggestionStatus (performancesql.js) sets those directly
-      // (not COALESCE), so omitting them would wipe whatever was already
-      // there.
       const poItemFixControl = `
         <input class="tf-input isd-po-item-input" type="text" maxlength="5"
-               data-suggestion-id="${o.SuggestionId}" data-status="${esc(o.Status)}"
-               data-po-number="${esc(o.PoNumber || '')}" data-supplier-ref="${esc(o.SupplierReference || '')}"
-               data-notes="${esc(o.Notes || '')}"
+               data-suggestion-id="${o.SuggestionId}"
                value="${esc(o.PoItemNumber || '')}" placeholder="e.g. 00010" style="width:70px;padding:3px 6px;font-size:11px">
         <button type="button" class="btn-secondary isd-po-item-save" data-suggestion-id="${o.SuggestionId}" style="padding:2px 6px;font-size:11px;margin-left:4px">Save</button>`;
       const sapGrCell = canReceive ? '' : `<td>${
@@ -11354,9 +11399,10 @@ async function refreshInboundShipmentDetail(shipmentId) {
     renderShipmentDocuments(shipmentId);
     if (s.IsManual) renderManualInboundItems(shipmentId);
 
-    // PO Item save — sends the full current row state (see poItemCell's
-    // comment above for why) so this single-field edit can't wipe
-    // Status/PoNumber/SupplierReference/Notes on save.
+    // PO Item save — narrow single-field update (updateOrderSuggestionPoItem
+    // in performancesql.js), deliberately not the general PUT endpoint so it
+    // keeps working on an already-Received line (see that function's
+    // comment for why).
     document.querySelectorAll('.isd-po-item-save').forEach(btn => {
       btn.addEventListener('click', async () => {
         const suggestionId = btn.dataset.suggestionId;
@@ -11365,16 +11411,10 @@ async function refreshInboundShipmentDetail(shipmentId) {
         if (resultDiv) resultDiv.innerHTML = '';
         btn.disabled = true; btn.textContent = 'Saving…';
         try {
-          const res2 = await fetch(`/api/performance/order-suggestions/${suggestionId}`, {
-            method: 'PUT',
+          const res2 = await fetch(`/api/performance/order-suggestions/${suggestionId}/po-item`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              status: input.dataset.status,
-              poNumber: input.dataset.poNumber || null,
-              poItemNumber: input.value.trim() || null,
-              supplierReference: input.dataset.supplierRef || null,
-              notes: input.dataset.notes || null,
-            }),
+            body: JSON.stringify({ poItemNumber: input.value.trim() || null }),
           });
           const json2 = await res2.json();
           if (!json2.success) throw new Error(json2.error?.message || 'Failed to save PO item number');
@@ -11693,7 +11733,7 @@ async function saveInboundShipmentDetail(shipmentId) {
   }
 }
 
-// Bulk-flips every linked order to 'Booked' server-side — a significant,
+// Bulk-flips every linked order to 'Received' server-side — a significant,
 // hard-to-reverse action affecting every order on the shipment, so this
 // gets an explicit confirm() rather than firing straight away. Reads the
 // per-line "Qty Received" inputs (rendered by refreshInboundShipmentDetail,
@@ -11703,7 +11743,7 @@ async function saveInboundShipmentDetail(shipmentId) {
 // comment in performancesql.js. The "Skip SAP posting" checkbox (testing
 // phase only) bypasses every SAP call for this receive so nothing books
 // into SAP before the operator is ready — every line still gets marked
-// Booked in the portal with its confirmed quantity, just flagged Skipped
+// Received in the portal with its confirmed quantity, just flagged Skipped
 // instead of posted.
 async function markInboundShipmentReceived(shipmentId, shipment) {
   const orderCount = shipment.orders?.length || 0;
@@ -11722,8 +11762,8 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
 
   const skipSap = !!document.getElementById('isd-skip-sap')?.checked;
   const confirmMsg = skipSap
-    ? `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Booked using the confirmed quantities — SAP posting will be SKIPPED (testing mode).`
-    : `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Booked and posted as goods receipt in SAP using the confirmed quantities.`;
+    ? `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Received using the confirmed quantities — SAP posting will be SKIPPED (testing mode).`
+    : `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Received and posted as goods receipt in SAP using the confirmed quantities.`;
   if (!confirm(confirmMsg)) return;
 
   const btn = document.getElementById('isd-receive-btn');

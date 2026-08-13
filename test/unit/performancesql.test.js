@@ -21,9 +21,17 @@ let undoShipmentReceived;
 let addManualInboundItem;
 let removeManualInboundItem;
 let upsertForecastAccuracyLog;
+let updateOrderSuggestionStatus;
+let updateOrderSuggestionPoItem;
+let deleteOrderSuggestion;
+let assignOrderShipment;
 
 beforeAll(async () => {
-  ({ createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem, removeManualInboundItem, upsertForecastAccuracyLog } = await import('../../routes/performancesql.js'));
+  ({
+    createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem,
+    removeManualInboundItem, upsertForecastAccuracyLog, updateOrderSuggestionStatus,
+    updateOrderSuggestionPoItem, deleteOrderSuggestion, assignOrderShipment,
+  } = await import('../../routes/performancesql.js'));
 });
 
 beforeEach(() => {
@@ -76,7 +84,7 @@ describe('createDemandAdjustment', () => {
 // Inbound Log's "Mark Received" action. Query order inside
 // markShipmentReceived: (1) shipment lookup, (2) non-cancelled linked
 // orders, (3) UPDATE PurchaseOrderShipment, then one UPDATE
-// PurchaseOrderSuggestion per order (Status='Booked' + ReceivedQty +
+// PurchaseOrderSuggestion per order (Status='Received' + ReceivedQty +
 // SapMaterialDocument/SapGrError/SapGrSkipped). postGoodsReceipt (when
 // supplied) is an injected callback, not a DB call, so it doesn't add to
 // the query count — routes/performance.js supplies the real SapServer HTTP
@@ -96,6 +104,17 @@ describe('markShipmentReceived', () => {
   function inputCalls(name) {
     return dbRequest.input.mock.calls.filter(call => call[0] === name).map(call => call[2]);
   }
+
+  test('flips each order line straight to Received (not the retired Booked status)', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100 }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    await markShipmentReceived(1, { receivedBy: 'tester' });
+
+    const updateCall = dbRequest.query.mock.calls.find(call => /UPDATE log\.PurchaseOrderSuggestion/.test(call[0]));
+    expect(updateCall[0]).toContain("Status = 'Received'");
+    expect(updateCall[0]).not.toContain("Status = 'Booked'");
+  });
 
   test('defaults each order line to its OrderQty when no receivedQuantities are given', async () => {
     queueShipmentAndOrders([
@@ -340,6 +359,90 @@ describe('undoShipmentReceived', () => {
     expect(result.stillPostedCount).toBe(1);
     expect(result.shipmentUndone).toBe(false);
     expect(result.sapResults).toEqual([{ suggestionId: 1, material: 'MAT1', success: false, error: 'SapServer unreachable' }]);
+  });
+});
+
+// assertOrderEditable's completed-order lock — Tracked Orders' general edit
+// paths (row Save, Delete, Assign Shipment) all reject once an order's
+// Status is 'Received' (or the retired 'Booked'), so the UI's "no edits on
+// a completed row" rule can't be bypassed via a direct API call. Each
+// guarded function does its own SELECT Status lookup first, so the lock
+// check is always the first query.
+describe('assertOrderEditable (updateOrderSuggestionStatus / deleteOrderSuggestion / assignOrderShipment)', () => {
+  test('updateOrderSuggestionStatus rejects with 409 when the order is already Received', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Status: 'Received' }] });
+
+    await expect(updateOrderSuggestionStatus(1, { status: 'Ordered' })).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('Undo Received'),
+    });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // never reaches the UPDATE
+  });
+
+  test('updateOrderSuggestionStatus rejects with 409 when the order is still the retired Booked status', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Status: 'Booked' }] });
+
+    await expect(updateOrderSuggestionStatus(1, { status: 'Ordered' })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  test('updateOrderSuggestionStatus rejects with 404 when the order does not exist', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+
+    await expect(updateOrderSuggestionStatus(999, { status: 'Ordered' })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  test('updateOrderSuggestionStatus proceeds normally for a not-yet-received order', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ Status: 'Ordered' }] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    await expect(updateOrderSuggestionStatus(1, { status: 'Received' })).resolves.toBeUndefined();
+    expect(dbRequest.query).toHaveBeenCalledTimes(2);
+  });
+
+  test('deleteOrderSuggestion rejects with 409 when the order is already Received', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Status: 'Received' }] });
+
+    await expect(deleteOrderSuggestion(1)).rejects.toMatchObject({ statusCode: 409 });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // never reaches the DELETE
+  });
+
+  test('deleteOrderSuggestion proceeds normally for a not-yet-received order', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ Status: 'Accepted' }] })
+      .mockResolvedValueOnce({ recordset: [{ SuggestionId: 1 }] });
+
+    await expect(deleteOrderSuggestion(1)).resolves.toBeUndefined();
+  });
+
+  test('assignOrderShipment rejects with 409 when the order is already Received, before checking the target shipment', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Status: 'Received' }] });
+
+    await expect(assignOrderShipment(1, 5)).rejects.toMatchObject({ statusCode: 409 });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('assignOrderShipment proceeds normally for a not-yet-received order', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ Status: 'Ordered' }] })
+      .mockResolvedValueOnce({ recordset: [{ CancelledAtUtc: null }] })
+      .mockResolvedValueOnce({ recordset: [] });
+
+    await expect(assignOrderShipment(1, 5)).resolves.toBeUndefined();
+  });
+});
+
+// The one edit deliberately NOT covered by assertOrderEditable's lock — see
+// updateOrderSuggestionPoItem's comment in performancesql.js for why it
+// stays usable on an already-Received line.
+describe('updateOrderSuggestionPoItem', () => {
+  test('sets PoItemNumber with a single query and no completed-order lock check', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+
+    await updateOrderSuggestionPoItem(1, '00010');
+
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+    expect(dbRequest.input.mock.calls.filter(call => call[0] === 'poItemNumber').map(call => call[2])).toEqual(['00010']);
   });
 });
 

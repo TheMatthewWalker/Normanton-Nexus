@@ -3858,15 +3858,32 @@ router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), asy
     await db.updateOrderSuggestionStatus(req.params.suggestionId, req.body);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, error: { message: err.message } });
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Narrow PO Item Number update — see updateOrderSuggestionPoItem's comment
+// in performancesql.js for why this is a separate endpoint from PUT above
+// rather than reusing it: it deliberately stays usable on an already-
+// Received line, to retry a goods receipt that didn't post for lack of a PO
+// item number. Used only by the Inbound Shipment detail's SAP GR retry
+// control (isd-po-item-save in logistics.js).
+router.patch('/order-suggestions/:suggestionId/po-item', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { poItemNumber } = req.body;
+    await db.updateOrderSuggestionPoItem(req.params.suggestionId, poItemNumber || null);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
   }
 });
 
 // Hard delete — see db.deleteOrderSuggestion's comment for how this differs
-// from setting Status='Cancelled'. No restriction on which status/shipment
-// state a row is in: the user asked for this specifically to fix mistakes
-// (duplicate manual entries, wrong material picked), which can happen at
-// any stage.
+// from setting Status='Cancelled'. Originally allowed at any stage (to fix
+// mistakes — duplicate manual entries, wrong material picked); now blocked
+// once an order is Received/Booked (assertOrderEditable in
+// performancesql.js), at the product owner's later request, so a completed
+// order can only be touched again via Undo Received on its shipment.
 router.delete('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     await db.deleteOrderSuggestion(req.params.suggestionId);
@@ -4114,7 +4131,7 @@ async function postGoodsReceiptToSap(order, shipment, callerUserId) {
 }
 
 // Inbound Log's "Mark Received" action — stamps the shipment received,
-// bulk-flips every linked order to 'Booked', and posts each line's goods
+// bulk-flips every linked order to 'Received', and posts each line's goods
 // receipt to SAP (see postGoodsReceiptToSap and markShipmentReceived's own
 // comment for why one line's SAP failure doesn't block the others). Body:
 // { receivedAt?, receivedQuantities?, skipSap? } — receivedAt defaults to

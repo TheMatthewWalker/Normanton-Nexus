@@ -62,6 +62,19 @@
    deliberate placeholder — real SAP RFC integration comes later; for now
    it's a no-op called once per order so the real implementation has an
    obvious, already-wired hook to fill in.
+
+   ADDENDUM (2026-08-13): the Booked/Received two-step above was collapsed
+   at the product owner's request — Mark Received now bulk-flips straight to
+   'Received' (markShipmentReceived), and the manual "SAP GR confirmed" gate
+   this section describes was never built out further, so it's removed
+   rather than kept half-used. 'Booked' is left as a recognized Status value
+   (OS_STATUS_OPTIONS in logistics.js, the OTIF query and undoShipmentReceived's
+   scope in performancesql.js) purely so any rows already sitting in 'Booked'
+   from before this change keep being treated as received; nothing writes
+   'Booked' anymore. Tracked Orders' "Completed" bucket (osRenderTrackedList
+   in logistics.js) is Status IN ('Booked','Received') for the same reason,
+   and locks those rows against further edits — the only way to change one
+   afterward is Undo Received on its Inbound Shipment.
    ============================================================ */
 
 
