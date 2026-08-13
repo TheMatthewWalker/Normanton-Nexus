@@ -13,15 +13,7 @@
     "migrate:status:nexus_operations": "knex migrate:status --env nexus_operations --knexfile knexfile.cjs",
     "migrate:status:nexus_archive": "knex migrate:status --env nexus_archive --knexfile knexfile.cjs",
     "seed:nexus": "knex seed:run --env nexus --knexfile knexfile.cjs",
-    "seed:nexus_operations": "knex seed:run --env nexus_operations --knexfile knexfile.cjs",
-    "migrate:nexus_live": "knex migrate:latest --env nexus_live --knexfile knexfile.cjs",
-    "migrate:nexus_operations_live": "knex migrate:latest --env nexus_operations_live --knexfile knexfile.cjs",
-    "migrate:nexus_archive_live": "knex migrate:latest --env nexus_archive_live --knexfile knexfile.cjs",
-    "migrate:status:nexus_live": "knex migrate:status --env nexus_live --knexfile knexfile.cjs",
-    "migrate:status:nexus_operations_live": "knex migrate:status --env nexus_operations_live --knexfile knexfile.cjs",
-    "migrate:status:nexus_archive_live": "knex migrate:status --env nexus_archive_live --knexfile knexfile.cjs",
-    "seed:nexus_live": "knex seed:run --env nexus_live --knexfile knexfile.cjs",
-    "seed:nexus_operations_live": "knex seed:run --env nexus_operations_live --knexfile knexfile.cjs"
+    "seed:nexus_operations": "knex seed:run --env nexus_operations --knexfile knexfile.cjs"
   },
   "keywords": [],
   "author": "",

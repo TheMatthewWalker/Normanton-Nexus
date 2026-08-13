@@ -10,14 +10,25 @@ One subfolder per database (`kongsberg/`, `production/`, `logistics/`,
 > renamed into **Nexus**, **NexusOperations**, and **NexusArchive** — see
 > `knexfile.cjs`'s own header comment for the full rationale. `knexfile.cjs`
 > and `package.json` only define `nexus` / `nexus_operations` /
-> `nexus_archive` environments (plus their `_live` counterparts) now — the
-> `kongsberg` / `production` / `logistics` / `production_archive` `--env`
-> names and `npm run migrate:kongsberg` etc. commands documented below are
-> **historical** (the folders and their already-applied initial migrations
-> are kept on disk for reference) and no longer runnable as written. New
-> schema work goes through `nexus` / `nexus_operations` / `nexus_archive`
-> (e.g. `npm run migrate:nexus_operations`, `npm run migrate:nexus_operations_live`)
-> — see the dated entry near the bottom of this file for a worked example.
+> `nexus_archive` environments now — the `kongsberg` / `production` /
+> `logistics` / `production_archive` `--env` names and `npm run
+> migrate:kongsberg` etc. commands documented below are **historical** (the
+> folders and their already-applied initial migrations are kept on disk for
+> reference) and no longer runnable as written. New schema work goes through
+> `nexus` / `nexus_operations` / `nexus_archive` (e.g. `npm run
+> migrate:nexus_operations`) — see the dated entry near the bottom of this
+> file for a worked example.
+>
+> **2026-08-13 update:** the `_live` environments (`nexus_live`,
+> `nexus_operations_live`, `nexus_archive_live`, and the older `kongsberg_live`
+> / `logistics_live` / `production_live` / `production_archive_live` below)
+> have been removed from `knexfile.cjs`/`package.json`. They existed to target
+> the live `GATEWAYHO` box separately from a test server; now that
+> `eudc-sql-app` is the only SQL Server instance in use, `MIGRATE_DB_*`
+> (`.env`) and the app's own `config.json` `sqlConfig` point at the same
+> server, so the plain `nexus` / `nexus_operations` / `nexus_archive`
+> commands are the only ones needed. The baselining walkthrough below is kept
+> for historical reference only.
 
 Run with:
 
@@ -242,10 +253,9 @@ start hitting a unique-constraint violation.
    convention as `20260805134845_billet_staging.cjs`), so it's idempotent
    and safe to run against an environment that was never actually broken.
 
-Apply with:
-```bash
-npm run migrate:nexus_operations_live
-```
+Applied at the time with `npm run migrate:nexus_operations_live` (that
+script no longer exists — see the 2026-08-13 update above; the equivalent
+today is `npm run migrate:nexus_operations`).
 
 ## 2026-08-12 — datacenter move: Nexus/NexusOperations data copy + legacy Kongsberg-table archive
 

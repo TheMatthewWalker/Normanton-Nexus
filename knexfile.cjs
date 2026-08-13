@@ -28,9 +28,11 @@
 // e.g. `npx knex migrate:latest --env nexus --knexfile knexfile.cjs`.
 // See package.json's migrate:* scripts for the short forms.
 //
-// Connection details come from MIGRATE_DB_* env vars (.env.example), kept
-// deliberately separate from the app's own config.json-sourced sqlConfig —
-// see that .env.example section for why.
+// Connection details come from MIGRATE_DB_* env vars (.env.example). This
+// used to be kept separate from the app's own config.json-sourced sqlConfig
+// because migrations ran against a separate test server while the live app
+// pointed elsewhere; now there's only the one SQL Server instance
+// (eudc-sql-app) and both configs point at it.
 
 require('dotenv').config();
 
@@ -48,12 +50,9 @@ const baseConnection = {
   password: process.env.MIGRATE_DB_PASSWORD,
   ...(instanceName ? {} : { port: Number(process.env.MIGRATE_DB_PORT) || 1433 }),
   options: {
-    // SQL Server 2005 (the current production instance this app's TLS
-    // bridge exists for) has no encryption support worth relying on here;
-    // the new/test server this migration system targets may differ, but
     // trustServerCertificate keeps a self-signed/dev cert from failing the
-    // connection either way. Tighten this once the new server's real
-    // certificate situation is known.
+    // connection. Tighten this once eudc-sql-app's real certificate
+    // situation is known.
     encrypt: false,
     trustServerCertificate: true,
     ...(instanceName ? { instanceName } : {}),
@@ -76,74 +75,8 @@ function dbConfig(databaseName, dir, hasSeeds) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// *_live environments — point at the actual live SQL Server 2005 box, using
-// the SAME server/login the running app itself already uses (config.json's
-// sqlConfig), not a duplicate copy of that password in .env. There's no
-// reason for the live credential to exist in two places.
-//
-// nexus_live/nexus_archive_live need baselining first if their live
-// databases already exist under the old Kongsberg/production_archive names
-// with this schema already applied (see migrations/README.md's "Using this
-// against live" section) — running the migration for real would fail
-// immediately (every constraint/index already exists there under the same
-// name). nexus_operations_live is different: NexusOperations has no live
-// predecessor under any name (it's a genuine merge of three databases), so
-// its migration runs fresh once that database is created live — no baseline
-// needed, nothing there to collide with.
-//
-// Deliberately no `seeds` config here at all: seeding live would DELETE and
-// reinsert PortalUsers/Vendor/etc. with a stale point-in-time snapshot,
-// wiping real changes made since. `knex seed:run --env nexus_live` falls
-// back to Knex's default top-level ./seeds/ directory, which has nothing
-// directly in it to run — a deliberate safety net, not just an omission.
-let liveConfig = null;
-try {
-  const fs = require('fs');
-  liveConfig = JSON.parse(fs.readFileSync('./config.json', 'utf8')).sqlConfig;
-} catch {
-  // config.json is git-ignored and won't exist on every checkout (e.g. a
-  // fresh clone that's only set up .env for the test server) — the *_live
-  // environments just won't be defined below in that case, rather than
-  // breaking every other environment in this file.
-}
-
-function liveDbConfig(databaseName, dir, hasSeeds) {
-  return {
-    client: 'mssql',
-    connection: {
-      user: liveConfig.user,
-      password: liveConfig.password,
-      server: liveConfig.server,
-      database: databaseName,
-      options: { encrypt: false, trustServerCertificate: true },
-    },
-    migrations: {
-      directory: `./migrations/${dir}`,
-      tableName: 'knex_migrations',
-    },
-    // Deliberately opt-in per environment, NOT the default -- seeding an
-    // already-populated live database DELETEs and reinserts a stale
-    // snapshot, wiping real changes. Only safe here because, as of
-    // 2026-08-10, Nexus/NexusOperations were just created empty directly on
-    // GATEWAYHO (the hardware move was delayed, so the restructure is
-    // happening in place on the current server instead) -- there was
-    // nothing live in them yet to overwrite. Once real traffic/data exists
-    // in these databases, remove this before ever running `seed:*_live`
-    // again.
-    ...(hasSeeds ? { seeds: { directory: `./seeds/${dir}` } } : {}),
-  };
-}
-
 module.exports = {
   nexus: dbConfig('Nexus', 'nexus', true),
   nexus_operations: dbConfig('NexusOperations', 'nexus_operations', true),
   nexus_archive: dbConfig('NexusArchive', 'nexus_archive', false),
-  ...(liveConfig
-    ? {
-        nexus_live: liveDbConfig('Nexus', 'nexus', true),
-        nexus_operations_live: liveDbConfig('NexusOperations', 'nexus_operations', true),
-        nexus_archive_live: liveDbConfig('NexusArchive', 'nexus_archive', false),
-      }
-    : {}),
 };
