@@ -461,11 +461,19 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 // matches CreateTransferOrderRequest or ConsignmentMb1bRequest respectively,
 // same as the two proxies above.
 // ---------------------------------------------------------------------------
-router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'), async (req, res) => {
-    const { kind, payload } = req.body;
 
+// Shared by the single-item route below and the -bulk route that follows it.
+// Never throws — every failure mode (validation, TransferBlockedError, SAP/
+// network error) resolves to { success: false, error }, since the bulk route
+// runs many of these concurrently via Promise.all and one item's rejection
+// must not cancel the others still in flight.
+// Returns { status, ...body } — status is the HTTP status the single-item
+// route below responds with; the bulk route strips it back off since a
+// per-item failure there is carried in the result's `success`/`error` fields
+// rather than the (always-200) response's own status line.
+async function executeBatchCleanupItem({ kind, payload }, req) {
     if (kind !== 'transfer' && kind !== 'consignment') {
-        return res.status(400).json({ success: false, error: "kind must be 'transfer' or 'consignment'" });
+        return { status: 400, success: false, error: "kind must be 'transfer' or 'consignment'" };
     }
 
     const sapPath = kind === 'consignment' ? '/api/warehouse/consignment-mb1b' : '/api/warehouse/transfer-order';
@@ -491,20 +499,60 @@ router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'),
             audit, actorUsername: getActorUsername(req), req,
         }) : null;
 
-        res.json({ success: true, data: body.data, ...(redrum ? { redrum } : {}) });
+        return { status: 200, success: true, data: body.data, ...(redrum ? { redrum } : {}) };
 
     } catch (err) {
         if (err instanceof TransferBlockedError) {
             await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} blocked for material ${payload?.Material || ''}`, err.message), req);
-            return res.status(409).json({ success: false, error: err.message });
+            return { status: 409, success: false, error: err.message };
         }
         const status  = err.response?.status  ?? 500;
         const message = err.response?.data?.error?.message ?? err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} failed for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
-        res.status(status).json({ success: false, error: message });
+        return { status, success: false, error: message };
     }
+}
+
+router.post('/warehouse/batch-cleanup-transfer', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { status, ...result } = await executeBatchCleanupItem(req.body, req);
+    res.status(status).json(result);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/batch-cleanup-transfer-bulk  (mounted at /api/sap in server.js)
+//
+// Same as /warehouse/batch-cleanup-transfer above, but takes the WHOLE set of
+// moves for one clean-up plan in a single request and fires them at SapServer
+// concurrently (Promise.all) instead of the caller awaiting them one at a
+// time. SapServer's connection pool already load-balances concurrent RFC
+// calls across its service STA worker threads (least-loaded routing, see
+// SapServer's SapConnectionPool.SelectWorker) — sending items sequentially
+// meant that pool never actually had more than one of this tool's requests
+// in flight, so this is what lets it actually parallelise. There's no SAP-side
+// "enough stock in the bin" check gating transfer creation, so there's no
+// correctness reason to serialize these; each item still gets its own
+// independent try/catch (via executeBatchCleanupItem) so one failure doesn't
+// abort the rest.
+//
+// Body: { items: [{ kind, payload }, ...] } — same per-item shape as the
+// single route above.
+// Response: { success: true, results: [{ success, data|error, redrum? }, ...] }
+// in the same order as the input items.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/batch-cleanup-transfer-bulk', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'items must be a non-empty array' });
+    }
+
+    const results = await Promise.all(items.map(async item => {
+        const { status, ...result } = await executeBatchCleanupItem(item, req);
+        return result;
+    }));
+    res.json({ success: true, results });
 });
 
 

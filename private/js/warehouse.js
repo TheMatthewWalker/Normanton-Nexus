@@ -761,9 +761,17 @@ async function wsmRefreshAfterTransfer() {
 //     on purpose) unless it happens to be part of a batch that nets to zero,
 //     in which case Card 1 already claims it instead.
 // Both action paths call the LOG_SUPER-gated /api/sap/warehouse/batch-cleanup-transfer
-// route rather than the ungated single/mass transfer proxy used elsewhere in
-// Stock Management, since this tool can move stock across many batches
-// automatically rather than one row a person explicitly picked.
+// (or its -bulk sibling, for the multi-move flows below) route rather than
+// the ungated single/mass transfer proxy used elsewhere in Stock Management,
+// since this tool can move stock across many batches automatically rather
+// than one row a person explicitly picked. Every multi-move flow on this
+// dashboard (Card 1's zero-sum clean-up, Card 2's consolidate-into-one-bin,
+// and the Stock in Investigation card's "move back out" bulk transfer) sends
+// its whole move list as one request via wsmCreateBatchCleanupTransfersBulk
+// rather than awaiting one TR per round trip — SapServer's STA worker pool
+// load-balances concurrent RFC calls across its service threads, so this is
+// what actually lets multiple TRs process in parallel instead of one at a
+// time (see routes/sap.js's batch-cleanup-transfer-bulk comment).
 const WSM_HOLDING_TYPE = '999';
 const WSM_HOLDING_BIN  = 'TEMP';
 const WSM_EPS          = 0.0005;
@@ -882,38 +890,72 @@ function wsmBuildZeroSumPlan(card1) {
   return { plan, unresolved };
 }
 
+// Builds the { kind, payload } shape the batch-cleanup-transfer(-bulk) routes
+// expect, from the flat params object every caller on this dashboard already
+// builds (StorageLocation/Material/Batch/Quantity/Source*/Destination*/...).
+function wsmBuildCleanupItem(params) {
+  const isConsignment = params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA';
+  return {
+    kind: isConsignment ? 'consignment' : 'transfer',
+    payload: isConsignment ? {
+      DeliveryNote: '', Header: 'Batch Discrepancy Clean-up',
+      StorageLocation: params.StorageLocation, SpecialStockNumber: params.SpecialStockNumber,
+      Material: params.Material, Quantity: params.Quantity,
+      DestinationType: params.DestinationType, DestinationBin: params.DestinationBin,
+      SourceType: params.SourceType, SourceBin: params.SourceBin,
+    } : params,
+  };
+}
+
+// Interprets one SapServer result — either the single route's {success,data}
+// body, or one entry of the bulk route's results array — into the
+// {success, message} shape every progress banner on this dashboard expects.
+function wsmInterpretCleanupResult(item, json) {
+  if (!json.success) return { success: false, message: json.error || 'SAP call failed' };
+  if (item.kind === 'consignment') {
+    const parts = [json.data?.mb1bMessage, json.data?.toNonConsignMessage, json.data?.toConsignMessage].filter(Boolean);
+    return { success: true, message: parts.join('; ') || 'Consignment processed' };
+  }
+  const transferOrder = json.data?.transferOrderNumber || '';
+  const messages       = json.data?.messages || [];
+  const ok = json.data?.success && !json.error;
+  if (!ok) return { success: false, message: json.error || messages.map(m => m.message || m).join('; ') || 'SAP rejected the transfer order.' };
+  return { success: true, message: transferOrder ? `TO ${transferOrder}` : 'Done' };
+}
+
 // Same underlying SAP calls as wsmCreateTransferOrder, but routed through the
 // LOG_SUPER-gated batch-cleanup proxy instead of the ungated one.
 async function wsmCreateBatchCleanupTransfer(params) {
-  const isConsignment = params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA';
+  const item = wsmBuildCleanupItem(params);
   try {
     const res = await fetch('/api/sap/warehouse/batch-cleanup-transfer', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        kind: isConsignment ? 'consignment' : 'transfer',
-        payload: isConsignment ? {
-          DeliveryNote: '', Header: 'Batch Discrepancy Clean-up',
-          StorageLocation: params.StorageLocation, SpecialStockNumber: params.SpecialStockNumber,
-          Material: params.Material, Quantity: params.Quantity,
-          DestinationType: params.DestinationType, DestinationBin: params.DestinationBin,
-          SourceType: params.SourceType, SourceBin: params.SourceBin,
-        } : params,
-      }),
+      body: JSON.stringify(item),
+    });
+    return wsmInterpretCleanupResult(item, await res.json());
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+}
+
+// Same as wsmCreateBatchCleanupTransfer, but for a whole list of moves sent
+// as ONE request instead of one round trip per move — SapServer's STA worker
+// pool load-balances the RFC calls across its service threads (least-loaded
+// routing; see routes/sap.js's batch-cleanup-transfer-bulk comment), so this
+// is what actually lets multiple TRs process in parallel rather than one at a
+// time. Returns results in the same order as paramsList.
+async function wsmCreateBatchCleanupTransfersBulk(paramsList) {
+  const items = paramsList.map(wsmBuildCleanupItem);
+  try {
+    const res = await fetch('/api/sap/warehouse/batch-cleanup-transfer-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'SAP call failed');
-
-    if (isConsignment) {
-      const parts = [json.data?.mb1bMessage, json.data?.toNonConsignMessage, json.data?.toConsignMessage].filter(Boolean);
-      return { success: true, message: parts.join('; ') || 'Consignment processed' };
-    }
-    const transferOrder = json.data?.transferOrderNumber || '';
-    const messages       = json.data?.messages || [];
-    const ok = json.data?.success && !json.error;
-    if (!ok) return { success: false, message: json.error || messages.map(m => m.message || m).join('; ') || 'SAP rejected the transfer order.' };
-    return { success: true, message: transferOrder ? `TO ${transferOrder}` : 'Done' };
+    return items.map((item, i) => wsmInterpretCleanupResult(item, json.results[i]));
   } catch (err) {
-    return { success: false, message: err.message };
+    return paramsList.map(() => ({ success: false, message: err.message }));
   }
 }
 
@@ -1185,24 +1227,33 @@ async function wsmExecuteZeroSumPlan(plan) {
   confirmBtn.disabled = true;
   confirmBtn.textContent = 'Executing…';
 
-  const totalMoves = plan.reduce((s, p) => s + p.moves.length, 0);
+  const entries = [];
+  plan.forEach(({ batch, moves }) => moves.forEach(m => entries.push({ batch, m })));
+
+  const totalMoves = entries.length;
   const progress   = wsmShowProgressBanner(resultEl, totalMoves, 'Executing zero-sum clean-up');
-  let done = 0, ok = 0, fail = 0;
+
+  const paramsList = entries.map(({ batch, m }) => ({
+    StorageLocation: m.storageLocation, Material: m.material, Batch: batch,
+    Quantity: m.qty, SourceType: m.sourceType, SourceBin: m.sourceBin,
+    DestinationType: m.destType, DestinationBin: m.destBin,
+    StockCategory: m.stockCategory || '', SpecialStockIndicator: m.specialStockInd || '', SpecialStockNumber: m.specialStockNum || '',
+  }));
+
+  // Sent as one request, executed concurrently server-side rather than
+  // awaited move-by-move — see wsmCreateBatchCleanupTransfersBulk.
+  const results = await wsmCreateBatchCleanupTransfersBulk(paramsList);
+
+  let ok = 0, fail = 0;
   const failures = [];
+  results.forEach((result, i) => {
+    if (result.success) { ok++; return; }
+    fail++;
+    const { batch, m } = entries[i];
+    failures.push(`${batch} ${m.sourceType}/${m.sourceBin} → ${m.destType}/${m.destBin}: ${result.message}`);
+  });
 
-  for (const { batch, moves } of plan) {
-    for (const m of moves) {
-      const result = await wsmCreateBatchCleanupTransfer({
-        StorageLocation: m.storageLocation, Material: m.material, Batch: batch,
-        Quantity: m.qty, SourceType: m.sourceType, SourceBin: m.sourceBin,
-        DestinationType: m.destType, DestinationBin: m.destBin,
-        StockCategory: m.stockCategory || '', SpecialStockIndicator: m.specialStockInd || '', SpecialStockNumber: m.specialStockNum || '',
-      });
-      if (result.success) ok++; else { fail++; failures.push(`${batch} ${m.sourceType}/${m.sourceBin} → ${m.destType}/${m.destBin}: ${result.message}`); }
-      progress.update(++done);
-    }
-  }
-
+  progress.update(totalMoves);
   progress.finish(ok, fail, failures);
   confirmBtn.textContent = 'Done — press Rescan above to refresh';
   // Deliberately not auto-rescanning: wsmRunDiscrepancyScan() replaces the
@@ -1367,19 +1418,28 @@ async function wsmConsolidateGroup(group) {
   if (consolidateBtn) consolidateBtn.disabled = true;
 
   const progress = wsmShowProgressBanner(resultEl, movable.length, 'Consolidating into selected bin');
-  let done = 0, ok = 0, fail = 0;
-  const failures = [];
-  for (const r of movable) {
-    const result = await wsmCreateBatchCleanupTransfer({
-      StorageLocation: r.storageLocation, Material: r.material, Batch: group.batch,
-      Quantity: r.availableQty, SourceType: r.storageType, SourceBin: r.bin,
-      DestinationType: target.storageType, DestinationBin: target.bin,
-      StockCategory: r.stockCategory || '', SpecialStockIndicator: r.specialStockInd || '', SpecialStockNumber: r.specialStockNum || '',
-    });
-    if (result.success) ok++; else { fail++; failures.push(`${r.storageType}/${r.bin}: ${result.message}`); }
-    progress.update(++done);
-  }
 
+  const paramsList = movable.map(r => ({
+    StorageLocation: r.storageLocation, Material: r.material, Batch: group.batch,
+    Quantity: r.availableQty, SourceType: r.storageType, SourceBin: r.bin,
+    DestinationType: target.storageType, DestinationBin: target.bin,
+    StockCategory: r.stockCategory || '', SpecialStockIndicator: r.specialStockInd || '', SpecialStockNumber: r.specialStockNum || '',
+  }));
+
+  // Sent as one request, executed concurrently server-side rather than
+  // awaited move-by-move — see wsmCreateBatchCleanupTransfersBulk.
+  const results = await wsmCreateBatchCleanupTransfersBulk(paramsList);
+
+  let ok = 0, fail = 0;
+  const failures = [];
+  results.forEach((result, i) => {
+    if (result.success) { ok++; return; }
+    fail++;
+    const r = movable[i];
+    failures.push(`${r.storageType}/${r.bin}: ${result.message}`);
+  });
+
+  progress.update(movable.length);
   progress.finish(ok, fail, failures);
   if (skipped.length) {
     const note = document.createElement('div');
@@ -1706,9 +1766,12 @@ function siShowTransferPanel() {
     const submitBtn = document.getElementById('si-transfer-submit');
     submitBtn.disabled = true;
     const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Creating transfer orders');
-    let done = 0, ok = 0, fail = 0;
+    let ok = 0, fail = 0;
     const failures = [];
 
+    // Rows with a missing/invalid qty never reach the server — filtered out
+    // up front rather than sent as a bad item in the bulk payload below.
+    const sendable = [];
     for (const row of rows) {
       const id         = wsmRowId(row);
       const qtyInput   = document.querySelector(`.si-transfer-qty[data-id="${CSS.escape(id)}"]`);
@@ -1718,22 +1781,32 @@ function siShowTransferPanel() {
       if (!quantity || quantity <= 0) {
         fail++; failures.push('Missing/invalid qty');
         if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing/invalid qty</span>`;
-        progress.update(++done);
         continue;
       }
+      sendable.push({ row, resultCell, quantity });
+    }
+    progress.update(rows.length - sendable.length);
 
-      const result = await wsmCreateBatchCleanupTransfer({
+    if (sendable.length) {
+      const paramsList = sendable.map(({ row, quantity }) => ({
         StorageLocation: row.storageLocation, Material: row.material, Batch: row.batch || '',
         Quantity: quantity, SourceType: row.storageType, SourceBin: row.bin,
         DestinationType: destType, DestinationBin: destBin,
         StockCategory: row.stockCategory || '', SpecialStockIndicator: row.specialStockInd || '', SpecialStockNumber: row.specialStockNum || '',
-      });
+      }));
 
-      if (result.success) { ok++; if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.message)}</span>`; }
-      else { fail++; failures.push(result.message); if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`; }
-      progress.update(++done);
+      // Sent as one request, executed concurrently server-side rather than
+      // awaited move-by-move — see wsmCreateBatchCleanupTransfersBulk.
+      const results = await wsmCreateBatchCleanupTransfersBulk(paramsList);
+
+      results.forEach((result, i) => {
+        const { resultCell } = sendable[i];
+        if (result.success) { ok++; if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.message)}</span>`; }
+        else { fail++; failures.push(result.message); if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`; }
+      });
     }
 
+    progress.update(rows.length);
     progress.finish(ok, fail, failures);
     if (ok) {
       submitBtn.textContent = 'Done — refreshing…';
@@ -6194,7 +6267,7 @@ async function scRenderCountList(countType, defaultStorageLocation, backFn) {
           <input class="tf-input" name="ticketNumber" placeholder="e.g. TKT-1042">
         </div>
         <div class="tf-field" style="align-self:flex-end">
-          <button class="btn-run" type="submit">Start Count</button>
+          <button class="btn-submit" type="submit">Start Count</button>
         </div>
       </form>
       <div id="sc-start-result"></div>
@@ -6269,12 +6342,10 @@ function scRenderCountDetail(doc, backFn) {
   const lines = doc.lines || [];
   const invalidCount = lines.filter(l => l.IsInvalidMaterial).length;
 
-  const locationField = doc.CountType === 'PTFE_WEEKLY'
-    ? `<div class="tf-field">
-        <label class="tf-label">Location <span class="tf-req">*</span></label>
-        <select class="tf-input" name="namedLocation" id="sc-named-location" required><option value="">Loading…</option></select>
-      </div>`
-    : doc.CountType === 'RAW_MATERIAL'
+  // PTFE and Raw Material both take a free-typed storage type/bin — PTFE's
+  // is validated live against SAP LAGP server-side (POST .../lines), no
+  // supervisor-maintained mapping involved.
+  const locationField = (doc.CountType === 'PTFE_WEEKLY' || doc.CountType === 'RAW_MATERIAL')
     ? `<div class="tf-field"><label class="tf-label">Storage Type <span class="tf-req">*</span></label><input class="tf-input" name="storageType" maxlength="3" required></div>
        <div class="tf-field"><label class="tf-label">Bin <span class="tf-req">*</span></label><input class="tf-input" name="bin" maxlength="10" required></div>`
     : '';
@@ -6285,7 +6356,7 @@ function scRenderCountDetail(doc, backFn) {
       <div class="tf-field"><label class="tf-label">Material <span class="tf-req">*</span></label><input class="tf-input" name="material" required></div>
       ${locationField}
       <div class="tf-field"><label class="tf-label">Counted Qty <span class="tf-req">*</span></label><input class="tf-input" type="number" step="any" min="0" name="countedQty" required></div>
-      <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">+ Add Line</button></div>
+      <div class="tf-field" style="align-self:flex-end"><button class="btn-submit" type="submit">+ Add Line</button></div>
     </form>
     <div id="sc-line-result"></div>
   ` : '';
@@ -6302,11 +6373,8 @@ function scRenderCountDetail(doc, backFn) {
   const rejectionNotice = doc.Status === 'Rejected' ? `
     <div class="sap-error" style="margin-bottom:12px">
       Rejected by finance: ${esc(doc.RejectionReason || '')}
-      ${sessionPermissions.includes('LOG_SUPER') ? `<button class="btn-run" type="button" id="sc-reopen-btn" style="margin-left:12px">Reopen for correction</button>` : ''}
+      ${sessionPermissions.includes('LOG_SUPER') ? `<button class="btn-submit" type="button" id="sc-reopen-btn" style="margin-left:12px">Reopen for correction</button>` : ''}
     </div>` : '';
-
-  const locationMapLink = doc.CountType === 'PTFE_WEEKLY' && sessionPermissions.includes('LOG_SUPER')
-    ? `<button class="btn-back-tiles" type="button" id="sc-manage-locations-btn" style="margin-left:8px">Manage Location Mapping</button>` : '';
 
   // Accuracy stat — warehouse-facing (was stock in the right place/quantity),
   // deliberately separate from finance's value-of-variance framing on the
@@ -6335,10 +6403,8 @@ function scRenderCountDetail(doc, backFn) {
       </table>
     </div>
     ${invalidCount ? `<div id="sc-invalid-materials"></div>` : ''}
-    ${isOpen ? `<button class="btn-run" type="button" id="sc-submit-btn">Submit for Approval</button> ${locationMapLink}` : (locationMapLink ? `<div>${locationMapLink}</div>` : '')}
+    ${isOpen ? `<button class="btn-submit" type="button" id="sc-submit-btn">Submit for Approval</button>` : ''}
   `;
-
-  if (doc.CountType === 'PTFE_WEEKLY' && isOpen) scLoadLocationOptions();
 
   const lineForm = document.getElementById('sc-line-form');
   if (lineForm) lineForm.addEventListener('submit', (e) => scSubmitLine(e, doc, backFn));
@@ -6349,24 +6415,7 @@ function scRenderCountDetail(doc, backFn) {
   const reopenBtn = document.getElementById('sc-reopen-btn');
   if (reopenBtn) reopenBtn.addEventListener('click', () => scReopenCount(doc, backFn));
 
-  const manageBtn = document.getElementById('sc-manage-locations-btn');
-  if (manageBtn) manageBtn.addEventListener('click', () => scRenderLocationMapAdmin(backFn));
-
   if (invalidCount) scRenderInvalidMaterials(doc, backFn);
-}
-
-async function scLoadLocationOptions() {
-  const select = document.getElementById('sc-named-location');
-  if (!select) return;
-  try {
-    const json = await scApi('/location-map');
-    const rows = json.data || [];
-    select.innerHTML = rows.length
-      ? `<option value="">Select a location…</option>${rows.map(r => `<option value="${esc(r.NamedLocation)}">${esc(r.NamedLocation)}</option>`).join('')}`
-      : `<option value="">No locations mapped yet — ask a supervisor</option>`;
-  } catch (err) {
-    select.innerHTML = `<option value="">Failed to load locations</option>`;
-  }
 }
 
 async function scSubmitLine(e, doc, backFn) {
@@ -6377,9 +6426,8 @@ async function scSubmitLine(e, doc, backFn) {
     material: form.material.value.trim(),
     countedQty: form.countedQty.value,
   };
-  if (form.namedLocation) body.namedLocation = form.namedLocation.value;
-  if (form.storageType)   body.storageType   = form.storageType.value.trim();
-  if (form.bin)            body.bin           = form.bin.value.trim();
+  if (form.storageType) body.storageType = form.storageType.value.trim();
+  if (form.bin)          body.bin          = form.bin.value.trim();
 
   try {
     const json = await scApi(`/counts/${doc.CountId}/lines`, {
@@ -6437,7 +6485,7 @@ async function scRenderInvalidMaterials(doc, backFn) {
                 <td>${(l.suggestions || []).map(s => `<button type="button" class="btn-back-tiles sc-suggestion-btn" data-line-id="${l.LineId}" data-material="${esc(s.material)}" style="margin:2px">${esc(s.material)}${s.materialText ? ` — ${esc(s.materialText)}` : ''}</button>`).join('') || '<span class="toolbar-hint">No close matches found</span>'}</td>
                 <td>
                   <input class="tf-input sc-correct-input" data-line-id="${l.LineId}" style="width:120px" placeholder="Correct material">
-                  <button type="button" class="btn-run sc-correct-btn" data-line-id="${l.LineId}">Save</button>
+                  <button type="button" class="btn-submit sc-correct-btn" data-line-id="${l.LineId}">Save</button>
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -6470,67 +6518,6 @@ async function scCorrectInvalidLine(doc, backFn, lineId, container) {
     await scReloadCountDetail(doc.CountId, backFn);
   } catch (err) {
     alert(err.message);
-  }
-}
-
-// ── PTFE Location Mapping admin (LOG_SUPER) ───────────────────────────────────
-
-async function scRenderLocationMapAdmin(backFn) {
-  showResultPanel('PTFE Location Mapping', 'Named locations on the cycle-count sheet → SAP storage type/bin — validated against SAP (LAGP) on save');
-  try {
-    const json = await scApi('/location-map');
-    scRenderLocationMapTable(json.data || [], backFn);
-  } catch (err) {
-    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-  }
-}
-
-function scRenderLocationMapTable(rows, backFn) {
-  const existingNames = ['PTFE', 'YARD', 'CONTAINER 1', 'CONTAINER 2', 'WAREHOUSE'];
-  const byName = Object.fromEntries(rows.map(r => [r.NamedLocation, r]));
-  const names = Array.from(new Set([...existingNames, ...rows.map(r => r.NamedLocation)]));
-
-  document.getElementById('result-body').innerHTML = `
-    <button class="btn-back-tiles" type="button" id="sc-back-to-count">← Back to Count</button>
-    <div style="overflow-x:auto;margin-top:10px">
-      <table class="pn-batch-table admin-table">
-        <thead><tr><th>Named Location</th><th>Storage Type</th><th>Bin</th><th></th></tr></thead>
-        <tbody>
-          ${names.map(name => {
-            const existing = byName[name];
-            return `
-              <tr class="pn-row" data-name="${esc(name)}">
-                <td><strong>${esc(name)}</strong></td>
-                <td><input class="tf-input sc-map-storagetype" data-name="${esc(name)}" maxlength="3" value="${esc(existing?.StorageType || '')}" style="width:70px"></td>
-                <td><input class="tf-input sc-map-bin" data-name="${esc(name)}" maxlength="10" value="${esc(existing?.Bin || '')}" style="width:110px"></td>
-                <td><button type="button" class="btn-run sc-map-save" data-name="${esc(name)}">Save</button></td>
-              </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-    </div>
-    <div id="sc-map-result"></div>
-  `;
-
-  document.getElementById('sc-back-to-count').addEventListener('click', () => window[backFn]?.());
-  document.querySelectorAll('.sc-map-save').forEach(btn => {
-    btn.addEventListener('click', () => scSaveLocationMap(btn.dataset.name, backFn));
-  });
-}
-
-async function scSaveLocationMap(name, backFn) {
-  const storageType = document.querySelector(`.sc-map-storagetype[data-name="${CSS.escape(name)}"]`)?.value.trim();
-  const bin = document.querySelector(`.sc-map-bin[data-name="${CSS.escape(name)}"]`)?.value.trim();
-  const resultEl = document.getElementById('sc-map-result');
-  if (!storageType || !bin) { alert('Storage type and bin are both required.'); return; }
-
-  try {
-    await scApi(`/location-map/${encodeURIComponent(name)}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storageType, bin }),
-    });
-    await scRenderLocationMapAdmin(backFn);
-  } catch (err) {
-    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }
 
@@ -6567,7 +6554,7 @@ function fgRenderNoSession() {
       <div class="tf-section-label">Start Count Session</div>
       <form class="tf-row" id="fg-start-form">
         <div class="tf-field"><label class="tf-label">Storage Location <span class="tf-req">*</span></label><input class="tf-input" name="storageLocation" value="1711" required></div>
-        <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">Start Session</button></div>
+        <div class="tf-field" style="align-self:flex-end"><button class="btn-submit" type="submit">Start Session</button></div>
       </form>
       <div id="fg-start-result"></div>
     ` : '<div class="toolbar-hint">Ask a warehouse supervisor to start one.</div>'}
@@ -6651,7 +6638,7 @@ function fgRenderScanUI(session) {
     <form id="fg-confirm-form" class="tf-row">
       <div class="tf-field"><label class="tf-label">Storage Type</label><input class="tf-input" name="storageType" maxlength="3" required></div>
       <div class="tf-field"><label class="tf-label">Bin</label><input class="tf-input" name="bin" maxlength="10" required></div>
-      <div class="tf-field" style="align-self:flex-end"><button class="btn-run" type="submit">Confirm Bin</button></div>
+      <div class="tf-field" style="align-self:flex-end"><button class="btn-submit" type="submit">Confirm Bin</button></div>
     </form>
     <div id="fg-confirm-result"></div>
   `;

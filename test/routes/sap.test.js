@@ -304,6 +304,93 @@ describe('POST /warehouse/batch-cleanup-transfer', () => {
   });
 });
 
+describe('POST /warehouse/batch-cleanup-transfer-bulk', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/warehouse/batch-cleanup-transfer-bulk').send({ items: [{ kind: 'transfer', payload: {} }] });
+    expect(res.status).toBe(403);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('400s when items is missing or empty', async () => {
+    const res1 = await request(appLogSuper).post('/warehouse/batch-cleanup-transfer-bulk').send({});
+    expect(res1.status).toBe(400);
+    const res2 = await request(appLogSuper).post('/warehouse/batch-cleanup-transfer-bulk').send({ items: [] });
+    expect(res2.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('fires every item concurrently and returns results in the same order', async () => {
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, transferOrderNumber: '4500001111', messages: [] } } })
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, transferOrderNumber: '4500002222', messages: [] } } });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer-bulk')
+      .send({
+        items: [
+          { kind: 'transfer', payload: { Material: '30005R', Batch: 'B1' } },
+          { kind: 'transfer', payload: { Material: '30006R', Batch: 'B2' } },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.results).toHaveLength(2);
+    expect(res.body.results[0].data.transferOrderNumber).toBe('4500001111');
+    expect(res.body.results[1].data.transferOrderNumber).toBe('4500002222');
+    expect(axiosMock.post).toHaveBeenCalledTimes(2);
+  });
+
+  test('one item failing does not prevent the others from succeeding', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 422, data: { error: { message: 'Material 30005R does not exist' } } };
+    axiosMock.post
+      .mockRejectedValueOnce(sapError)
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, transferOrderNumber: '4500002222', messages: [] } } });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer-bulk')
+      .send({
+        items: [
+          { kind: 'transfer', payload: { Material: '30005R', Batch: 'B1' } },
+          { kind: 'transfer', payload: { Material: '30006R', Batch: 'B2' } },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ success: false, error: 'Material 30005R does not exist' });
+    expect(res.body.results[1]).toMatchObject({ success: true });
+  });
+
+  test('409-worthy TransferBlockedError on one item surfaces as a failed result, not an HTTP 409 for the whole batch', async () => {
+    // One of the two items' storage locations is under an active count (first
+    // dbRequest.query call to resolve gets the blocked recordset); which item
+    // that ends up being isn't guaranteed under Promise.all, so this asserts
+    // the batch-level shape rather than a specific index.
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 7, CountType: 'PRODUCTION', Status: 'PendingApproval' }],
+    });
+    axiosMock.post.mockResolvedValue({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500002222', messages: [] } },
+    });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/batch-cleanup-transfer-bulk')
+      .send({
+        items: [
+          { kind: 'transfer', payload: { Material: '30005R', StorageLocation: '1716' } },
+          { kind: 'transfer', payload: { Material: '30006R', StorageLocation: '1717' } },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const successes = res.body.results.filter(r => r.success);
+    const failures  = res.body.results.filter(r => !r.success);
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+  });
+});
+
 describe('POST /warehouse/create-lt04', () => {
   test('passes StorageLocation to the guard but never forwards it to SapServer', async () => {
     axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: { transferOrderNumber: '4500007777' } } });
