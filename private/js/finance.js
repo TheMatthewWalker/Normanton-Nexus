@@ -1332,7 +1332,6 @@ async function scfRenderPendingCounts() {
           <td>#${c.CountId}</td>
           <td>${esc(c.CountType.replace('_', ' '))}</td>
           <td>${esc(location)}</td>
-          <td>${esc(c.TicketNumber || '—')}</td>
           <td>${esc(c.SubmittedBy || '—')}</td>
           <td style="color:${netValue >= 0 ? '#059669' : '#DC2626'};font-weight:700">${netValue >= 0 ? '+' : ''}£${netValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
         </tr>`;
@@ -1347,7 +1346,7 @@ async function scfRenderPendingCounts() {
       <div class="tf-section-label">Stock Count Results — Pending Approval</div>
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Count</th><th>Type</th><th>Location</th><th>Ticket</th><th>Submitted By</th><th>Net Value</th></tr></thead>
+          <thead><tr><th>Count</th><th>Type</th><th>Location</th><th>Submitted By</th><th>Net Value</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>

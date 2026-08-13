@@ -97,6 +97,19 @@ describe('addCountLine', () => {
     expect(dbRequest.input).toHaveBeenCalledWith('varianceQty', expect.anything(), null);
     expect(dbRequest.input).toHaveBeenCalledWith('varianceValue', expect.anything(), null);
   });
+
+  // Every physical lot counted on paper gets its own ticket + label — this
+  // lives on the line, not the count document.
+  test('persists a per-line ticketNumber', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ LineId: 7 }] });
+
+    await db.addCountLine(1, {
+      material: '30005R', countedQty: 100, sapQty: 90, unitPrice: 2.5, ticketNumber: 'TKT-1042',
+      isInvalidMaterial: false, isBatchManaged: false, enteredBy: 'j.smith',
+    });
+
+    expect(dbRequest.input).toHaveBeenCalledWith('ticketNumber', expect.anything(), 'TKT-1042');
+  });
 });
 
 describe('getOrCreatePtfeCountForWeek', () => {

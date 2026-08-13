@@ -16,7 +16,7 @@ import { getNexusOperationsPool } from '../config.js';
 const getPool = getNexusOperationsPool;
 
 const DOCUMENT_COLUMNS = `
-  CountId, CountType, StorageLocation, TicketNumber, Status, WeekStartDate,
+  CountId, CountType, StorageLocation, Status, WeekStartDate,
   CreatedBy, CreatedByUserId, CreatedAtUtc,
   SubmittedBy, SubmittedAtUtc,
   ApprovedBy, ApprovedAtUtc,
@@ -26,8 +26,10 @@ const DOCUMENT_COLUMNS = `
   Notes
 `;
 
+// TicketNumber is per-LINE, not per-document (RAW_MATERIAL/PRODUCTION only)
+// — every physical lot counted on paper gets its own ticket + label.
 const LINE_COLUMNS = `
-  LineId, CountId, Material, MaterialText, Uom, NamedLocation, StorageType, Bin,
+  LineId, CountId, Material, MaterialText, Uom, NamedLocation, StorageType, Bin, TicketNumber,
   CountedQty, SapQty, VarianceQty, UnitPrice, VarianceValue,
   IsInvalidMaterial, IsBatchManaged,
   BinCompletedBy, BinCompletedAtUtc,
@@ -165,22 +167,21 @@ export async function getPtfeCountForWeek(weekStartDate) {
 // ── Count documents — writes ─────────────────────────────────────────────────
 
 export async function createCountDocument({
-  countType, storageLocation, ticketNumber, weekStartDate, createdBy, createdByUserId,
+  countType, storageLocation, weekStartDate, createdBy, createdByUserId,
 }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('countType',       sql.NVarChar(20), countType)
     .input('storageLocation', sql.NVarChar(4),  storageLocation || null)
-    .input('ticketNumber',    sql.NVarChar(30), ticketNumber || null)
     .input('weekStartDate',   sql.Date,         weekStartDate || null)
     .input('createdBy',       sql.NVarChar(100), createdBy || null)
     .input('createdByUserId', sql.Int,          createdByUserId ?? null)
     .input('status',           sql.NVarChar(20), 'Open')
     .query(`
       INSERT INTO log.StockCountDocument
-        (CountType, StorageLocation, TicketNumber, WeekStartDate, CreatedBy, CreatedByUserId, Status)
+        (CountType, StorageLocation, WeekStartDate, CreatedBy, CreatedByUserId, Status)
       OUTPUT INSERTED.CountId
-      VALUES (@countType, @storageLocation, @ticketNumber, @weekStartDate, @createdBy, @createdByUserId, @status)
+      VALUES (@countType, @storageLocation, @weekStartDate, @createdBy, @createdByUserId, @status)
     `);
   return recordset[0].CountId;
 }
@@ -270,7 +271,7 @@ export async function countHasIncompleteBins(countId) {
 // query) before calling this; this layer just persists the frozen snapshot,
 // per the migration's "freeze figures at entry/comparison time" convention.
 export async function addCountLine(countId, {
-  material, materialText, uom, namedLocation, storageType, bin,
+  material, materialText, uom, namedLocation, storageType, bin, ticketNumber,
   countedQty, sapQty, unitPrice, isInvalidMaterial, isBatchManaged, enteredBy,
 }) {
   const varianceQty = sapQty != null ? countedQty - sapQty : null;
@@ -285,22 +286,23 @@ export async function addCountLine(countId, {
     .input('namedLocation',  sql.NVarChar(50), namedLocation || null)
     .input('storageType',     sql.NVarChar(3),  storageType || null)
     .input('bin',              sql.NVarChar(10), bin || null)
-    .input('countedQty',        sql.Decimal(15, 3), countedQty)
-    .input('sapQty',             sql.Decimal(15, 3), sapQty ?? null)
-    .input('varianceQty',         sql.Decimal(15, 3), varianceQty)
-    .input('unitPrice',            sql.Decimal(15, 4), unitPrice ?? null)
-    .input('varianceValue',         sql.Decimal(18, 2), varianceValue)
-    .input('isInvalidMaterial',      sql.Bit, isInvalidMaterial ? 1 : 0)
-    .input('isBatchManaged',          sql.Bit, isBatchManaged ? 1 : 0)
-    .input('enteredBy',                sql.NVarChar(100), enteredBy)
+    .input('ticketNumber',      sql.NVarChar(30), ticketNumber || null)
+    .input('countedQty',         sql.Decimal(15, 3), countedQty)
+    .input('sapQty',              sql.Decimal(15, 3), sapQty ?? null)
+    .input('varianceQty',          sql.Decimal(15, 3), varianceQty)
+    .input('unitPrice',             sql.Decimal(15, 4), unitPrice ?? null)
+    .input('varianceValue',          sql.Decimal(18, 2), varianceValue)
+    .input('isInvalidMaterial',       sql.Bit, isInvalidMaterial ? 1 : 0)
+    .input('isBatchManaged',           sql.Bit, isBatchManaged ? 1 : 0)
+    .input('enteredBy',                 sql.NVarChar(100), enteredBy)
     .query(`
       INSERT INTO log.StockCountLine
-        (CountId, Material, MaterialText, Uom, NamedLocation, StorageType, Bin,
+        (CountId, Material, MaterialText, Uom, NamedLocation, StorageType, Bin, TicketNumber,
          CountedQty, SapQty, VarianceQty, UnitPrice, VarianceValue,
          IsInvalidMaterial, IsBatchManaged, EnteredBy)
       OUTPUT INSERTED.LineId
       VALUES
-        (@countId, @material, @materialText, @uom, @namedLocation, @storageType, @bin,
+        (@countId, @material, @materialText, @uom, @namedLocation, @storageType, @bin, @ticketNumber,
          @countedQty, @sapQty, @varianceQty, @unitPrice, @varianceValue,
          @isInvalidMaterial, @isBatchManaged, @enteredBy)
     `);

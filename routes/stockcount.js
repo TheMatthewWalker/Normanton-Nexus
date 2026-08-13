@@ -262,7 +262,7 @@ router.get('/counts/:id/report', async (req, res) => {
 // ── Count documents — supervisor-initiated (Raw Material / Production) ───────
 
 router.post('/counts', requirePermission('LOG_SUPER'), async (req, res) => {
-  const { countType, storageLocation, ticketNumber } = req.body;
+  const { countType, storageLocation } = req.body;
   if (!['RAW_MATERIAL', 'PRODUCTION'].includes(countType)) {
     return res.status(400).json({ success: false, error: "countType must be 'RAW_MATERIAL' or 'PRODUCTION'" });
   }
@@ -270,7 +270,7 @@ router.post('/counts', requirePermission('LOG_SUPER'), async (req, res) => {
 
   try {
     const countId = await db.createCountDocument({
-      countType, storageLocation, ticketNumber,
+      countType, storageLocation,
       createdBy: actor(req), createdByUserId: req.session.user.userID,
     });
     await audit('STOCKCOUNT_OK', actor(req), `${countType} count #${countId} started (storage location ${storageLocation})`, req);
@@ -285,7 +285,7 @@ router.post('/counts', requirePermission('LOG_SUPER'), async (req, res) => {
 
 router.post('/counts/:id/lines', async (req, res) => {
   const countId = req.params.id;
-  const { material, storageType, bin, countedQty } = req.body;
+  const { material, storageType, bin, ticketNumber, countedQty } = req.body;
   if (!material || countedQty === undefined || countedQty === null) {
     return res.status(400).json({ success: false, error: 'material and countedQty are required' });
   }
@@ -340,6 +340,10 @@ router.post('/counts/:id/lines', async (req, res) => {
       uom: materialInfo?.uom,
       storageType: resolvedStorageType,
       bin: resolvedBin,
+      // Per-line, not per-count — every physical lot on paper gets its own
+      // ticket + label (RAW_MATERIAL/PRODUCTION only; ignored for PTFE/left
+      // undefined by the frontend there).
+      ticketNumber,
       countedQty: Number(countedQty),
       sapQty,
       unitPrice: materialInfo?.unitPrice ?? null,

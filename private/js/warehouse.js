@@ -6262,10 +6262,6 @@ async function scRenderCountList(countType, defaultStorageLocation, backFn) {
           <label class="tf-label">Storage Location <span class="tf-req">*</span></label>
           <input class="tf-input" name="storageLocation" value="${esc(defaultStorageLocation)}" required>
         </div>
-        <div class="tf-field">
-          <label class="tf-label">Ticket Number <span class="tf-optional">(optional — paper count reference)</span></label>
-          <input class="tf-input" name="ticketNumber" placeholder="e.g. TKT-1042">
-        </div>
         <div class="tf-field" style="align-self:flex-end">
           <button class="btn-submit" type="submit">Start Count</button>
         </div>
@@ -6277,17 +6273,16 @@ async function scRenderCountList(countType, defaultStorageLocation, backFn) {
       <tr class="admin-row sc-count-row" style="cursor:pointer" data-id="${c.CountId}">
         <td>#${c.CountId}</td>
         <td>${scStatusBadge(c.Status)}</td>
-        <td>${esc(c.TicketNumber || '—')}</td>
         <td>${esc(c.CreatedBy || '—')}</td>
         <td>${scFormatDate(c.CreatedAtUtc)}</td>
-      </tr>`).join('') : `<tr><td colspan="5" class="sap-empty">No counts yet.</td></tr>`;
+      </tr>`).join('') : `<tr><td colspan="4" class="sap-empty">No counts yet.</td></tr>`;
 
     document.getElementById('result-body').innerHTML = `
       ${startForm}
       <div class="tf-section-label">Counts</div>
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Count</th><th>Status</th><th>Ticket</th><th>Started By</th><th>Started</th></tr></thead>
+          <thead><tr><th>Count</th><th>Status</th><th>Started By</th><th>Started</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
@@ -6316,13 +6311,12 @@ async function scSubmitStartCount(e) {
   const countType = form.dataset.countType;
   const backFn = form.dataset.backFn;
   const storageLocation = form.storageLocation.value.trim();
-  const ticketNumber = form.ticketNumber.value.trim();
   const resultEl = document.getElementById('sc-start-result');
 
   try {
     await scApi('/counts', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ countType, storageLocation, ticketNumber: ticketNumber || undefined }),
+      body: JSON.stringify({ countType, storageLocation }),
     });
     window[backFn]?.();
   } catch (err) {
@@ -6350,11 +6344,20 @@ function scRenderCountDetail(doc, backFn) {
        <div class="tf-field"><label class="tf-label">Bin <span class="tf-req">*</span></label><input class="tf-input" name="bin" maxlength="10" required></div>`
     : '';
 
+  // Per-LINE, not per-count — every physical lot counted on paper gets its
+  // own ticket + label, so this is entered alongside each line, not once at
+  // count start. RAW_MATERIAL/PRODUCTION only, matches the original spec.
+  const hasTicketPerLine = doc.CountType === 'RAW_MATERIAL' || doc.CountType === 'PRODUCTION';
+  const ticketField = hasTicketPerLine
+    ? `<div class="tf-field"><label class="tf-label">Ticket Number <span class="tf-optional">(optional — paper lot reference)</span></label><input class="tf-input" name="ticketNumber" placeholder="e.g. TKT-1042"></div>`
+    : '';
+
   const entryForm = isOpen ? `
     <div class="tf-section-label">Add Line</div>
     <form class="tf-row" id="sc-line-form">
       <div class="tf-field"><label class="tf-label">Material <span class="tf-req">*</span></label><input class="tf-input" name="material" required></div>
       ${locationField}
+      ${ticketField}
       <div class="tf-field"><label class="tf-label">Counted Qty <span class="tf-req">*</span></label><input class="tf-input" type="number" step="any" min="0" name="countedQty" required></div>
       <div class="tf-field" style="align-self:flex-end"><button class="btn-submit" type="submit">+ Add Line</button></div>
     </form>
@@ -6365,10 +6368,11 @@ function scRenderCountDetail(doc, backFn) {
     <tr class="pn-row${l.IsInvalidMaterial ? ' sc-invalid-row' : ''}">
       <td><strong>${esc(l.Material)}</strong>${l.MaterialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(l.MaterialText)}</div>` : ''}${l.IsInvalidMaterial ? '<div style="font-size:11px;color:#DC2626;font-weight:700">Invalid material</div>' : ''}</td>
       <td>${esc(l.NamedLocation || [l.StorageType, l.Bin].filter(Boolean).join('/') || '—')}</td>
+      ${hasTicketPerLine ? `<td>${esc(l.TicketNumber || '—')}</td>` : ''}
       <td>${Number(l.CountedQty).toLocaleString()} ${esc(l.Uom || '')}</td>
       <td>${l.SapQty != null ? Number(l.SapQty).toLocaleString() : '—'}</td>
       <td>${l.VarianceQty != null ? `<span style="color:${Number(l.VarianceQty) === 0 ? 'inherit' : (Number(l.VarianceQty) > 0 ? '#059669' : '#DC2626')};font-weight:${Number(l.VarianceQty) === 0 ? 400 : 700}">${Number(l.VarianceQty) > 0 ? '+' : ''}${Number(l.VarianceQty).toLocaleString()}</span>` : '—'}</td>
-    </tr>`).join('') : `<tr><td colspan="5" class="sap-empty">No lines entered yet.</td></tr>`;
+    </tr>`).join('') : `<tr><td colspan="${hasTicketPerLine ? 6 : 5}" class="sap-empty">No lines entered yet.</td></tr>`;
 
   const rejectionNotice = doc.Status === 'Rejected' ? `
     <div class="sap-error" style="margin-bottom:12px">
@@ -6389,7 +6393,6 @@ function scRenderCountDetail(doc, backFn) {
       <div class="tf-field"><label class="tf-label">Count</label><div>#${doc.CountId}</div></div>
       <div class="tf-field"><label class="tf-label">Status</label><div>${scStatusBadge(doc.Status)}</div></div>
       ${doc.StorageLocation ? `<div class="tf-field"><label class="tf-label">Storage Location</label><div>${esc(doc.StorageLocation)}</div></div>` : ''}
-      ${doc.TicketNumber ? `<div class="tf-field"><label class="tf-label">Ticket</label><div>${esc(doc.TicketNumber)}</div></div>` : ''}
       ${doc.WeekStartDate ? `<div class="tf-field"><label class="tf-label">Week</label><div>${scFormatDate(doc.WeekStartDate)}</div></div>` : ''}
       ${accuracyPct !== null ? `<div class="tf-field"><label class="tf-label">Stock Accuracy</label><div style="color:${accuracyPct === 100 ? '#059669' : (accuracyPct >= 90 ? '#B45309' : '#DC2626')};font-weight:700">${accuracyPct}% <span style="font-weight:400;color:var(--text-secondary,#666)">(${accurateLines.length}/${comparedLines.length} lines matched SAP)</span></div></div>` : ''}
     </div>
@@ -6398,7 +6401,7 @@ function scRenderCountDetail(doc, backFn) {
     <div class="tf-section-label">Lines ${invalidCount ? `<span style="color:#DC2626">— ${invalidCount} invalid material line${invalidCount === 1 ? '' : 's'} must be corrected before submission</span>` : ''}</div>
     <div style="overflow-x:auto;margin-bottom:14px">
       <table class="pn-batch-table admin-table">
-        <thead><tr><th>Material</th><th>Location</th><th>Counted</th><th>SAP Qty</th><th>Variance</th></tr></thead>
+        <thead><tr><th>Material</th><th>Location</th>${hasTicketPerLine ? '<th>Ticket</th>' : ''}<th>Counted</th><th>SAP Qty</th><th>Variance</th></tr></thead>
         <tbody>${linesRows}</tbody>
       </table>
     </div>
@@ -6426,8 +6429,9 @@ async function scSubmitLine(e, doc, backFn) {
     material: form.material.value.trim(),
     countedQty: form.countedQty.value,
   };
-  if (form.storageType) body.storageType = form.storageType.value.trim();
-  if (form.bin)          body.bin          = form.bin.value.trim();
+  if (form.storageType)  body.storageType  = form.storageType.value.trim();
+  if (form.bin)           body.bin           = form.bin.value.trim();
+  if (form.ticketNumber)   body.ticketNumber   = form.ticketNumber.value.trim() || undefined;
 
   try {
     const json = await scApi(`/counts/${doc.CountId}/lines`, {

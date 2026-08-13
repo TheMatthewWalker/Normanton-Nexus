@@ -18,7 +18,10 @@
 // can't silently drift if the snapshot or SAP stock changes after the fact — same rationale as
 // log.IsoparDeclaration's CalculationSnapshotJson. IsInvalidMaterial is a denormalized flag
 // (recomputed on every material-code correction) rather than a live join, so the "does this
-// count have any invalid lines" completion gate is a single indexed lookup.
+// count have any invalid lines" completion gate is a single indexed lookup. TicketNumber is
+// per-LINE, not per-document (RAW_MATERIAL/PRODUCTION only) — every physical lot counted on
+// paper gets its own ticket + label, so the cross-reference has to live at that granularity,
+// not once for the whole count.
 //
 // log.StockCountFgScan — Finished Goods Count's scan audit trail. "Correct" is evaluated per
 // the *scanned* bin against LQUA, not against one fixed "expected bin" — a batch legitimately
@@ -39,7 +42,6 @@ CREATE TABLE log.StockCountDocument (
     CountId INT IDENTITY(1,1) NOT NULL
 ,   CountType NVARCHAR(20) NOT NULL
 ,   StorageLocation NVARCHAR(4) NULL
-,   TicketNumber NVARCHAR(30) NULL
 ,   Status NVARCHAR(20) NOT NULL
 ,   WeekStartDate DATE NULL
 ,   CreatedBy NVARCHAR(100) NULL
@@ -95,6 +97,7 @@ CREATE TABLE log.StockCountLine (
 ,   NamedLocation NVARCHAR(50) NULL
 ,   StorageType NVARCHAR(3) NULL
 ,   Bin NVARCHAR(10) NULL
+,   TicketNumber NVARCHAR(30) NULL
 ,   CountedQty DECIMAL(15,3) NOT NULL
 ,   SapQty DECIMAL(15,3) NULL
 ,   VarianceQty DECIMAL(15,3) NULL

@@ -157,12 +157,15 @@ describe('POST /counts', () => {
 
   test('starts a Raw Material count', async () => {
     db.createCountDocument.mockResolvedValueOnce(42);
-    const res = await request(appLogSuper).post('/counts').send({ countType: 'RAW_MATERIAL', storageLocation: '1710', ticketNumber: 'T-1' });
+    const res = await request(appLogSuper).post('/counts').send({ countType: 'RAW_MATERIAL', storageLocation: '1710' });
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({ countId: 42 });
     expect(db.createCountDocument).toHaveBeenCalledWith(expect.objectContaining({
-      countType: 'RAW_MATERIAL', storageLocation: '1710', ticketNumber: 'T-1', createdBy: logSuperUser.username,
+      countType: 'RAW_MATERIAL', storageLocation: '1710', createdBy: logSuperUser.username,
     }));
+    // TicketNumber is per-line (every physical lot gets its own ticket +
+    // label), not per-document — never passed to createCountDocument.
+    expect(db.createCountDocument).not.toHaveBeenCalledWith(expect.objectContaining({ ticketNumber: expect.anything() }));
   });
 });
 
@@ -213,6 +216,21 @@ describe('POST /counts/:id/lines', () => {
     expect(res.body.data).toMatchObject({ lineId: 8, isInvalidMaterial: false, sapQty: 95 });
     expect(axiosMock.get.mock.calls[0][1].params).toMatchObject({ material: '30005R', storageType: 'PDR', bin: 'B01', storageLocation: '1710' });
     expect(db.addCountLine).toHaveBeenCalledWith('1', expect.objectContaining({ sapQty: 95, storageType: 'PDR', bin: 'B01' }));
+  });
+
+  // Every physical lot counted on paper gets its own ticket + label — the
+  // cross-reference is per-line, not once for the whole count.
+  test('RAW_MATERIAL: passes a per-line ticketNumber through to addCountLine', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 1, CountType: 'RAW_MATERIAL', Status: 'Open', StorageLocation: '1710' });
+    db.searchMaterialForCount.mockResolvedValueOnce({ material: '30005R', materialText: 'Wire', uom: 'M', unitPrice: 2 });
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 90 }] } });
+    db.addCountLine.mockResolvedValueOnce(8);
+
+    await request(app).post('/counts/1/lines').send({
+      material: '30005R', storageType: 'PDR', bin: 'B01', ticketNumber: 'TKT-1042', countedQty: 90,
+    });
+
+    expect(db.addCountLine).toHaveBeenCalledWith('1', expect.objectContaining({ ticketNumber: 'TKT-1042' }));
   });
 
   test('PTFE_WEEKLY: 400s when storageType or bin is missing', async () => {
