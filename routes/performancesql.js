@@ -1270,7 +1270,7 @@ export async function listVendorMaterials(vendorId) {
     .query(`
       SELECT
         vm.VendorMaterialId, vm.VendorId, vm.Material, vm.MaterialMoqQty, vm.MaterialMaxQty,
-        vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement, vm.SourceHint,
+        vm.LeadTimeDaysOverride, vm.MinSafetyStockQty, vm.ScheduleAgreement, vm.ScheduleAgreementItem, vm.SourceHint,
         t.MaterialText, t.MrpController, t.PlannedDeliveryTime AS SapLeadTimeDays, t.SafetyStock AS SapSafetyStock
       FROM log.VendorMaterial vm
       LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = vm.Material
@@ -1280,40 +1280,43 @@ export async function listVendorMaterials(vendorId) {
   return recordset;
 }
 
-export async function addVendorMaterial(vendorId, { material, materialMoqQty, materialMaxQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement, sourceHint }) {
+export async function addVendorMaterial(vendorId, { material, materialMoqQty, materialMaxQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement, scheduleAgreementItem, sourceHint }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
-    .input('vendorId',             sql.Int,            vendorId)
-    .input('material',             sql.NVarChar(18),   material)
-    .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
-    .input('materialMaxQty',       sql.Decimal(15, 3), materialMaxQty ?? null)
-    .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
-    .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
-    .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
-    .input('sourceHint',           sql.NVarChar(40),   sourceHint || null)
+    .input('vendorId',              sql.Int,            vendorId)
+    .input('material',              sql.NVarChar(18),   material)
+    .input('materialMoqQty',        sql.Decimal(15, 3), materialMoqQty ?? null)
+    .input('materialMaxQty',        sql.Decimal(15, 3), materialMaxQty ?? null)
+    .input('leadTimeDaysOverride',  sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
+    .input('minSafetyStockQty',     sql.Decimal(15, 3), minSafetyStockQty ?? null)
+    .input('scheduleAgreement',     sql.NVarChar(10),   scheduleAgreement || null)
+    .input('scheduleAgreementItem', sql.NVarChar(5),    scheduleAgreementItem || null)
+    .input('sourceHint',            sql.NVarChar(40),   sourceHint || null)
     .query(`
-      INSERT INTO log.VendorMaterial (VendorId, Material, MaterialMoqQty, MaterialMaxQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, SourceHint)
+      INSERT INTO log.VendorMaterial (VendorId, Material, MaterialMoqQty, MaterialMaxQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, ScheduleAgreementItem, SourceHint)
       OUTPUT INSERTED.VendorMaterialId
-      VALUES (@vendorId, @material, @materialMoqQty, @materialMaxQty, @leadTimeDaysOverride, @minSafetyStockQty, @scheduleAgreement, @sourceHint)
+      VALUES (@vendorId, @material, @materialMoqQty, @materialMaxQty, @leadTimeDaysOverride, @minSafetyStockQty, @scheduleAgreement, @scheduleAgreementItem, @sourceHint)
     `);
   return recordset[0].VendorMaterialId;
 }
 
-export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, materialMaxQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement }) {
+export async function updateVendorMaterial(vendorMaterialId, { materialMoqQty, materialMaxQty, leadTimeDaysOverride, minSafetyStockQty, scheduleAgreement, scheduleAgreementItem }) {
   const pool = await getPool();
   await pool.request()
-    .input('vendorMaterialId',     sql.Int,            vendorMaterialId)
-    .input('materialMoqQty',       sql.Decimal(15, 3), materialMoqQty ?? null)
-    .input('materialMaxQty',       sql.Decimal(15, 3), materialMaxQty ?? null)
-    .input('leadTimeDaysOverride', sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
-    .input('minSafetyStockQty',    sql.Decimal(15, 3), minSafetyStockQty ?? null)
-    .input('scheduleAgreement',    sql.NVarChar(10),   scheduleAgreement || null)
+    .input('vendorMaterialId',      sql.Int,            vendorMaterialId)
+    .input('materialMoqQty',        sql.Decimal(15, 3), materialMoqQty ?? null)
+    .input('materialMaxQty',        sql.Decimal(15, 3), materialMaxQty ?? null)
+    .input('leadTimeDaysOverride',  sql.Decimal(9, 2),  leadTimeDaysOverride ?? null)
+    .input('minSafetyStockQty',     sql.Decimal(15, 3), minSafetyStockQty ?? null)
+    .input('scheduleAgreement',     sql.NVarChar(10),   scheduleAgreement || null)
+    .input('scheduleAgreementItem', sql.NVarChar(5),    scheduleAgreementItem || null)
     .query(`
       UPDATE log.VendorMaterial SET
         MaterialMoqQty = @materialMoqQty, MaterialMaxQty = @materialMaxQty,
         LeadTimeDaysOverride = @leadTimeDaysOverride,
         MinSafetyStockQty = @minSafetyStockQty,
-        ScheduleAgreement = @scheduleAgreement, UpdatedAtUtc = GETUTCDATE()
+        ScheduleAgreement = @scheduleAgreement, ScheduleAgreementItem = @scheduleAgreementItem,
+        UpdatedAtUtc = GETUTCDATE()
       WHERE VendorMaterialId = @vendorMaterialId
     `);
 }
@@ -1832,6 +1835,15 @@ export async function acceptOrderSuggestion({
 // audit but don't need to clutter the tracker view. Ordered by status stage
 // then most-recent order first, so the "needs attention" rows (still
 // Accepted, not yet actually raised in SAP) surface at the top.
+//
+// LEFT JOINs log.VendorMaterial for ScheduleAgreement/ScheduleAgreementItem —
+// live current master data, not IsSpotPo's accept-time snapshot, so Tracked
+// Orders' "Assign to Schedule Agreement" button (routes/performance.js's
+// assign-schedule-agreement route) reflects a schedule agreement added to
+// the material AFTER this order was accepted, not just one that existed at
+// accept time. LEFT, not INNER — VendorMaterial has no cascade-delete
+// protection against PurchaseOrderSuggestion (see deleteVendorMaterial), so
+// a since-deleted assignment must not make the order vanish from this list.
 export async function listOrderSuggestionsTracked() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
@@ -1842,11 +1854,13 @@ export async function listOrderSuggestionsTracked() {
       p.IsSpotPo, p.PoNumber, p.PoItemNumber, p.Notes, p.SupplierReference,
       p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc,
       p.ShipmentId, s.ShipmentReference, s.Haulier, s.ModeOfTransport,
-      s.TrackingNumber AS ShipmentTrackingNumber, s.ExpectedEta, s.ReceivedAtUtc AS ShipmentReceivedAtUtc
+      s.TrackingNumber AS ShipmentTrackingNumber, s.ExpectedEta, s.ReceivedAtUtc AS ShipmentReceivedAtUtc,
+      vm.ScheduleAgreement, vm.ScheduleAgreementItem
     FROM log.PurchaseOrderSuggestion p
     JOIN log.Vendor v ON v.VendorId = p.VendorId
     LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
     LEFT JOIN log.PurchaseOrderShipment s ON s.ShipmentId = p.ShipmentId
+    LEFT JOIN log.VendorMaterial vm ON vm.VendorMaterialId = p.VendorMaterialId
     WHERE p.Status <> 'Cancelled'
     ORDER BY
       CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Booked' THEN 2 WHEN 'Received' THEN 3 ELSE 4 END,

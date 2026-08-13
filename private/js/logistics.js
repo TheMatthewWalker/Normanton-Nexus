@@ -7576,7 +7576,7 @@ function vmRenderVendorMaterials(vendor, materials) {
       <td>${esc(m.MrpController || '—')}</td>
       <td>${vmMaterialQtyLabel(m)}</td>
       <td>${vmLeadTimeDisplay(m)}</td>
-      <td>${esc(m.ScheduleAgreement || '—')}</td>
+      <td>${m.ScheduleAgreement ? esc(m.ScheduleAgreement) + (m.ScheduleAgreementItem ? ' / ' + esc(m.ScheduleAgreementItem) : '') : '—'}</td>
       <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
         <button class="btn-secondary vm-remove-material" data-id="${esc(String(m.VendorMaterialId))}" data-material="${esc(m.Material)}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Remove</button>
       </td>
@@ -7737,12 +7737,16 @@ function vmOpenMaterialEditModal(vendor, m) {
       </div>
       <div class="toolbar-hint" style="margin:2px 0 10px">Minimum stock buffer to maintain for this material — order suggestions (Phase 2b) are raised before stock is projected to fall below this floor rather than just-in-time, since supplier dates often slip. Leave blank to fall back to SAP's own safety stock (EISBE) if set, otherwise 0.</div>
       <div class="tf-row">
-        <div class="tf-field tf-field--wide">
+        <div class="tf-field">
           <label class="tf-label">Schedule Agreement</label>
           <input class="tf-input" type="text" id="vm-mat-sched" value="${esc(m.ScheduleAgreement || '')}">
         </div>
+        <div class="tf-field">
+          <label class="tf-label">Agreement Item</label>
+          <input class="tf-input" type="text" maxlength="5" id="vm-mat-sched-item" value="${esc(m.ScheduleAgreementItem || '')}" placeholder="e.g. 00010">
+        </div>
       </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Leave blank if this material is ordered via spot PO rather than against a scheduling agreement.</div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Leave both blank if this material is ordered via spot PO rather than against a scheduling agreement. Agreement Item is the SAP line item on the agreement — needed so Tracked Orders' "Assign to Schedule Agreement" can post a goods receipt against it when the order is received and booked in, same as a PO's own item number.</div>
       ${m.SourceHint ? `<div class="toolbar-hint">Seeded from MRP2.xlsx as "${esc(m.SourceHint)}" — double-check this is the right SAP material.</div>` : ''}
       <div id="vm-mat-result"></div>
     </div>
@@ -7759,6 +7763,7 @@ function vmOpenMaterialEditModal(vendor, m) {
       leadTimeDaysOverride: vmNumOrNull(document.getElementById('vm-mat-lead').value),
       minSafetyStockQty: vmNumOrNull(document.getElementById('vm-mat-safety').value),
       scheduleAgreement: document.getElementById('vm-mat-sched').value.trim() || null,
+      scheduleAgreementItem: document.getElementById('vm-mat-sched-item').value.trim() || null,
     };
     const btn = document.getElementById('vm-mat-save-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
@@ -10011,6 +10016,7 @@ function osRenderTrackedList(tracked) {
       <button type="button" class="btn-secondary" id="os-save-selected-btn" disabled>Save Selected</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
       <button type="button" class="btn-submit" id="os-create-po-btn" disabled>Create PO in SAP</button>
+      <button type="button" class="btn-submit" id="os-assign-schedule-btn" disabled>Assign to Schedule Agreement</button>
     </div>
     ${rows.length ? `<div class="ps-sections">${bucketSections}</div>` : `<div class="sap-empty">${emptyMessage}</div>`}
   `;
@@ -10022,6 +10028,7 @@ function osRenderTrackedList(tracked) {
   document.getElementById('os-auto-shipment-btn').addEventListener('click', () => autoCreateShipments());
   document.getElementById('os-save-selected-btn').addEventListener('click', () => saveSelectedTrackedOrders());
   document.getElementById('os-create-po-btn').addEventListener('click', () => openCreatePoModal());
+  document.getElementById('os-assign-schedule-btn').addEventListener('click', () => assignSelectedToScheduleAgreement());
   document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
   document.querySelectorAll('.os-save-btn').forEach(btn => {
@@ -10147,6 +10154,8 @@ function onTrackedCheckToggle(e) {
   if (saveSelBtn) saveSelBtn.disabled = selectedTrackedIds.size === 0;
   const poBtn = document.getElementById('os-create-po-btn');
   if (poBtn) poBtn.disabled = !osCreatePoSelectionValid();
+  const scheduleBtn = document.getElementById('os-assign-schedule-btn');
+  if (scheduleBtn) scheduleBtn.disabled = !osAssignScheduleAgreementSelectionValid();
 }
 
 // One PO per vendor, and only for lines that genuinely haven't been ordered
@@ -10160,6 +10169,50 @@ function osCreatePoSelectionValid() {
   if (rows.some(t => t.Status !== 'Accepted' || t.PoNumber)) return false;
   const vendorIds = new Set(rows.map(t => t.VendorId));
   return vendorIds.size === 1;
+}
+
+// Same not-yet-ordered rule as osCreatePoSelectionValid, but no same-vendor
+// grouping — unlike Create PO, assign-schedule-agreement doesn't create any
+// single shared SAP document to group lines under, it just writes each
+// line's own agreement number/item independently, so a mixed-vendor
+// selection is fine as long as every line individually has a schedule
+// agreement on file (ScheduleAgreement, joined live from log.VendorMaterial
+// by listOrderSuggestionsTracked).
+function osAssignScheduleAgreementSelectionValid() {
+  if (!selectedTrackedIds.size) return false;
+  const rows = trackedRows.filter(t => selectedTrackedIds.has(Number(t.SuggestionId)));
+  return rows.every(t => t.Status === 'Accepted' && !t.PoNumber && t.ScheduleAgreement);
+}
+
+// "Assign to Schedule Agreement" — the create-po route's own comment in
+// performance.js explains why this writes the same PoNumber/PoItemNumber
+// fields Create PO does, without ever calling SAP. No review modal like
+// Create PO's (no price/currency/delivery-date to check, nothing gets
+// posted anywhere) — just a confirm() naming each line's agreement, same
+// weight as Mark Received's confirm().
+async function assignSelectedToScheduleAgreement() {
+  const btn = document.getElementById('os-assign-schedule-btn');
+  if (!btn || !osAssignScheduleAgreementSelectionValid()) return;
+  const ids = [...selectedTrackedIds];
+  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+  const lines = rows.map(t => `${t.Material} — ${t.ScheduleAgreement}${t.ScheduleAgreementItem ? '/' + t.ScheduleAgreementItem : ''}`).join('\n');
+  if (!confirm(`Assign ${rows.length} order line${rows.length === 1 ? '' : 's'} to their schedule agreement? No PO is created in SAP — this records the agreement number/item against each line so it can be received and booked in later.\n\n${lines}`)) return;
+
+  btn.disabled = true; btn.textContent = 'Assigning…';
+  try {
+    const res = await fetch('/api/performance/order-suggestions/assign-schedule-agreement', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ suggestionIds: ids }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to assign schedule agreement');
+    selectedTrackedIds = new Set();
+    runOrderSuggestionsTracked(true);
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false; btn.textContent = 'Assign to Schedule Agreement';
+  }
 }
 
 // Reads the on-screen inputs for one tracked row and PUTs them — shared by

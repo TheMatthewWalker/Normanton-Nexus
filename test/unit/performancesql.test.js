@@ -25,12 +25,15 @@ let updateOrderSuggestionStatus;
 let updateOrderSuggestionPoItem;
 let deleteOrderSuggestion;
 let assignOrderShipment;
+let addVendorMaterial;
+let updateVendorMaterial;
 
 beforeAll(async () => {
   ({
     createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem,
     removeManualInboundItem, upsertForecastAccuracyLog, updateOrderSuggestionStatus,
     updateOrderSuggestionPoItem, deleteOrderSuggestion, assignOrderShipment,
+    addVendorMaterial, updateVendorMaterial,
   } = await import('../../routes/performancesql.js'));
 });
 
@@ -443,6 +446,36 @@ describe('updateOrderSuggestionPoItem', () => {
 
     expect(dbRequest.query).toHaveBeenCalledTimes(1);
     expect(dbRequest.input.mock.calls.filter(call => call[0] === 'poItemNumber').map(call => call[2])).toEqual(['00010']);
+  });
+});
+
+// ScheduleAgreementItem — the missing piece Vendor Master Data needed
+// alongside the existing ScheduleAgreement field (see this column's own
+// comment in the migration) so a Tracked Orders line can be assigned
+// straight to the agreement instead of raising a PO.
+describe('addVendorMaterial / updateVendorMaterial — scheduleAgreementItem', () => {
+  test('addVendorMaterial passes scheduleAgreementItem through to the INSERT', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ VendorMaterialId: 1 }] });
+
+    await addVendorMaterial(1, { material: 'MAT1', scheduleAgreement: '4600012345', scheduleAgreementItem: '00010' });
+
+    expect(dbRequest.input.mock.calls.filter(call => call[0] === 'scheduleAgreementItem').map(call => call[2])).toEqual(['00010']);
+  });
+
+  test('addVendorMaterial defaults scheduleAgreementItem to null when omitted', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ VendorMaterialId: 1 }] });
+
+    await addVendorMaterial(1, { material: 'MAT1' });
+
+    expect(dbRequest.input.mock.calls.filter(call => call[0] === 'scheduleAgreementItem').map(call => call[2])).toEqual([null]);
+  });
+
+  test('updateVendorMaterial passes scheduleAgreementItem through to the UPDATE', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+
+    await updateVendorMaterial(1, { scheduleAgreement: '4600012345', scheduleAgreementItem: '00020' });
+
+    expect(dbRequest.input.mock.calls.filter(call => call[0] === 'scheduleAgreementItem').map(call => call[2])).toEqual(['00020']);
   });
 });
 

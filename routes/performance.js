@@ -3829,6 +3829,72 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
   }
 });
 
+// "Assign to Schedule Agreement" — the no-PO-needed sibling of Create PO in
+// SAP above, for one or more Accepted, not-yet-ordered tracked orders whose
+// vendor+material already has a SAP scheduling agreement on file
+// (log.VendorMaterial.ScheduleAgreement/ScheduleAgreementItem, Vendor Master
+// Data). Writes ScheduleAgreement/ScheduleAgreementItem onto PoNumber/
+// PoItemNumber and flips Status to 'Ordered' — the SAME two fields Create PO
+// stamps on, so everything downstream that already reads them (Mark
+// Received's postGoodsReceiptToSap, the Inbound Shipment's PO Item fix
+// control, PO PDFs) keeps working unmodified against a scheduling agreement
+// release exactly as it would a real PO; SAP itself accepts either in the
+// same EBELN/EBELP fields at goods-receipt time.
+//
+// Unlike Create PO, there's no "one per vendor" grouping requirement — no
+// SAP document gets created here, each line just writes its own
+// (independent) agreement number/item, so a mixed-vendor selection is fine
+// as long as every line individually has one on file. No SAP credentials
+// needed either, for the same reason.
+router.post('/order-suggestions/assign-schedule-agreement', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { suggestionIds } = req.body;
+    if (!Array.isArray(suggestionIds) || !suggestionIds.length) {
+      return res.status(400).json({ success: false, error: { message: 'suggestionIds must be a non-empty array.' } });
+    }
+
+    // Fresh from the DB, not trusted from whatever the client had on screen —
+    // same reasoning as create-po above (a row's status/PO, or the
+    // material's schedule agreement, could have changed since the page was
+    // last loaded).
+    const idSet = new Set(suggestionIds.map(Number));
+    const allTracked = await db.listOrderSuggestionsTracked();
+    const rows = allTracked.filter(r => idSet.has(Number(r.SuggestionId)));
+
+    if (rows.length !== suggestionIds.length) {
+      return res.status(404).json({ success: false, error: { message: 'One or more selected orders could not be found.' } });
+    }
+    const alreadyOrdered = rows.filter(r => r.PoNumber || r.Status !== 'Accepted');
+    if (alreadyOrdered.length) {
+      return res.status(400).json({
+        success: false,
+        error: { message: `${alreadyOrdered.length} of the selected line(s) already have a PO number or aren't in Accepted status — refresh and try again.` },
+      });
+    }
+    const missingAgreement = rows.filter(r => !r.ScheduleAgreement);
+    if (missingAgreement.length) {
+      return res.status(400).json({
+        success: false,
+        error: { message: `${missingAgreement.map(r => r.Material).join(', ')} — no schedule agreement on file in Vendor Master Data. Refresh and try again, or use Create PO in SAP instead.` },
+      });
+    }
+
+    for (const r of rows) {
+      await db.updateOrderSuggestionStatus(r.SuggestionId, {
+        status: 'Ordered',
+        poNumber: r.ScheduleAgreement,
+        poItemNumber: r.ScheduleAgreementItem || null,
+        notes: r.Notes || null,
+        supplierReference: r.SupplierReference || null,
+      });
+    }
+
+    res.json({ success: true, data: { suggestionIds: rows.map(r => r.SuggestionId) } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 router.put('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const { status, orderQty, deliveryDate, readyToCollectDate } = req.body;
