@@ -757,11 +757,11 @@ router.post('/warehouse/delete-tr', requirePermission('LOG_SUPER'), async (req, 
 // because the Stock Management UI does).
 // ---------------------------------------------------------------------------
 router.get('/warehouse/stock', async (req, res) => {
-    const { material, storageType, bin, batch, storageLocation, stockCategory } = req.query;
+    const { material, storageType, bin, batch, storageLocation, stockCategory, profitCentre } = req.query;
 
     try {
         const response = await axios.get(`${sapConfig.url}/api/warehouse/stock`, {
-            params: { material, storageType, bin, batch, storageLocation, stockCategory, rowCount: 9999 },
+            params: { material, storageType, bin, batch, storageLocation, stockCategory, profitCentre, rowCount: 9999 },
             timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
         });
 

@@ -160,12 +160,15 @@ async function runStockManagement() {
 }
 
 const WSM_FILTER_FIELDS = [
-  { key: 'material',        label: 'Material'     },
+  // Material supports an optional SAP wildcard search ('*', e.g. "TSHV*") —
+  // opt-in only, a plain material number still matches exactly as before.
+  { key: 'material',        label: 'Material',      placeholder: 'e.g. TSHV* for wildcard' },
   { key: 'batch',           label: 'Batch'        },
   { key: 'storageType',     label: 'Storage Type' },
   { key: 'bin',             label: 'Bin'          },
   { key: 'storageLocation', label: 'Storage Loc.' },
   { key: 'stockCategory',   label: 'Stock Cat.'   },
+  { key: 'profitCentre',    label: 'Profit Centre' },
 ];
 
 function wsmRenderLayout() {
@@ -176,10 +179,11 @@ function wsmRenderLayout() {
           ${WSM_FILTER_FIELDS.map(f => `
             <div class="wsm-filter-field">
               <label class="tf-label">${esc(f.label)}</label>
-              <input class="tf-input wsm-filter-input" type="text" data-key="${f.key}" placeholder="${esc(f.label)}">
+              <input class="tf-input wsm-filter-input" type="text" data-key="${f.key}" placeholder="${esc(f.placeholder || f.label)}">
             </div>`).join('')}
           <button type="button" class="btn-submit wsm-search-btn" id="wsm-search-btn">Search</button>
           <button type="button" class="btn-secondary wsm-clear-btn" id="wsm-clear-filters">Clear</button>
+          <button type="button" class="btn-secondary wsm-export-btn" id="wsm-export-btn">Download CSV</button>
         </div>
         <div class="wsm-table-wrap" id="wsm-table-wrap">
           <div class="wsm-empty">Enter search criteria above and press Search — nothing is pulled from SAP until you do.</div>
@@ -204,6 +208,7 @@ function wsmRenderLayout() {
   document.getElementById('wsm-clear-filters').addEventListener('click', () => {
     document.querySelectorAll('.wsm-filter-input').forEach(i => { i.value = ''; });
   });
+  document.getElementById('wsm-export-btn').addEventListener('click', () => wsmExportCsv());
   if (wsm.rows.length) wsmRenderTable(); // re-render the last fetched result rather than re-querying SAP
   wsmRenderTransferPanel(); // keep the panel in sync with wsm.selected even when the table itself isn't re-rendered
 }
@@ -230,6 +235,39 @@ async function wsmRunSearch() {
   } catch (err) {
     wrap.innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
   }
+}
+
+// Downloads the full current search result (not just the visible/selected
+// rows) as CSV — same field set as the on-screen table, including Profit
+// Centre and GR Date.
+function wsmExportCsv() {
+  if (!wsm.rows.length) return;
+
+  const columns = [
+    ['storageLocation', 'Storage Location'], ['storageType', 'Storage Type'], ['bin', 'Bin'],
+    ['material', 'Material'], ['availableQty', 'Available Qty'], ['batch', 'Batch'],
+    ['stockCategory', 'Stock Category'], ['specialStockInd', 'Special Stock'], ['specialStockNum', 'Special Stock No.'],
+    ['profitCentre', 'Profit Centre'], ['grDate', 'GR Date'],
+  ];
+  const lines = [
+    columns.map(([, label]) => label).join(','),
+    ...wsm.rows.map(row => columns.map(([key]) =>
+      `"${String(row[key] ?? '').replace(/"/g, '""')}"`).join(',')),
+  ];
+
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = `stock-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// WDATU comes back as a raw SAP yyyyMMdd string (or blank/all-zero if the
+// quant has never had a goods movement) — format for display only.
+function wsmFormatGrDate(v) {
+  if (!v || !/^\d{8}$/.test(v) || v === '00000000') return '—';
+  return `${v.slice(6, 8)}.${v.slice(4, 6)}.${v.slice(0, 4)}`;
 }
 
 function wsmRenderTable() {
@@ -262,9 +300,18 @@ function wsmRenderTable() {
       <td>${esc(row.stockCategory || '—')}</td>
       <td>${esc(row.specialStockInd || '—')}</td>
       <td>${esc(row.specialStockNum || '—')}</td>
+      <td>${esc(row.profitCentre || '—')}</td>
+      <td>${wsmFormatGrDate(row.grDate)}</td>
     </tr>`;
   }).join('');
 
+  // Note: this DOM is a plain <table>, auto-paginated client-side by
+  // table-paginate.js once past 20 rows. That paginator re-pages to page 1
+  // whenever it sees the <table> node get swapped out for a new one, so
+  // wsmRenderTable() is only ever called for an actual new/changed result
+  // set (a fresh search, or Select All) — per-row selection below patches
+  // the existing DOM in place via wsmSyncSelectionUI() instead of calling
+  // back in here, so checking a row on page 2+ doesn't bounce you to page 1.
   wrap.innerHTML = `
     <table class="wsm-table">
       <thead>
@@ -272,6 +319,7 @@ function wsmRenderTable() {
           <th class="wsm-td-check"><input type="checkbox" id="wsm-select-all"${allChecked ? ' checked' : ''}></th>
           <th>Storage Loc.</th><th>Storage Type</th><th>Bin</th><th>Material</th>
           <th>Available Qty</th><th>Batch</th><th>Stock Cat.</th><th>Special Stock</th><th>Special Stock No.</th>
+          <th>Profit Centre</th><th>GR Date</th>
         </tr>
       </thead>
       <tbody>${rowsHtml}</tbody>
@@ -280,8 +328,7 @@ function wsmRenderTable() {
   document.getElementById('wsm-select-all').addEventListener('change', e => {
     if (e.target.checked) wsm.rows.forEach(r => wsm.selected.add(wsmRowId(r)));
     else wsm.rows.forEach(r => wsm.selected.delete(wsmRowId(r)));
-    wsmRenderTable();
-    wsmRenderTransferPanel();
+    wsmSyncSelectionUI();
   });
 
   wrap.querySelectorAll('.wsm-row-check').forEach(cb => {
@@ -289,8 +336,7 @@ function wsmRenderTable() {
       e.stopPropagation();
       const id = cb.dataset.id;
       if (cb.checked) wsm.selected.add(id); else wsm.selected.delete(id);
-      wsmRenderTable();
-      wsmRenderTransferPanel();
+      wsmSyncSelectionUI();
     });
   });
 
@@ -299,13 +345,35 @@ function wsmRenderTable() {
       if (e.target.closest('.wsm-row-check')) return;
       const id = tr.dataset.id;
       if (wsm.selected.has(id)) wsm.selected.delete(id); else wsm.selected.add(id);
-      wsmRenderTable();
-      wsmRenderTransferPanel();
+      wsmSyncSelectionUI();
     });
   });
 
   badge.textContent = `${wsm.rows.length} rows${wsm.selected.size ? ` · ${wsm.selected.size} selected` : ''}`;
   badge.classList.remove('hidden');
+}
+
+// Patches checkbox/row state and the badge/transfer panel in place, without
+// touching the <table> node itself — see the comment above wsmRenderTable's
+// innerHTML assignment for why (keeps table-paginate.js's page position).
+function wsmSyncSelectionUI() {
+  const wrap = document.getElementById('wsm-table-wrap');
+  if (!wrap) return;
+
+  wrap.querySelectorAll('.wsm-row').forEach(tr => {
+    const id  = tr.dataset.id;
+    const sel = wsm.selected.has(id);
+    const cb  = tr.querySelector('.wsm-row-check');
+    if (cb) cb.checked = sel;
+  });
+
+  const selectAll = document.getElementById('wsm-select-all');
+  if (selectAll) selectAll.checked = wsm.rows.length > 0 && wsm.rows.every(r => wsm.selected.has(wsmRowId(r)));
+
+  const badge = document.getElementById('result-row-badge');
+  if (badge) badge.textContent = `${wsm.rows.length} rows${wsm.selected.size ? ` · ${wsm.selected.size} selected` : ''}`;
+
+  wsmRenderTransferPanel();
 }
 
 function wsmSelectedRows() {

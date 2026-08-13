@@ -125,6 +125,22 @@ describe('POST /warehouse/stock-adjustment', () => {
   });
 });
 
+describe('GET /warehouse/stock', () => {
+  test('forwards all filters, including profitCentre, to SapServer', async () => {
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
+
+    await request(app)
+      .get('/warehouse/stock')
+      .query({ material: 'TSHV*', storageType: 'SA', bin: 'BIN-001', batch: 'B1', storageLocation: '1710', stockCategory: 'F', profitCentre: '9912' });
+
+    const [, options] = axiosMock.get.mock.calls[0];
+    expect(options.params).toEqual({
+      material: 'TSHV*', storageType: 'SA', bin: 'BIN-001', batch: 'B1',
+      storageLocation: '1710', stockCategory: 'F', profitCentre: '9912', rowCount: 9999,
+    });
+  });
+});
+
 describe('GET /warehouse/open-transfer-requirements', () => {
   test('forwards material, storageLocation and createdBy alongside mrpController', async () => {
     axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });

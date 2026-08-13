@@ -1418,7 +1418,7 @@ body::before {
   flex: 1;
   min-width: 130px;
 }
-.wsm-clear-btn { padding: 8px 16px; }
+.wsm-clear-btn, .wsm-export-btn { padding: 8px 16px; }
 
 .wsm-table-wrap {
   overflow-x: auto;
