@@ -579,9 +579,11 @@ function wsmWireMassTransfer(rows) {
     let successCount = 0, failCount = 0;
     const failMessages = [];
     const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Creating transfer orders');
-    let done = 0;
 
-    for (const row of rows) {
+    // Rows with a missing qty/destination never reach the server — filtered
+    // out up front rather than sent as a bad item in the bulk payload below.
+    const sendable = [];
+    rows.forEach(row => {
       const id          = wsmRowId(row);
       const qtyInput    = document.querySelector(`.wsm-mass-qty[data-id="${CSS.escape(id)}"]`);
       const resultCell  = document.getElementById(`wsm-mass-result-${id}`);
@@ -597,36 +599,48 @@ function wsmWireMassTransfer(rows) {
         failCount++;
         failMessages.push('Missing qty/destination');
         if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing qty/destination</span>`;
-        progress.update(++done);
-        continue;
+        return;
       }
 
-      const result = await wsmCreateTransferOrder({
-        StorageLocation:       row.storageLocation,
-        Material:              row.material,
-        Batch:                 row.batch || '',
-        Quantity:              quantity,
-        SourceType:            row.storageType,
-        SourceBin:             row.bin,
-        DestinationType:       destType,
-        DestinationBin:        destBin,
-        StockCategory:         row.stockCategory || '',
-        SpecialStockIndicator: row.specialStockInd || '',
-        SpecialStockNumber:    row.specialStockNum || '',
-        NegativeStock:         row.availableQty < 0,
+      sendable.push({
+        resultCell,
+        params: {
+          StorageLocation:       row.storageLocation,
+          Material:              row.material,
+          Batch:                 row.batch || '',
+          Quantity:              quantity,
+          SourceType:            row.storageType,
+          SourceBin:             row.bin,
+          DestinationType:       destType,
+          DestinationBin:        destBin,
+          StockCategory:         row.stockCategory || '',
+          SpecialStockIndicator: row.specialStockInd || '',
+          SpecialStockNumber:    row.specialStockNum || '',
+          NegativeStock:         row.availableQty < 0,
+        },
       });
+    });
+    progress.update(rows.length - sendable.length);
 
-      if (result.success) {
-        successCount++;
-        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.transferOrderNumber || 'Done')}</span>`;
-      } else {
-        failCount++;
-        failMessages.push(result.message);
-        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`;
-      }
-      progress.update(++done);
+    if (sendable.length) {
+      // Sent as one request, executed concurrently server-side rather than
+      // awaited row-by-row — see wsmCreateTransferOrdersBulk.
+      const results = await wsmCreateTransferOrdersBulk(sendable.map(s => s.params));
+
+      results.forEach((result, i) => {
+        const { resultCell } = sendable[i];
+        if (result.success) {
+          successCount++;
+          if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.transferOrderNumber || 'Done')}</span>`;
+        } else {
+          failCount++;
+          failMessages.push(result.message);
+          if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`;
+        }
+      });
     }
 
+    progress.update(rows.length);
     progress.finish(successCount, failCount, failMessages);
     // Leave the button disabled once anything succeeded — the rows/qty this
     // form was built from are now stale, so re-clicking would replay old
@@ -654,12 +668,12 @@ function wsmResultHtml(result) {
   return `<div class="sap-error tf-inline-error">✕ ${esc(result.message)}</div>`;
 }
 
-// Shared low-level SAP call — same branching runStockTransfer uses between
-// the normal transfer-order proxy and the consignment MB1B+LT01 pair, but
-// returns a result object instead of writing to a fixed #tf-result element,
-// so it can be reused both for the single-row form and looped for mass
-// movement without the two treading on each other's DOM.
-async function wsmCreateTransferOrder(params) {
+// Applies the negative-stock Source/Destination swap and decides
+// transfer-vs-consignment, producing both the post-swap params (needed for
+// the NegativeStock messaging in wsmInterpretTransferResult below) and the
+// { kind, payload } item shape the bulk route expects. Shared by
+// wsmCreateTransferOrder (single row) and wsmCreateTransferOrdersBulk.
+function wsmBuildTransferItem(rawParams) {
   // Negative available qty means the "Source" bin is already short — SAP
   // can't post a transfer order moving stock OUT of a bin that doesn't have
   // it. Per the user's rule, this is handled by reversing the move instead:
@@ -669,53 +683,89 @@ async function wsmCreateTransferOrder(params) {
   // anything else with `params` (including the consignment branch below,
   // which keys off DestinationType) so every downstream use sees the real
   // direction the movement will actually post in.
+  let params = rawParams;
   if (params.NegativeStock) {
     const { SourceType, SourceBin, DestinationType, DestinationBin } = params;
     params = { ...params, SourceType: DestinationType, SourceBin: DestinationBin, DestinationType: SourceType, DestinationBin: SourceBin };
   }
 
   const isConsignment = params.SpecialStockIndicator === 'K' && params.DestinationType === 'SA';
+  return {
+    params, isConsignment,
+    item: {
+      kind: isConsignment ? 'consignment' : 'transfer',
+      payload: isConsignment ? {
+        DeliveryNote: '', Header: 'Consignment',
+        StorageLocation: params.StorageLocation, SpecialStockNumber: params.SpecialStockNumber,
+        Material: params.Material, Quantity: params.Quantity,
+        DestinationType: params.DestinationType, DestinationBin: params.DestinationBin,
+        SourceType: params.SourceType, SourceBin: params.SourceBin,
+      } : params,
+    },
+  };
+}
+
+// Interprets one SapServer result (the single route's {success,data} body,
+// or one entry of the bulk route's results array) into the
+// {success, message, transferOrderNumber} shape both the single-row form and
+// the mass-transfer panel expect.
+function wsmInterpretTransferResult(params, isConsignment, json) {
+  if (!json.success) return { success: false, message: json.error || 'SAP call failed' };
+
+  if (isConsignment) {
+    const parts = [json.data?.mb1bMessage, json.data?.toNonConsignMessage, json.data?.toConsignMessage].filter(Boolean);
+    return { success: true, message: parts.map(esc).join('<br>') || 'Consignment processed', transferOrderNumber: null };
+  }
+
+  const transferOrder = json.data?.transferOrderNumber || '';
+  const messages       = json.data?.messages || [];
+  const ok = json.data?.success && !json.error;
+  if (!ok) return { success: false, message: json.error || messages.map(m => m.message || m).join('; ') || 'SAP rejected the transfer order.' };
+
+  const lines = [];
+  if (params.NegativeStock) lines.push(`Negative stock — moved ${params.Quantity} from ${esc(params.SourceType)}/${esc(params.SourceBin)} into ${esc(params.DestinationType)}/${esc(params.DestinationBin)} instead.`);
+  if (transferOrder) lines.push(`Transfer Order: ${esc(transferOrder)}`);
+  if (messages.length) lines.push(...messages.map(m => esc(m.message || m)));
+  return { success: true, message: lines.join('<br>') || 'SAP returned no message', transferOrderNumber: transferOrder };
+}
+
+// Shared low-level SAP call — same branching runStockTransfer uses between
+// the normal transfer-order proxy and the consignment MB1B+LT01 pair, but
+// returns a result object instead of writing to a fixed #tf-result element,
+// so it can be reused both for the single-row form and (via
+// wsmCreateTransferOrdersBulk) the mass-transfer panel.
+async function wsmCreateTransferOrder(rawParams) {
+  const { params, isConsignment, item } = wsmBuildTransferItem(rawParams);
   try {
-    let res;
-    if (isConsignment) {
-      res = await fetch('/api/sap/warehouse/consignment-mb1b', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          DeliveryNote: '', Header: 'Consignment',
-          StorageLocation: params.StorageLocation, SpecialStockNumber: params.SpecialStockNumber,
-          Material: params.Material, Quantity: params.Quantity,
-          DestinationType: params.DestinationType, DestinationBin: params.DestinationBin,
-          SourceType: params.SourceType, SourceBin: params.SourceBin,
-        }),
-      });
-    } else {
-      res = await fetch('/api/sap/warehouse/transfer-order', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
-      });
-    }
-
+    const res = await fetch(isConsignment ? '/api/sap/warehouse/consignment-mb1b' : '/api/sap/warehouse/transfer-order', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(item.payload),
+    });
     const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'SAP call failed');
-
-    if (isConsignment) {
-      const parts = [json.data?.mb1bMessage, json.data?.toNonConsignMessage, json.data?.toConsignMessage].filter(Boolean);
-      return { success: true, message: parts.map(esc).join('<br>') || 'Consignment processed', transferOrderNumber: null };
-    }
-
-    const transferOrder = json.data?.transferOrderNumber || '';
-    const messages       = json.data?.messages || [];
-    const ok = json.data?.success && !json.error;
-    if (!ok) return { success: false, message: json.error || messages.map(m => m.message || m).join('; ') || 'SAP rejected the transfer order.' };
-
-    const lines = [];
-    if (params.NegativeStock) lines.push(`Negative stock — moved ${params.Quantity} from ${esc(params.SourceType)}/${esc(params.SourceBin)} into ${esc(params.DestinationType)}/${esc(params.DestinationBin)} instead.`);
-    if (transferOrder) lines.push(`Transfer Order: ${esc(transferOrder)}`);
-    if (messages.length) lines.push(...messages.map(m => esc(m.message || m)));
-    return { success: true, message: lines.join('<br>') || 'SAP returned no message', transferOrderNumber: transferOrder };
-
+    return wsmInterpretTransferResult(params, isConsignment, json);
   } catch (err) {
     return { success: false, message: err.message };
+  }
+}
+
+// Same as wsmCreateTransferOrder, but for a whole list of rows sent as ONE
+// request instead of one round trip per row — SapServer's STA worker pool
+// load-balances the RFC calls across its service threads (least-loaded
+// routing), so this is what actually lets multiple transfer orders process
+// in parallel rather than one at a time. Returns results in the same order
+// as rawParamsList.
+async function wsmCreateTransferOrdersBulk(rawParamsList) {
+  const built = rawParamsList.map(wsmBuildTransferItem);
+  try {
+    const res = await fetch('/api/sap/warehouse/transfer-order-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: built.map(b => b.item) }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    return built.map((b, i) => wsmInterpretTransferResult(b.params, b.isConsignment, json.results[i]));
+  } catch (err) {
+    return rawParamsList.map(() => ({ success: false, message: err.message }));
   }
 }
 

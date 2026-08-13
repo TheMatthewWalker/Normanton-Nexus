@@ -238,6 +238,114 @@ describe('POST /warehouse/transfer-order', () => {
   });
 });
 
+describe('POST /warehouse/transfer-order-bulk', () => {
+  test('is NOT gated behind LOG_SUPER — an ordinary logged-in user can call it', async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500003333', messages: [] } },
+    });
+
+    const res = await request(app)
+      .post('/warehouse/transfer-order-bulk')
+      .send({ items: [{ kind: 'transfer', payload: { Material: '30005R' } }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ success: true });
+  });
+
+  test('400s when items is missing or empty', async () => {
+    const res1 = await request(app).post('/warehouse/transfer-order-bulk').send({});
+    expect(res1.status).toBe(400);
+    const res2 = await request(app).post('/warehouse/transfer-order-bulk').send({ items: [] });
+    expect(res2.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('fires every item concurrently and returns results in the same order', async () => {
+    // Both items are 'transfer' kind deliberately — a 'transfer' item takes
+    // one extra await (assertTransfersAllowed) before its axios.post call
+    // that a 'consignment' item doesn't, so mixing kinds here would make the
+    // axios call order (and therefore which mockResolvedValueOnce answer
+    // lands on which item) an artifact of that extra hop rather than of
+    // Promise.all(items.map(...)) preserving array order for same-shaped work.
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, transferOrderNumber: '4500001111', messages: [] } } })
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, transferOrderNumber: '4500002222', messages: [] } } });
+
+    const res = await request(app)
+      .post('/warehouse/transfer-order-bulk')
+      .send({
+        items: [
+          { kind: 'transfer', payload: { Material: '30005R' } },
+          { kind: 'transfer', payload: { Material: '30006R' } },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(res.body.results[0].data.transferOrderNumber).toBe('4500001111');
+    expect(res.body.results[1].data.transferOrderNumber).toBe('4500002222');
+    expect(axiosMock.post).toHaveBeenCalledTimes(2);
+  });
+
+  test('routes a consignment item to consignment-mb1b and a transfer item to transfer-order', async () => {
+    axiosMock.post.mockResolvedValue({
+      data: { success: true, data: { success: true, mb1bMessage: 'Posted' } },
+    });
+
+    await request(app)
+      .post('/warehouse/transfer-order-bulk')
+      .send({ items: [{ kind: 'consignment', payload: { Material: '30006R' } }] });
+
+    const [url] = axiosMock.post.mock.calls[0];
+    expect(url).toContain('/api/warehouse/consignment-mb1b');
+  });
+
+  test('one item failing does not prevent the others from succeeding', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 422, data: { error: 'Material 30005R does not exist' } };
+    axiosMock.post
+      .mockRejectedValueOnce(sapError)
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, transferOrderNumber: '4500002222', messages: [] } } });
+
+    const res = await request(app)
+      .post('/warehouse/transfer-order-bulk')
+      .send({
+        items: [
+          { kind: 'transfer', payload: { Material: '30005R' } },
+          { kind: 'transfer', payload: { Material: '30006R' } },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ success: false, error: 'Material 30005R does not exist' });
+    expect(res.body.results[1]).toMatchObject({ success: true });
+  });
+
+  test('an active count blocking one item surfaces as a failed result, not an HTTP 409 for the whole batch', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 7, CountType: 'PRODUCTION', Status: 'PendingApproval' }],
+    });
+    axiosMock.post.mockResolvedValue({
+      data: { success: true, data: { success: true, transferOrderNumber: '4500002222', messages: [] } },
+    });
+
+    const res = await request(app)
+      .post('/warehouse/transfer-order-bulk')
+      .send({
+        items: [
+          { kind: 'transfer', payload: { Material: '30005R', StorageLocation: '1716' } },
+          { kind: 'transfer', payload: { Material: '30006R', StorageLocation: '1717' } },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const successes = res.body.results.filter(r => r.success);
+    const failures  = res.body.results.filter(r => !r.success);
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+  });
+});
+
 describe('POST /warehouse/batch-cleanup-transfer', () => {
   test('is rejected for a user without LOG_SUPER', async () => {
     const res = await request(app).post('/warehouse/batch-cleanup-transfer').send({ kind: 'transfer', payload: {} });

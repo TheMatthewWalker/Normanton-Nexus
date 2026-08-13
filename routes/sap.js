@@ -444,6 +444,101 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/transfer-order-bulk  (mounted at /api/sap in server.js)
+//
+// Same per-item logic as /warehouse/transfer-order and /warehouse/
+// consignment-mb1b immediately above (guard check, SapServer call, audit,
+// redrum reversal) — but takes a whole list of rows in ONE request and fires
+// them at SapServer concurrently via Promise.all, instead of the caller
+// awaiting one transfer order at a time. Used by Stock Management's Mass
+// Transfer panel (wsmWireMassTransfer/wsmCreateTransferOrdersBulk), which
+// used to send one row, wait ~15-60s for SAP, then send the next — SapServer
+// logs showed every one of those calls landing on the same slot/thread with
+// zero queue depth in between, i.e. never more than one in flight, even
+// though the pool has 3 service STA worker threads that can each run a call
+// independently. Deliberately NOT LOG_SUPER-gated, matching the two
+// single-item routes above it: mass transfer is an ordinary Stock Management
+// action available to any logged-in user, unlike the supervisor-only
+// batch-cleanup-transfer(-bulk) pair below.
+//
+// Body: { items: [{ kind: 'transfer'|'consignment', payload }, ...] } — same
+// per-item shape as batch-cleanup-transfer-bulk; payload is the flat body
+// each single-item route above expects.
+// Response: { success: true, results: [{ success, data|error, redrum? }, ...] }
+// in the same order as the input items.
+// ---------------------------------------------------------------------------
+
+async function executeTransferItem({ kind, payload }, req) {
+    if (kind !== 'transfer' && kind !== 'consignment') {
+        return { success: false, error: "kind must be 'transfer' or 'consignment'" };
+    }
+
+    if (kind === 'consignment') {
+        try {
+            const response = await axios.post(`${sapConfig.url}/api/warehouse/consignment-mb1b`, payload, {
+                timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+            });
+            const body = response.data;
+            if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+            await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Consignment MB1B succeeded for material ${payload?.Material || ''}`), req);
+            return { success: true, data: body.data };
+        } catch (err) {
+            const status  = err.response?.status ?? 500;
+            const message = err.response?.data?.error?.message ?? err.response?.data?.error ?? err.message;
+            await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Consignment MB1B failed for material ${payload?.Material || ''}`, message), req);
+            console.error('Error:', status, message);
+            if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+            return { success: false, error: message };
+        }
+    }
+
+    try {
+        await assertTransfersAllowed(payload?.StorageLocation);
+
+        const response = await axios.post(`${sapConfig.url}/api/warehouse/transfer-order`, payload, {
+            timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
+        });
+        const body = response.data;
+        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+
+        const rows = body.data;
+        await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Transfer order succeeded for material ${payload?.Material || ''}`, rows?.transferOrderNumber ? `TR ${rows.transferOrderNumber}` : null), req);
+
+        const redrum = await maybeReverseBatchManagedReturn({
+            batch: payload.Batch || null,
+            destinationStorageType: payload.DestinationType,
+            destinationBin: payload.DestinationBin,
+            storageLocation: payload.StorageLocation,
+            audit, actorUsername: getActorUsername(req), req,
+        });
+
+        return { success: true, data: rows, ...(redrum ? { redrum } : {}) };
+    } catch (err) {
+        if (err instanceof TransferBlockedError) {
+            await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Transfer order blocked for material ${payload?.Material || ''}`, err.message), req);
+            return { success: false, error: err.message };
+        }
+        const status  = err.response?.status  ?? 500;
+        const message = err.response?.data?.error ?? err.message;
+        await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Transfer order failed for material ${payload?.Material || ''}`, message), req);
+        console.error('Error:', status, message);
+        if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
+        return { success: false, error: message };
+    }
+}
+
+router.post('/warehouse/transfer-order-bulk', async (req, res) => {
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'items must be a non-empty array' });
+    }
+
+    const results = await Promise.all(items.map(item => executeTransferItem(item, req)));
+    res.json({ success: true, results });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/sap/warehouse/batch-cleanup-transfer  (mounted at /api/sap in server.js)
 //
 // Gated wrapper around the same transfer-order / consignment-mb1b endpoints
