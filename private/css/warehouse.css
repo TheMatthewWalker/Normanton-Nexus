@@ -1659,6 +1659,19 @@ body::before {
    consolidate into. */
 .wsm-row--holding td { color: var(--text-muted); font-style: italic; }
 
+/* Bulk Consolidate modal (Card 2's "Preview Combine") — wider than the
+   single-batch resolve modal since each row packs every bin for that batch
+   as inline radio options, plus a full moves-preview table below it. */
+.wsm-resolve-modal--wide { max-width: 920px; }
+.wsm-bulk-bins { white-space: normal; }
+.wsm-bulk-bin-opt {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin: 2px 14px 2px 0;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--text-dim); cursor: pointer;
+}
+.wsm-bulk-bin-opt input { cursor: pointer; }
+
 /* ── Progress banner ──────────────────────────────────────────────────────
    Shared by mass transfer, zero-sum clean-up and consolidate — anywhere a
    loop of one-POST-per-line runs client-side and needs a live counter plus

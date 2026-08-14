@@ -1277,6 +1277,7 @@ function wsmRenderDiscrepancyDashboard(analysis) {
       <div class="wsm-disc-card">
         <div class="wsm-disc-card-num">${card2.length}</div>
         <div class="wsm-disc-card-label">batch(es) have stock in multiple bins that doesn't net to zero</div>
+        <button type="button" class="btn-submit" id="wsm-disc-card2-btn" ${card2.length ? '' : 'disabled'}>Preview Combine</button>
       </div>
       <div class="wsm-disc-card">
         <div class="wsm-disc-card-num">${card3.length}</div>
@@ -1295,6 +1296,8 @@ function wsmRenderDiscrepancyDashboard(analysis) {
   document.getElementById('wsm-disc-rescan').addEventListener('click', () => wsmRunDiscrepancyScan());
   const card1Btn = document.getElementById('wsm-disc-card1-btn');
   if (card1Btn) card1Btn.addEventListener('click', () => wsmShowZeroSumPreview(card1));
+  const card2Btn = document.getElementById('wsm-disc-card2-btn');
+  if (card2Btn) card2Btn.addEventListener('click', () => wsmOpenBulkConsolidateModal(card2));
 
   wsmRenderCard2List(card2);
   wsmRenderCard3List(card3);
@@ -1523,6 +1526,260 @@ function wsmOpenResolveModal(group, card2) {
   document.getElementById('wsm-resolve-consolidate-btn').addEventListener('click', () => wsmConsolidateGroup(group, card2));
 
   wsmRenderResolveTable(group);
+}
+
+// ── Card 2 — bulk consolidate across every batch at once ──────────────────
+//
+// Resolving 90+ multi-bin batches one at a time through the single-batch
+// modal above doesn't scale — this is the "Preview Combine" equivalent for
+// Card 2 (mirroring Card 1's zero-sum Preview Combine): pick a keep-bin for
+// every batch at once (defaulted sensibly, overridable per batch), preview
+// every move it implies across the whole list, then execute them all in one
+// bulk request.
+//
+// Unlike the single-batch resolve modal (wsmComputeConsolidatePlan), which
+// only ever pushes OTHER positive bins into the chosen one and leaves
+// negative bins and the holding bin alone for manual handling, this bulk
+// tool is bidirectional and holding-inclusive by design: negative bins get
+// topped up FROM the chosen bin (same idea Card 3 already uses pulling from
+// holding into a single negative line — the shortfall just lands back on the
+// chosen bin instead of disappearing), and the holding bin itself can be
+// picked as the keep-bin, since working through a big backlog needs full
+// control over where everything ends up rather than clearing every
+// holding-bin exception by hand afterwards.
+
+// Sensible default keep-bin per batch: the largest active (non-holding)
+// positive bin, since that's normally the "real" pickable location you'd
+// want stock consolidated into rather than left in quarantine. Falls back to
+// the overall largest-quantity bin (which could be the holding bin) only
+// when there's no positive active bin to prefer.
+function wsmDefaultBulkTarget(group) {
+  const positiveNonHolding = group.rows.filter(r => !wsmIsHolding(r) && r.availableQty > 0);
+  const pool = positiveNonHolding.length ? positiveNonHolding : group.rows;
+  return pool.reduce((best, r) => (r.availableQty > best.availableQty ? r : best));
+}
+
+// Per-batch plan for a given chosen target bin — every other bin in the
+// batch (including holding) either pushes its positive quantity into target,
+// or pulls its shortfall in from target if negative; bins in a different
+// stock category/special stock/material/location than target are left
+// untouched and reported back with a reason, same categorisation
+// wsmComputeConsolidatePlan already uses.
+function wsmComputeBulkPlan(group, target) {
+  const targetKey = wsmCategoryKey(target);
+  const others = group.rows.filter(r => wsmRowId(r) !== wsmRowId(target));
+
+  const moves = [], skipped = [];
+  others.forEach(r => {
+    if (Math.abs(r.availableQty) < WSM_EPS) return; // nothing to move
+
+    if (wsmCategoryKey(r) !== targetKey) {
+      const reasons = [];
+      if (r.material !== target.material) reasons.push('different material');
+      else if (r.stockCategory !== target.stockCategory) reasons.push('different stock category');
+      else if (r.specialStockInd !== target.specialStockInd || r.specialStockNum !== target.specialStockNum) reasons.push('different special stock');
+      else reasons.push('different storage location/batch');
+      skipped.push({ row: r, reason: reasons.join(' & ') });
+      return;
+    }
+
+    if (r.availableQty > 0) moves.push({ source: r, dest: target, qty: r.availableQty });
+    else moves.push({ source: target, dest: r, qty: -r.availableQty });
+  });
+
+  return { target, moves, skipped };
+}
+
+// Builds the plan for every batch in card2 at once, using whatever's
+// currently selected in `targets` (Map<batch, row>) — recomputed fresh
+// wherever it's needed (live preview, and again right before executing)
+// rather than cached, so it can never drift from what's actually selected.
+function wsmBuildBulkPlan(card2, targets) {
+  return card2
+    .map(group => {
+      const target = targets.get(group.batch);
+      if (!target) return null;
+      const { moves, skipped } = wsmComputeBulkPlan(group, target);
+      return { group, target, moves, skipped };
+    })
+    .filter(Boolean);
+}
+
+function wsmRenderBulkPreview(card2, targets) {
+  const container = document.getElementById('wsm-bulk-preview');
+  if (!container) return;
+
+  const perBatch     = wsmBuildBulkPlan(card2, targets);
+  const totalMoves   = perBatch.reduce((s, p) => s + p.moves.length, 0);
+  const totalSkipped = perBatch.reduce((s, p) => s + p.skipped.length, 0);
+
+  const movesHtml = perBatch.flatMap(({ group, moves }) => moves.map(m => `<tr>
+    <td>${esc(group.batch)}</td>
+    <td class="wsm-mono">${esc(m.source.storageType)}/${esc(m.source.bin)}</td>
+    <td class="wsm-mono">${esc(m.dest.storageType)}/${esc(m.dest.bin)}</td>
+    <td>${Math.round(m.qty * 1000) / 1000}</td>
+  </tr>`)).join('');
+
+  const skippedHtml = perBatch.filter(p => p.skipped.length).map(({ group, skipped }) =>
+    `<li>${esc(group.batch)}: ${skipped.map(s => `${esc(s.row.storageType)}/${esc(s.row.bin)} (qty ${s.row.availableQty}) — ${esc(s.reason)}`).join('; ')}</li>`
+  ).join('');
+
+  container.innerHTML = `
+    <div class="wsm-panel-sub">${perBatch.length} batch(es) · ${totalMoves} move(s) planned${totalSkipped ? ` · ${totalSkipped} bin(s) skipped (category mismatch)` : ''}</div>
+    ${totalSkipped ? `<div class="wsm-disc-warn"><ul>${skippedHtml}</ul></div>` : ''}
+    ${totalMoves ? `
+      <div class="wsm-mass-table-wrap" style="max-height:320px;overflow-y:auto">
+        <table class="wsm-mass-table">
+          <thead><tr><th>Batch</th><th>From</th><th>To</th><th>Qty</th></tr></thead>
+          <tbody>${movesHtml}</tbody>
+        </table>
+      </div>` : '<div class="wsm-empty">Nothing to move.</div>'}`;
+
+  const confirmBtn = document.getElementById('wsm-bulk-confirm');
+  if (confirmBtn) confirmBtn.disabled = !totalMoves;
+}
+
+function wsmOpenBulkConsolidateModal(card2) {
+  if (!card2.length) return;
+  document.getElementById('wsm-bulk-modal')?.remove();
+
+  // batch -> currently selected keep-bin row. A plain Map rather than
+  // storing the choice on each group, so re-selecting a target never has to
+  // reconcile with wsmMoveToHolding/wsmConsolidateGroup mutating the same
+  // group objects elsewhere (this modal reads group.rows but never mutates
+  // it, side-stepping that entirely).
+  const targets = new Map();
+  card2.forEach(g => targets.set(g.batch, wsmDefaultBulkTarget(g)));
+
+  const overlay = document.createElement('div');
+  overlay.id        = 'wsm-bulk-modal';
+  overlay.className = 'wsm-resolve-overlay';
+
+  const selectRowsHtml = card2.map(g => {
+    const target = targets.get(g.batch);
+    const binsHtml = g.rows.map(r => {
+      const id = wsmRowId(r);
+      const checked = wsmRowId(target) === id ? ' checked' : '';
+      return `<label class="wsm-bulk-bin-opt"><input type="radio" name="wsm-bulk-target-${esc(g.batch)}" value="${esc(id)}"${checked}> ${esc(r.storageType)}/${esc(r.bin)} (${Math.round(r.availableQty * 1000) / 1000})</label>`;
+    }).join('');
+    return `<tr data-batch="${esc(g.batch)}">
+      <td>${esc(g.batch)}</td>
+      <td>${esc(g.rows[0]?.material || '')}</td>
+      <td class="wsm-bulk-bins">${binsHtml}</td>
+    </tr>`;
+  }).join('');
+
+  overlay.innerHTML = `
+    <div class="wsm-resolve-modal wsm-resolve-modal--wide">
+      <div class="wsm-resolve-modal-hdr">
+        <div class="wsm-panel-title">Bulk Consolidate — ${card2.length} Batch(es)</div>
+        <button type="button" class="wsm-resolve-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="wsm-panel-sub">Pick which bin to keep for each batch — defaults to the largest active bin. Other positive bins move in; negative bins are topped up from the bin you keep.</div>
+      <div class="wsm-mass-table-wrap" style="max-height:280px;overflow-y:auto">
+        <table class="wsm-mass-table" id="wsm-bulk-select-table">
+          <thead><tr><th>Batch</th><th>Material</th><th>Bins (pick one to keep)</th></tr></thead>
+          <tbody>${selectRowsHtml}</tbody>
+        </table>
+      </div>
+
+      <div class="wsm-panel-title" style="margin-top:16px">Planned Moves</div>
+      <div id="wsm-bulk-preview"></div>
+
+      <div class="tf-actions">
+        <div id="wsm-bulk-exec-result"></div>
+        <button type="button" class="btn-secondary" id="wsm-bulk-cancel">Close</button>
+        <button type="button" class="btn-submit" id="wsm-bulk-confirm">Confirm &amp; Execute</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector('.wsm-resolve-close').addEventListener('click', close);
+  overlay.querySelector('#wsm-bulk-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  overlay.querySelectorAll('#wsm-bulk-select-table input[type="radio"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const batch = radio.closest('tr').dataset.batch;
+      const group = card2.find(g => g.batch === batch);
+      const row   = group?.rows.find(r => wsmRowId(r) === radio.value);
+      if (row) targets.set(batch, row);
+      wsmRenderBulkPreview(card2, targets);
+    });
+  });
+
+  document.getElementById('wsm-bulk-confirm').addEventListener('click', () => wsmExecuteBulkPlan(card2, targets));
+
+  wsmRenderBulkPreview(card2, targets);
+}
+
+async function wsmExecuteBulkPlan(card2, targets) {
+  const resultEl   = document.getElementById('wsm-bulk-exec-result');
+  const confirmBtn = document.getElementById('wsm-bulk-confirm');
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = 'Executing…';
+
+  // Recomputed fresh rather than trusting the last-rendered preview — cheap,
+  // and guarantees this can never execute against a stale plan.
+  const perBatch = wsmBuildBulkPlan(card2, targets);
+  const entries  = [];
+  perBatch.forEach(({ group, moves }) => moves.forEach(m => entries.push({ group, m })));
+
+  const totalMoves = entries.length;
+  if (!totalMoves) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Execute'; return; }
+
+  const progress = wsmShowProgressBanner(resultEl, totalMoves, 'Executing bulk consolidation');
+
+  const paramsList = entries.map(({ group, m }) => ({
+    StorageLocation: m.source.storageLocation, Material: m.source.material, Batch: group.batch,
+    Quantity: m.qty, SourceType: m.source.storageType, SourceBin: m.source.bin,
+    DestinationType: m.dest.storageType, DestinationBin: m.dest.bin,
+    StockCategory: m.source.stockCategory || '', SpecialStockIndicator: m.source.specialStockInd || '', SpecialStockNumber: m.source.specialStockNum || '',
+  }));
+
+  // Sent as one request, executed concurrently server-side rather than
+  // awaited move-by-move — see wsmCreateBatchCleanupTransfersBulk.
+  const results = await wsmCreateBatchCleanupTransfersBulk(paramsList);
+
+  // A batch only counts as fully resolved if every one of ITS OWN moves
+  // succeeded — one failed move (or a skipped, category-mismatched bin) means
+  // that batch stays in the Multiple Bins, Non-Zero list for manual
+  // follow-up rather than disappearing along with the rest.
+  const batchOk = new Map();
+  let ok = 0, fail = 0;
+  const failures = [];
+  results.forEach((result, i) => {
+    const { group, m } = entries[i];
+    if (!batchOk.has(group.batch)) batchOk.set(group.batch, true);
+    if (result.success) { ok++; return; }
+    fail++;
+    batchOk.set(group.batch, false);
+    failures.push(`${group.batch} ${m.source.storageType}/${m.source.bin} → ${m.dest.storageType}/${m.dest.bin}: ${result.message}`);
+  });
+
+  progress.update(totalMoves);
+  progress.finish(ok, fail, failures);
+
+  let removed = 0;
+  perBatch.forEach(({ group, skipped }) => {
+    if (skipped.length) return; // never a complete consolidation — leave it for manual review even if what it DID plan succeeded
+    if (batchOk.get(group.batch)) { wsmRemoveCard2Row(card2, group.batch); removed++; }
+  });
+
+  const summary = document.createElement('div');
+  summary.className = 'wsm-progress-summary';
+  summary.textContent = `${removed} batch(es) fully resolved and removed from the list.` +
+    (removed < perBatch.length ? ` ${perBatch.length - removed} remain — resolve individually above, or Rescan and retry.` : '');
+  resultEl.appendChild(summary);
+
+  confirmBtn.textContent = 'Done — press Rescan above to refresh';
+  // Left open rather than auto-closing (unlike the single-batch resolve
+  // modal's 1s auto-close, built for a repetitive "resolve one, move to the
+  // next" flow) — this is a one-time bulk action across potentially dozens
+  // of batches, so there's real value in leaving the breakdown up to review
+  // rather than snapping the modal shut the moment it finishes.
 }
 
 // Shared by the live pre-consolidate check and the actual Consolidate action,
