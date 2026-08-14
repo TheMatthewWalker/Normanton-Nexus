@@ -291,7 +291,7 @@ describe('POST /process/EX/complete/:recordID — billet-staging gate', () => {
       { recordset: [{ recordID: 5, tubID: 3 }] },                                         // 4. MX parent trace lookup
       { recordset: [{ TraceID: 99, Material: 'RUBBERMIX1' }] },                            // 5. apportion: trace rows joined to tub material
       { recordset: [] },                                                                  // 6. apportion: UPDATE ExpectedConsumptionKG
-      { recordset: [{ MixingID: 5, IsStaged: 0, IsScrapped: 0, Material: 'RUBBERMIX1' }] }, // 7. validateMxTubLinks: tub lookup — NOT staged
+      { recordset: [{ MixingID: 5, TubSeq: 2, MixRef: 'MX00000005', IsStaged: 0, IsScrapped: 0, Material: 'RUBBERMIX1' }] }, // 7. validateMxTubLinks: tub lookup — NOT staged
       { recordset: [] },                                                                  // 8. markSapFailed: UPDATE Extrusion Status=6
       { recordset: [] },                                                                  // 9. audit() fire-and-forget insert (see file header)
       { recordset: [] },                                                                  // 10. INSERT SAPPostings (failed)
@@ -308,6 +308,12 @@ describe('POST /process/EX/complete/:recordID — billet-staging gate', () => {
     expect(res.body.data.status).toBe('SAP_FAILED');
     expect(res.body.data.error).toMatch(/^Blocked:/);
     expect(res.body.data.error).toMatch(/not been staged/i);
+    // The operator-facing reason must read as MixRef + tub sequence number
+    // (what's printed on the physical ticket/tub picker), never the raw
+    // MixingID/TubID primary keys an operator has no way to interpret.
+    expect(res.body.data.error).toMatch(/MX00000005 tub 2 has not been staged/);
+    expect(res.body.data.error).not.toMatch(/\bmix 5\b/i);
+    expect(res.body.data.error).not.toMatch(/tub #?3\b/i);
     expect(axiosMock.post).not.toHaveBeenCalled(); // the actual backflush call must never fire
   });
 });

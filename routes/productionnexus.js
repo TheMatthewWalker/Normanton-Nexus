@@ -1231,32 +1231,45 @@ async function validateMxTubLinks(pool, extrudedMaterial, parentBatches) {
   }
   const bomMaterials = new Set(bomRows.map(r => r.component));
 
+  // Resolves a mix's printed reference (e.g. "MX00000005") for messages
+  // where no valid tub row was found to read it off below — an operator
+  // reading the failed-backflush log has no way to make sense of a raw
+  // MixingID/TubID without knowing the SQL schema, so every message here
+  // must use MixRef + the tub's own sequence number (the same "Tub N"
+  // labelling already printed on the physical ticket/tub picker), never
+  // the internal primary keys.
+  async function mixRefFor(mixingID) {
+    const r = await pool.request().input('id', sql.Int, mixingID).query(`SELECT MixRef FROM prod.Mixing WHERE MixingID = @id`);
+    return r.recordset[0]?.MixRef || `MX${String(mixingID).padStart(8, '0')}`;
+  }
+
   const problems = [];
   for (const pb of mxParents) {
-    const label = `mix ${Number(pb.recordID)}${pb.tubID ? ` tub #${pb.tubID}` : ''}`;
     if (!pb.tubID) {
-      problems.push({ ...pb, reason: `No specific tub selected for ${label} — pick a tub via the tub picker.` });
+      problems.push({ ...pb, reason: `No specific tub selected for ${await mixRefFor(Number(pb.recordID))} — pick a tub via the tub picker.` });
       continue;
     }
     const r = await pool.request().input('id', sql.Int, Number(pb.tubID))
-      .query(`SELECT t.MixingID, t.IsStaged, t.IsScrapped, m.Material
+      .query(`SELECT t.MixingID, t.TubSeq, t.IsStaged, t.IsScrapped, m.Material, m.MixRef
               FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
               WHERE t.TubID = @id`);
     const t = r.recordset[0];
     if (!t || t.MixingID !== Number(pb.recordID)) {
-      problems.push({ ...pb, reason: `Tub not found or does not belong to the selected mix (${label}).` });
+      problems.push({ ...pb, reason: `Tub not found, or does not belong to ${await mixRefFor(Number(pb.recordID))}.` });
       continue;
     }
+
+    const label = `${t.MixRef} tub ${t.TubSeq}`;
     if (t.IsScrapped) {
-      problems.push({ ...pb, reason: `Tub ${pb.tubID} (mix ${pb.recordID}) has been scrapped.` });
+      problems.push({ ...pb, reason: `${label} has been scrapped.` });
       continue;
     }
     if (!t.IsStaged) {
-      problems.push({ ...pb, reason: `Tub ${pb.tubID} (mix ${pb.recordID}) has not been staged into Billet yet.` });
+      problems.push({ ...pb, reason: `${label} has not been staged into Billet yet.` });
       continue;
     }
     if (!bomMaterials.has(t.Material)) {
-      problems.push({ ...pb, reason: `Tub ${pb.tubID}'s material (${t.Material}) is not a component of ${extrudedMaterial}'s SAP BOM.` });
+      problems.push({ ...pb, reason: `${label}'s material (${t.Material}) is not a component of ${extrudedMaterial}'s SAP BOM.` });
     }
   }
   return problems;
