@@ -160,9 +160,11 @@ async function runStockManagement() {
 }
 
 const WSM_FILTER_FIELDS = [
-  // Material supports an optional SAP wildcard search ('*', e.g. "TSHV*") —
-  // opt-in only, a plain material number still matches exactly as before.
-  { key: 'material',        label: 'Material',      placeholder: 'e.g. TSHV* for wildcard' },
+  // Material supports an optional SQL-style wildcard search — '%' (any run of
+  // characters) and '_' (exactly one character), e.g. "TSHV%" (starts with),
+  // "%TSHV" (ends with), "%TSHV%" (contains), "TSH_V" (single-char wildcard).
+  // Opt-in only — a plain material number still matches exactly as before.
+  { key: 'material',        label: 'Material',      placeholder: 'e.g. TSHV% for wildcard' },
   { key: 'batch',           label: 'Batch'        },
   { key: 'storageType',     label: 'Storage Type' },
   { key: 'bin',             label: 'Bin'          },
