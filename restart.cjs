@@ -114,5 +114,5 @@ main()
     // wants to see what the service is doing next — so open the log tail
     // unconditionally rather than only on success. Runs forever; the user
     // ends the session with Ctrl+C when they're done watching.
-    tailLogFiles(REPO_DIR);
+    //tailLogFiles(REPO_DIR);
   });
