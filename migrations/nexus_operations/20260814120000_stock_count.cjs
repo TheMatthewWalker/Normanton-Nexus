@@ -1,4 +1,11 @@
 'use strict';
+// DEPLOYED — this file has already been applied against the real database.
+// Editing it further will NOT change that deployed schema (knex tracks
+// completed migrations by filename in knex_migrations, not by content) —
+// see 20260814140000_stock_count_fixups.cjs for what happened the two
+// times this got edited in place after the fact. Any further schema
+// changes to these tables need a new follow-up migration, not an edit here.
+//
 // Stock Count feature — see the approved plan for full rationale. Four tables, all log.*
 // (a fifth, StockCountLocationMap, was tried for the PTFE Weekly Cycle Count's named
 // locations but replaced with free-typed bins validated live against SAP LAGP instead —
