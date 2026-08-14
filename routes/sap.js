@@ -674,10 +674,12 @@ router.post('/warehouse/batch-cleanup-transfer-bulk', requirePermission('LOG_SUP
 // StockCategory, SpecialStockIndicator, SpecialStockNumber, ValuationType,
 // Reference, PostingDate, DocumentDate, TestRun, Plant.
 // ---------------------------------------------------------------------------
-router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async (req, res) => {
-    const params = req.body;
-    const dryRun = req.query.dryRun === 'true';
 
+// Shared by the single-item route below and its -bulk sibling — same
+// never-throws contract as executeBatchCleanupItem above, since the bulk
+// route runs many of these concurrently via Promise.all and one item's
+// rejection must not cancel the others still in flight.
+async function executeStockAdjustmentItem(params, dryRun, req) {
     try {
         const response = await axios.post(
             `${sapConfig.url}/api/warehouse/stock-adjustment${dryRun ? '?dryRun=true' : ''}`,
@@ -689,7 +691,7 @@ router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async
         if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Stock adjustment (${params.MovementType || ''}) succeeded for material ${params.Material || ''}`), req);
-        res.json({ success: true, data: body.data });
+        return { status: 200, success: true, data: body.data };
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
@@ -697,8 +699,43 @@ router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Stock adjustment (${params.MovementType || ''}) failed for material ${params.Material || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
-        res.status(status).json({ success: false, error: message });
+        return { status, success: false, error: message };
     }
+}
+
+router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async (req, res) => {
+    const dryRun = req.query.dryRun === 'true';
+    const { status, ...result } = await executeStockAdjustmentItem(req.body, dryRun, req);
+    res.status(status).json(result);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/stock-adjustment-bulk  (mounted at /api/sap in server.js)
+//
+// Same as /warehouse/stock-adjustment above, but for a whole batch of
+// write-offs/corrections in one request — the Stock in Investigation card
+// can have dozens of holding-bin rows selected at once, and this is what
+// lets them post concurrently through SapServer's STA worker pool instead of
+// one request per row. Same reasoning as /warehouse/batch-cleanup-transfer-bulk.
+//
+// Body: { items: [...] } — each item the same shape as the single route's
+// body above. Query: dryRun, applied to every item in the batch.
+// Response: { success: true, results: [{ success, data|error }, ...] } in
+// the same order as the input items.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/stock-adjustment-bulk', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { items } = req.body;
+    const dryRun = req.query.dryRun === 'true';
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'items must be a non-empty array' });
+    }
+
+    const results = await Promise.all(items.map(async item => {
+        const { status, ...result } = await executeStockAdjustmentItem(item, dryRun, req);
+        return result;
+    }));
+    res.json({ success: true, results });
 });
 
 
@@ -715,9 +752,10 @@ router.post('/warehouse/stock-adjustment', requirePermission('LOG_SUPER'), async
 //
 // Body: { TrNumber } — matches SapServer's DeleteTrRequest.
 // ---------------------------------------------------------------------------
-router.post('/warehouse/delete-tr', requirePermission('LOG_SUPER'), async (req, res) => {
-    const params = req.body;
 
+// Shared by the single-item route below and its -bulk sibling — same
+// never-throws contract as executeBatchCleanupItem above.
+async function executeDeleteTrItem(params, req) {
     try {
         const response = await axios.post(
             `${sapConfig.url}/api/warehouse/delete-tr`,
@@ -729,7 +767,7 @@ router.post('/warehouse/delete-tr', requirePermission('LOG_SUPER'), async (req, 
         if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Delete TR ${params.TrNumber || ''} succeeded`), req);
-        res.json({ success: true, data: body.data });
+        return { status: 200, success: true, data: body.data };
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
@@ -737,8 +775,41 @@ router.post('/warehouse/delete-tr', requirePermission('LOG_SUPER'), async (req, 
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Delete TR ${params.TrNumber || ''} failed`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
-        res.status(status).json({ success: false, error: message });
+        return { status, success: false, error: message };
     }
+}
+
+router.post('/warehouse/delete-tr', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { status, ...result } = await executeDeleteTrItem(req.body, req);
+    res.status(status).json(result);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/delete-tr-bulk  (mounted at /api/sap in server.js)
+//
+// Same as /warehouse/delete-tr above, but for the whole set of TRs the TR
+// Cleanup Assistant has selected in one request instead of one per TR — that
+// assistant's candidate list can easily run into dozens of stale TRs, and
+// deleting them one at a time meant SapServer's STA worker pool never had
+// more than one of this tool's requests in flight. Same reasoning as
+// /warehouse/batch-cleanup-transfer-bulk.
+//
+// Body: { items: [{ TrNumber }, ...] }.
+// Response: { success: true, results: [{ success, data|error }, ...] } in
+// the same order as the input items.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/delete-tr-bulk', requirePermission('LOG_SUPER'), async (req, res) => {
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'items must be a non-empty array' });
+    }
+
+    const results = await Promise.all(items.map(async item => {
+        const { status, ...result } = await executeDeleteTrItem(item, req);
+        return result;
+    }));
+    res.json({ success: true, results });
 });
 
 
@@ -915,8 +986,10 @@ router.get('/warehouse/tr-cleanup-candidates', async (req, res) => {
 // from (GET /warehouse/open-transfer-requirements). Older/unaware callers
 // that omit it simply skip the guard rather than failing closed.
 // ---------------------------------------------------------------------------
-router.post('/warehouse/create-lt04', async (req, res) => {
-    const { StorageLocation, ...params } = req.body;
+// Shared by the single-item route below and its -bulk sibling — same
+// never-throws contract as executeBatchCleanupItem above.
+async function executeCreateLt04Item(rawParams, req) {
+    const { StorageLocation, ...params } = rawParams;
 
     try {
         await assertTransfersAllowed(StorageLocation);
@@ -931,20 +1004,54 @@ router.post('/warehouse/create-lt04', async (req, res) => {
         if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `LT04 succeeded for TR ${params.TrNumber || ''}`), req);
-        res.json({ success: true, data: body.data });
+        return { status: 200, success: true, data: body.data };
 
     } catch (err) {
         if (err instanceof TransferBlockedError) {
             await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `LT04 blocked for TR ${params.TrNumber || ''}`, err.message), req);
-            return res.status(409).json({ success: false, error: err.message });
+            return { status: 409, success: false, error: err.message };
         }
         const status  = err.response?.status  ?? 500;
         const message = err.response?.data?.error ?? err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `LT04 failed for TR ${params.TrNumber || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
-        res.status(status).json({ success: false, error: message });
+        return { status, success: false, error: message };
     }
+}
+
+router.post('/warehouse/create-lt04', async (req, res) => {
+    const { status, ...result } = await executeCreateLt04Item(req.body, req);
+    res.status(status).json(result);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sap/warehouse/create-lt04-bulk  (mounted at /api/sap in server.js)
+//
+// Same as /warehouse/create-lt04 above, but for a whole page of open Transfer
+// Requirements confirmed at once instead of one LT04 per TR — the
+// Transfer Requirements tile's mass "Confirm via LT04" action. Unrestricted
+// to any logged-in user, same as the single-item route above (this replaces
+// routine manual LT04 entry, not a supervisor-only action — bulking the
+// requests doesn't change what each one is individually allowed to do).
+//
+// Body: { items: [...] } — each item the same shape as the single route's
+// body above (StorageLocation + CreateLt04Request fields).
+// Response: { success: true, results: [{ success, data|error }, ...] } in
+// the same order as the input items.
+// ---------------------------------------------------------------------------
+router.post('/warehouse/create-lt04-bulk', async (req, res) => {
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: 'items must be a non-empty array' });
+    }
+
+    const results = await Promise.all(items.map(async item => {
+        const { status, ...result } = await executeCreateLt04Item(item, req);
+        return result;
+    }));
+    res.json({ success: true, results });
 });
 
 

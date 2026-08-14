@@ -4832,23 +4832,24 @@ router.get('/scrap-reversal/search', requirePermission('PROD_SUPERVISOR'), async
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// Reverse a single scrap material document via SapServer
-router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
-  const { scrapDocumentID, materialDocument } = req.body;
+// Shared by the single-item route below and its /bulk SSE sibling — same
+// never-throws contract as sap.js's executeBatchCleanupItem, since the bulk
+// route runs many of these concurrently via Promise.all and one item's
+// rejection must not cancel the others still in flight. pool/uid are passed
+// in rather than resolved per-item, since the bulk route only wants to fetch
+// the connection pool once for the whole batch.
+async function reverseScrapDocumentItem({ scrapDocumentID, materialDocument }, uid, pool, req) {
   if (!scrapDocumentID || !materialDocument)
-    return res.status(400).json({ success: false, error: 'scrapDocumentID and materialDocument are required.' });
+    return { status: 400, success: false, error: 'scrapDocumentID and materialDocument are required.' };
 
   try {
-    const pool = await getNexusOperationsPool();
-    const uid  = userId(req);
-
     const chk = await pool.request()
       .input('id', sql.Int, Number(scrapDocumentID))
       .query(`SELECT IsReversed FROM prod.ScrapMaterialDocuments WHERE ScrapDocumentID = @id`);
     if (!chk.recordset.length)
-      return res.status(404).json({ success: false, error: 'Scrap document not found.' });
+      return { status: 404, success: false, error: 'Scrap document not found.' };
     if (chk.recordset[0].IsReversed)
-      return res.status(409).json({ success: false, error: 'Already reversed.' });
+      return { status: 409, success: false, error: 'Already reversed.' };
 
     // Helper: check if SAP response data contains M7/067 (already reversed)
     const isAlreadyReversed = (data) => {
@@ -4874,9 +4875,9 @@ router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), asy
 
     let raw;
     try {
-      // 120s, not the 30s default — the Scrap Reversal UI now fires every
-      // selected document's reversal concurrently rather than one at a time
-      // (see production-nexus.js's scrap-reversal wireTable handler), so a
+      // 120s, not the 30s default — the Scrap Reversal UI fires every
+      // selected document's reversal in one bulk request (see
+      // /scrap-reversal/reverse/bulk below) rather than one at a time, so a
       // document queued behind several ~15s-each reversals on the same
       // SapServer worker thread may not even start until well past 30s.
       raw = await sapPost('/api/production/scrap/reverse', { MaterialDocument: String(materialDocument) }, 120000);
@@ -4887,7 +4888,7 @@ router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), asy
         await syncDb(null);
         audit('SAP_OK', req.session?.user?.username,
           `'${materialDocument}' SCRAP ALREADY REVERSED IN SAP - synced`, req);
-        return res.json({ success: true, synced: true, data: { reversalDocument: null } });
+        return { status: 200, success: true, synced: true, data: { reversalDocument: null } };
       }
       throw sapErr;
     }
@@ -4897,7 +4898,7 @@ router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), asy
       await syncDb(null);
       audit('SAP_OK', req.session?.user?.username,
         `'${materialDocument}' SCRAP ALREADY REVERSED IN SAP - synced`, req);
-      return res.json({ success: true, synced: true, data: { reversalDocument: null } });
+      return { status: 200, success: true, synced: true, data: { reversalDocument: null } };
     }
 
     // Explicit failure from SapServer wrapper (not M7/067)
@@ -4914,14 +4915,88 @@ router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), asy
     audit('SAP_OK', req.session?.user?.username,
       `'${materialDocument}' SCRAP REVERSED - Reversal Document = '${reversalDoc || ''}'`, req);
 
-    res.json({ success: true, data: { reversalDocument: reversalDoc } });
+    return { status: 200, success: true, data: { reversalDocument: reversalDoc } };
   } catch (err) {
     const d = err.response?.data;
     const errMsg = (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title || err.message;
     audit('SAP_ERROR', req.session?.user?.username,
       `'${materialDocument}' SCRAP REVERSAL FAILED - Message = "${errMsg}"`, req);
-    res.status(502).json({ success: false, error: errMsg });
+    return { status: 502, success: false, error: errMsg };
   }
+}
+
+// Reverse a single scrap material document via SapServer
+router.post('/scrap-reversal/reverse', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  try {
+    const pool = await getNexusOperationsPool();
+    const uid  = userId(req);
+    const { status, ...result } = await reverseScrapDocumentItem(req.body, uid, pool, req);
+    res.status(status).json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /scrap-reversal/reverse/bulk
+//
+// Same as /scrap-reversal/reverse above, but for the whole set of documents
+// selected in the Scrap Reversal UI in one request instead of N — that UI
+// used to fire one HTTP request per selected document concurrently via
+// client-side Promise.all (still N round trips, just not serialized). This
+// collapses that to ONE request, streamed back as SSE progress events as
+// each SapServer call settles — same event shape as /reversal/bulk above
+// (type: 'start'/'progress'/'complete'), so the frontend can reuse the same
+// SSE parsing it already has for that route.
+//
+// Body: { items: [{ scrapDocumentID, materialDocument }, ...] }.
+// ---------------------------------------------------------------------------
+router.post('/scrap-reversal/reverse/bulk', requirePermission('PROD_SUPERVISOR'), async (req, res) => {
+  const { items } = req.body;
+  if (!Array.isArray(items) || !items.length)
+    return res.status(400).json({ success: false, error: 'items array required.' });
+
+  const pool  = await getNexusOperationsPool();
+  const uid   = userId(req);
+  const total = items.length;
+
+  // Disable socket inactivity timeout for this long-running SSE connection
+  req.socket.setTimeout(0);
+
+  res.setHeader('Content-Type',      'text/event-stream');
+  res.setHeader('Cache-Control',     'no-cache');
+  res.setHeader('Connection',        'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  const send = data => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`); };
+  send({ type: 'start', total });
+
+  // Heartbeat every 20s keeps proxies and firewalls from closing an idle connection
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n');
+  }, 20000);
+
+  let done = 0;
+
+  try {
+    // Fire every reversal at SapServer in parallel via reverseScrapDocumentItem
+    // — same never-throws contract as /reversal/bulk relies on above.
+    await Promise.all(items.map(async item => {
+      const result = await reverseScrapDocumentItem(item, uid, pool, req);
+      send({
+        type: 'progress', done: ++done, total,
+        scrapDocumentID: item.scrapDocumentID, materialDocument: item.materialDocument,
+        success: result.success, synced: result.synced || false,
+        reversalDocument: result.data?.reversalDocument || null,
+        error: result.success ? undefined : result.error,
+      });
+    }));
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  send({ type: 'complete', total });
+  res.end();
 });
 
 // ── Reversal — SAP postings for a specific batch ─────────────────────────────

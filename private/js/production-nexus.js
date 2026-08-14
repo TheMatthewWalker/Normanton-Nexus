@@ -3539,42 +3539,75 @@ async function runScrapReversal() {
 
       btn.disabled = true;
       const total = selected.length;
-      let ok = 0, fail = 0, done = 0;
+      let ok = 0, fail = 0;
       btn.textContent = `Reversing… 0/${total}`;
-      if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = `Sending ${total} request${total!==1?'s':''} to SAP — waiting on responses…`; }
+      if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = `Sending ${total} document${total!==1?'s':''} to SAP — waiting on responses…`; }
 
       selected.forEach(({ id }) => {
         const rowEl = document.getElementById(`${prefix}-row-${id}`);
         if (rowEl) rowEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px">…</span>`;
       });
 
-      // Fire every reversal at once instead of awaiting one at a time before
-      // sending the next — this is still one HTTP request per document (the
-      // endpoint isn't a bulk one), just not serialized. Each ~15s SAP call
-      // updates its own row and the running counter the moment its own
-      // response lands, independent of the others still in flight.
-      await Promise.all(selected.map(async ({ id, doc }) => {
-        const rowEl = document.getElementById(`${prefix}-row-${id}`);
-        try {
-          const res = await api('/scrap-reversal/reverse', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scrapDocumentID: id, materialDocument: doc }),
-          });
-          if (!res.success) throw new Error(res.error || 'SAP error');
-          ok++;
-          if (rowEl) rowEl.innerHTML = res.synced
-            ? `<span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace"
-                title="Already reversed in SAP — DB synced">↺ Synced</span>`
-            : `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(res.data?.reversalDocument||'')}</span>`;
-        } catch (err) {
-          fail++;
-          if (rowEl) rowEl.innerHTML =
-            `<span style="color:var(--error);font-size:11px" title="${esc(err.message)}">✗ ${esc(err.message)}</span>`;
-        }
-        btn.textContent = `Reversing… ${++done}/${total}`;
-      }));
+      // Sent as ONE request rather than one fetch per document (even
+      // concurrently, that was still N round trips) — see
+      // routes/productionnexus.js's POST /scrap-reversal/reverse/bulk, which
+      // streams back an SSE progress event as each SapServer call settles,
+      // same event shape as /reversal/bulk above (reused via the same
+      // parsing loop) so each row/counter still updates live as results land.
+      let streamError = null;
+      try {
+        const res = await fetch('/api/productionnexus/scrap-reversal/reverse/bulk', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ items: selected.map(({ id, doc }) => ({ scrapDocumentID: id, materialDocument: doc })) }),
+        });
 
-      if (msg) {
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let   buffer  = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop();
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const ev = JSON.parse(line.slice(6));
+              if (ev.type !== 'progress') continue;
+
+              const rowEl = document.getElementById(`${prefix}-row-${ev.scrapDocumentID}`);
+              if (ev.success) {
+                ok++;
+                if (rowEl) rowEl.innerHTML = ev.synced
+                  ? `<span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace"
+                      title="Already reversed in SAP — DB synced">↺ Synced</span>`
+                  : `<span style="color:var(--accent);font-size:11px;font-family:'JetBrains Mono',monospace">✓ ${esc(ev.reversalDocument||'')}</span>`;
+              } else {
+                fail++;
+                if (rowEl) rowEl.innerHTML =
+                  `<span style="color:var(--error);font-size:11px" title="${esc(ev.error)}">✗ ${esc(ev.error)}</span>`;
+              }
+              btn.textContent = `Reversing… ${ev.done}/${ev.total}`;
+            } catch { /* malformed SSE line — skip */ }
+          }
+        }
+      } catch (err) {
+        streamError = err.message;
+      }
+
+      if (streamError) {
+        if (msg) { msg.style.color = 'var(--error)'; msg.textContent = `Error: ${streamError}`; }
+      } else if (msg) {
         msg.style.color = fail ? '#D97706' : 'var(--accent)';
         msg.textContent = fail
           ? `${ok} reversed, ${fail} failed — see inline results.`

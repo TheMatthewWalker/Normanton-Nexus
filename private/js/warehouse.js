@@ -2359,17 +2359,12 @@ function siShowAdjustmentPanel() {
     const submitBtn = document.getElementById('si-adjust-submit');
     submitBtn.disabled = true;
     const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Posting stock adjustments');
-    let done = 0, ok = 0, fail = 0;
-    const failures = [];
 
-    for (const row of rows) {
-      const id          = wsmRowId(row);
-      const resultCell  = document.getElementById(`si-adjust-result-${id}`);
-      const movementType = siMovementTypeFor(row);
-
-      const result = await siCreateStockAdjustment({
+    const entries = rows.map(row => ({
+      resultCell: document.getElementById(`si-adjust-result-${wsmRowId(row)}`),
+      params: {
         Material: row.material, StorageLocation: row.storageLocation, Batch: row.batch || '',
-        MovementType: movementType, Quantity: Math.abs(row.availableQty), Reference: reference,
+        MovementType: siMovementTypeFor(row), Quantity: Math.abs(row.availableQty), Reference: reference,
         // Stock sits inside warehouse management, so SAP needs the actual WM
         // storage type/bin, not just the IM storage location — these rows
         // are always the holding bin (999/TEMP) since that's what this card
@@ -2378,13 +2373,22 @@ function siShowAdjustmentPanel() {
         StorageType: row.storageType, StorageBin: row.bin,
         StockCategory: row.stockCategory || '',
         SpecialStockIndicator: row.specialStockInd || '', SpecialStockNumber: row.specialStockNum || '',
-      });
+      },
+    }));
 
+    // Sent as one request, executed concurrently server-side rather than
+    // awaited row-by-row — see siCreateStockAdjustmentsBulk.
+    const results = await siCreateStockAdjustmentsBulk(entries.map(e => e.params));
+
+    let ok = 0, fail = 0;
+    const failures = [];
+    results.forEach((result, i) => {
+      const { resultCell } = entries[i];
       if (result.success) { ok++; if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ Doc ${esc(result.materialDocument || '')}</span>`; }
       else { fail++; failures.push(result.message); if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.message)}</span>`; }
-      progress.update(++done);
-    }
+    });
 
+    progress.update(rows.length);
     progress.finish(ok, fail, failures);
     if (ok) {
       submitBtn.textContent = 'Done — refreshing…';
@@ -2395,19 +2399,28 @@ function siShowAdjustmentPanel() {
   });
 }
 
-async function siCreateStockAdjustment(params) {
+// Sends a whole page of stock adjustments as one request, executed
+// concurrently server-side by SapServer's STA worker pool rather than
+// awaited row-by-row — same reasoning as wsmCreateBatchCleanupTransfersBulk.
+// Returns results in the same order as paramsList, each unwrapped down to
+// the SAP business-level {success, materialDocument|message} shape
+// siCreateStockAdjustment used to return for a single item.
+async function siCreateStockAdjustmentsBulk(paramsList) {
   try {
-    const res = await fetch('/api/sap/warehouse/stock-adjustment', {
+    const res = await fetch('/api/sap/warehouse/stock-adjustment-bulk', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify({ items: paramsList }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'SAP call failed');
-    const data = json.data || {};
-    if (!data.success) return { success: false, message: (data.messages || []).map(m => m.message || m).join('; ') || 'SAP rejected the adjustment.' };
-    return { success: true, materialDocument: data.materialDocument, message: 'Posted' };
+    return json.results.map(result => {
+      if (!result.success) return { success: false, message: result.error };
+      const data = result.data || {};
+      if (!data.success) return { success: false, message: (data.messages || []).map(m => m.message || m).join('; ') || 'SAP rejected the adjustment.' };
+      return { success: true, materialDocument: data.materialDocument, message: 'Posted' };
+    });
   } catch (err) {
-    return { success: false, message: err.message };
+    return paramsList.map(() => ({ success: false, message: err.message }));
   }
 }
 
@@ -2848,15 +2861,36 @@ function trReqRender(filters = {}) {
 //
 // Mirrors the Stock Management mass-transfer panel (wsmMassTransferHtml/
 // wsmWireMassTransfer) structurally — same shared-vs-per-row radio toggle,
-// same sequential per-row POST loop with a progress banner — but posts to
-// create-lt04 (not transfer-order), since these are TRs, and never needs a
-// Pallet/Batch field since each row already carries its own batch. Kept as
-// a deliberate duplicate of the wsm pattern rather than a shared abstraction
-// — the field sets differ enough (this needs Batch off the row + a
-// destination only; wsm needs a full source/destination/quantity/stock-flags
-// set) that forcing a shared helper for two call sites adds indirection for
-// no real gain, same as showTransferForm/wsmSingleTransferHtml already
-// coexisting as separate, similar-but-distinct forms in this file.
+// same progress banner, and (like that panel) sends every row's LT04 as ONE
+// request via create-lt04-bulk rather than one POST per row — but posts to
+// create-lt04(-bulk) (not transfer-order), since these are TRs, and never
+// needs a Pallet/Batch field since each row already carries its own batch.
+// Kept as a deliberate duplicate of the wsm pattern rather than a shared
+// abstraction — the field sets differ enough (this needs Batch off the row +
+// a destination only; wsm needs a full source/destination/quantity/
+// stock-flags set) that forcing a shared helper for two call sites adds
+// indirection for no real gain, same as showTransferForm/wsmSingleTransferHtml
+// already coexisting as separate, similar-but-distinct forms in this file.
+
+// Sends a whole page of LT04 confirmations as one request, executed
+// concurrently server-side by SapServer's STA worker pool rather than
+// awaited row-by-row — same reasoning as wsmCreateBatchCleanupTransfersBulk.
+// Returns results in the same order as paramsList, each already shaped like
+// the single create-lt04 route's own response ({success, data} or
+// {success:false, error}).
+async function wsmCreateLt04Bulk(paramsList) {
+  try {
+    const res = await fetch('/api/sap/warehouse/create-lt04-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: paramsList }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    return json.results;
+  } catch (err) {
+    return paramsList.map(() => ({ success: false, error: err.message }));
+  }
+}
 function trReqRenderBulkPanel(filters) {
   const panel = document.getElementById('tr-req-bulk-panel');
   if (!panel) return;
@@ -2965,12 +2999,14 @@ function trReqWireMass(rows, filters) {
       }
     }
 
-    let okCount = 0, failCount = 0;
+    let failCount = 0;
     const failMessages = [];
     const progress = wsmShowProgressBanner(summaryEl, rows.length, 'Confirming via LT04');
-    let done = 0;
 
-    for (const row of rows) {
+    // Rows with a missing qty/destination never reach the server — filtered
+    // out up front rather than sent as a bad item in the bulk payload below.
+    const sendable = [];
+    rows.forEach(row => {
       const tr         = row.trNumber;
       const qtyInput   = document.querySelector(`.tr-mass-qty[data-tr="${CSS.escape(tr)}"]`);
       const resultCell = document.getElementById(`tr-mass-result-${tr}`);
@@ -2986,30 +3022,37 @@ function trReqWireMass(rows, filters) {
         failCount++;
         failMessages.push('Missing qty/destination');
         if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ Missing qty/destination</span>`;
-        progress.update(++done);
-        continue;
+        return;
       }
+      sendable.push({
+        resultCell,
+        params: {
+          TrNumber: tr, Material: row.material, Quantity: quantity,
+          DestinationType: destType, DestinationBin: destBin, PalletOrBatch: row.batch,
+        },
+      });
+    });
+    progress.update(rows.length - sendable.length);
 
-      try {
-        const res = await fetch('/api/sap/warehouse/create-lt04', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            TrNumber: tr, Material: row.material, Quantity: quantity,
-            DestinationType: destType, DestinationBin: destBin, PalletOrBatch: row.batch,
-          }),
-        });
-        const json = await res.json();
-        if (!json.success) throw new Error(json.error || 'SAP call failed');
-        okCount++;
-        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(json.data?.message || 'Done')}</span>`;
-      } catch (err) {
-        failCount++;
-        failMessages.push(err.message);
-        if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(err.message)}</span>`;
-      }
-      progress.update(++done);
+    let okCount = 0;
+    if (sendable.length) {
+      // Sent as one request, executed concurrently server-side rather than
+      // awaited row-by-row — see wsmCreateLt04Bulk.
+      const results = await wsmCreateLt04Bulk(sendable.map(s => s.params));
+      results.forEach((result, i) => {
+        const { resultCell } = sendable[i];
+        if (result.success) {
+          okCount++;
+          if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-ok">✓ ${esc(result.data?.message || 'Done')}</span>`;
+        } else {
+          failCount++;
+          failMessages.push(result.error);
+          if (resultCell) resultCell.innerHTML = `<span class="wsm-mass-fail">✕ ${esc(result.error)}</span>`;
+        }
+      });
     }
 
+    progress.update(rows.length);
     progress.finish(okCount, failCount, failMessages);
     if (okCount) {
       submitBtn.textContent = 'Done — reselect rows to run again';
@@ -3411,6 +3454,24 @@ function trReqCleanupUpdateDeleteButton() {
   if (!sessionPermissions.includes('LOG_SUPER')) btn.title = 'Requires LOG_SUPER';
 }
 
+// Sends a whole page of TR deletes as one request, executed concurrently
+// server-side by SapServer's STA worker pool rather than awaited TR-by-TR —
+// same reasoning as wsmCreateBatchCleanupTransfersBulk. Returns results in
+// the same order as trNumbers.
+async function wsmDeleteTrsBulk(trNumbers) {
+  try {
+    const res = await fetch('/api/sap/warehouse/delete-tr-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: trNumbers.map(TrNumber => ({ TrNumber })) }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'SAP call failed');
+    return json.results;
+  } catch (err) {
+    return trNumbers.map(() => ({ success: false, error: err.message }));
+  }
+}
+
 async function trReqCleanupDeleteSelected() {
   const trNumbers = [...trReqCleanup.selected];
   if (!trNumbers.length) return;
@@ -3425,25 +3486,19 @@ async function trReqCleanupDeleteSelected() {
 
   const summaryEl = document.getElementById('tr-cleanup-summary');
   const progress  = wsmShowProgressBanner(summaryEl, trNumbers.length, 'Deleting TRs');
+
+  // Sent as one request, executed concurrently server-side rather than
+  // awaited TR-by-TR — see wsmDeleteTrsBulk.
+  const results = await wsmDeleteTrsBulk(trNumbers);
+
   let okCount = 0, failCount = 0;
   const failMessages = [];
-  let done = 0;
+  results.forEach(result => {
+    if (result.success) okCount++;
+    else { failCount++; failMessages.push(result.error); }
+  });
 
-  for (const tr of trNumbers) {
-    try {
-      const res  = await fetch('/api/sap/warehouse/delete-tr', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ TrNumber: tr }),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error || 'SAP call failed');
-      okCount++;
-    } catch (err) {
-      failCount++;
-      failMessages.push(err.message);
-    }
-    progress.update(++done);
-  }
-
+  progress.update(trNumbers.length);
   progress.finish(okCount, failCount, failMessages);
   setTimeout(() => runTrCleanupAssistant(), 1500);
 }

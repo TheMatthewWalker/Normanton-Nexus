@@ -125,6 +125,54 @@ describe('POST /warehouse/stock-adjustment', () => {
   });
 });
 
+describe('POST /warehouse/stock-adjustment-bulk', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/warehouse/stock-adjustment-bulk').send({ items: [{ Material: '30005R' }] });
+    expect(res.status).toBe(403);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('400s when items is missing or empty', async () => {
+    const res1 = await request(appLogSuper).post('/warehouse/stock-adjustment-bulk').send({});
+    expect(res1.status).toBe(400);
+    const res2 = await request(appLogSuper).post('/warehouse/stock-adjustment-bulk').send({ items: [] });
+    expect(res2.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('fires every item concurrently, applies dryRun to all of them, and returns results in order', async () => {
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: { id: 1 } } })
+      .mockResolvedValueOnce({ data: { success: true, data: { id: 2 } } });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/stock-adjustment-bulk?dryRun=true')
+      .send({ items: [{ Material: '30005R', MovementType: '711' }, { Material: '30006R', MovementType: '712' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(res.body.results[0].data).toEqual({ id: 1 });
+    expect(res.body.results[1].data).toEqual({ id: 2 });
+    for (const [url] of axiosMock.post.mock.calls) expect(url).toContain('?dryRun=true');
+  });
+
+  test('one item failing does not prevent the others from succeeding', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 422, data: { error: 'Material does not exist' } };
+    axiosMock.post
+      .mockRejectedValueOnce(sapError)
+      .mockResolvedValueOnce({ data: { success: true, data: { id: 2 } } });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/stock-adjustment-bulk')
+      .send({ items: [{ Material: '30005R' }, { Material: '30006R' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ success: false, error: 'Material does not exist' });
+    expect(res.body.results[1]).toMatchObject({ success: true });
+  });
+});
+
 describe('GET /warehouse/stock', () => {
   test('forwards all filters, including profitCentre, to SapServer', async () => {
     axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
@@ -553,6 +601,59 @@ describe('POST /warehouse/create-lt04', () => {
   });
 });
 
+describe('POST /warehouse/create-lt04-bulk', () => {
+  test('400s when items is missing or empty', async () => {
+    const res1 = await request(app).post('/warehouse/create-lt04-bulk').send({});
+    expect(res1.status).toBe(400);
+    const res2 = await request(app).post('/warehouse/create-lt04-bulk').send({ items: [] });
+    expect(res2.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('fires every item concurrently, strips StorageLocation per item, and returns results in order', async () => {
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: { transferOrderNumber: '4500001111' } } })
+      .mockResolvedValueOnce({ data: { success: true, data: { transferOrderNumber: '4500002222' } } });
+
+    const res = await request(app)
+      .post('/warehouse/create-lt04-bulk')
+      .send({
+        items: [
+          { TrNumber: '123', Material: '30005R', StorageLocation: '1710' },
+          { TrNumber: '124', Material: '30006R', StorageLocation: '1711' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(res.body.results[0].data.transferOrderNumber).toBe('4500001111');
+    expect(res.body.results[1].data.transferOrderNumber).toBe('4500002222');
+    for (const [, sentBody] of axiosMock.post.mock.calls) expect(sentBody).not.toHaveProperty('StorageLocation');
+  });
+
+  test('a TransferBlockedError on one item surfaces as a failed result, not an HTTP 409 for the whole batch', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ CountId: 7, CountType: 'PRODUCTION', Status: 'PendingApproval' }],
+    });
+    axiosMock.post.mockResolvedValue({ data: { success: true, data: { transferOrderNumber: '4500002222' } } });
+
+    const res = await request(app)
+      .post('/warehouse/create-lt04-bulk')
+      .send({
+        items: [
+          { TrNumber: '123', Material: '30005R', StorageLocation: '1716' },
+          { TrNumber: '124', Material: '30006R', StorageLocation: '1717' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const successes = res.body.results.filter(r => r.success);
+    const failures  = res.body.results.filter(r => !r.success);
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+  });
+});
+
 describe('POST /warehouse/delete-tr', () => {
   test('is rejected for a user without LOG_SUPER', async () => {
     const res = await request(app).post('/warehouse/delete-tr').send({ TrNumber: '4500001234' });
@@ -581,6 +682,54 @@ describe('POST /warehouse/delete-tr', () => {
     expect(res.status).toBe(422);
     expect(res.body.error).toBe('RFC call failed');
     expect(dbRequest.query).toHaveBeenCalledTimes(1); // the audit insert
+  });
+});
+
+describe('POST /warehouse/delete-tr-bulk', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/warehouse/delete-tr-bulk').send({ items: [{ TrNumber: '4500001234' }] });
+    expect(res.status).toBe(403);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('400s when items is missing or empty', async () => {
+    const res1 = await request(appLogSuper).post('/warehouse/delete-tr-bulk').send({});
+    expect(res1.status).toBe(400);
+    const res2 = await request(appLogSuper).post('/warehouse/delete-tr-bulk').send({ items: [] });
+    expect(res2.status).toBe(400);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('fires every TR delete concurrently and returns results in the same order', async () => {
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: { message: 'deleted 1' } } })
+      .mockResolvedValueOnce({ data: { success: true, data: { message: 'deleted 2' } } });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/delete-tr-bulk')
+      .send({ items: [{ TrNumber: '4500001234' }, { TrNumber: '4500005678' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(res.body.results[0].data.message).toBe('deleted 1');
+    expect(res.body.results[1].data.message).toBe('deleted 2');
+    expect(axiosMock.post).toHaveBeenCalledTimes(2);
+  });
+
+  test('one item failing does not prevent the others from succeeding', async () => {
+    const sapError = new Error('request failed');
+    sapError.response = { status: 422, data: { error: 'RFC call failed' } };
+    axiosMock.post
+      .mockRejectedValueOnce(sapError)
+      .mockResolvedValueOnce({ data: { success: true, data: { message: 'deleted' } } });
+
+    const res = await request(appLogSuper)
+      .post('/warehouse/delete-tr-bulk')
+      .send({ items: [{ TrNumber: '4500001234' }, { TrNumber: '4500005678' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ success: false, error: 'RFC call failed' });
+    expect(res.body.results[1]).toMatchObject({ success: true });
   });
 });
 
