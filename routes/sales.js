@@ -16,6 +16,7 @@ import express from 'express';
 import sql     from 'mssql';
 import { getNexusOperationsPool } from '../config.js';
 import { requireDepartment, requirePermission } from '../middleware/auth.js';
+import { getScheduleWaterfall } from './salessap.js';
 
 const router = express.Router();
 
@@ -162,6 +163,51 @@ router.delete('/customer-instructions/:customer', canEdit, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('[sales] DELETE /customer-instructions failed', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /schedule-waterfall — SAP-backed "history of past schedule agreements"
+// report (rebuild of sd_waterfall.xltm). View-only, same canView gate as the
+// rest of this module: no new permission code, since the source tool never
+// had a separate edit tier either.
+function toArray(value) {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+router.get('/schedule-waterfall', canView, async (req, res) => {
+  try {
+    const salesOrg = String(req.query.salesOrg || '').trim();
+    const shipToParties = toArray(req.query.shipToParties).map(String).filter(Boolean);
+    const scheduleDateFrom = String(req.query.scheduleDateFrom || '').trim();
+    const scheduleDateTo = String(req.query.scheduleDateTo || '').trim();
+
+    if (!salesOrg || !shipToParties.length || !scheduleDateFrom || !scheduleDateTo) {
+      return res.status(400).json({
+        success: false,
+        error: 'salesOrg, shipToParties, scheduleDateFrom and scheduleDateTo are required.'
+      });
+    }
+
+    const includeForecast = req.query.includeForecast !== 'false';
+    const includeJit = req.query.includeJit !== 'false';
+
+    const rows = await getScheduleWaterfall(req, {
+      salesOrg,
+      shipToParties,
+      materials: toArray(req.query.materials).map(String).filter(Boolean),
+      includeForecast,
+      includeJit,
+      idocCreatedAfter: req.query.idocCreatedAfter || null,
+      scheduleDateFrom,
+      scheduleDateTo,
+      includeZeroQty: req.query.includeZeroQty === 'true',
+    });
+
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('[sales] GET /schedule-waterfall failed', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

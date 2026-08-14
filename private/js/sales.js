@@ -36,11 +36,13 @@ function backToTiles() {
 const TITLES = {
   productionSchedule:    ['Production Schedule', 'Open PTFE order lines due in the next 5 working days — comments, ETA and OTIF KPI'],
   customerInstructions:  ['Customer Standard Instructions', 'Standing instructions printed on every Drumming Ticket for a customer'],
+  scheduleWaterfall:     ['Schedule Agreement Waterfall', 'History of past schedule agreement releases — compare cumulative totals and required orders release-over-release'],
 };
 
 const FNS = {
   productionSchedule:   () => window.ProductionScheduleReport.mount(),
   customerInstructions: () => renderCustomerInstructions(),
+  scheduleWaterfall:    () => window.SalesWaterfallReport.mount(),
 };
 
 // ── Customer Standard Instructions ──────────────────────────────────────────

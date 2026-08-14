@@ -1,8 +1,10 @@
 // routes/sales.js manages Customer Standard Instructions
-// (log.CustomerStandardInstructions). Real logic worth testing: the single
-// PUT's exists-then-UPDATE/INSERT branch, and bulk-import's per-row
-// validation + continue-on-failure behavior (a single bad row must not
-// abort the rest of the batch).
+// (log.CustomerStandardInstructions) plus the SAP-backed Schedule Agreement
+// Waterfall report. Real logic worth testing: the single PUT's
+// exists-then-UPDATE/INSERT branch, bulk-import's per-row validation +
+// continue-on-failure behavior (a single bad row must not abort the rest of
+// the batch), and GET /schedule-waterfall's required-filter validation
+// (mirrors what SapServer itself would otherwise reject).
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
@@ -13,6 +15,9 @@ import { operatorUser } from '../helpers/fixtures/users.js';
 
 const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
 jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
+
+const getScheduleWaterfall = jest.fn();
+jest.unstable_mockModule('../../routes/salessap.js', () => ({ getScheduleWaterfall }));
 
 const salesUser = { ...operatorUser, departments: ['sales'], permissions: [] };
 const salesSupervisor = { ...operatorUser, departments: ['sales'], permissions: ['SALES_SUPERVISOR'] };
@@ -31,6 +36,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   resetMockSql({ pool, request: dbRequest, connect });
+  getScheduleWaterfall.mockReset();
 });
 
 function queueResults(...results) {
@@ -156,5 +162,70 @@ describe('DELETE /customer-instructions/:customer', () => {
     const res = await request(appSupervisor).delete('/customer-instructions/C1');
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+  });
+});
+
+describe('GET /schedule-waterfall', () => {
+  test('403s outside the sales department', async () => {
+    const res = await request(appNone).get('/schedule-waterfall').set('Accept', 'application/json').query({
+      salesOrg: '0302', shipToParties: '0000302879', scheduleDateFrom: '2020-01-01', scheduleDateTo: '2020-12-31',
+    });
+    expect(res.status).toBe(403);
+    expect(getScheduleWaterfall).not.toHaveBeenCalled();
+  });
+
+  test('400s when a required filter is missing, without calling SapServer', async () => {
+    const res = await request(appSales).get('/schedule-waterfall').query({ salesOrg: '0302' });
+    expect(res.status).toBe(400);
+    expect(getScheduleWaterfall).not.toHaveBeenCalled();
+  });
+
+  test('normalises a single-value ship-to/material query param into an array', async () => {
+    getScheduleWaterfall.mockResolvedValueOnce([]);
+    const res = await request(appSales).get('/schedule-waterfall').query({
+      salesOrg: '0302', shipToParties: '0000302879', materials: '31446702',
+      scheduleDateFrom: '2020-01-01', scheduleDateTo: '2020-12-31',
+    });
+    expect(res.status).toBe(200);
+    const [, query] = getScheduleWaterfall.mock.calls[0];
+    expect(query.shipToParties).toEqual(['0000302879']);
+    expect(query.materials).toEqual(['31446702']);
+  });
+
+  test('defaults includeForecast/includeJit to true and includeZeroQty to false', async () => {
+    getScheduleWaterfall.mockResolvedValueOnce([]);
+    await request(appSales).get('/schedule-waterfall').query({
+      salesOrg: '0302', shipToParties: '0000302879', scheduleDateFrom: '2020-01-01', scheduleDateTo: '2020-12-31',
+    });
+    const [, query] = getScheduleWaterfall.mock.calls[0];
+    expect(query).toMatchObject({ includeForecast: true, includeJit: true, includeZeroQty: false });
+  });
+
+  test('honours includeForecast=false/includeJit=false/includeZeroQty=true', async () => {
+    getScheduleWaterfall.mockResolvedValueOnce([]);
+    await request(appSales).get('/schedule-waterfall').query({
+      salesOrg: '0302', shipToParties: '0000302879', scheduleDateFrom: '2020-01-01', scheduleDateTo: '2020-12-31',
+      includeForecast: 'false', includeJit: 'false', includeZeroQty: 'true',
+    });
+    const [, query] = getScheduleWaterfall.mock.calls[0];
+    expect(query).toMatchObject({ includeForecast: false, includeJit: false, includeZeroQty: true });
+  });
+
+  test('returns the rows SapServer hands back', async () => {
+    getScheduleWaterfall.mockResolvedValueOnce([{ material: 'M1', orderQty: 100 }]);
+    const res = await request(appSales).get('/schedule-waterfall').query({
+      salesOrg: '0302', shipToParties: '0000302879', scheduleDateFrom: '2020-01-01', scheduleDateTo: '2020-12-31',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([{ material: 'M1', orderQty: 100 }]);
+  });
+
+  test('500s with the error message when the SapServer call fails', async () => {
+    getScheduleWaterfall.mockRejectedValueOnce(new Error('SAP unavailable'));
+    const res = await request(appSales).get('/schedule-waterfall').query({
+      salesOrg: '0302', shipToParties: '0000302879', scheduleDateFrom: '2020-01-01', scheduleDateTo: '2020-12-31',
+    });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('SAP unavailable');
   });
 });

@@ -65,6 +65,12 @@
             <div class="tile-title">Production Schedule</div>
             <div class="tile-desc">Open PTFE order lines due in the next 5 working days · Arrears · OTIF KPI</div>
           </div>
+          <div class="sap-tile sap-tile--live" data-fn="scheduleWaterfall">
+            <div class="tile-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg></div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Schedule Agreement Waterfall</div>
+            <div class="tile-desc">History of past schedule agreement releases · compare cumulative totals and required orders release-over-release</div>
+          </div>
         </div>
       </div>
 
@@ -106,6 +112,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script src="./js/production-schedule.js"></script>
+  <script type="module" src="./js/salesWaterfall.js"></script>
   <script src="./js/sales.js"></script>
 
 </body>
