@@ -2787,9 +2787,7 @@ function trReqRender(filters = {}) {
             </select></div>
           <div class="wsm-filter-field"><label class="tf-label">Material</label>
             <input class="tf-input" id="tr-req-material-filter" type="text" value="${esc(filters.material || '')}" style="max-width:160px"></div>
-          ` //<div class="wsm-filter-field"><label class="tf-label">Storage Loc.</label>
-            //<input class="tf-input" id="tr-req-sloc-filter" type="text" value="${esc(filters.storageLocation || '')}" style="max-width:110px"></div>
-          `<div class="wsm-filter-field"><label class="tf-label">Created By</label>
+          <div class="wsm-filter-field"><label class="tf-label">Created By</label>
             <input class="tf-input" id="tr-req-createdby-filter" type="text" value="${esc(filters.createdBy || '')}" style="max-width:110px"></div>
           <button type="button" class="btn-submit" id="tr-req-search-btn">Search</button>
           <button type="button" class="btn-secondary" id="tr-req-refresh">Refresh</button>
@@ -2818,7 +2816,7 @@ function trReqRender(filters = {}) {
   document.getElementById('tr-req-search-btn').addEventListener('click', () => trReqLoad(trReqReadFilters()));
   document.getElementById('tr-req-refresh').addEventListener('click', () => trReqLoad(trReqReadFilters()));
   document.getElementById('tr-req-cleanup-btn').addEventListener('click', () => runTrCleanupAssistant());
-  ['tr-req-material-filter', 'tr-req-sloc-filter', 'tr-req-createdby-filter'].forEach(id => {
+  ['tr-req-material-filter', 'tr-req-createdby-filter'].forEach(id => {
     document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); trReqLoad(trReqReadFilters()); } });
   });
   document.getElementById('tr-req-mrp-filter').addEventListener('change', () => trReqLoad(trReqReadFilters()));
