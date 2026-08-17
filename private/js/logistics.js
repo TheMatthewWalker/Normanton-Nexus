@@ -12291,6 +12291,8 @@ async function mrpLoadVendorsInto(selectId) {
 
 // ── Trends sub-tab ───────────────────────────────────────────────────────────
 
+const MRP_TRENDS_PROMPT = '<div class="sap-empty">Enter a material code or select a vendor, then Load — there\'s too much year/vendor history across every material to load unfiltered.</div>';
+
 function mrpRenderTrendsTab() {
   const body = document.getElementById('mrp-tab-body');
   body.innerHTML = `
@@ -12317,7 +12319,7 @@ function mrpRenderTrendsTab() {
       <div id="mrp-trends-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px"></div>
       <canvas id="mrp-trends-chart" style="max-height:320px"></canvas>
     </div>
-    <div id="mrp-trends-table" style="margin-top:14px"></div>`;
+    <div id="mrp-trends-table" style="margin-top:14px">${MRP_TRENDS_PROMPT}</div>`;
 
   document.getElementById('mrp-trends-load-btn').addEventListener('click', mrpLoadTrends);
   document.getElementById('mrp-trends-material').addEventListener('keydown', e => {
@@ -12327,7 +12329,9 @@ function mrpRenderTrendsTab() {
   document.getElementById('mrp-trends-refresh-btn').addEventListener('click', mrpRefreshHistory);
 
   mrpLoadVendorsInto('mrp-trends-vendor');
-  mrpLoadTrends();
+  // Deliberately no initial load — there's too much history across every material/vendor to
+  // fetch and render unfiltered (this was the whole page's slow-load complaint). Trends only
+  // ever loads once a material or vendor filter narrows the request.
 }
 
 async function mrpRefreshHistory() {
@@ -12427,11 +12431,19 @@ async function mrpLoadTrends() {
   const tableEl = document.getElementById('mrp-trends-table');
   destroyMrpCharts();
   chartWrap.classList.add('hidden');
-  tableEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
 
   const params = new URLSearchParams();
   materialInput.split(',').map(s => s.trim()).filter(Boolean).forEach(m => params.append('materials', m));
   if (vendorId) params.append('vendorId', vendorId);
+
+  // Never fetch unfiltered — every material's history across every vendor/year is too much to
+  // load (and render) at once. Wait for the operator to narrow it down first.
+  if (![...params.keys()].length) {
+    tableEl.innerHTML = MRP_TRENDS_PROMPT;
+    return;
+  }
+
+  tableEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
 
   try {
     const res = await fetch(`/api/mrp-analysis/trends?${params.toString()}`);
