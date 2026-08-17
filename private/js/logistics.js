@@ -10149,7 +10149,7 @@ function osRenderTrackedList(tracked) {
   // renderTrackedRow's comment for why a completed order can't be
   // reassigned from here.
   document.querySelectorAll('.os-shipment-view-btn').forEach(btn => {
-    btn.addEventListener('click', () => openInboundShipmentDetail(Number(btn.dataset.shipmentId)));
+    btn.addEventListener('click', () => openInboundShipmentDetail(Number(btn.dataset.shipmentId), 'trackedOrders'));
   });
   document.querySelectorAll('.os-invoice-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -10560,6 +10560,7 @@ async function openAssignShipmentModal(t) {
       <div id="as-result"></div>
     </div>
     <div class="ps-modal-actions">
+      ${hasShipment ? '<button type="button" class="btn-secondary" id="as-edit-shipment-btn">Edit Shipment</button>' : ''}
       ${hasShipment ? '<button type="button" class="btn-secondary" id="as-unassign-btn">Unassign</button>' : ''}
       <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
       <button type="button" class="btn-submit" id="as-save-btn">Save</button>
@@ -10567,6 +10568,14 @@ async function openAssignShipmentModal(t) {
   </div>`);
 
   const existingSelect = document.getElementById('as-existing');
+
+  // Opens the same shipment-detail/edit view as the Inbound Log's own list
+  // (dispatch/ETA/haulier/tracking, mark received, etc. — see
+  // openInboundShipmentDetail) — this modal itself only ever lets you pick
+  // WHICH shipment an order line is on, never the shipment's own details.
+  if (hasShipment) {
+    document.getElementById('as-edit-shipment-btn').addEventListener('click', () => openInboundShipmentDetail(Number(t.ShipmentId), 'trackedOrders'));
+  }
 
   try {
     const res  = await fetch('/api/performance/order-suggestions/shipments');
@@ -11234,6 +11243,20 @@ async function openManualInboundShipmentModal() {
   });
 }
 
+// Which tile's list is sitting underneath this modal — set on open, read by
+// refreshShipmentDetailUnderlyingView below. Reachable from two places now:
+// the Inbound Log's own row/detail flow, and Tracked Orders' shipment pill
+// (openAssignShipmentModal's Edit Shipment button) — a save/receive/undo/
+// cancel inside this modal must refresh WHICHEVER of those two is actually
+// showing behind it, not unconditionally swap the page over to Inbound Log
+// just because that used to be the only way in.
+let inboundShipmentDetailOpener = 'inboundLog';
+
+function refreshShipmentDetailUnderlyingView() {
+  if (inboundShipmentDetailOpener === 'trackedOrders') runOrderSuggestionsTracked(true);
+  else runInboundLog();
+}
+
 // Detail/edit view for one inbound shipment — header fields (editable via
 // PUT), linked order lines (read-only except for a per-line Qty Received
 // input while the shipment is still open), and Mark Received when not yet
@@ -11241,7 +11264,8 @@ async function openManualInboundShipmentModal() {
 // side (markShipmentReceived) using the confirmed Qty Received per line and
 // calls the SAP goods-receipt placeholder — see that function's comment in
 // performancesql.js.
-async function openInboundShipmentDetail(shipmentId) {
+async function openInboundShipmentDetail(shipmentId, opener = 'inboundLog') {
+  inboundShipmentDetailOpener = opener;
   openModal(`<div class="ps-modal lg-modal" style="max-width:640px;width:94vw">
     <div class="ps-modal-header">
       <div><div class="ps-modal-title">Shipment</div><div class="ps-modal-sub">Loading…</div></div>
@@ -11790,7 +11814,7 @@ async function saveInboundShipmentDetail(shipmentId) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to save shipment');
-    runInboundLog();
+    refreshShipmentDetailUnderlyingView();
     await refreshInboundShipmentDetail(shipmentId);
   } catch (err) {
     if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
@@ -11861,7 +11885,7 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to mark shipment received');
-    runInboundLog();
+    refreshShipmentDetailUnderlyingView();
     await refreshInboundShipmentDetail(shipmentId);
 
     // sapResults is a flat per-line array — {suggestionId, material,
@@ -11923,7 +11947,7 @@ async function undoInboundShipmentReceived(shipmentId, shipment) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to undo Mark Received');
-    runInboundLog();
+    refreshShipmentDetailUnderlyingView();
     await refreshInboundShipmentDetail(shipmentId);
 
     const data = json.data || {};
@@ -11964,7 +11988,7 @@ async function cancelInboundShipment(shipmentId, shipment) {
     // Not refreshing Tracked Orders here — it isn't necessarily the
     // underlying view (Inbound Log is), and it fetches fresh on its own
     // next visit anyway, same as after Mark Received above.
-    runInboundLog();
+    refreshShipmentDetailUnderlyingView();
     await refreshInboundShipmentDetail(shipmentId);
   } catch (err) {
     if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
