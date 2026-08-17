@@ -35,6 +35,7 @@ let sessionUsername = '';
 let freightSpendMonths = 12;
 let freightCharts = [];
 let turnsCharts = [];
+let mrpCharts = [];
 let valClassCatalogCache = null;
 let cvcSelections = new Map();
 const ISOPAR_MATERIAL = '10010'; // see the Isopar Tied Oil tile — routes/isoparConstants.js's server-side twin
@@ -139,6 +140,7 @@ function setupTiles() {
       if (fn === 'orderSuggestions')    runOrderSuggestions();
       if (fn === 'inboundLog')         runInboundLog();
       if (fn === 'demandAdjustments')  runDemandAdjustments();
+      if (fn === 'mrpAnalysis')        runMrpAnalysis();
       if (fn === 'isoparTiedOil')      runIsoparTiedOil();
     });
   });
@@ -189,6 +191,7 @@ function showResultPanel(title, hint) {
 function backToTiles() {
   destroyFreightCharts();
   destroyTurnsCharts();
+  destroyMrpCharts();
   document.getElementById('result-section').classList.add('hidden');
   document.getElementById('tile-section').classList.remove('hidden');
   document.getElementById('result-body').innerHTML = '';
@@ -12232,4 +12235,562 @@ async function openManualOrderCsvModal() {
       btn.disabled = false; btn.textContent = 'Upload';
     }
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// MRP Analysis — Logistics > Material Planning
+// ══════════════════════════════════════════════════════════════════════════
+// Year-on-year consumption/goods-receipt trends per material, resolvable per vendor, plus two
+// ways to turn a sales outlook into a raw-material purchasing number for next year. Four
+// sub-tabs sharing one #mrp-tab-body: Trends, Percentage Forecast, Sales Breakdown Forecast,
+// Snapshot History. See routes/mrpanalysis.js for the API this talks to.
+
+function destroyMrpCharts() {
+  mrpCharts.forEach(c => { try { c.destroy(); } catch (_) {} });
+  mrpCharts = [];
+}
+
+async function runMrpAnalysis() {
+  showResultPanel('MRP Analysis', "Year-on-year consumption & order-received trends per material, resolvable per vendor — plus two ways to turn a sales outlook into next year's raw-material purchasing number.");
+  const body = document.getElementById('result-body');
+  body.innerHTML = `
+    <div class="tf-row" id="mrp-tabs">
+      <button type="button" class="btn-submit" data-mrp-tab="trends" onclick="mrpShowTab('trends')">Trends</button>
+      <button type="button" class="btn-secondary" data-mrp-tab="percentage" onclick="mrpShowTab('percentage')">Percentage Forecast</button>
+      <button type="button" class="btn-secondary" data-mrp-tab="bom" onclick="mrpShowTab('bom')">Sales Breakdown Forecast</button>
+      <button type="button" class="btn-secondary" data-mrp-tab="history" onclick="mrpShowTab('history')">Snapshot History</button>
+    </div>
+    <div id="mrp-tab-body" style="margin-top:14px"></div>`;
+  mrpShowTab('trends');
+}
+
+function mrpShowTab(tab) {
+  document.querySelectorAll('#mrp-tabs button').forEach(btn => {
+    btn.className = btn.dataset.mrpTab === tab ? 'btn-submit' : 'btn-secondary';
+  });
+  destroyMrpCharts();
+  if (tab === 'trends') mrpRenderTrendsTab();
+  else if (tab === 'percentage') mrpRenderPercentageTab();
+  else if (tab === 'bom') mrpRenderBomTab();
+  else if (tab === 'history') mrpRenderHistoryTab();
+}
+
+async function mrpLoadVendorsInto(selectId) {
+  const sel = document.getElementById(selectId);
+  if (!sel) return;
+  try {
+    const vendors = await vmFetchVendors(); // reused from Vendor Master Data — GET /api/performance/vendors
+    vendors.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.VendorId;
+      opt.textContent = v.VendorName;
+      sel.appendChild(opt);
+    });
+  } catch (_) { /* dropdown just stays at "All vendors" */ }
+}
+
+// ── Trends sub-tab ───────────────────────────────────────────────────────────
+
+function mrpRenderTrendsTab() {
+  const body = document.getElementById('mrp-tab-body');
+  body.innerHTML = `
+    <div class="tf-row">
+      <div class="tf-field tf-field--wide">
+        <label class="tf-label">Material</label>
+        <input class="tf-input" id="mrp-trends-material" type="text" placeholder="Material code(s), comma-separated — leave blank for all" autocomplete="off">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Vendor</label>
+        <select class="tf-input" id="mrp-trends-vendor"><option value="">All vendors</option></select>
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-submit" id="mrp-trends-load-btn">Load</button>
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-secondary" id="mrp-trends-refresh-btn">Refresh Now</button>
+      </div>
+    </div>
+    <div class="toolbar-hint">Consumption is vendor-agnostic (SAP doesn't attribute usage to whichever vendor supplied it) — the chart only appears once the filter narrows to one material, so vendors can be compared bar-for-bar; the table below always shows every vendor's received quantity side by side.</div>
+    <div id="mrp-trends-chart-wrap" class="hidden" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
+      <div id="mrp-trends-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px"></div>
+      <canvas id="mrp-trends-chart" style="max-height:320px"></canvas>
+    </div>
+    <div id="mrp-trends-table" style="margin-top:14px"></div>`;
+
+  document.getElementById('mrp-trends-load-btn').addEventListener('click', mrpLoadTrends);
+  document.getElementById('mrp-trends-material').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); mrpLoadTrends(); }
+  });
+  document.getElementById('mrp-trends-vendor').addEventListener('change', mrpLoadTrends);
+  document.getElementById('mrp-trends-refresh-btn').addEventListener('click', mrpRefreshHistory);
+
+  mrpLoadVendorsInto('mrp-trends-vendor');
+  mrpLoadTrends();
+}
+
+async function mrpRefreshHistory() {
+  const btn = document.getElementById('mrp-trends-refresh-btn');
+  if (!btn) return;
+  btn.disabled = true; btn.textContent = 'Refreshing…';
+  try {
+    const res = await fetch('/api/mrp-analysis/refresh', { method: 'POST' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Refresh failed');
+    await mrpLoadTrends();
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Refresh Now'; }
+  }
+}
+
+// Reshapes the two flat series (consumption per material/year, receipts per material/vendor/
+// year) into one row per (Material, Year), with a dynamic column per vendor that actually
+// appears in the receipts — this is the "compare vendors all at once" view: every vendor's
+// received quantity for that material/year sits side by side in one row.
+function mrpPivotTrends(consumption, receipts) {
+  const vendorLabel = r => r.VendorName || r.SapVendorNumber || (r.VendorId != null ? `Vendor ${r.VendorId}` : 'Unknown vendor');
+  const vendorNames = [...new Set(receipts.map(vendorLabel))].sort();
+  const key = (mat, yr) => `${mat}||${yr}`;
+  const rows = new Map();
+
+  consumption.forEach(c => {
+    rows.set(key(c.Material, c.FiscalYear), {
+      material: c.Material, materialText: c.MaterialText, year: c.FiscalYear,
+      consumption: Number(c.ConsumedQty), vendors: {},
+    });
+  });
+  receipts.forEach(r => {
+    const k = key(r.Material, r.FiscalYear);
+    if (!rows.has(k)) rows.set(k, { material: r.Material, materialText: r.MaterialText, year: r.FiscalYear, consumption: null, vendors: {} });
+    const row = rows.get(k);
+    const v = vendorLabel(r);
+    row.vendors[v] = (row.vendors[v] || 0) + Number(r.ReceivedQty);
+  });
+
+  return {
+    vendorNames,
+    rows: [...rows.values()].sort((a, b) => a.material.localeCompare(b.material) || a.year - b.year),
+  };
+}
+
+function mrpTrendsChartConfig(rows, vendorNames) {
+  const palette = ['#0891B2', '#F59E0B', '#16A34A', '#DC2626', '#7C3AED', '#DB2777', '#2563EB', '#65A30D'];
+  const barDatasets = vendorNames.map((v, i) => ({
+    type: 'bar', label: v, data: rows.map(r => r.vendors[v] ?? null),
+    backgroundColor: palette[i % palette.length],
+  }));
+  const lineDataset = {
+    type: 'line', label: 'Consumption', data: rows.map(r => r.consumption),
+    borderColor: '#1F2937', backgroundColor: 'transparent', tension: 0.3, pointRadius: 3, pointBackgroundColor: '#1F2937',
+  };
+  return {
+    data: { labels: rows.map(r => r.year), datasets: [...barDatasets, lineDataset] },
+    options: {
+      plugins: { legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        y: { beginAtZero: true, ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' } },
+      },
+    },
+  };
+}
+
+function mrpRenderTrendsTable(el, rows, vendorNames) {
+  if (!rows.length) {
+    el.innerHTML = '<div class="sap-empty">No history found for this filter yet — try Refresh Now, or widen the filter.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="pn-batch-table admin-table">
+        <thead><tr><th>Material</th><th>Year</th><th>Consumption</th>${vendorNames.map(v => `<th>${esc(v)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr class="admin-row">
+              <td><strong>${esc(r.material)}</strong>${r.materialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.materialText)}</div>` : ''}</td>
+              <td>${r.year}</td>
+              <td>${r.consumption != null ? Number(r.consumption).toLocaleString() : '-'}</td>
+              ${vendorNames.map(v => `<td>${r.vendors[v] != null ? Number(r.vendors[v]).toLocaleString() : '-'}</td>`).join('')}
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+async function mrpLoadTrends() {
+  const materialInput = document.getElementById('mrp-trends-material').value.trim();
+  const vendorId = document.getElementById('mrp-trends-vendor').value;
+  const chartWrap = document.getElementById('mrp-trends-chart-wrap');
+  const tableEl = document.getElementById('mrp-trends-table');
+  destroyMrpCharts();
+  chartWrap.classList.add('hidden');
+  tableEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+
+  const params = new URLSearchParams();
+  materialInput.split(',').map(s => s.trim()).filter(Boolean).forEach(m => params.append('materials', m));
+  if (vendorId) params.append('vendorId', vendorId);
+
+  try {
+    const res = await fetch(`/api/mrp-analysis/trends?${params.toString()}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load trends');
+
+    const { vendorNames, rows } = mrpPivotTrends(json.data.consumption, json.data.receipts);
+
+    const distinctMaterials = new Set(rows.map(r => r.material));
+    if (distinctMaterials.size === 1 && rows.length) {
+      const cfg = mrpTrendsChartConfig(rows, vendorNames);
+      document.getElementById('mrp-trends-chart-title').textContent =
+        `${rows[0].material}${rows[0].materialText ? ' — ' + rows[0].materialText : ''}`;
+      chartWrap.classList.remove('hidden');
+      const chart = new Chart(document.getElementById('mrp-trends-chart'), { type: 'bar', ...cfg });
+      mrpCharts.push(chart);
+    }
+
+    mrpRenderTrendsTable(tableEl, rows, vendorNames);
+  } catch (err) {
+    tableEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// ── Percentage Forecast sub-tab ─────────────────────────────────────────────
+
+let mrpPctPreviewData = null;
+
+function mrpRenderPercentageTab() {
+  const body = document.getElementById('mrp-tab-body');
+  const now = new Date().getFullYear();
+  mrpPctPreviewData = null;
+  body.innerHTML = `
+    <div class="tf-row">
+      <div class="tf-field">
+        <label class="tf-label">Target Year</label>
+        <input class="tf-input" id="mrp-pct-target-year" type="number" value="${now + 1}">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Baseline Year</label>
+        <input class="tf-input" id="mrp-pct-baseline-year" type="number" value="${now}">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">% Change</label>
+        <input class="tf-input" id="mrp-pct-change" type="number" step="0.1" value="0">
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-submit" id="mrp-pct-preview-btn">Preview</button>
+      </div>
+    </div>
+    <div class="toolbar-hint">Predicted quantity = each material's confirmed consumption for the baseline year, adjusted by the % change above.</div>
+    <div id="mrp-pct-result" style="margin-top:14px"></div>`;
+
+  document.getElementById('mrp-pct-preview-btn').addEventListener('click', mrpPreviewPercentage);
+}
+
+async function mrpPreviewPercentage() {
+  const targetYear = Number(document.getElementById('mrp-pct-target-year').value);
+  const baselineYear = Number(document.getElementById('mrp-pct-baseline-year').value);
+  const percentageChange = Number(document.getElementById('mrp-pct-change').value);
+  const resultEl = document.getElementById('mrp-pct-result');
+  mrpPctPreviewData = null;
+
+  if (!targetYear || !baselineYear || Number.isNaN(percentageChange)) {
+    resultEl.innerHTML = '<div class="sap-error">Enter a target year, baseline year, and % change.</div>';
+    return;
+  }
+
+  resultEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Calculating…</div>';
+
+  try {
+    const res = await fetch('/api/mrp-analysis/forecast/percentage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baselineYear, percentageChange }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Preview failed');
+
+    if (!json.data.materials.length) {
+      resultEl.innerHTML = `<div class="sap-empty">No consumption history found for ${baselineYear} — try Refresh Now on the Trends tab, or pick a different baseline year.</div>`;
+      return;
+    }
+
+    mrpPctPreviewData = { targetYear, baselineYear, percentageChange, materials: json.data.materials };
+
+    resultEl.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Predicted Qty for ${targetYear}</th></tr></thead>
+          <tbody>
+            ${json.data.materials.map(m => `
+              <tr class="admin-row">
+                <td><strong>${esc(m.material)}</strong>${m.materialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.materialText)}</div>` : ''}</td>
+                <td>${Number(m.predictedQty).toLocaleString()}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="tf-row" style="margin-top:10px">
+        <button type="button" class="btn-submit" id="mrp-pct-save-btn">Save Prediction</button>
+      </div>`;
+    document.getElementById('mrp-pct-save-btn').addEventListener('click', mrpSavePercentage);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function mrpSavePercentage() {
+  if (!mrpPctPreviewData) return;
+  const btn = document.getElementById('mrp-pct-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/mrp-analysis/forecast/percentage/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(mrpPctPreviewData),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Save failed');
+    document.getElementById('mrp-pct-result').insertAdjacentHTML('beforeend',
+      `<div class="toolbar-hint" style="margin-top:8px">Saved as forecast run #${json.data.runId}. <a href="javascript:void(0)" onclick="mrpShowTab('history')">View in Snapshot History</a></div>`);
+    btn.remove();
+    mrpPctPreviewData = null;
+  } catch (err) {
+    document.getElementById('mrp-pct-result').insertAdjacentHTML('beforeend', `<div class="sap-error">${esc(err.message)}</div>`);
+    btn.disabled = false; btn.textContent = 'Save Prediction';
+  }
+}
+
+// ── Sales Breakdown Forecast sub-tab ────────────────────────────────────────
+
+let mrpBomPreviewData = null;
+
+function mrpRenderBomTab() {
+  const body = document.getElementById('mrp-tab-body');
+  const now = new Date().getFullYear();
+  mrpBomPreviewData = null;
+  body.innerHTML = `
+    <div class="tf-row">
+      <div class="tf-field">
+        <label class="tf-label">Target Year</label>
+        <input class="tf-input" id="mrp-bom-target-year" type="number" value="${now + 1}">
+      </div>
+      <div class="tf-field" style="justify-content:flex-end">
+        <label class="tf-label">&nbsp;</label>
+        <button type="button" class="btn-export" id="mrp-bom-download-btn">Download Sales Template</button>
+      </div>
+    </div>
+    <div class="toolbar-hint">Fill in "Expected Sales Units" for each product you expect to sell in the target year, then upload the file below — raw materials are calculated automatically by exploding SAP's BOM down to profit centre 2012. Raw-material rows in the template can be left blank.</div>
+    <div class="tf-row" style="margin-top:10px">
+      <input type="file" id="mrp-bom-file-input" accept=".xlsx" style="display:none">
+      <button type="button" class="btn-secondary" id="mrp-bom-upload-btn">Upload &amp; Calculate</button>
+    </div>
+    <div id="mrp-bom-result" style="margin-top:14px"></div>`;
+
+  document.getElementById('mrp-bom-download-btn').addEventListener('click', mrpDownloadSalesTemplate);
+  document.getElementById('mrp-bom-upload-btn').addEventListener('click', () => document.getElementById('mrp-bom-file-input').click());
+  document.getElementById('mrp-bom-file-input').addEventListener('change', mrpUploadBomFile);
+}
+
+async function mrpDownloadSalesTemplate() {
+  const btn = document.getElementById('mrp-bom-download-btn');
+  btn.disabled = true; btn.textContent = 'Downloading…';
+  try {
+    const res = await fetch('/api/mrp-analysis/products/export');
+    if (!res.ok) throw new Error('Download failed.');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mrp-sales-forecast-template_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Download Sales Template';
+  }
+}
+
+async function mrpUploadBomFile() {
+  const fileInput = document.getElementById('mrp-bom-file-input');
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const targetYear = Number(document.getElementById('mrp-bom-target-year').value);
+  const resultEl = document.getElementById('mrp-bom-result');
+  const uploadBtn = document.getElementById('mrp-bom-upload-btn');
+  mrpBomPreviewData = null;
+
+  if (!targetYear) {
+    resultEl.innerHTML = '<div class="sap-error">Enter a target year first.</div>';
+    fileInput.value = '';
+    return;
+  }
+
+  uploadBtn.disabled = true; uploadBtn.textContent = 'Calculating…';
+  resultEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Exploding BOM — this can take a few seconds for a large sales list…</div>';
+
+  try {
+    const res = await fetch(`/api/mrp-analysis/forecast/bom/upload?targetYear=${encodeURIComponent(targetYear)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Upload failed.');
+
+    mrpBomPreviewData = { targetYear: json.data.targetYear, products: json.data.products, rawMaterials: json.data.rawMaterials };
+
+    const failed = (json.data.results || []).filter(r => !r.success);
+    const parts = [];
+    parts.push(`<div class="toolbar-hint">${json.data.succeeded} of ${json.data.total} rows had a valid Expected Sales Units value.</div>`);
+    if (failed.length) {
+      parts.push(`<div class="sap-error">${failed.length} row(s) had a problem:<ul style="margin:6px 0 0;padding-left:18px">${failed.map(r => `<li>Row ${r.row}: ${esc(r.error)}</li>`).join('')}</ul></div>`);
+    }
+    if (json.data.unresolved.length) {
+      parts.push(`<div class="sap-error">${json.data.unresolved.length} material(s) couldn't be fully resolved to a raw material (a BOM cycle, or the explosion went deeper than expected) — included in the totals below, but worth checking in SAP: ${json.data.unresolved.map(esc).join(', ')}</div>`);
+    }
+    if (!json.data.rawMaterials.length) {
+      parts.push('<div class="sap-empty">No raw materials came back from the BOM explosion.</div>');
+    } else {
+      parts.push(`
+        <div style="overflow-x:auto;margin-top:10px">
+          <table class="pn-batch-table admin-table">
+            <thead><tr><th>Raw Material</th><th>Predicted Qty for ${json.data.targetYear}</th><th>Uom</th></tr></thead>
+            <tbody>
+              ${json.data.rawMaterials.map(r => `
+                <tr class="admin-row">
+                  <td><strong>${esc(r.material)}</strong></td>
+                  <td>${Number(r.quantity).toLocaleString()}</td>
+                  <td>${esc(r.uom || '-')}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="tf-row" style="margin-top:10px">
+          <button type="button" class="btn-submit" id="mrp-bom-save-btn">Save Prediction</button>
+        </div>`);
+    }
+    resultEl.innerHTML = parts.join('');
+    const saveBtn = document.getElementById('mrp-bom-save-btn');
+    if (saveBtn) saveBtn.addEventListener('click', mrpSaveBom);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  } finally {
+    uploadBtn.disabled = false; uploadBtn.textContent = 'Upload & Calculate';
+    fileInput.value = '';
+  }
+}
+
+async function mrpSaveBom() {
+  if (!mrpBomPreviewData) return;
+  const btn = document.getElementById('mrp-bom-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/mrp-analysis/forecast/bom/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(mrpBomPreviewData),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Save failed');
+    document.getElementById('mrp-bom-result').insertAdjacentHTML('beforeend',
+      `<div class="toolbar-hint" style="margin-top:8px">Saved as forecast run #${json.data.runId}. <a href="javascript:void(0)" onclick="mrpShowTab('history')">View in Snapshot History</a></div>`);
+    btn.remove();
+    mrpBomPreviewData = null;
+  } catch (err) {
+    document.getElementById('mrp-bom-result').insertAdjacentHTML('beforeend', `<div class="sap-error">${esc(err.message)}</div>`);
+    btn.disabled = false; btn.textContent = 'Save Prediction';
+  }
+}
+
+// ── Snapshot History sub-tab ─────────────────────────────────────────────────
+// Every run is an immutable, dated snapshot (see log.MrpForecastRun) — this tab is read-only,
+// no edit/delete affordance for any listed run.
+
+async function mrpRenderHistoryTab() {
+  const body = document.getElementById('mrp-tab-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const res = await fetch('/api/mrp-analysis/forecast/runs');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load forecast runs');
+    const runs = json.data;
+
+    if (!runs.length) {
+      body.innerHTML = '<div class="sap-empty">No forecast snapshots saved yet — run a Percentage or Sales Breakdown forecast and save it.</div>';
+      return;
+    }
+
+    body.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Run</th><th>Target Year</th><th>Method</th><th>Calculated On</th><th>By</th><th></th></tr></thead>
+          <tbody>
+            ${runs.map(r => `
+              <tr class="admin-row">
+                <td>#${r.RunId}</td>
+                <td>${r.TargetYear}</td>
+                <td>${r.Method === 'BomBreakdown' ? 'Sales Breakdown' : `Percentage (baseline ${r.BaselineYear ?? '-'}, ${r.PercentageChange ?? 0}%)`}</td>
+                <td>${formatDisplayDate(r.CreatedAtUtc)}</td>
+                <td>${esc(r.CreatedBy || '-')}</td>
+                <td><button type="button" class="btn-secondary mrp-history-view-btn" data-run-id="${r.RunId}" style="padding:3px 10px;font-size:11px">View</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div id="mrp-history-detail" style="margin-top:14px"></div>`;
+
+    document.querySelectorAll('.mrp-history-view-btn').forEach(btn => {
+      btn.addEventListener('click', () => mrpViewRunDetail(btn.dataset.runId));
+    });
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function mrpViewRunDetail(runId) {
+  const detailEl = document.getElementById('mrp-history-detail');
+  detailEl.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
+  try {
+    const res = await fetch(`/api/mrp-analysis/forecast/runs/${runId}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load run detail');
+    const run = json.data;
+
+    detailEl.innerHTML = `
+      <div class="tf-section-label">Run #${run.RunId} — ${run.TargetYear} (${run.Method === 'BomBreakdown' ? 'Sales Breakdown' : 'Percentage'})</div>
+      ${run.Method === 'BomBreakdown' && run.products.length ? `
+      <div class="tf-section-label" style="font-size:11px">Sales Input</div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Product</th><th>Expected Sales Units</th></tr></thead>
+          <tbody>
+            ${run.products.map(p => `
+              <tr class="admin-row">
+                <td><strong>${esc(p.Material)}</strong>${p.MaterialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(p.MaterialText)}</div>` : ''}</td>
+                <td>${Number(p.ExpectedSalesUnits).toLocaleString()}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : ''}
+      <div class="tf-section-label" style="font-size:11px">Predicted Raw Materials</div>
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Predicted Qty</th><th>Uom</th></tr></thead>
+          <tbody>
+            ${run.materials.map(m => `
+              <tr class="admin-row">
+                <td><strong>${esc(m.Material)}</strong>${m.MaterialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.MaterialText)}</div>` : ''}</td>
+                <td>${Number(m.PredictedQty).toLocaleString()}</td>
+                <td>${esc(m.Uom || '-')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (err) {
+    detailEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
 }

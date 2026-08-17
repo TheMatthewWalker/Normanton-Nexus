@@ -146,3 +146,35 @@ describe('postChangeValuationClass', () => {
     await expect(sap.postChangeValuationClass({}, {})).rejects.toBe(err);
   });
 });
+
+describe('MRP Analysis client functions', () => {
+  test('getConsumptionByYear takes no query params', async () => {
+    clientMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
+    await sap.getConsumptionByYear({});
+    expect(clientMock.get.mock.calls[0][0]).toBe('/api/mrp-analysis/consumption-by-year');
+  });
+
+  test('getGoodsReceiptHistory passes sinceDate as a query param', async () => {
+    clientMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
+    await sap.getGoodsReceiptHistory({}, '01.01.2021');
+    expect(clientMock.get.mock.calls[0][1].params).toEqual({ sinceDate: '01.01.2021' });
+  });
+
+  test('getGoodsReceiptHistory omits sinceDate when not given', async () => {
+    clientMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
+    await sap.getGoodsReceiptHistory({});
+    expect(clientMock.get.mock.calls[0][1].params).toEqual({ sinceDate: undefined });
+  });
+
+  test('postExplodeBom posts the body with auth headers and unwraps the success envelope', async () => {
+    clientMock.post.mockResolvedValueOnce({ data: { success: true, data: { rawMaterials: [] } } });
+    const body = { Items: [{ Material: 'FG1', Quantity: 10 }] };
+    const result = await sap.postExplodeBom({}, body);
+    expect(clientMock.post.mock.calls[0]).toEqual([
+      '/api/mrp-analysis/explode-bom',
+      body,
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.any(String) }) }),
+    ]);
+    expect(result).toEqual({ rawMaterials: [] });
+  });
+});

@@ -68,7 +68,8 @@ import productionScheduleRoutes, { runProductionScheduleOtifDiff } from './route
 import salesRoutes              from './routes/sales.js';
 import packagingRoutes          from './routes/packaging.js';
 import sqlQueriesRoutes        from './routes/sqlqueries.js';
-import { runFullRefresh, runTurnsValClassRefresh } from './routes/performancesync.js';
+import { runFullRefresh, runTurnsValClassRefresh, runMrpHistoryRefresh } from './routes/performancesync.js';
+import mrpAnalysisRoutes       from './routes/mrpanalysis.js';
 //import testOtifInsertRoutes     from './routes/test-otif-insert.js';
 import debugRoutes             from './routes/debugsap.js';
 
@@ -170,6 +171,17 @@ cron.schedule('45 5 * * *', () => {
   runTurnsValClassRefresh()
     .then(results => console.log('[cron] turns-valclass refresh complete', results))
     .catch(err => console.error('[cron] turns-valclass refresh failed', err));
+});
+
+// MRP Analysis history (consumption-by-year, goods-receipt-by-vendor) — weekly, not daily
+// like turns-valclass above: this is slow-changing history data, not a live operational
+// figure (see runMrpHistoryRefresh's own comment). Sunday 04:30, ahead of the Monday 05:56
+// PTFE Cycle Count job and clear of the 05:45 daily turns-valclass run.
+cron.schedule('30 4 * * 0', () => {
+  console.log('[cron] starting scheduled MRP Analysis history refresh');
+  runMrpHistoryRefresh()
+    .then(results => console.log('[cron] MRP Analysis history refresh complete', results))
+    .catch(err => console.error('[cron] MRP Analysis history refresh failed', err));
 });
 
 // Warehouse SAP sync (open picksheets -> DeliveryMain) — every hour at xx:55
@@ -485,6 +497,7 @@ app.use('/api/labels',        requireLogin,   labelsRoutes);
 app.use('/api/finance',       requireLogin,   financeRoutes);
 app.use('/api/notifications', requireLogin,   notificationsRoutes);
 app.use('/api/performance', requireLogin, performanceRoutes);
+app.use('/api/mrp-analysis', requireLogin, mrpAnalysisRoutes);
 app.use('/api/staging', requireLogin, stagingRoutes);
 app.use('/api/stockcount', requireLogin, stockCountRoutes);
 app.use('/api/consignment', requireLogin, consignmentRoutes);

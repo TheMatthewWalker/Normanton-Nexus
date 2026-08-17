@@ -190,6 +190,66 @@ async function doRunTurnsValClassRefresh(req) {
   return results;
 }
 
+// ── MRP Analysis history — weekly, not part of the 30-min runFullRefresh or the daily
+// TurnsValClass refresh above. This data (consumption-by-year, goods-receipt-by-vendor) is
+// slow-changing history, not a live operational figure, and both SAP pulls are unfiltered
+// bulk reads (see MrpAnalysisHelper's own comments on SapServer) — no value in running them
+// more than about once a week. Same shared-in-flight-promise guard as
+// runTurnsValClassRefresh, for the same reason (this can also be triggered manually from the
+// MRP Analysis screen's "Refresh Now" button, which could otherwise race the weekly cron).
+
+async function syncMrpHistory(req) {
+  const runId = await db.startRefresh('MrpAnalysisHistory');
+
+  try {
+    const [consumptionRows, receiptRows] = await Promise.all([
+      sap.getConsumptionByYear(req),
+      sap.getGoodsReceiptHistory(req),
+    ]);
+
+    // Plant is always 3012 for this app (see log.TurnsValClassSnapshot's own Plant column) —
+    // SapServer's MRP Analysis endpoints don't return it themselves since every RFC read
+    // behind them is already plant-filtered server-side.
+    await db.upsertMaterialConsumptionHistory(consumptionRows.map(r => ({
+      material:    r.material,
+      plant:       '3012',
+      fiscalYear:  r.fiscalYear,
+      consumedQty: r.qty,
+    })));
+
+    await db.upsertMaterialReceiptHistory(receiptRows.map(r => ({
+      material:        r.material,
+      plant:           '3012',
+      sapVendorNumber: r.vendor,
+      fiscalYear:      r.year,
+      receivedQty:     r.qty,
+      uom:             r.uom,
+    })));
+
+    const total = consumptionRows.length + receiptRows.length;
+    await db.completeRefresh(runId, total);
+    return { name: 'MrpAnalysisHistory', status: 'success', rowCount: total };
+  } catch (err) {
+    await db.failRefresh(runId, err.message);
+    return { name: 'MrpAnalysisHistory', status: 'failed', error: err.message };
+  }
+}
+
+let mrpHistoryRefreshPromise = null;
+
+export function runMrpHistoryRefresh(req) {
+  if (mrpHistoryRefreshPromise) {
+    console.log('[MrpAnalysisHistory] refresh already in progress — reusing in-flight run instead of starting a second one');
+    return mrpHistoryRefreshPromise;
+  }
+
+  mrpHistoryRefreshPromise = syncMrpHistory(req).finally(() => {
+    mrpHistoryRefreshPromise = null;
+  });
+
+  return mrpHistoryRefreshPromise;
+}
+
 export async function runFullRefresh(req) {
   
 const now = new Date();

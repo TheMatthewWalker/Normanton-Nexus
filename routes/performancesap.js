@@ -148,3 +148,34 @@ export const postChangeValuationClass = (req, body) =>
       }
       throw err;
     });
+
+// ── MRP Analysis ─────────────────────────────────────────────────────────────
+// Backs routes/mrpanalysis.js / runMrpHistoryRefresh (routes/performancesync.js).
+// See SapServer's MrpAnalysisController for the underlying RFC reads.
+
+export const getConsumptionByYear = (req) =>
+  client.get('/api/mrp-analysis/consumption-by-year', auth(req))
+    .then(unwrap)
+    .catch(err => {
+      console.error('SAP ERROR (ConsumptionByYear):', err.response?.data);
+      throw err;
+    });
+
+// sinceDate is optional, SAP dd.MM.yyyy — omit for a first-ever full-history sync.
+export const getGoodsReceiptHistory = (req, sinceDate) =>
+  client.get('/api/mrp-analysis/goods-receipt-history', {
+    ...auth(req), params: { sinceDate } })
+      .then(unwrap)
+      .catch(err => {
+      console.error('SAP ERROR (GoodsReceiptHistory):', err.response?.data);
+      throw err;
+    });
+
+// body: { Items: [{ Material, Quantity }] } — see BomExplosionRequest in SapServer.
+export const postExplodeBom = (req, body) =>
+  client.post('/api/mrp-analysis/explode-bom', body, auth(req))
+    .then(unwrap)
+    .catch(err => {
+      console.error('SAP ERROR (ExplodeBom):', err.response?.data);
+      throw err;
+    });

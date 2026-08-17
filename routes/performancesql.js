@@ -613,6 +613,221 @@ export async function upsertForecastAccuracyLog(rows) {
   ], actualRows);
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// MRP Analysis — log.MaterialConsumptionHistory / log.MaterialReceiptHistory /
+// log.MrpForecastRun(+Material/+Product)
+// ══════════════════════════════════════════════════════════════════════════
+// Backs the MRP Analysis screen's year-on-year trends and saved forecast
+// snapshots — see migrations/nexus_operations/20260817150000_mrp_analysis.cjs
+// for the full schema rationale and routes/performancesync.js's
+// runMrpHistoryRefresh for what populates the two history tables (both
+// upserted, never truncated — see that migration's own comment for why).
+
+// rows: [{ material, plant, fiscalYear, consumedQty }] — see
+// SapServer.MrpAnalysisController.GetConsumptionByYear.
+export async function upsertMaterialConsumptionHistory(rows) {
+  await upsertBatch('log.MaterialConsumptionHistory', [
+    ['Material',   'material',   sql.VarChar(18)],
+    ['Plant',      'plant',      sql.VarChar(4)],
+    ['FiscalYear', 'fiscalYear', sql.Int],
+  ], [
+    ['ConsumedQty', 'consumedQty', sql.Decimal(15, 3)],
+  ], rows);
+}
+
+// rows: [{ material, plant, sapVendorNumber, fiscalYear, receivedQty, uom }] — see
+// SapServer.MrpAnalysisController.GetGoodsReceiptHistory. VendorId is resolved here
+// (not by the caller) against log.Vendor.SapVendorNumber, one lookup shared across the whole
+// batch — left NULL when no matching vendor exists yet in Nexus (see the migration's own
+// comment: the row is still kept, keyed by SapVendorNumber, rather than dropped).
+export async function upsertMaterialReceiptHistory(rows) {
+  if (rows.length === 0) return;
+
+  const pool = await getPool();
+  const { recordset: vendorRows } = await pool.request()
+    .query('SELECT VendorId, SapVendorNumber FROM log.Vendor WHERE SapVendorNumber IS NOT NULL');
+  const vendorIdByNumber = new Map(vendorRows.map(v => [v.SapVendorNumber, v.VendorId]));
+
+  const withVendorId = rows.map(r => ({ ...r, vendorId: vendorIdByNumber.get(r.sapVendorNumber) ?? null }));
+
+  await upsertBatch('log.MaterialReceiptHistory', [
+    ['Material',        'material',        sql.VarChar(18)],
+    ['Plant',           'plant',           sql.VarChar(4)],
+    ['SapVendorNumber', 'sapVendorNumber', sql.VarChar(10)],
+    ['FiscalYear',      'fiscalYear',      sql.Int],
+  ], [
+    ['VendorId',    'vendorId',    sql.Int],
+    ['ReceivedQty', 'receivedQty', sql.Decimal(15, 3)],
+    ['Uom',         'uom',         sql.VarChar(3), null, 3],
+  ], withVendorId);
+}
+
+// Year-on-year consumption per material — the Trends sub-view's consumption series
+// (vendor-agnostic, same as SAP's own consumption tracking: a material's usage isn't
+// attributed to whichever vendor happened to supply it). materials optional filter, same
+// parameterised-IN-list convention as listOpenIncomingOrders/listDemandAdjustments above.
+export async function getConsumptionByYear(materials = null) {
+  const pool = await getPool();
+  const request = pool.request();
+  let whereSql = '';
+  if (materials && materials.length) {
+    const inClause = materials.map((m, i) => {
+      request.input(`cm${i}`, sql.NVarChar(18), m);
+      return `@cm${i}`;
+    }).join(',');
+    whereSql = `WHERE h.Material IN (${inClause})`;
+  }
+  const { recordset } = await request.query(`
+    SELECT h.Material, t.MaterialText, h.FiscalYear, h.ConsumedQty
+    FROM log.MaterialConsumptionHistory h
+    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material
+    ${whereSql}
+    ORDER BY h.Material, h.FiscalYear
+  `);
+  return recordset;
+}
+
+// Year-on-year goods-receipt (order quantity received) per material, resolvable per vendor —
+// the Trends sub-view's vendor-comparable series. Both filters optional and independent.
+export async function getReceiptHistoryByVendor(materials = null, vendorId = null) {
+  const pool = await getPool();
+  const request = pool.request();
+  const conditions = [];
+
+  if (materials && materials.length) {
+    const inClause = materials.map((m, i) => {
+      request.input(`rm${i}`, sql.NVarChar(18), m);
+      return `@rm${i}`;
+    }).join(',');
+    conditions.push(`h.Material IN (${inClause})`);
+  }
+  if (vendorId) {
+    request.input('vendorId', sql.Int, vendorId);
+    conditions.push('h.VendorId = @vendorId');
+  }
+  const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const { recordset } = await request.query(`
+    SELECT h.Material, t.MaterialText, h.VendorId, v.VendorName, h.SapVendorNumber, h.FiscalYear, h.ReceivedQty, h.Uom
+    FROM log.MaterialReceiptHistory h
+    LEFT JOIN log.Vendor v ON v.VendorId = h.VendorId
+    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material
+    ${whereSql}
+    ORDER BY h.Material, h.FiscalYear, v.VendorName
+  `);
+  return recordset;
+}
+
+// Saves one forecast calculation as a new, immutable snapshot — never updates an existing
+// RunId (see the migration's own comment: re-running a forecast must produce a new dated run,
+// not overwrite the last one, so estimates can be compared over time). materials/products
+// child rows are always fresh inserts against a brand-new RunId, so upsertBatch's
+// insertOnly:true (skip the UPDATE branch entirely) is both correct and the batched-INSERT
+// fast path, not just a workaround.
+export async function createMrpForecastRun({ targetYear, method, baselineYear = null, percentageChange = null, createdBy, materials, products = null }) {
+  const pool = await getPool();
+
+  const { recordset } = await pool.request()
+    .input('targetYear',       sql.Int, targetYear)
+    .input('method',           sql.VarChar(20), method)
+    .input('baselineYear',     sql.Int, baselineYear)
+    .input('percentageChange', sql.Decimal(9, 2), percentageChange)
+    .input('createdBy',        sql.NVarChar(100), createdBy || null)
+    .query(`
+      INSERT INTO log.MrpForecastRun (TargetYear, Method, BaselineYear, PercentageChange, CreatedBy)
+      OUTPUT INSERTED.RunId
+      VALUES (@targetYear, @method, @baselineYear, @percentageChange, @createdBy)
+    `);
+  const runId = recordset[0].RunId;
+
+  const materialRows = (materials || []).map(m => ({ runId, material: m.material, predictedQty: m.predictedQty, uom: m.uom || null }));
+  await upsertBatch('log.MrpForecastRunMaterial', [
+    ['RunId',    'runId',    sql.Int],
+    ['Material', 'material', sql.VarChar(18)],
+  ], [
+    ['PredictedQty', 'predictedQty', sql.Decimal(15, 3)],
+    ['Uom',           'uom',          sql.VarChar(3), null, 3],
+  ], materialRows, { insertOnly: true });
+
+  if (products && products.length) {
+    const productRows = products.map(p => ({ runId, material: p.material, expectedSalesUnits: p.expectedSalesUnits }));
+    await upsertBatch('log.MrpForecastRunProduct', [
+      ['RunId',    'runId',    sql.Int],
+      ['Material', 'material', sql.VarChar(18)],
+    ], [
+      ['ExpectedSalesUnits', 'expectedSalesUnits', sql.Decimal(15, 3)],
+    ], productRows, { insertOnly: true });
+  }
+
+  return runId;
+}
+
+export async function listMrpForecastRuns(targetYear = null) {
+  const pool = await getPool();
+  const request = pool.request();
+  let whereSql = '';
+  if (targetYear) {
+    request.input('targetYear', sql.Int, targetYear);
+    whereSql = 'WHERE TargetYear = @targetYear';
+  }
+  const { recordset } = await request.query(`
+    SELECT RunId, TargetYear, Method, BaselineYear, PercentageChange, CreatedBy, CreatedAtUtc
+    FROM log.MrpForecastRun
+    ${whereSql}
+    ORDER BY CreatedAtUtc DESC
+  `);
+  return recordset;
+}
+
+// Every material at plant 3012, for the Sales Breakdown method's downloadable template —
+// see routes/mrpanalysis.js's GET /products/export. TurnsValClassSnapshot already covers
+// every material at the plant, not just procurement-relevant ones (its own daily sync calls
+// SapServer with no filter — see doRunTurnsValClassRefresh in performancesync.js), so this is
+// a genuinely full product list, not scoped to a "finished goods" subset the schema has no
+// clean way to identify — the operator filling in the download just leaves raw-material rows
+// blank.
+export async function listMaterialsForSalesExport() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT Material, MaterialText, MaterialType, ProfitCentre, Uom
+    FROM log.TurnsValClassSnapshot
+    ORDER BY Material
+  `);
+  return recordset;
+}
+
+export async function getMrpForecastRunDetail(runId) {
+  const pool = await getPool();
+
+  const { recordset: runRows } = await pool.request()
+    .input('runId', sql.Int, runId)
+    .query('SELECT RunId, TargetYear, Method, BaselineYear, PercentageChange, CreatedBy, CreatedAtUtc FROM log.MrpForecastRun WHERE RunId = @runId');
+  const run = runRows[0];
+  if (!run) return null;
+
+  const { recordset: materials } = await pool.request()
+    .input('runId', sql.Int, runId)
+    .query(`
+      SELECT m.Material, t.MaterialText, m.PredictedQty, m.Uom
+      FROM log.MrpForecastRunMaterial m
+      LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = m.Material
+      WHERE m.RunId = @runId
+      ORDER BY m.Material
+    `);
+
+  const { recordset: products } = await pool.request()
+    .input('runId', sql.Int, runId)
+    .query(`
+      SELECT p.Material, t.MaterialText, p.ExpectedSalesUnits
+      FROM log.MrpForecastRunProduct p
+      LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
+      WHERE p.RunId = @runId
+      ORDER BY p.Material
+    `);
+
+  return { ...run, materials, products };
+}
+
 // ── Valuation class change audit ────────────────────────────────────────────
 // Append-only — never truncated. One header row per POST, one detail row per
 // material in that batch. Called from the /change-valuation-class route, not

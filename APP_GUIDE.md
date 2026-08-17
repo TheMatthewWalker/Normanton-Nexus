@@ -154,7 +154,34 @@ Search across all shipments by reference number, destination, date range, or sta
 Manage customs documentation batches for shipments requiring export clearance.
 
 #### Material Planning *(LOG_MRP)*
-Functions for MRP (Material Requirements Planning) related to logistics. Manages delivery schedules and planned inbound material movements.
+MRP (Material Requirements Planning) for raw materials — vendor data, safety-stock ordering, stock valuation, consumption forecasting, and delivery scheduling for planned inbound material movements.
+
+**Vendor Master Data**
+Lead time, Incoterms, and minimum/maximum order quantities per vendor and per vendor+material.
+
+**Vendor Consignment Tracker**
+Delivered/stock/declared balance per vendor for consignment-supplied materials, an allocation proposal builder (FEFO/FIFO), and a printable supplier declaration.
+
+**MRP System**
+Materials projected to fall below their safety stock floor before a fresh order could arrive — the day-to-day ordering workflow (Tracked Orders, Inbound Log, Mark Received).
+
+**Stock Turns & Valuation**
+Full material list — stock quantity, valuation class, turns, and days-in-stock, filterable.
+
+**Change Valuation Class**
+Moves stock to an order, changes its valuation class in SAP, then moves stock back.
+
+**Stock History & Forecast**
+13-month consumption history vs. SAP's demand forecast and Nexus's own seasonal-index prediction, by material — filterable by material search, MRP controller, or vendor (shows every material a vendor supplies side by side).
+
+**MRP Analysis**
+Year-on-year consumption and order-received quantities per material, comparable across vendors, for forecasting and setting blanket purchase order quantities. Two ways to turn a sales outlook into a predicted raw-material requirement, both saved as a dated, permanent snapshot rather than overwriting the last calculation: a quick percentage-increase extrapolation against a chosen baseline year's consumption, or a full sales-unit breakdown (download every product, fill in expected sales units, re-upload) exploded down through SAP's multi-level Bill of Materials to raw materials and summed.
+
+**Demand Adjustments**
+Manual usage overrides for known events — machine downtime, extra production, or a standing forecast correction — applied on top of the predicted usage feeding both the forecast chart and the MRP ordering engine.
+
+**Isopar Tied Oil**
+Daily meter-reading log, weekday/weekend planning rate, and HMRC Tied Oil declarations for Material 10010.
 
 #### Reports *(LOG_ADMIN, LOG_MRP, or LOG_REPORTS)*
 
