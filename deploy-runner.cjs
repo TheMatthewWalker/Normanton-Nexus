@@ -150,6 +150,14 @@ for (const level of ['log', 'warn', 'error']) {
   };
 }
 
+// dbo.ScheduledDeployments lives on a shared corporate SQL DC in the EU, ~1hr
+// ahead of true UK wall-clock time (CET/CEST vs GMT/BST) and not something
+// this script can change — see the matching comment in routes/deploy.js
+// (SQL SERVER'S OWN CLOCK) for the full story. Since the UK and the EU both
+// shift DST on the same calendar dates, this fixed offset always holds. Keep
+// in sync with the copies in routes/deploy.js and server.js if it changes.
+const SITE_NOW_SQL = 'DATEADD(HOUR, -1, GETDATE())';
+
 const REPO_DIR       = __dirname;
 const TOKEN_PATH      = path.join(REPO_DIR, '.deploykey', 'github_token');
 const ASKPASS_PATH    = path.join(REPO_DIR, 'deploy-askpass.cmd');
@@ -394,7 +402,7 @@ async function main() {
         .input('id',  sql.Int, deploymentID)
         .input('err', sql.NVarChar(sql.MAX), String(detail).slice(0, 8000))
         .query(`UPDATE Nexus.dbo.ScheduledDeployments
-                SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
+                SET Status = 'failed', CompletedAt = ${SITE_NOW_SQL}, ErrorMessage = @err
                 WHERE DeploymentID = @id`);
       await audit('DEPLOY_FAILED', `Deployment #${deploymentID} failed: ${String(detail).slice(0, 400)}`);
       await notifySuperadminsDeployFailed(pool, deploymentID, detail);
@@ -541,7 +549,7 @@ async function main() {
       .input('id',  sql.Int, deploymentID)
       .input('log', sql.NVarChar(sql.MAX), combinedLog.slice(0, 8000))
       .query(`UPDATE Nexus.dbo.ScheduledDeployments
-              SET Status = 'completed', CompletedAt = GETDATE(), OutputLog = @log
+              SET Status = 'completed', CompletedAt = ${SITE_NOW_SQL}, OutputLog = @log
               WHERE DeploymentID = @id`);
     await audit('DEPLOY_COMPLETED',
       `Deployment #${deploymentID} completed (${gitRef})${sapResult.skipped ? '' : ' + SapServer redeployed'}`);

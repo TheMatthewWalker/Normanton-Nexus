@@ -263,6 +263,20 @@ cron.schedule('56 5 * * 1', () => {
     .catch(err => console.error('[cron] weekly PTFE cycle count check failed', err));
 });
 
+// dbo.ScheduledDeployments lives on a shared corporate SQL DC in the EU, not
+// a box co-located with the Normanton (UK) site — its own GETDATE() reads
+// about an hour ahead of true UK wall-clock time (CET/CEST vs GMT/BST), and
+// that box's timezone can't be changed (other applications depend on it).
+// Since the UK and the EU both shift DST on the same calendar dates, the DC
+// is ALWAYS exactly one hour ahead of the UK site, year-round, so this fixed
+// DATEADD reliably cancels that offset without needing SQL Server's AT TIME
+// ZONE / time zone database. Used everywhere a query below needs "the
+// current UK wall-clock time" — see the matching comment in routes/deploy.js
+// for the full story (this used to make just-scheduled deployments fire
+// almost immediately instead of at their scheduled time) and keep this in
+// sync with the copy there and in deploy-runner.cjs if it ever changes.
+const SITE_NOW_SQL = 'DATEADD(HOUR, -1, GETDATE())';
+
 // Runs `schtasks args...` and resolves { ok, stdout, stderr }, never
 // rejects — mirrors restart-lib.cjs's runCommand() (async execFile, no
 // shell, own timeout) so a hung schtasks.exe can never block this cron
@@ -322,9 +336,9 @@ cron.schedule('*/15 * * * * *', async () => {
     const pool = await configJS.getNexusPool();
     const due = await pool.request().query(`
       UPDATE dbo.ScheduledDeployments
-      SET Status = 'running', StartedAt = GETDATE()
+      SET Status = 'running', StartedAt = ${SITE_NOW_SQL}
       OUTPUT INSERTED.DeploymentID
-      WHERE Status = 'pending' AND ScheduledAt <= GETDATE()
+      WHERE Status = 'pending' AND ScheduledAt <= ${SITE_NOW_SQL}
     `);
     for (const row of due.recordset) {
       const taskName = `NNDeployRunner_${row.DeploymentID}`;
@@ -355,7 +369,7 @@ cron.schedule('*/15 * * * * *', async () => {
           .input('id',  sql.Int, row.DeploymentID)
           .input('err', sql.NVarChar(sql.MAX), detail)
           .query(`UPDATE dbo.ScheduledDeployments
-                  SET Status = 'failed', CompletedAt = GETDATE(), ErrorMessage = @err
+                  SET Status = 'failed', CompletedAt = ${SITE_NOW_SQL}, ErrorMessage = @err
                   WHERE DeploymentID = @id`);
         await notifyDeployFailed(pool, row.DeploymentID, detail);
       }
@@ -378,10 +392,10 @@ cron.schedule('*/5 * * * *', async () => {
     const pool = await configJS.getNexusPool();
     const stuck = await pool.request().query(`
       UPDATE dbo.ScheduledDeployments
-      SET Status = 'failed', CompletedAt = GETDATE(),
+      SET Status = 'failed', CompletedAt = ${SITE_NOW_SQL},
           ErrorMessage = 'Stuck at running for over 20 minutes with no completion — deploy-runner.cjs likely crashed, was killed, or the host restarted mid-deployment. Check deploy-runner.log and confirm the service manually.'
       OUTPUT INSERTED.DeploymentID
-      WHERE Status = 'running' AND StartedAt <= DATEADD(minute, -20, GETDATE())
+      WHERE Status = 'running' AND StartedAt <= DATEADD(minute, -20, ${SITE_NOW_SQL})
     `);
     for (const row of stuck.recordset) {
       await notifyDeployFailed(pool, row.DeploymentID,

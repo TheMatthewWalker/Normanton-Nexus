@@ -16,19 +16,36 @@
  * TIMEZONE HANDLING — important, and the reason ScheduledAt is treated
  * specially throughout this file: dbo.ScheduledDeployments.ScheduledAt
  * is a plain SQL Server DATETIME column, which has NO timezone concept, and
- * the cron checker in server.js compares it directly against GETDATE(), which
- * returns the SQL Server machine's own local wall-clock time. So ScheduledAt
- * has to be written as a literal local wall-clock value in the SAME frame as
- * GETDATE() — NOT converted to/from UTC via a JS Date object. Round-tripping
- * a JS Date through node-mssql (which defaults to useUTC: true) silently
- * shifts the stored value by the server's UTC offset (e.g. an admin entering
- * 15:10 BST would get "14:10:00" stored, so the cron checker would fire an
- * hour early). To avoid that, ScheduledAt is written via a hand-built literal
- * string (CONVERT(datetime, @str, 120)) and read back the same way
- * (CONVERT(varchar, ScheduledAt, 126)) — never through a JS Date object on
- * either side of the SQL boundary. All OTHER timestamp columns here
- * (CreatedAt/StartedAt/CompletedAt/CancelledAt) are always written via
- * GETDATE() directly in SQL, so they're unaffected by this issue.
+ * the cron checker in server.js compares it directly against "now" in SQL,
+ * so ScheduledAt has to be written as a literal wall-clock value in the SAME
+ * frame that comparison uses — NOT converted to/from UTC via a JS Date
+ * object. Round-tripping a JS Date through node-mssql (which defaults to
+ * useUTC: true) silently shifts the stored value by the server's UTC offset
+ * (e.g. an admin entering 15:10 BST would get "14:10:00" stored, so the cron
+ * checker would fire an hour early). To avoid that, ScheduledAt is written
+ * via a hand-built literal string (CONVERT(datetime, @str, 120)) and read
+ * back the same way (CONVERT(varchar, ScheduledAt, 126)) — never through a
+ * JS Date object on either side of the SQL boundary.
+ *
+ * SQL SERVER'S OWN CLOCK — dbo.ScheduledDeployments now lives on a shared
+ * corporate SQL DC in the EU, not a box co-located with the Normanton (UK)
+ * site — confirmed directly: GETDATE() there reads about an hour AHEAD of
+ * true UK wall-clock time (it's on CET/CEST, not GMT/BST), which used to
+ * make the cron checker treat a just-scheduled future deployment as already
+ * due and fire it almost immediately. Since the UK and the EU both shift
+ * DST on the same calendar dates (last Sunday of March/October), the DC is
+ * ALWAYS exactly one hour ahead of the UK site, year-round — so bare
+ * GETDATE() is never used directly for "now" in this file; every read/write
+ * that means "the current UK wall-clock time" goes through SITE_NOW_SQL
+ * (DATEADD(HOUR, -1, GETDATE())) instead, which cancels that fixed offset.
+ * The DC's own timezone can't be changed (shared corporate resource — other
+ * applications depend on it), so this correction has to live here. (A more
+ * "proper" fix would be SQL Server's AT TIME ZONE, but that needs the
+ * server's Windows time zone database and a version guarantee this shared
+ * box can't offer — a fixed DATEADD needs neither.) deploy-runner.cjs and
+ * server.js each keep their own copy of this same SITE_NOW_SQL constant —
+ * see the matching comment in each of those files if this ever needs to
+ * change.
  *
  * Mount in server.js:
  *   import deployRoutes from './routes/deploy.js';
@@ -49,6 +66,12 @@ import sql     from 'mssql';
 import { getNexusPool } from '../config.js';
 
 const router = express.Router();
+
+// The DC hosting this table's own GETDATE() runs ~1hr ahead of the UK site
+// (shared corporate SQL DC, not co-located) — see the TIMEZONE HANDLING /
+// SQL SERVER'S OWN CLOCK comment at the top of this file. Use this wherever
+// a query needs "the current UK wall-clock time," never bare GETDATE().
+const SITE_NOW_SQL = 'DATEADD(HOUR, -1, GETDATE())';
 
 function requireSuperadmin(req, res, next) {
   if (req.session?.user?.role === 'superadmin') return next();
@@ -149,9 +172,12 @@ router.post('/', requireSuperadmin, async (req, res) => {
   // its full advertised warning window to display before the restart fires
   // (previously nothing stopped scheduling e.g. a 5-minute warning only 30
   // seconds out, so the restart could hit with barely any notice at all).
-  // Assumes this Node process runs in the same local timezone as the SQL
-  // Server machine and the people scheduling deployments (true for this
-  // on-prem, single-site setup). See timezone note at the top of this file.
+  // Uses Date.now() rather than SQL Server's GETDATE(), unlike the actual
+  // firing comparison — this Node process runs ON the Normanton (UK) site
+  // itself, alongside the people scheduling deployments, so its own local
+  // clock IS the site's wall-clock time; it's the SQL Server box (a shared
+  // corporate EU DC — see SQL SERVER'S OWN CLOCK above) whose clock needs
+  // correcting, not this one.
   const leadMs = new Date(scheduledAt).getTime() - Date.now();
   if (leadMs < warnMin * 60_000) {
     return res.status(400).json({
@@ -183,15 +209,15 @@ router.post('/', requireSuperadmin, async (req, res) => {
       .input('createdByUser', sql.NVarChar(80),  actor)
       .query(`
         INSERT INTO dbo.ScheduledDeployments
-          (ScheduledAt, GitRef, WarningMinutes, Notes, CreatedByUserID, CreatedByUsername)
+          (ScheduledAt, GitRef, WarningMinutes, Notes, CreatedByUserID, CreatedByUsername, CreatedAt)
         OUTPUT INSERTED.DeploymentID
-        VALUES (CONVERT(datetime, @scheduledAt, 120), @gitRef, @warningMin, @notes, @createdByID, @createdByUser)
+        VALUES (CONVERT(datetime, @scheduledAt, 120), @gitRef, @warningMin, @notes, @createdByID, @createdByUser, ${SITE_NOW_SQL})
       `);
 
     const deploymentID = result.recordset[0].DeploymentID;
 
     await audit('DEPLOY_SCHEDULED', actor,
-      `Scheduled deployment #${deploymentID}: ${branch} @ ${sqlLiteral} (server local time)`, req);
+      `Scheduled deployment #${deploymentID}: ${branch} @ ${sqlLiteral} (site local time)`, req);
 
     res.json({ success: true, deploymentID });
 
@@ -217,7 +243,7 @@ router.post('/:id/cancel', requireSuperadmin, async (req, res) => {
       .input('actor', sql.NVarChar(80), actor)
       .query(`
         UPDATE dbo.ScheduledDeployments
-        SET Status = 'cancelled', CancelledAt = GETDATE(), CancelledBy = @actor
+        SET Status = 'cancelled', CancelledAt = ${SITE_NOW_SQL}, CancelledBy = @actor
         OUTPUT INSERTED.DeploymentID
         WHERE DeploymentID = @id AND Status = 'pending'
       `);

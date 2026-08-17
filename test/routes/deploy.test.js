@@ -123,6 +123,38 @@ describe('POST / — the literal timezone-safe string sent to SQL', () => {
   });
 });
 
+describe('SQL SERVER\'S OWN CLOCK — corrects for the shared EU DC running ~1hr ahead of the UK site', () => {
+  // dbo.ScheduledDeployments lives on a shared corporate SQL DC whose own
+  // GETDATE() reads ~1hr ahead of true UK wall-clock time (see the SQL
+  // SERVER'S OWN CLOCK comment at the top of routes/deploy.js) — bare
+  // GETDATE() used to make just-scheduled future deployments look already
+  // due and fire almost immediately. Every write of "now" in this file must
+  // go through the DATEADD(HOUR, -1, GETDATE()) correction instead.
+  test('POST / stamps CreatedAt via the corrected expression, not bare GETDATE()', async () => {
+    queueResults({ recordset: [{ DeploymentID: 42 }] }, { recordset: [] });
+    await request(appSuperadmin).post('/').send({
+      scheduledAt: localDateTimeString(60), gitRef: 'main', warningMinutes: 15,
+    });
+
+    const insertSql = dbRequest.query.mock.calls[0][0];
+    const corrected = insertSql.split('DATEADD(HOUR, -1, GETDATE())').length - 1;
+    const bareTotal = insertSql.split('GETDATE()').length - 1;
+    expect(corrected).toBeGreaterThan(0);
+    expect(bareTotal).toBe(corrected); // every GETDATE() call is wrapped in the correction
+  });
+
+  test('POST /:id/cancel stamps CancelledAt via the corrected expression, not bare GETDATE()', async () => {
+    queueResults({ recordset: [{ DeploymentID: 5 }] }, { recordset: [] });
+    await request(appSuperadmin).post('/5/cancel');
+
+    const cancelSql = dbRequest.query.mock.calls[0][0];
+    const corrected = cancelSql.split('DATEADD(HOUR, -1, GETDATE())').length - 1;
+    const bareTotal = cancelSql.split('GETDATE()').length - 1;
+    expect(corrected).toBeGreaterThan(0);
+    expect(bareTotal).toBe(corrected);
+  });
+});
+
 describe('POST /:id/cancel', () => {
   test('400s on a non-numeric id', async () => {
     const res = await request(appSuperadmin).post('/not-a-number/cancel');
