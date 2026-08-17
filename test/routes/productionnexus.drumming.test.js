@@ -65,14 +65,18 @@ describe('GET /process/DR/bom-preview', () => {
     expect(res.status).toBe(400);
   });
 
-  test('returns the live BOM component list', async () => {
-    axiosMock.request.mockResolvedValueOnce({ data: { success: true, data: [
-      { material: '30005R', plant: '3012', component: 'M1', item: '0010', componentQty: 1, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312' },
-    ] } });
+  test('returns the live BOM component list, enriched with each component\'s profit centre / raw-material flag', async () => {
+    axiosMock.request
+      .mockResolvedValueOnce({ data: { success: true, data: [
+        { material: '30005R', plant: '3012', component: 'M1', item: '0010', componentQty: 1, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312' },
+      ] } })
+      .mockResolvedValueOnce({ data: { success: true, data: [
+        { material: 'M1', profitCentre: '0000002012' }, // raw material
+      ] } });
     const res = await request(app).get('/process/DR/bom-preview?material=30005R');
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual([
-      { material: '30005R', plant: '3012', component: 'M1', item: '0010', componentQty: 1, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312' },
+      { material: '30005R', plant: '3012', component: 'M1', item: '0010', componentQty: 1, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312', profitCentre: '2012', isRawMaterial: true },
     ]);
   });
 

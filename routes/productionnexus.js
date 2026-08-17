@@ -731,7 +731,7 @@ router.post('/process/:processCode/draft', async (req, res) => {
     if (!METRE_PROCESSES.has(code))
       return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
 
-    const { material, machineID, parentBatches = [], notes } = req.body;
+    const { material, machineID, parentBatches = [], rawMaterialBatches = [], notes } = req.body;
     if (!material)
       return res.status(400).json({ success: false, error: 'material is required.' });
 
@@ -776,6 +776,9 @@ router.post('/process/:processCode/draft', async (req, res) => {
         .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,ParentTubID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@ptub,@uid)`);
     }
 
+    if (BOM_VALIDATED_PROCESSES.has(code))
+      await persistRawMaterialBatches(pool, code, recordID, uid, rawMaterialBatches);
+
     await writeEvent(pool, code, recordID, 'STARTED', `${code} open entry created: ${material}`, 0, uid);
 
     // Informational only at draft time (clarification #2) — a mix not yet
@@ -789,13 +792,18 @@ router.post('/process/:processCode/draft', async (req, res) => {
       // Download and save the BOM into the job the moment its material is
       // known, then warn (non-blocking, matching the EX/MX precedent above)
       // on any traceability link whose own material isn't a component of it
-      // — see validateTraceabilityAgainstBom. Hard-blocked later at
-      // completion time, not here (see /process/:processCode/complete).
+      // — see validateTraceabilityAgainstBom — and on any raw-material BOM
+      // component still missing its hand-written batch number — see
+      // validateRawMaterialBatches. Hard-blocked later at completion time,
+      // not here (see /process/:processCode/complete).
       try {
         const bomRows = await fetchBom(material);
         await persistBomSnapshot(pool, code, recordID, material, bomRows);
-        const problems = await validateTraceabilityAgainstBom(pool, parentBatches, bomRows);
-        warnings = problems.map(p => p.reason);
+        const [linkProblems, rawProblems] = await Promise.all([
+          validateTraceabilityAgainstBom(pool, parentBatches, bomRows),
+          validateRawMaterialBatches(pool, code, recordID, bomRows),
+        ]);
+        warnings = [...linkProblems, ...rawProblems].map(p => p.reason);
       } catch (err) {
         warnings = [`Unable to download BOM for ${material} — SAP BOM lookup failed (${err.message}). Traceability cannot be verified yet.`];
       }
@@ -1007,8 +1015,13 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
       const problems = await validateTraceabilityAgainstBom(pool, traceRows.recordset, bomRows);
       const blocking = await unresolvedProblems(pool, code, recordID, problems);
 
-      if (blocking.length) {
-        const errMsg = `Blocked: ${blocking.map(p => p.reason).join(' ')} Raise a concession from the traceability screen, or use "Refresh BOM" if SAP's BOM has since been corrected.`;
+      // Raw-material BOM components (profit centre RAW_MATERIAL_PROFIT_CENTRE)
+      // have no portal record to concede against — a missing hand-written
+      // batch number always blocks, never bypassable via a concession.
+      const rawProblems = await validateRawMaterialBatches(pool, code, recordID, bomRows);
+
+      if (blocking.length || rawProblems.length) {
+        const errMsg = `Blocked: ${[...blocking, ...rawProblems].map(p => p.reason).join(' ')}${blocking.length ? ' Raise a concession from the traceability screen, or use "Refresh BOM" if SAP\'s BOM has since been corrected.' : ''}`;
         return await markSapFailed(res, req, pool, code, cfg, recordID, batchRef, length, errMsg, uid);
       }
 
@@ -1329,12 +1342,45 @@ async function apportionMxExpectedConsumption(pool, code, recordID, extrudedMate
 // touched or merged with this (see the approved plan).
 const BOM_VALIDATED_PROCESSES = new Set(['CO', 'BR', 'CL', 'TW', 'DR']);
 
+// Materials at this SAP profit centre are raw materials — bought in, never
+// produced by any Normanton-Nexus process, so there's no prod.Mixing/
+// Extrusion/etc. record to resolve a traceability link against. Their
+// traceability is a hand-written SAP batch number instead (see
+// prod.RawMaterialBatches / validateRawMaterialBatches below) — nothing to
+// resolve, so no wrong-material mismatch is possible for these, only a
+// missing entry.
+const RAW_MATERIAL_PROFIT_CENTRE = '2012';
+
+// Bulk profit-centre lookup for every distinct material in one SAP round
+// trip (see SapServer's GET /api/production/check-profit-centres) rather
+// than one check-profit-centre call per BOM component. Returns
+// Map<material, profitCentre> with leading zeros already stripped — same
+// convention assertProfitCentre uses (MARC-PRCTR comes back zero-padded to
+// 10 chars).
+async function fetchProfitCentres(materials) {
+  const distinct = [...new Set((materials || []).filter(Boolean))];
+  if (!distinct.length) return new Map();
+  const raw  = await sapGet('/api/production/check-profit-centres', { Materials: distinct });
+  const rows = raw?.data ?? raw ?? [];
+  return new Map(rows.map(r => [r.material, String(r.profitCentre || '').replace(/^0+/, '')]));
+}
+
 // Live BOM lookup for `material` — the finished/produced good, same role as
 // `extrudedMaterial` in validateMxTubLinks. Shared by the preview endpoint
 // and the persist-at-creation step so both hit SAP exactly once per call.
+// Enriches each row with its own profit centre (one extra bulk call, not
+// one per component) so callers can tell a raw material apart from a
+// portal-tracked semi-finished material without a further round trip.
 async function fetchBom(material) {
-  const bomRaw = await sapGet('/api/production/bom', { Material: material });
-  return bomRaw?.data ?? bomRaw ?? [];
+  const bomRaw  = await sapGet('/api/production/bom', { Material: material });
+  const bomRows = bomRaw?.data ?? bomRaw ?? [];
+  if (!bomRows.length) return bomRows;
+
+  const profitCentres = await fetchProfitCentres(bomRows.map(r => r.component)).catch(() => new Map());
+  return bomRows.map(r => {
+    const profitCentre = profitCentres.get(r.component) || null;
+    return { ...r, profitCentre, isRawMaterial: profitCentre === RAW_MATERIAL_PROFIT_CENTRE };
+  });
 }
 
 // Persists a fetched BOM snapshot into prod.ProductionBom for a job. Never
@@ -1345,34 +1391,77 @@ async function fetchBom(material) {
 async function persistBomSnapshot(pool, code, recordID, material, bomRows) {
   for (const r of bomRows) {
     await pool.request()
-      .input('pc',   sql.NVarChar(5),   code)
-      .input('rid',  sql.Int,           recordID)
-      .input('mat',  sql.NVarChar(18),  material)
-      .input('comp', sql.NVarChar(18),  r.component)
-      .input('item', sql.NVarChar(4),   r.item ?? null)
-      .input('qty',  sql.Decimal(12, 4), r.componentQty ?? null)
-      .input('unit', sql.NVarChar(3),   r.componentUnit ?? null)
-      .input('sloc', sql.NVarChar(4),   r.storageLocation ?? null)
+      .input('pc',    sql.NVarChar(5),   code)
+      .input('rid',   sql.Int,           recordID)
+      .input('mat',   sql.NVarChar(18),  material)
+      .input('comp',  sql.NVarChar(18),  r.component)
+      .input('item',  sql.NVarChar(4),   r.item ?? null)
+      .input('qty',   sql.Decimal(12, 4), r.componentQty ?? null)
+      .input('unit',  sql.NVarChar(3),   r.componentUnit ?? null)
+      .input('sloc',  sql.NVarChar(4),   r.storageLocation ?? null)
+      .input('prctr', sql.NVarChar(10),  r.profitCentre ?? null)
       .query(`INSERT INTO prod.ProductionBom
-                (ProcessCode,RecordID,Material,Component,Item,ComponentQty,ComponentUnit,StorageLocation)
-              VALUES (@pc,@rid,@mat,@comp,@item,@qty,@unit,@sloc)`);
+                (ProcessCode,RecordID,Material,Component,Item,ComponentQty,ComponentUnit,StorageLocation,ProfitCentre)
+              VALUES (@pc,@rid,@mat,@comp,@item,@qty,@unit,@sloc,@prctr)`);
   }
 }
 
 // Reads back the LATEST persisted BOM batch for a job (MAX(DownloadedAt) —
 // see persistBomSnapshot/the refresh route for why old batches aren't
 // deleted on refresh). Returned shape matches fetchBom's live rows
-// (component/componentQty/componentUnit/item/storageLocation) so both feed
-// the same validation/rendering code paths interchangeably.
+// (component/componentQty/componentUnit/item/storageLocation/profitCentre/
+// isRawMaterial) so both feed the same validation/rendering code paths
+// interchangeably.
 async function latestBomSnapshot(pool, code, recordID) {
   const r = await pool.request()
     .input('pc', sql.NVarChar(5), code).input('rid', sql.Int, recordID)
     .query(`SELECT Component AS component, ComponentQty AS componentQty, ComponentUnit AS componentUnit,
-                   Item AS item, StorageLocation AS storageLocation
+                   Item AS item, StorageLocation AS storageLocation, ProfitCentre AS profitCentre
             FROM prod.ProductionBom
             WHERE ProcessCode=@pc AND RecordID=@rid
               AND DownloadedAt = (SELECT MAX(DownloadedAt) FROM prod.ProductionBom WHERE ProcessCode=@pc AND RecordID=@rid)`);
-  return r.recordset;
+  return r.recordset.map(row => ({ ...row, isRawMaterial: row.profitCentre === RAW_MATERIAL_PROFIT_CENTRE }));
+}
+
+// Records a hand-written SAP batch number against a raw-material BOM
+// component — no resolving, no processCode/recordID, since there's no
+// portal record for a raw material to link to. Inserted unconditionally
+// (same "insert now, validate separately" pattern as parentBatches ->
+// prod.ProductionTrace above) — validateRawMaterialBatches below decides
+// whether what's here actually satisfies the job's BOM.
+async function persistRawMaterialBatches(pool, code, recordID, uid, rawMaterialBatches) {
+  for (const rb of rawMaterialBatches || []) {
+    const batchNumber = String(rb?.batchNumber || '').trim();
+    if (!rb?.material || !batchNumber) continue;
+    await pool.request()
+      .input('pc',    sql.NVarChar(5),  code)
+      .input('rid',   sql.Int,          recordID)
+      .input('mat',   sql.NVarChar(18), rb.material)
+      .input('batch', sql.NVarChar(50), batchNumber)
+      .input('uid',   sql.Int,          uid)
+      .query(`INSERT INTO prod.RawMaterialBatches (ProcessCode,RecordID,Material,BatchNumber,LinkedByUserID) VALUES (@pc,@rid,@mat,@batch,@uid)`);
+  }
+}
+
+// Checks every raw-material BOM component has at least one hand-written
+// batch number recorded against it. Unlike validateTraceabilityAgainstBom,
+// there's nothing to mismatch here (the operator can't pick the "wrong"
+// portal record for something with no portal record at all) — only a
+// missing entry — so these problems are never concession-eligible
+// (unresolvedProblems/prod.TraceabilityConcessions don't apply) and always
+// hard-block completion until filled in.
+async function validateRawMaterialBatches(pool, code, recordID, bomRows) {
+  const rawComponents = [...new Set((bomRows || []).filter(r => r.isRawMaterial).map(r => r.component))];
+  if (!rawComponents.length) return [];
+
+  const r = await pool.request()
+    .input('pc', sql.NVarChar(5), code).input('rid', sql.Int, recordID)
+    .query(`SELECT DISTINCT Material FROM prod.RawMaterialBatches WHERE ProcessCode=@pc AND RecordID=@rid`);
+  const recorded = new Set(r.recordset.map(row => row.Material));
+
+  return rawComponents
+    .filter(mat => !recorded.has(mat))
+    .map(mat => ({ material: mat, reason: `${mat} is a raw material (profit centre ${RAW_MATERIAL_PROFIT_CENTRE}) — enter its supplier/SAP batch number.` }));
 }
 
 // Generalization of validateMxTubLinks's core check (same problems[] /
@@ -2814,6 +2903,64 @@ router.get('/process/:processCode/:recordID/trace', async (req, res) => {
   }
 });
 
+// ── Raw-material batch numbers (hand-written, no resolving) ─────────────────
+// For BOM components at profit centre RAW_MATERIAL_PROFIT_CENTRE — bought
+// in, never produced by any Normanton-Nexus process, so there's no portal
+// record to link against (see validateRawMaterialBatches above). These
+// three routes let a job's raw-material batches be added to/listed/removed
+// after the job already exists (draft/submitDrumming persist whatever was
+// entered in the New Entry form/Drumming wizard directly, in the same
+// request — see persistRawMaterialBatches).
+
+router.get('/process/:processCode/:recordID/raw-material-batches', async (req, res) => {
+  try {
+    const code     = req.params.processCode.toUpperCase();
+    const recordID = Number(req.params.recordID);
+    const pool     = await getNexusOperationsPool();
+    const r = await pool.request()
+      .input('pc', sql.NVarChar(5), code).input('rid', sql.Int, recordID)
+      .query(`SELECT BatchID AS batchID, Material AS material, BatchNumber AS batchNumber
+              FROM prod.RawMaterialBatches WHERE ProcessCode=@pc AND RecordID=@rid ORDER BY LinkedAt`);
+    res.json({ success: true, data: r.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/process/:processCode/:recordID/raw-material-batch', async (req, res) => {
+  const code     = req.params.processCode.toUpperCase();
+  const recordID = Number(req.params.recordID);
+  if (!BOM_VALIDATED_PROCESSES.has(code))
+    return res.status(400).json({ success: false, error: `${code} is not handled by this endpoint.` });
+
+  const { material, batchNumber } = req.body;
+  if (!material || !String(batchNumber || '').trim())
+    return res.status(400).json({ success: false, error: 'material and batchNumber are required.' });
+
+  try {
+    const pool = await getNexusOperationsPool();
+    const uid  = userId(req);
+    await persistRawMaterialBatches(pool, code, recordID, uid, [{ material, batchNumber }]);
+    await writeEvent(pool, code, recordID, 'NOTE', `Raw material batch recorded for ${material}: ${String(batchNumber).trim()}`, 0, uid);
+    res.status(201).json({ success: true });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+router.delete('/process/:processCode/:recordID/raw-material-batch/:batchID', async (req, res) => {
+  try {
+    const pool    = await getNexusOperationsPool();
+    const batchID = Number(req.params.batchID);
+    const upd = await pool.request().input('id', sql.Int, batchID)
+      .query(`DELETE FROM prod.RawMaterialBatches WHERE BatchID=@id`);
+    if (!upd.rowsAffected[0]) return res.status(404).json({ success: false, error: 'Batch entry not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Traceability Concessions — Production raises, Quality approves ──────────
 // Modeled on the existing scrap-approval flow (POST /scrap/approve below):
 // raise a pending row, notify the approver role, separate gated
@@ -3125,6 +3272,7 @@ async function submitDrumming(req, res, entryType) {
     customerNumber, orderNumber, orderItem,
     packagingID, weightKG,
     parentBatches = [],
+    rawMaterialBatches = [],
     coilLengths = [],
     hasScrap, scrapTotalKG, scrapReasons = [],
     comments,
@@ -3207,6 +3355,8 @@ async function submitDrumming(req, res, entryType) {
       .query(`INSERT INTO prod.ProductionTrace (ChildProcessCode,ChildRecordID,ParentProcessCode,ParentRecordID,LinkedByUserID) VALUES (@cc,@cr,@pc,@pr,@uid)`);
   }
 
+  await persistRawMaterialBatches(pool, 'DR', drummingID, uid, rawMaterialBatches);
+
   if (hasScrap && scrapTotalKG && scrapReasons.length) {
     const totalOcc = scrapReasons.reduce((s, r) => s + Number(r.occurrences || 0), 0);
     for (const { reasonID, occurrences } of scrapReasons) {
@@ -3241,9 +3391,10 @@ async function submitDrumming(req, res, entryType) {
 
   const drProblems = await validateTraceabilityAgainstBom(pool, drTraceRows.recordset, drBomRows);
   const drBlocking = await unresolvedProblems(pool, 'DR', drummingID, drProblems);
+  const drRawProblems = await validateRawMaterialBatches(pool, 'DR', drummingID, drBomRows);
 
-  if (drBlocking.length) {
-    const errMsg = `Blocked: ${drBlocking.map(p => p.reason).join(' ')} Raise a concession from the traceability screen, or use "Refresh BOM" if SAP's BOM has since been corrected.`;
+  if (drBlocking.length || drRawProblems.length) {
+    const errMsg = `Blocked: ${[...drBlocking, ...drRawProblems].map(p => p.reason).join(' ')}${drBlocking.length ? ' Raise a concession from the traceability screen, or use "Refresh BOM" if SAP\'s BOM has since been corrected.' : ''}`;
     await pool.request().input('rid', sql.Int, drummingID).query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
     await writeEvent(pool, 'DR', drummingID, 'SAP_FAIL', errMsg, 2, uid);
     return res.status(409).json({ success: false, data: { drummingID, batchRef: drumRef, status: 'BLOCKED' }, error: errMsg });
@@ -4253,9 +4404,10 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
       const drBomRows  = await latestBomSnapshot(pool, 'DR', id);
       const drProblems = await validateTraceabilityAgainstBom(pool, drTraceRows.recordset, drBomRows);
       const drBlocking = await unresolvedProblems(pool, 'DR', id, drProblems);
+      const drRawProblems = await validateRawMaterialBatches(pool, 'DR', id, drBomRows);
 
-      if (drBlocking.length) {
-        const errMsg = `Still blocked: ${drBlocking.map(p => p.reason).join(' ')} Raise a concession from the traceability screen, or use "Refresh BOM" if SAP's BOM has since been corrected.`;
+      if (drBlocking.length || drRawProblems.length) {
+        const errMsg = `Still blocked: ${[...drBlocking, ...drRawProblems].map(p => p.reason).join(' ')}${drBlocking.length ? ' Raise a concession from the traceability screen, or use "Refresh BOM" if SAP\'s BOM has since been corrected.' : ''}`;
         return res.status(409).json({ success: false, data: { drummingID: id, status: 'BLOCKED' }, error: errMsg });
       }
       const drConcessions = drProblems.length ? await approvedConcessions(pool, 'DR', id) : [];

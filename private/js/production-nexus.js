@@ -368,6 +368,11 @@ const PROCESS_LABELS = {
 // separate MX-tub-staging-aware picker/check untouched.
 const BOM_CHECKLIST_PROCESSES = new Set(['CO', 'BR', 'CL', 'TW', 'DR']);
 
+// Mirrors routes/productionnexus.js's RAW_MATERIAL_PROFIT_CENTRE — display
+// only (the server is what actually classifies each BOM row; this is just
+// the label shown on a row already flagged isRawMaterial).
+const RAW_MATERIAL_PROFIT_CENTRE_CLIENT = '2012';
+
 async function runLineFloor() {
   // Start auto-refresh if not already running
   if (!refreshTimer) {
@@ -1374,7 +1379,16 @@ async function _resolveBatchMaterial(processCode, recordID) {
 //   beforeAdd:    async (processCode, recordID) => boolean — extra guard run before an add is
 //                 accepted (e.g. Drumming's re-drum reversal check); false/rejection cancels the add
 // }
-async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) {
+// rawMaterialBatches: shared mutable array [{material, batchNumber, batchID?}]
+// — the hand-written-batch counterpart to parentBatches, for BOM components
+// at RAW_MATERIAL_PROFIT_CENTRE (bought-in raw material — no portal
+// production record exists to resolve a link against, so there's nothing
+// to match/mismatch, only "has a batch number been entered". batchID is
+// only present once persisted server-side (see the raw-material-batch
+// routes); entries added before a job exists (recordID null) don't have
+// one yet — they're carried to the server in the draft/submit request body
+// instead, same as parentBatches always has been.
+async function renderBomChecklist(container, bomRows, parentBatches, rawMaterialBatches, opts = {}) {
   const { processCode, recordID = null, readOnly = false, onChange, onRefresh, beforeAdd } = opts;
 
   container.innerHTML = `<div class="pn-loading" style="padding:12px 0"><div class="spinner"></div>Checking traceability…</div>`;
@@ -1385,10 +1399,10 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
     }))
   );
 
-  const componentGroups = new Map(); // component -> { qty, unit, batches: [] }
+  const componentGroups = new Map(); // component -> { qty, unit, isRawMaterial, batches: [] }
   bomRows.forEach(r => {
     if (!componentGroups.has(r.component))
-      componentGroups.set(r.component, { qty: r.componentQty, unit: r.componentUnit, batches: [] });
+      componentGroups.set(r.component, { qty: r.componentQty, unit: r.componentUnit, isRawMaterial: !!r.isRawMaterial, batches: [] });
   });
 
   const other = [];
@@ -1407,7 +1421,32 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
       ${!ok && recordID ? `<button class="bc-concede" data-comp="" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:3px;cursor:pointer;font-size:10px;padding:1px 4px;margin-left:2px">Raise concession</button>` : ''}
     </span>`;
 
-  const rowsHtml = [...componentGroups.entries()].map(([component, g]) => `
+  const rawTagHtml = (entry, idx) => `
+    <span class="bc-raw-tag" style="display:inline-flex;align-items:center;gap:5px;background:rgba(13,148,136,0.1);border:1px solid var(--accent);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">
+      ✓ ${esc(entry.batchNumber)}
+      <button class="bc-remove-raw" data-idx="${idx}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>
+    </span>`;
+
+  const rowsHtml = [...componentGroups.entries()].map(([component, g]) => {
+    if (g.isRawMaterial) {
+      const entries = (rawMaterialBatches || []).map((rb, i) => ({ rb, i })).filter(({ rb }) => rb.material === component);
+      return `
+      <div class="bc-row" style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+          <span class="pn-batch-mono" style="font-weight:600">${esc(component)}</span>
+          <span style="font-size:10px;color:var(--text-muted);border:1px solid var(--border);border-radius:10px;padding:1px 6px">RAW MATERIAL — profit centre ${RAW_MATERIAL_PROFIT_CENTRE_CLIENT}, no portal record — hand-written batch</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">
+          ${entries.length ? entries.map(({ rb, i }) => rawTagHtml(rb, i)).join(' ')
+            : `<span style="font-size:12px;color:var(--error)">No batch number entered yet</span>`}
+        </div>
+        <div style="display:flex;gap:6px">
+          <input class="tf-input bc-raw-input" data-component="${esc(component)}" type="text" placeholder="Supplier/SAP batch number" style="max-width:220px">
+          <button class="btn-secondary bc-add-raw" data-component="${esc(component)}">+ Add</button>
+        </div>
+      </div>`;
+    }
+    return `
     <div class="bc-row" style="padding:8px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
         <span class="pn-batch-mono" style="font-weight:600">${esc(component)}</span>
@@ -1417,11 +1456,12 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
         ${g.batches.length ? g.batches.map(e => tagHtml(e, true)).join(' ')
           : `<span style="font-size:12px;color:var(--text-muted)">No batch linked yet</span>`}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   container.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div style="font-size:12px;color:var(--text-muted)">Add each input batch this run consumes — it's matched to the BOM automatically.</div>
+      <div style="font-size:12px;color:var(--text-muted)">Add each input batch this run consumes — matched to the BOM automatically. Raw materials (no portal record) take a hand-written batch number instead.</div>
       ${onRefresh ? `<button class="btn-secondary" id="bc-refresh" style="font-size:11px;padding:3px 8px">↻ Refresh BOM</button>` : ''}
     </div>
     ${!readOnly ? `
@@ -1447,7 +1487,7 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
       btn.disabled = true; btn.textContent = 'Refreshing…';
       try {
         const newBomRows = await onRefresh();
-        await renderBomChecklist(container, newBomRows, parentBatches, opts);
+        await renderBomChecklist(container, newBomRows, parentBatches, rawMaterialBatches, opts);
       } catch (err) {
         const msg = document.getElementById('bc-msg');
         if (msg) msg.textContent = `Refresh failed: ${err.message}`;
@@ -1469,7 +1509,7 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
     if (!parentBatches.find(pb => pb.processCode === pc && pb.recordID === rid))
       parentBatches.push({ processCode: pc, recordID: rid });
     onChange?.();
-    await renderBomChecklist(container, bomRows, parentBatches, opts);
+    await renderBomChecklist(container, bomRows, parentBatches, rawMaterialBatches, opts);
   });
 
   container.querySelectorAll('.bc-remove').forEach(btn => {
@@ -1477,7 +1517,7 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
       const idx = parentBatches.findIndex(pb => pb.processCode === btn.dataset.pc && pb.recordID === Number(btn.dataset.rid));
       if (idx >= 0) parentBatches.splice(idx, 1);
       onChange?.();
-      await renderBomChecklist(container, bomRows, parentBatches, opts);
+      await renderBomChecklist(container, bomRows, parentBatches, rawMaterialBatches, opts);
     });
   });
 
@@ -1488,9 +1528,61 @@ async function renderBomChecklist(container, bomRows, parentBatches, opts = {}) 
         processCode, recordID,
         parentProcessCode: tag.dataset.pc, parentRecordID: Number(tag.dataset.rid),
         actualMaterial: tag.dataset.mat, componentOptions: [...componentGroups.keys()],
-      }, async () => { await renderBomChecklist(container, bomRows, parentBatches, opts); });
+      }, async () => { await renderBomChecklist(container, bomRows, parentBatches, rawMaterialBatches, opts); });
     });
   });
+
+  // Raw-material batch add/remove — a live persist immediately once a real
+  // job exists (recordID set, e.g. the Complete Run traceability review or
+  // a re-opened blocked Drumming submission), otherwise just local state
+  // carried into the eventual draft/submit request body (rawMaterialBatches
+  // field), same as parentBatches always has worked pre-save.
+  container.querySelectorAll('.bc-add-raw').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const component  = btn.dataset.component;
+      const input       = container.querySelector(`.bc-raw-input[data-component="${cssEscape(component)}"]`);
+      const batchNumber = input?.value.trim();
+      const msg = document.getElementById('bc-msg');
+      if (msg) msg.textContent = '';
+      if (!batchNumber) return;
+
+      let batchID;
+      if (recordID) {
+        try {
+          await api(`/process/${processCode}/${recordID}/raw-material-batch`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ material: component, batchNumber }),
+          });
+        } catch (err) { if (msg) msg.textContent = err.message; return; }
+      }
+      rawMaterialBatches.push({ material: component, batchNumber, batchID });
+      onChange?.();
+      await renderBomChecklist(container, bomRows, parentBatches, rawMaterialBatches, opts);
+    });
+  });
+
+  container.querySelectorAll('.bc-remove-raw').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const idx   = Number(btn.dataset.idx);
+      const entry = rawMaterialBatches[idx];
+      const msg   = document.getElementById('bc-msg');
+      if (msg) msg.textContent = '';
+      if (recordID && entry?.batchID) {
+        try { await api(`/process/${processCode}/${recordID}/raw-material-batch/${entry.batchID}`, { method: 'DELETE' }); }
+        catch (err) { if (msg) msg.textContent = err.message; return; }
+      }
+      rawMaterialBatches.splice(idx, 1);
+      onChange?.();
+      await renderBomChecklist(container, bomRows, parentBatches, rawMaterialBatches, opts);
+    });
+  });
+}
+
+// Minimal CSS.escape polyfill-equivalent for the one place this file needs
+// it (data-component attribute selectors above) — avoids depending on
+// browser CSS.escape support for what's just an attribute-value match.
+function cssEscape(value) {
+  return String(value).replace(/["\\]/g, '\\$&');
 }
 
 // Small inline form for raising a concession against one flagged batch —
@@ -1615,7 +1707,7 @@ async function runMeterProcessEntry(processCode) {
 // ── New Entry flow ────────────────────────────────────────────────────────────
 
 function runNewEntry(processCode, machines, reasons) {
-  const state = { material: '', machineID: null, parentBatches: [], bomRows: [] };
+  const state = { material: '', machineID: null, parentBatches: [], rawMaterialBatches: [], bomRows: [] };
   const isBomChecklist = BOM_CHECKLIST_PROCESSES.has(processCode);
 
   const saveNewEntry = async () => {
@@ -1633,7 +1725,7 @@ function runNewEntry(processCode, machines, reasons) {
     try {
       const json = await api(`/process/${processCode}/draft`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches }),
+        body: JSON.stringify({ material: state.material, machineID: state.machineID, parentBatches: state.parentBatches, rawMaterialBatches: state.rawMaterialBatches }),
       });
       const d = json.data || {};
       // Synthetic "open entry" row built entirely from what's already in
@@ -1750,7 +1842,7 @@ function runNewEntry(processCode, machines, reasons) {
           checklistEl.innerHTML = `<div style="font-size:12px;color:var(--error)">Unable to download BOM for ${esc(state.material)} — ${esc(err.message)}</div>`;
           return;
         }
-        await renderBomChecklist(checklistEl, state.bomRows, state.parentBatches, { processCode, recordID: null });
+        await renderBomChecklist(checklistEl, state.bomRows, state.parentBatches, state.rawMaterialBatches, { processCode, recordID: null });
       };
       loadBom();
       document.getElementById('ne-material')?.addEventListener('blur', e => {
@@ -2188,12 +2280,14 @@ function renderCompletePhase(state, entry, reasons, processCode) {
       const checklistEl = document.getElementById('cr-bom-checklist');
       (async () => {
         try {
-          const [bomJson, traceJson] = await Promise.all([
+          const [bomJson, traceJson, rawJson] = await Promise.all([
             api(`/process/${processCode}/${entry.RecordID}/bom`),
             api(`/process/${processCode}/${entry.RecordID}/trace`),
+            api(`/process/${processCode}/${entry.RecordID}/raw-material-batches`),
           ]);
-          state.parentBatches = traceJson.data || [];
-          await renderBomChecklist(checklistEl, bomJson.data || [], state.parentBatches, {
+          state.parentBatches      = traceJson.data || [];
+          state.rawMaterialBatches = rawJson.data || [];
+          await renderBomChecklist(checklistEl, bomJson.data || [], state.parentBatches, state.rawMaterialBatches, {
             processCode, recordID: entry.RecordID, readOnly: true,
             onRefresh: async () => {
               const r = await api(`/process/${processCode}/${entry.RecordID}/bom/refresh`, { method: 'POST' });
@@ -4401,6 +4495,7 @@ async function runDrummingEntry() {
     packagingID: '',
     weightKG: '',
     parentBatches: [],
+    rawMaterialBatches: [],
     bomRows: [],
     drummingID: null, // set once a blocked submit reveals a real DrummingID exists — see the 'review' step below
     coilLengths: [],
@@ -4633,12 +4728,14 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
         // persisted snapshot (and let "Raise concession" work) instead of a
         // fresh live preview, same as the Complete Run review step does.
         if (state.drummingID) {
-          const [bomJson, traceJson] = await Promise.all([
+          const [bomJson, traceJson, rawJson] = await Promise.all([
             api(`/process/DR/${state.drummingID}/bom`),
             api(`/process/DR/${state.drummingID}/trace`),
+            api(`/process/DR/${state.drummingID}/raw-material-batches`),
           ]);
           state.bomRows = bomJson.data || [];
           state.parentBatches = traceJson.data || [];
+          state.rawMaterialBatches = rawJson.data || [];
         } else {
           const json = await api(`/process/DR/bom-preview?material=${encodeURIComponent(state.material)}`);
           state.bomRows = json.data || [];
@@ -4647,7 +4744,7 @@ function renderDrummingPhaseBody(state, reasons, packagingOptions) {
         checklistEl.innerHTML = `<div style="font-size:12px;color:var(--error)">Unable to download BOM for ${esc(state.material)} — ${esc(err.message)}</div>`;
         return;
       }
-      await renderBomChecklist(checklistEl, state.bomRows, state.parentBatches, {
+      await renderBomChecklist(checklistEl, state.bomRows, state.parentBatches, state.rawMaterialBatches, {
         processCode: 'DR', recordID: state.drummingID,
         onRefresh: async () => {
           if (state.drummingID) {
@@ -4862,6 +4959,7 @@ async function advanceDrummingWizard(state, reasons, packagingOptions) {
           weightKG:       state.weightKG,
           lengthMetres:   state.coilLengths.reduce((s, l) => s + Number(l), 0),
           parentBatches:  state.parentBatches,
+          rawMaterialBatches: state.rawMaterialBatches,
           coilLengths:    state.coilLengths,
           hasScrap:       state.hasScrap,
           scrapTotalKG:   state.hasScrap ? state.scrapTotalKG : 0,

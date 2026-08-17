@@ -262,3 +262,159 @@ describe('GET /concessions and POST /concessions/:id/approve|reject — QUAL_CON
     expect(res.body.data.status).toBe('REJECTED');
   });
 });
+
+// ── Raw materials (profit centre 2012) — hand-written batch, no resolving ───
+// Some BOM components are bought-in raw material rather than a portal-
+// tracked semi-finished material — there's no prod.Mixing/Extrusion/etc.
+// record to resolve a batch against, so fetchBom tags each component with
+// its own profit centre (one bulk SAP call, not one per component — see
+// fetchProfitCentres) and validateRawMaterialBatches just checks a
+// hand-written batch number was recorded, never a wrong-material mismatch.
+
+// Live-fetch shape (no profitCentre — SAP's BomRow doesn't carry one; fetchBom
+// enriches it separately via a second, bulk fetchProfitCentres call).
+const rawBomRow = { material: 'TCEL9-9CBT', plant: '3012', component: 'RAWMAT1', item: '0020', componentQty: 2, componentUnit: 'KG', storageLocation: '1710', supplyArea: '312' };
+// latestBomSnapshot shape — what's actually persisted in prod.ProductionBom
+// (ProfitCentre column already populated at draft/submit time), so
+// isRawMaterial computes true without a second SAP round trip.
+const rawBomSnapshotRow = { ...rawBomRow, profitCentre: '2012' };
+
+describe('POST /process/CO/draft — raw material BOM components', () => {
+  test('warns when a raw-material component has no batch number recorded', async () => {
+    mockProfitCentreOk();
+    axiosMock.request
+      .mockResolvedValueOnce({ data: { success: true, data: [rawBomRow] } })                         // fetchBom
+      .mockResolvedValueOnce({ data: { success: true, data: [{ material: 'RAWMAT1', profitCentre: '0000002012' }] } }); // fetchProfitCentres (bulk)
+
+    queueResults(
+      { recordset: [{ ConvolutingID: 50 }] }, // INSERT prod.Convoluting
+      { recordset: [] },                      // INSERT BatchOperators
+      { recordset: [] },                      // writeEvent STARTED
+      { recordset: [] },                      // persistBomSnapshot INSERT (1 row)
+      { recordset: [] },                      // validateRawMaterialBatches: SELECT DISTINCT Material — none recorded
+    );
+
+    const res = await request(app).post('/process/CO/draft').send({ material: 'TCEL9-9CBT' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.warnings).toHaveLength(1);
+    expect(res.body.warnings[0]).toMatch(/RAWMAT1 is a raw material \(profit centre 2012\)/);
+  });
+
+  test('no warning once the raw-material batch is recorded in the same draft request', async () => {
+    mockProfitCentreOk();
+    axiosMock.request
+      .mockResolvedValueOnce({ data: { success: true, data: [rawBomRow] } })
+      .mockResolvedValueOnce({ data: { success: true, data: [{ material: 'RAWMAT1', profitCentre: '0000002012' }] } });
+
+    queueResults(
+      { recordset: [{ ConvolutingID: 51 }] },
+      { recordset: [] },
+      { recordset: [] },                      // persistRawMaterialBatches INSERT (1 row)
+      { recordset: [] },                      // writeEvent STARTED
+      { recordset: [] },                      // persistBomSnapshot INSERT
+      { recordset: [{ Material: 'RAWMAT1' }] }, // validateRawMaterialBatches — recorded
+    );
+
+    const res = await request(app).post('/process/CO/draft').send({
+      material: 'TCEL9-9CBT',
+      rawMaterialBatches: [{ material: 'RAWMAT1', batchNumber: 'SUP-000123' }],
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.warnings).toBeUndefined();
+  });
+});
+
+describe('POST /process/CO/complete/:recordID — raw material batch is always a hard block, never concession-eligible', () => {
+  test('blocks completion when the raw-material component has no batch recorded, even with no portal traceability at all', async () => {
+    mockProfitCentreOk();
+    queueResults(
+      { recordset: [{ ConvolutingID: 60, Material: 'TCEL9-9CBT', Status: 1 }] }, // existence/open check
+      { recordset: [] },                                                        // UPDATE Convoluting -> Status=4
+      { recordset: [] },                                                        // writeEvent STARTED
+      { recordset: [] },                                                        // ProductionTrace parents — none
+      { recordset: [rawBomSnapshotRow] },                                       // latestBomSnapshot
+      { recordset: [] },                                                        // validateRawMaterialBatches — none recorded
+      { recordset: [] },                                                        // markSapFailed: UPDATE Status=6
+      { recordset: [] },                                                        // audit() fire-and-forget insert
+      { recordset: [] },                                                        // INSERT SAPPostings (failed)
+      { recordset: [] },                                                        // writeEvent SAP_FAIL
+    );
+
+    const res = await request(app).post('/process/CO/complete/60').send({ lengthMetres: 10 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('SAP_FAILED');
+    expect(res.body.data.error).toMatch(/^Blocked:/);
+    expect(res.body.data.error).toMatch(/RAWMAT1 is a raw material/);
+    // No portal-link mismatch occurred, so this must NOT mention concessions
+    // — a missing raw-material batch has nothing to concede, only to fill in.
+    expect(res.body.data.error).not.toMatch(/concession/i);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('completes normally once the raw-material batch is recorded', async () => {
+    mockProfitCentreOk();
+    queueResults(
+      { recordset: [{ ConvolutingID: 61, Material: 'TCEL9-9CBT', Status: 1 }] },
+      { recordset: [] },
+      { recordset: [] },
+      { recordset: [] },                        // ProductionTrace parents — none
+      { recordset: [rawBomSnapshotRow] },        // latestBomSnapshot
+      { recordset: [{ Material: 'RAWMAT1' }] },  // validateRawMaterialBatches — recorded
+      { recordset: [] },                         // audit() SAP_OK
+      { recordset: [] },                         // INSERT SAPPostings
+      { recordset: [] },                         // writeEvent SAP_POST
+    );
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: { type: 'S', messageClass: 'RM', messageNumber: '191', documentNumber: 'MD500' } } });
+
+    const res = await request(app).post('/process/CO/complete/61').send({ lengthMetres: 10 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('COMPLETE');
+    expect(res.body.data.materialDocument).toBe('MD500');
+  });
+});
+
+describe('Raw-material batch routes', () => {
+  test('POST .../raw-material-batch 400s outside CO/BR/CL/TW/DR', async () => {
+    const res = await request(app).post('/process/EX/70/raw-material-batch').send({ material: 'RAWMAT1', batchNumber: 'SUP1' });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST .../raw-material-batch 400s without material or batchNumber', async () => {
+    const res = await request(app).post('/process/CO/70/raw-material-batch').send({ material: 'RAWMAT1' });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('POST .../raw-material-batch records the batch and logs an event', async () => {
+    queueResults(
+      { recordset: [] }, // persistRawMaterialBatches INSERT
+      { recordset: [] }, // writeEvent NOTE
+    );
+    const res = await request(app).post('/process/CO/70/raw-material-batch').send({ material: 'RAWMAT1', batchNumber: 'SUP-000456' });
+    expect(res.status).toBe(201);
+  });
+
+  test('GET .../raw-material-batches lists recorded entries', async () => {
+    queueResults({ recordset: [{ batchID: 1, material: 'RAWMAT1', batchNumber: 'SUP-000456' }] });
+    const res = await request(app).get('/process/CO/70/raw-material-batches');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].batchNumber).toBe('SUP-000456');
+  });
+
+  test('DELETE .../raw-material-batch/:id removes an entry', async () => {
+    queueResults({ rowsAffected: [1] });
+    const res = await request(app).delete('/process/CO/70/raw-material-batch/1');
+    expect(res.status).toBe(200);
+  });
+
+  test('DELETE .../raw-material-batch/:id 404s when nothing matched', async () => {
+    queueResults({ rowsAffected: [0] });
+    const res = await request(app).delete('/process/CO/70/raw-material-batch/999');
+    expect(res.status).toBe(404);
+  });
+});
