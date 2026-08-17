@@ -219,6 +219,11 @@ function mergeWeeklyForecasts(forecasts, materials = []) {
 // frequent supplier date slips, so a buffer is kept on purpose.
 const ORDER_REVIEW_HORIZON_DAYS = 14;   // how far ahead to surface upcoming shortages, not just overdue ones
 const ORDER_COVERAGE_BUFFER_DAYS = 30;  // extra cover beyond lead time, so the next order isn't due immediately
+// Fallback rounding increment (in the vendor's own order unit) for a
+// material with no MaterialMoqQty lot size on file, when that order unit
+// differs from the material's SAP base unit (see buildSuggestionForRow) —
+// e.g. rounds a raw 3006.303 LB shortfall to a clean 3000 LB.
+const ORDER_UNIT_ROUNDING = 100;
 
 function addDaysUtc(date, days) {
   return new Date(date.getTime() + days * 86400000);
@@ -408,10 +413,51 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
       // size of its own. MaterialMaxQty (if set) is then enforced as a hard
       // cap via the same helper the accept routes use, so the auto-suggested
       // number is never something the accept flow would have to correct.
+      //
+      // A vendor that requires orders placed in a unit other than the
+      // material's SAP base unit (r.OrderMoqUom — e.g. LB for DeWAL) needs
+      // the WHOLE rounding step done in that unit, not KG — rounding a raw
+      // KG shortfall (or a KG lot size) and only converting to LB
+      // afterwards produces an ugly, non-round LB figure (e.g. 3006.303 LB)
+      // even though the KG number itself looked clean. MaterialMoqQty/
+      // MaterialMaxQty are therefore interpreted directly in the vendor's
+      // order unit whenever it differs from the base unit — a lot size
+      // entered before this changed needs re-checking against the order
+      // unit, not the base unit. suggestedQty itself stays in KG (this
+      // system's internal unit — see lib/unitConversion.js's header
+      // comment): the clean order-unit figure is converted back to KG here,
+      // so the stored/internal number looks "unrounded" while what
+      // actually reaches the real PO (create-po route) round-trips back to
+      // exactly that clean figure.
       const moq = Number(r.MaterialMoqQty) || 0;
       const max = Number(r.MaterialMaxQty) || 0;
-      const rounded = (dueNow && moq > 0) ? Math.ceil(qty / moq) * moq : qty;
-      suggestedQty = (dueNow && max > 0) ? enforceMaterialQty(rounded, moq, max) : Math.round(rounded * 1000) / 1000;
+      const baseUom = r.Uom || 'KG';
+      const orderUnit = r.OrderMoqUom || baseUom;
+      if (orderUnit.toUpperCase() !== baseUom.toUpperCase()) {
+        const qtyInOrderUnit = convertQty(qty, baseUom, orderUnit);
+        let roundedInOrderUnit;
+        if (dueNow && moq > 0) {
+          roundedInOrderUnit = Math.ceil(qtyInOrderUnit / moq) * moq;
+          if (max > 0) roundedInOrderUnit = enforceMaterialQty(roundedInOrderUnit, moq, max);
+        } else if (dueNow) {
+          // No material-specific lot size on file — round to the nearest
+          // ORDER_UNIT_ROUNDING so the real order is still a clean number,
+          // not a raw unit-conversion decimal. Relies on the coverage-days
+          // buffer/safety stock already folded into `qty` above to absorb
+          // rounding slightly down as well as up — but never all the way
+          // down to 0 for a material that's genuinely dueNow with a real
+          // shortfall, which would silently drop it from the suggestions
+          // list entirely (computeOrderSuggestions filters on
+          // suggestedQty > 0) instead of just rounding its size.
+          roundedInOrderUnit = Math.max(ORDER_UNIT_ROUNDING, Math.round(qtyInOrderUnit / ORDER_UNIT_ROUNDING) * ORDER_UNIT_ROUNDING);
+        } else {
+          roundedInOrderUnit = qtyInOrderUnit;
+        }
+        suggestedQty = convertQty(roundedInOrderUnit, orderUnit, baseUom);
+      } else {
+        const rounded = (dueNow && moq > 0) ? Math.ceil(qty / moq) * moq : qty;
+        suggestedQty = (dueNow && max > 0) ? enforceMaterialQty(rounded, moq, max) : Math.round(rounded * 1000) / 1000;
+      }
     }
   }
 
@@ -3662,6 +3708,60 @@ router.get('/order-suggestions/tracked', requirePermission('LOG_MRP'), async (re
 // material master data stores a price) — see PurchasingModels.cs's NetPrice
 // comment on the SapServer side. currency defaults to the vendor's own
 // Currency field; docDate defaults to today.
+// Best-effort read of a just-created (or existing) PO's real SAP price per
+// item, via SapServer's GET /api/purchasing/{poNumber}/price
+// (BAPI_PO_GETDETAIL1 — UNVERIFIED, see PurchasingHelper.cs's header
+// comment on the SapServer side; no proven reference for this call, unlike
+// PO creation). Deliberately swallows any failure and returns an empty map
+// rather than letting a lookup problem block PDF generation — the PDF
+// already falls back to "Per SAP condition" when a line has no price, the
+// same behaviour as if this call was never made at all.
+async function queryPoPricesFromSap(poNumber, callerUserId) {
+  try {
+    const resp = await axios.get(
+      `${sapConfig.url}/api/purchasing/${encodeURIComponent(poNumber)}/price`,
+      { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(callerUserId)}` } }
+    );
+    return (resp.data?.success && resp.data.data) ? resp.data.data : {};
+  } catch (err) {
+    console.error(`[queryPoPricesFromSap] Failed to read price for PO ${poNumber}:`, err.message);
+    return {};
+  }
+}
+
+// Shared shape-builder for both POST /order-suggestions/create-po (right
+// after SAP hands back a new PO number) and POST /order-suggestions/
+// regenerate-pdf (rebuilding the document later for an already-created PO)
+// — same quantity/unit conversion, EXW-aware delivery date, and price
+// fallback chain (manual override -> SAP-queried price -> null/"Per SAP
+// condition") either way, so the PDF a buyer downloads later never drifts
+// from the one generated at creation time for the same PO.
+function buildPoPdfItems(rows, { overridesById = new Map(), pricesByPoItem = {} } = {}) {
+  return rows.map((r, i) => {
+    const poItemNumber = r.PoItemNumber || String((i + 1) * 10).padStart(5, '0');
+    const override = overridesById.get(Number(r.SuggestionId));
+    const baseUnit = r.Uom || 'KG';
+    const orderUnit = r.OrderMoqUom || baseUnit;
+    const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
+    const netPrice = (override !== undefined && override !== null && override !== '')
+      ? Number(override)
+      : (pricesByPoItem[poItemNumber] ?? null);
+    return {
+      poItemNumber,
+      material: r.Material,
+      materialText: r.MaterialText,
+      quantity: convertQty(Number(r.OrderQty), baseUnit, orderUnit),
+      uom: orderUnit,
+      // EXW: goods are collected from the vendor's own site, not delivered
+      // to Kongsberg — the meaningful date is when they're ready for
+      // collection, not a delivery date (see buildPoPdf's own comment).
+      deliveryDate: isExw ? (r.ReadyToCollectDate || r.DeliveryDate) : r.DeliveryDate,
+      isExw,
+      netPrice,
+    };
+  });
+}
+
 router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const { suggestionIds, priceOverrides, currency: currencyOverride, docDate } = req.body;
@@ -3807,30 +3907,25 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
     let poPdfPath = null;
     let poPdfError = null;
     try {
+      // Rows here still carry their ORIGINAL (pre-loop) PoItemNumber = null
+      // — the just-assigned x10 numbering only exists as each row's index
+      // in this same `rows` array (see the loop above), so it's threaded
+      // through explicitly rather than relying on buildPoPdfItems' own
+      // (Tracked-Orders-reload) fallback of reading r.PoItemNumber.
+      const rowsWithPoItem = rows.map((r, i) => ({ ...r, PoItemNumber: String((i + 1) * 10).padStart(5, '0') }));
+      const pricesByPoItem = await queryPoPricesFromSap(poNumber, callerUserId);
       const pdfBuffer = await buildPoPdf({
         poNumber,
         poDate: docDate || today,
         vendorName: rows[0].VendorName,
         sapVendorNumber: rows[0].SapVendorNumber,
         currency,
+        incoterms: rows[0].Incoterms || null,
         // Matches the vendor-unit conversion applied to the actual SAP PO
         // above — the PDF sent to the supplier must show the same
         // quantity/unit as the real SAP PO and the supplier's own
         // paperwork, not the internal KG planning figure.
-        items: rows.map((r, i) => {
-          const override = overridesById.get(Number(r.SuggestionId));
-          const baseUnit = r.Uom || 'KG';
-          const orderUnit = r.OrderMoqUom || baseUnit;
-          return {
-            poItemNumber: String((i + 1) * 10).padStart(5, '0'),
-            material: r.Material,
-            materialText: r.MaterialText,
-            quantity: convertQty(Number(r.OrderQty), baseUnit, orderUnit),
-            uom: orderUnit,
-            deliveryDate: r.DeliveryDate,
-            netPrice: (override !== undefined && override !== null && override !== '') ? Number(override) : null,
-          };
-        }),
+        items: buildPoPdfItems(rowsWithPoItem, { overridesById, pricesByPoItem }),
       });
       poPdfPath = await savePoPdf(rows[0].VendorName, poNumber, pdfBuffer);
     } catch (pdfErr) {
@@ -3848,6 +3943,48 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
         poPdfError,
       },
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// Rebuilds and re-saves a PO PDF for an order line that already has a real
+// SAP PO on file (Tracked Orders' "Recreate PO PDF") — for a document that
+// was lost, needs resending, or was generated before a later fix (unit
+// conversion, EXW date, price, T&Cs, ...). Does NOT touch SAP at all — the
+// PO itself already exists; this only re-renders the document, overwriting
+// whatever's currently saved at LOGISTICS_PO_ROOT\{VendorName}\{PoNumber}.pdf
+// (savePoPdf's own convention, unchanged from create-po). Re-queries SAP
+// for the current price the same way create-po does (best-effort — see
+// queryPoPricesFromSap), so a reprint always reflects the price SAP has on
+// file NOW, not whatever a manual override said when the PO was first
+// raised (overrides aren't persisted anywhere to still apply here).
+router.post('/order-suggestions/regenerate-pdf', requirePermission('LOG_MRP'), async (req, res) => {
+  try {
+    const { poNumber } = req.body;
+    if (!poNumber) {
+      return res.status(400).json({ success: false, error: { message: 'poNumber is required.' } });
+    }
+
+    const callerUserId = req.session?.user?.userID;
+    const rows = await db.listOrderSuggestionsByPoNumber(poNumber);
+    if (!rows.length) {
+      return res.status(404).json({ success: false, error: { message: `No order lines found for PO ${poNumber}.` } });
+    }
+
+    const pricesByPoItem = await queryPoPricesFromSap(poNumber, callerUserId);
+    const pdfBuffer = await buildPoPdf({
+      poNumber,
+      poDate: rows[0].OrderDate,
+      vendorName: rows[0].VendorName,
+      sapVendorNumber: rows[0].SapVendorNumber,
+      currency: rows[0].Currency,
+      incoterms: rows[0].Incoterms || null,
+      items: buildPoPdfItems(rows, { pricesByPoItem }),
+    });
+    const poPdfPath = await savePoPdf(rows[0].VendorName, poNumber, pdfBuffer);
+
+    res.json({ success: true, data: { purchaseOrder: poNumber, poPdfSaved: !!poPdfPath } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }

@@ -2064,7 +2064,7 @@ export async function listOrderSuggestionsTracked() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.OrderMoqUom, p.VendorMaterialId, p.Material,
+      p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.OrderMoqUom, v.Incoterms, p.VendorMaterialId, p.Material,
       t.MaterialText, t.Uom, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
       p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
       p.IsSpotPo, p.PoNumber, p.PoItemNumber, p.Notes, p.SupplierReference,
@@ -2082,6 +2082,34 @@ export async function listOrderSuggestionsTracked() {
       CASE p.Status WHEN 'Accepted' THEN 0 WHEN 'Ordered' THEN 1 WHEN 'Booked' THEN 2 WHEN 'Received' THEN 3 ELSE 4 END,
       p.OrderDate DESC
   `);
+  return recordset;
+}
+
+// Every order line belonging to one already-created SAP PO — used by
+// POST /order-suggestions/regenerate-pdf (Tracked Orders' "Recreate PO PDF")
+// to rebuild the PDF later without re-creating the PO itself. Same column
+// shape as listOrderSuggestionsTracked's SELECT (reused by the PDF-building
+// code in routes/performance.js) but scoped to one PoNumber and NOT
+// excluding Cancelled — a line cancelled after the PO was raised in SAP
+// still needs to appear on a reprint exactly as it did on the original,
+// rather than silently vanishing from the document.
+export async function listOrderSuggestionsByPoNumber(poNumber) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('poNumber', sql.NVarChar(20), poNumber)
+    .query(`
+      SELECT
+        p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.OrderMoqUom, v.Incoterms, p.VendorMaterialId, p.Material,
+        t.MaterialText, t.Uom, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
+        p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
+        p.IsSpotPo, p.PoNumber, p.PoItemNumber, p.Notes, p.SupplierReference,
+        p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc
+      FROM log.PurchaseOrderSuggestion p
+      JOIN log.Vendor v ON v.VendorId = p.VendorId
+      LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
+      WHERE p.PoNumber = @poNumber
+      ORDER BY p.PoItemNumber
+    `);
   return recordset;
 }
 

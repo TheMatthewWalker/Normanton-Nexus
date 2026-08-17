@@ -159,16 +159,56 @@ test('groups same-vendor materials together, sorted by orderByDate, with a combi
 // directly with no conversion at all.
 test('converts the combined KG total into the vendor order unit before comparing against a non-KG combined MOQ', async () => {
   db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
-    // suggestedQty 2000 KG = ~4409.245 LB — short of a 5000 LB combined MOQ.
-    materialRow({ VendorMaterialId: 1, Material: 'M1', LeadTimeDaysOverride: 3, MaterialMoqQty: 1000, OrderMoqQty: 5000, OrderMoqUom: 'LB' }),
+    // No material-level lot size — isolates the vendor-level combined-MOQ
+    // unit conversion from buildSuggestionForRow's own order-unit rounding
+    // (covered separately below). Raw shortfall 1300 KG -> rounds to 2900 LB
+    // (nearest 100, no lot size on file) -> short of a 5000 LB combined MOQ.
+    materialRow({ VendorMaterialId: 1, Material: 'M1', LeadTimeDaysOverride: 3, OrderMoqQty: 5000, OrderMoqUom: 'LB' }),
   ]);
   const res = await request(appMrp).get('/order-suggestions');
 
   const group = res.body.data[0];
-  expect(group.combinedQty).toBe(2000); // raw KG sum, unconverted
+  expect(group.combinedQty).toBeCloseTo(1315.418, 2); // raw KG sum (2900 LB's KG equivalent), unconverted
   expect(group.moqMet).toBe(false);
-  // 5000 LB - (2000 KG / 0.45359237) LB ≈ 590.755 LB short.
-  expect(group.moqShortfall).toBeCloseTo(590.755, 2);
+  expect(group.moqShortfall).toBeCloseTo(2100, 2); // 5000 LB - 2900 LB
+});
+
+// A vendor whose order unit differs from the material's SAP base unit (e.g.
+// LB for DeWAL) needs the suggested-quantity ROUNDING step done in that
+// unit, not KG — otherwise a clean KG lot size still produces a jagged LB
+// figure once converted (e.g. 3006.303 LB) for the real PO. suggestedQty
+// itself keeps reporting the KG equivalent (this system's internal unit),
+// but derived from a round order-unit figure.
+describe('order-unit-aware suggested-quantity rounding (non-KG vendors)', () => {
+  test('rounds to the nearest 100 of the order unit when no material-level lot size is set', async () => {
+    // Raw shortfall (no MOQ) is 1300 KG (see the plain Overdue test above) =
+    // ~2866.009 LB -> nearest 100 = 2900 LB -> back to KG for suggestedQty.
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+      materialRow({ LeadTimeDaysOverride: 3, OrderMoqUom: 'LB' }),
+    ]);
+    const res = await request(appMrp).get('/order-suggestions');
+
+    const material = res.body.data[0].materials[0];
+    expect(material.suggestedQty).toBeCloseTo(1315.418, 2); // 2900 LB in KG
+  });
+
+  test('applies MaterialMoqQty as a lot size in the ORDER unit (LB), not KG, once the order unit differs from base', async () => {
+    // Same 1300 KG raw shortfall as above (~2866.009 LB), but now with a
+    // 1000 (LB) lot size on file -> ceil(2866.009/1000)*1000 = 3000 LB.
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+      materialRow({ LeadTimeDaysOverride: 3, MaterialMoqQty: 1000, OrderMoqUom: 'LB' }),
+    ]);
+    const res = await request(appMrp).get('/order-suggestions');
+
+    const material = res.body.data[0].materials[0];
+    expect(material.suggestedQty).toBeCloseTo(1360.777, 2); // 3000 LB in KG
+  });
+
+  test('leaves KG-only vendors (the common case) completely unaffected', async () => {
+    db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([materialRow({ LeadTimeDaysOverride: 3 })]);
+    const res = await request(appMrp).get('/order-suggestions');
+    expect(res.body.data[0].materials[0].suggestedQty).toBe(1300); // unchanged raw KG shortfall, no lot size
+  });
 });
 
 // Isopar (Material 10010) is planned off a manual daily meter reading + a fixed weekday/weekend

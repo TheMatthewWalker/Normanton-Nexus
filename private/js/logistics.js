@@ -9905,7 +9905,10 @@ function osRenderTrackedList(tracked) {
           </button>
           <button class="btn-secondary os-invoice-btn" data-shipment-id="${t.ShipmentId}" data-shipment-ref="${esc(t.ShipmentReference || '')}" style="padding:3px 8px;font-size:11px;white-space:nowrap;margin-left:4px">Invoice</button>
         </td>
-        <td style="text-align:right"><span class="toolbar-hint" style="white-space:nowrap">Reverse via shipment</span></td>
+        <td style="text-align:right">
+          <span class="toolbar-hint" style="white-space:nowrap">Reverse via shipment</span>
+          ${t.PoNumber ? `<button class="btn-secondary os-recreate-pdf-btn" data-po="${esc(t.PoNumber)}" style="padding:3px 8px;font-size:11px;white-space:nowrap;margin-left:4px">Recreate PO PDF</button>` : ''}
+        </td>
       </tr>`;
     }
 
@@ -9939,6 +9942,7 @@ function osRenderTrackedList(tracked) {
       <td style="text-align:right">
         <button class="btn-secondary os-save-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px">Save</button>
         <button class="btn-secondary os-delete-btn" data-id="${t.SuggestionId}" style="padding:3px 10px;font-size:11px;margin-left:4px;color:var(--error,#DC2626)">Delete</button>
+        ${t.PoNumber ? `<button class="btn-secondary os-recreate-pdf-btn" data-po="${esc(t.PoNumber)}" style="padding:3px 10px;font-size:11px;margin-left:4px;white-space:nowrap">Recreate PO PDF</button>` : ''}
       </td>
     </tr>`;
   };
@@ -10078,6 +10082,37 @@ function osRenderTrackedList(tracked) {
       openShipmentInvoiceModal(Number(btn.dataset.shipmentId), btn.dataset.shipmentRef);
     });
   });
+  // One button per row, but keyed by PoNumber not SuggestionId — several
+  // rows (different materials) can share one PO, and any of their buttons
+  // regenerates the same single PDF covering every line on that PO (see
+  // POST /order-suggestions/regenerate-pdf).
+  document.querySelectorAll('.os-recreate-pdf-btn').forEach(btn => {
+    btn.addEventListener('click', () => osRecreatePoPdf(btn.dataset.po, btn));
+  });
+}
+
+// Rebuilds and re-saves a PO PDF for an order that already has a real SAP
+// PO on file — does not touch SAP itself, just re-renders the document
+// (see routes/performance.js's own comment on the route). Useful for a lost/
+// needs-resending document, or one generated before a later PDF fix.
+async function osRecreatePoPdf(poNumber, btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Recreating…';
+  try {
+    const res = await fetch('/api/performance/order-suggestions/regenerate-pdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ poNumber }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to recreate the PO PDF.');
+    if (!json.data?.poPdfSaved) throw new Error('PDF was not saved — check the server log.');
+    btn.textContent = 'Recreated ✓';
+    setTimeout(() => { btn.disabled = false; btn.textContent = originalText; }, 2000);
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false; btn.textContent = originalText;
+  }
 }
 
 // Lists and uploads supplier invoices for a shipment, saved server-side into
