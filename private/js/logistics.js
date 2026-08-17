@@ -9805,6 +9805,20 @@ function osEffectiveDueDate(t) {
   return d ? new Date(d).getTime() : Infinity;
 }
 
+// Display-only mirror of Normanton-Nexus/lib/unitConversion.js's KG_PER_UNIT
+// table (server-side is the source of truth for anything actually posted —
+// this only computes a sensible default/display value for the Inbound Log's
+// Qty Received field, which some vendors require entering in a unit other
+// than the material's SAP base unit, e.g. LB for DeWAL — see
+// log.Vendor.OrderMoqUom). Falls back to the raw KG figure for any unit not
+// listed here rather than throwing in the middle of a render.
+const OS_KG_PER_UNIT = { KG: 1, LB: 0.45359237 };
+function osKgToOrderUnit(qtyKg, unit) {
+  const factor = OS_KG_PER_UNIT[(unit || 'KG').toUpperCase()];
+  if (!factor) return qtyKg;
+  return Math.round((qtyKg / factor) * 1000) / 1000;
+}
+
 // Live client-side filter — no server round trip, since the full tracked
 // list is already in memory. Matches on Material (part number), MaterialText
 // (description, so a partial name still finds the right part), or PoNumber.
@@ -11356,13 +11370,43 @@ async function refreshInboundShipmentDetail(shipmentId) {
 
     const ordersRows = s.orders.map(o => {
       const isCancelled = o.Status === 'Cancelled';
+      // Qty Ordered stays in the material's SAP base unit (o.Uom, always
+      // KG in practice) — the internal MRP planning figure. But a vendor
+      // that requires POs placed in a different unit (o.OrderMoqUom — e.g.
+      // LB for DeWAL) has that same unit on their real SAP PO and on the
+      // supplier's own delivery paperwork, so Qty Received is collected in
+      // THAT unit instead (converted back to the base unit server-side —
+      // see markShipmentReceived) — defaulted here via osKgToOrderUnit so
+      // the prefilled "assume everything ordered arrived" value is a
+      // sensible number in whatever unit the field is actually asking for,
+      // not a KG figure sitting in an LB-labelled box.
+      const receivedUnit = o.OrderMoqUom || o.Uom || 'KG';
       const qtyReceivedCell = canReceive
         ? (isCancelled
           ? '<span style="color:var(--text-secondary,#666)">—</span>'
           : `<input class="tf-input isd-received-qty" type="number" step="0.001" min="0"
                     data-suggestion-id="${o.SuggestionId}" data-material="${esc(o.Material)}"
-                    value="${Number(o.OrderQty)}" style="width:90px">`)
-        : (o.ReceivedQty != null ? Number(o.ReceivedQty).toLocaleString() : '-');
+                    value="${osKgToOrderUnit(Number(o.OrderQty), receivedUnit)}" style="width:90px">
+             <span style="font-size:11px;color:var(--text-secondary,#666)">${esc(receivedUnit)}</span>`)
+        : (o.ReceivedQty != null
+            ? `${osKgToOrderUnit(Number(o.ReceivedQty), receivedUnit).toLocaleString()} ${esc(receivedUnit)}`
+            : '-');
+
+      // Shown/entered per line, not once for the whole shipment — SAP's
+      // goods receipt posting needs the SUPPLIER's own reference for each
+      // item (RM07M-LFSNR, see postGoodsReceiptToSap), not Nexus's internal
+      // shipment reference. Already-on-file (e.g. entered earlier via
+      // Tracked Orders) is just shown read-only; missing means the operator
+      // must read it off the delivery paperwork before Mark Received will
+      // go through — markShipmentReceived rejects the whole receive
+      // up front if any non-cancelled line is still missing one.
+      const supplierRefCell = (canReceive && !isCancelled)
+        ? (o.SupplierReference
+          ? esc(o.SupplierReference)
+          : `<input class="tf-input isd-supplier-ref" type="text"
+                    data-suggestion-id="${o.SuggestionId}" data-material="${esc(o.Material)}"
+                    placeholder="Enter paperwork ref" style="width:110px">`)
+        : esc(o.SupplierReference || '-');
 
       // Only shown once the shipment itself is received (canReceive false) —
       // reflects markShipmentReceived's per-line SAP outcome
@@ -11408,10 +11452,10 @@ async function refreshInboundShipmentDetail(shipmentId) {
       <tr class="admin-row">
         <td><strong>${esc(o.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(o.MaterialText || '')}</div></td>
         <td>${esc(o.VendorName)}</td>
-        <td>${Number(o.OrderQty).toLocaleString()}</td>
+        <td>${Number(o.OrderQty).toLocaleString()} ${esc(o.Uom || 'KG')}</td>
         <td>${qtyReceivedCell}</td>
         <td>${esc(o.PoNumber || '-')}</td>
-        <td>${esc(o.SupplierReference || '-')}</td>
+        <td>${supplierRefCell}</td>
         ${sapGrCell}
       </tr>`;
     }).join('');
@@ -11849,7 +11893,10 @@ async function saveInboundShipmentDetail(shipmentId) {
 // phase only) bypasses every SAP call for this receive so nothing books
 // into SAP before the operator is ready — every line still gets marked
 // Received in the portal with its confirmed quantity, just flagged Skipped
-// instead of posted.
+// instead of posted. Also reads the per-line "Supplier Ref" inputs
+// (rendered only for a line with no SupplierReference already on file) —
+// every one of those must be filled in before this submits, since it's the
+// supplier's own reference SAP needs for the posting (RM07M-LFSNR).
 async function markInboundShipmentReceived(shipmentId, shipment) {
   const orderCount = shipment.orders?.length || 0;
   const result = document.getElementById('isd-result');
@@ -11865,6 +11912,23 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
     receivedQuantities[suggestionId] = qty;
   }
 
+  // Only rendered for a line with no SupplierReference already on file (see
+  // refreshInboundShipmentDetail's supplierRefCell) — every one of these
+  // must be filled in with the delivery paperwork reference before
+  // submitting, since markShipmentReceived rejects the whole receive if any
+  // non-cancelled line is still missing one (it's what's posted to SAP as
+  // RM07M-LFSNR).
+  const supplierReferences = {};
+  for (const input of document.querySelectorAll('.isd-supplier-ref')) {
+    const suggestionId = input.dataset.suggestionId;
+    const ref = input.value.trim();
+    if (!ref) {
+      if (result) result.innerHTML = `<div class="sap-error">Enter the supplier's delivery paperwork reference for ${esc(input.dataset.material || 'every order line')}.</div>`;
+      return;
+    }
+    supplierReferences[suggestionId] = ref;
+  }
+
   const skipSap = !!document.getElementById('isd-skip-sap')?.checked;
   const confirmMsg = skipSap
     ? `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Received using the confirmed quantities — SAP posting will be SKIPPED (testing mode).`
@@ -11877,7 +11941,7 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
     const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/receive`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ receivedQuantities, skipSap }),
+      body: JSON.stringify({ receivedQuantities, supplierReferences, skipSap }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to mark shipment received');

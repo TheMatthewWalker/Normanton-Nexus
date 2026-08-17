@@ -16,6 +16,12 @@
 // with a test-controlled order/shipment shape, rather than exercising the
 // real DB-layer function (covered separately in
 // test/unit/performancesql.test.js).
+//
+// Also covers the Reference/AddressCode field swap: RM07M-LFSNR carries the
+// order line's own SupplierReference (the supplier's paperwork reference,
+// not Nexus's internal shipment reference), and MKPF-BKTXT carries the
+// shipment reference instead — see postGoodsReceiptToSap's own comment for
+// why that field was free to repurpose here.
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
@@ -128,5 +134,61 @@ describe('POST /order-suggestions/shipments/:shipmentId/receive — SAP GR quant
 
     expect(axiosMock.post).not.toHaveBeenCalled();
     expect(res.body.data.sapResults[0]).toMatchObject({ skipped: true, zeroQty: true });
+  });
+
+  // ReceivedQty is always stored in the material's SAP base unit (KG), but
+  // SAP's goods-receipt posting is against a specific PO line and needs the
+  // quantity in THAT PO's own order unit (log.Vendor.OrderMoqUom — e.g. LB
+  // for DeWAL, the same unit the PO was created in) — see
+  // postGoodsReceiptToSap's own comment.
+  test('converts ReceivedQty from the base unit into the vendor order unit before sending Quantity to SAP', async () => {
+    mockOneOrderReceive({
+      SuggestionId: 1, Material: 'MAT1', PoNumber: '4500012345', PoItemNumber: '00010',
+      OrderQty: 100, ReceivedQty: 100, OrderMoqUom: 'LB', MaterialUom: 'KG',
+    });
+
+    await request(app).post('/order-suggestions/shipments/1/receive').send({});
+
+    const [, body] = axiosMock.post.mock.calls[0];
+    // 100 KG / 0.45359237 = 220.462262 LB.
+    expect(body.Quantity).toBeCloseTo(220.462262, 5);
+  });
+
+  test('leaves Quantity unconverted when the vendor order unit matches the base unit (KG)', async () => {
+    mockOneOrderReceive({
+      SuggestionId: 1, Material: 'MAT1', PoNumber: '4500012345', PoItemNumber: '00010',
+      OrderQty: 100, ReceivedQty: 80, OrderMoqUom: 'KG', MaterialUom: 'KG',
+    });
+
+    await request(app).post('/order-suggestions/shipments/1/receive').send({});
+
+    const [, body] = axiosMock.post.mock.calls[0];
+    expect(body.Quantity).toBe(80);
+  });
+});
+
+describe('POST /order-suggestions/shipments/:shipmentId/receive — SAP GR reference fields', () => {
+  test('sends the order line\'s SupplierReference as Reference (RM07M-LFSNR), not the shipment reference', async () => {
+    mockOneOrderReceive({
+      SuggestionId: 1, Material: 'MAT1', PoNumber: '4500012345', PoItemNumber: '00010',
+      OrderQty: 100, ReceivedQty: 100, SupplierReference: 'PAPERWORK-99',
+    });
+
+    await request(app).post('/order-suggestions/shipments/1/receive').send({});
+
+    const [, body] = axiosMock.post.mock.calls[0];
+    expect(body.Reference).toBe('PAPERWORK-99');
+  });
+
+  test('sends the shipment reference as AddressCode (MKPF-BKTXT) instead', async () => {
+    mockOneOrderReceive({
+      SuggestionId: 1, Material: 'MAT1', PoNumber: '4500012345', PoItemNumber: '00010',
+      OrderQty: 100, ReceivedQty: 100, SupplierReference: 'PAPERWORK-99',
+    });
+
+    await request(app).post('/order-suggestions/shipments/1/receive').send({});
+
+    const [, body] = axiosMock.post.mock.calls[0];
+    expect(body.AddressCode).toBe(shipment.ShipmentReference);
   });
 });

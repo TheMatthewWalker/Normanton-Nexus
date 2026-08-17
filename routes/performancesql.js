@@ -2,6 +2,7 @@ import sql from 'mssql';
 import { getNexusOperationsPool, getNexusPool } from '../config.js';
 import { ISOPAR_MATERIAL } from './isoparConstants.js';
 import { isoparPeriodsEndedBefore } from './isoparPeriods.js';
+import { convertQty } from '../lib/unitConversion.js';
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1848,7 +1849,7 @@ export async function listOrderSuggestionsTracked() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT
-      p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, p.VendorMaterialId, p.Material,
+      p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.OrderMoqUom, p.VendorMaterialId, p.Material,
       t.MaterialText, t.Uom, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
       p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
       p.IsSpotPo, p.PoNumber, p.PoItemNumber, p.Notes, p.SupplierReference,
@@ -2140,7 +2141,7 @@ export async function getOrderShipmentWithOrders(shipmentId) {
   const { recordset: orders } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
     .query(`
-      SELECT p.SuggestionId, p.Material, t.MaterialText, v.VendorName, p.OrderQty, p.ReceivedQty, p.Status, p.SupplierReference, p.PoNumber, p.PoItemNumber,
+      SELECT p.SuggestionId, p.Material, t.MaterialText, t.Uom, v.VendorName, v.OrderMoqUom, p.OrderQty, p.ReceivedQty, p.Status, p.SupplierReference, p.PoNumber, p.PoItemNumber,
              p.Notes, p.SapMaterialDocument, p.SapGrError, p.SapGrSkipped
       FROM log.PurchaseOrderSuggestion p
       JOIN log.Vendor v ON v.VendorId = p.VendorId
@@ -2380,6 +2381,19 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
 // falls back to its OrderQty. Quantities are validated up front, before any
 // write happens, so one bad value can't leave the receive half-applied.
 //
+// supplierReferences is an optional { [suggestionId]: ref } map — the
+// SUPPLIER's own reference for this delivery (read off the delivery
+// paperwork), only needed for an order line that doesn't already have one
+// on file (SupplierReference, e.g. entered earlier on Tracked Orders). Per
+// the user: SAP's goods-receipt posting (RM07M-LFSNR, see
+// postGoodsReceiptToSap) must carry the supplier's own reference, not
+// Nexus's internal shipment reference — so every non-cancelled line here
+// must end up with a SupplierReference one way or the other before any
+// write happens (same up-front-validation shape as receivedQuantities
+// above). Whatever's freshly entered is saved back onto the order line
+// alongside the SAP posting, so the paperwork reference only ever needs
+// typing in once.
+//
 // postGoodsReceipt is an optional async (order, shipment) => { success,
 // documentNumber?, error? } callback — routes/performance.js supplies the
 // real SapServer call (POST /api/purchasing/post-goods-receipt, MB01 BDC,
@@ -2398,7 +2412,7 @@ export async function cancelOrderShipment(shipmentId, cancelledBy) {
 // posting itself succeeded; the per-line outcome (documentNumber/error/
 // skipped) is stamped onto the order row and returned so a failure can be
 // seen and retried without blocking receiving the rest of the shipment.
-export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt, receivedQuantities, skipSap, postGoodsReceipt } = {}) {
+export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt, receivedQuantities, supplierReferences, skipSap, postGoodsReceipt } = {}) {
   const pool = await getPool();
   const { recordset: shipmentRows } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
@@ -2411,17 +2425,43 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
 
   const { recordset: orders } = await pool.request()
     .input('shipmentId', sql.Int, shipmentId)
-    .query(`SELECT SuggestionId, Material, OrderQty, PoNumber, PoItemNumber FROM log.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status <> 'Cancelled'`);
+    .query(`
+      SELECT p.SuggestionId, p.Material, p.OrderQty, p.PoNumber, p.PoItemNumber, p.SupplierReference,
+             v.OrderMoqUom, t.Uom AS MaterialUom
+      FROM log.PurchaseOrderSuggestion p
+      JOIN log.Vendor v ON v.VendorId = p.VendorId
+      LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
+      WHERE p.ShipmentId = @shipmentId AND p.Status <> 'Cancelled'
+    `);
 
   const resolvedOrders = orders.map(order => {
     const raw = receivedQuantities ? receivedQuantities[order.SuggestionId] : undefined;
-    const qty = (raw === undefined || raw === null || raw === '') ? Number(order.OrderQty) : Number(raw);
+    // A freshly-typed confirmation is entered by the operator off the
+    // supplier's own delivery paperwork, in the vendor's actual order unit
+    // (log.Vendor.OrderMoqUom — e.g. LB for DeWAL), not the material's SAP
+    // base unit — see lib/unitConversion.js's header comment. Convert it
+    // back to the base unit (what ReceivedQty is always stored in,
+    // matching OrderQty) here, once, at the point it enters the DB. The
+    // no-input default (whole order assumed received) is already in the
+    // base unit — nothing to convert there.
+    const orderUnit = order.OrderMoqUom || order.MaterialUom || 'KG';
+    const qty = (raw === undefined || raw === null || raw === '')
+      ? Number(order.OrderQty)
+      : convertQty(Number(raw), orderUnit, order.MaterialUom || 'KG');
     if (!Number.isFinite(qty) || qty < 0) {
       const err = new Error(`Invalid received quantity for material ${order.Material}.`);
       err.statusCode = 400;
       throw err;
     }
-    return { ...order, ReceivedQty: qty };
+    const freshRef = supplierReferences ? supplierReferences[order.SuggestionId] : undefined;
+    const supplierReference = (order.SupplierReference && order.SupplierReference.trim())
+      || (freshRef != null ? String(freshRef).trim() : '');
+    if (!supplierReference) {
+      const err = new Error(`Enter the supplier's delivery paperwork reference for material ${order.Material} before marking this shipment received.`);
+      err.statusCode = 400;
+      throw err;
+    }
+    return { ...order, ReceivedQty: qty, SupplierReference: supplierReference };
   });
 
   await pool.request()
@@ -2450,12 +2490,13 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
     await pool.request()
       .input('suggestionId',         sql.Int, order.SuggestionId)
       .input('receivedQty',          sql.Decimal(15, 3), order.ReceivedQty)
+      .input('supplierReference',    sql.NVarChar(50),  order.SupplierReference)
       .input('sapMaterialDocument',  sql.NVarChar(20),  sapResult.documentNumber || null)
       .input('sapGrError',           sql.NVarChar(500), sapResult.success === false ? (sapResult.error || 'Goods receipt failed.') : null)
       .input('sapGrSkipped',         sql.Bit, sapResult.skipped ? 1 : 0)
       .query(`
         UPDATE log.PurchaseOrderSuggestion SET
-          Status = 'Received', ReceivedQty = @receivedQty,
+          Status = 'Received', ReceivedQty = @receivedQty, SupplierReference = @supplierReference,
           SapMaterialDocument = @sapMaterialDocument, SapGrError = @sapGrError, SapGrSkipped = @sapGrSkipped,
           UpdatedAtUtc = GETUTCDATE()
         WHERE SuggestionId = @suggestionId

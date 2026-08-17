@@ -15,6 +15,7 @@ import { requirePermission, requireAnyPermission, requireSessionOrApiToken } fro
 import { insertInboundCostLine } from './inboundcosts.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
 import { buildPoPdf } from '../lib/poPdf.js';
+import { convertQty } from '../lib/unitConversion.js';
 import { ISOPAR_MATERIAL } from './isoparConstants.js';
 import { isoparPeriodContaining } from './isoparPeriods.js';
 import { notify } from '../lib/notify.js';
@@ -501,12 +502,20 @@ function groupSuggestionsByVendor(suggestions) {
   }
 
   const result = Array.from(groups.values()).map(g => {
+    // Each material's suggestedQty is in its own SAP base unit (effectively
+    // always KG in this system — see lib/unitConversion.js), but
+    // orderMoqQty/orderMaxQty are in the vendor's OWN order unit
+    // (log.Vendor.OrderMoqUom — e.g. LB for DeWAL), so the combined total
+    // must be converted into that unit before comparing against either
+    // threshold. A no-op for the (usual) case where the vendor's unit is
+    // already KG.
     const combinedQty = g.materials.reduce((sum, m) => sum + (Number(m.suggestedQty) || 0), 0);
+    const combinedQtyInOrderUnit = convertQty(combinedQty, 'KG', g.orderMoqUom || 'KG');
     // Exact-quantity vendor (e.g. Raaj Ratna: exactly 20,000kg, not just at
     // least) — a min that equals the max, not two independent checks.
     const isExactQty = !!(g.orderMoqQty && g.orderMaxQty && Number(g.orderMoqQty) === Number(g.orderMaxQty));
-    const moqShortfall = g.orderMoqQty ? Math.max(0, Number(g.orderMoqQty) - combinedQty) : 0;
-    const moqOverage = g.orderMaxQty ? Math.max(0, combinedQty - Number(g.orderMaxQty)) : 0;
+    const moqShortfall = g.orderMoqQty ? Math.max(0, Number(g.orderMoqQty) - combinedQtyInOrderUnit) : 0;
+    const moqOverage = g.orderMaxQty ? Math.max(0, combinedQtyInOrderUnit - Number(g.orderMaxQty)) : 0;
     const earliestOrderByDate = g.materials.reduce(
       (min, m) => (!min || m.orderByDate < min) ? m.orderByDate : min, null
     );
@@ -3710,13 +3719,22 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
     const overridesById = new Map((Array.isArray(priceOverrides) ? priceOverrides : [])
       .map(o => [Number(o.suggestionId), o.netPrice]));
 
+    // OrderQty is always in the material's SAP base unit (KG) internally —
+    // see lib/unitConversion.js's header comment. A vendor that requires
+    // orders placed in a different unit (log.Vendor.OrderMoqUom — e.g. LB
+    // for DeWAL) needs that conversion applied right here, at the boundary
+    // to the real SAP PO, so BAPI_PO_CREATE1's PO_UNIT/QUANTITY (and the
+    // resulting real PO in SAP) match what the vendor actually requires.
+    // A no-op when OrderMoqUom is unset or already matches the base unit.
     const items = rows.map(r => {
       const override = overridesById.get(Number(r.SuggestionId));
+      const baseUnit = r.Uom || 'KG';
+      const orderUnit = r.OrderMoqUom || baseUnit;
       return {
         Material:     r.Material,
         ShortText:    (r.MaterialText || r.Material || '').slice(0, 40),
-        Quantity:     Number(r.OrderQty),
-        Unit:         r.Uom || 'KG',
+        Quantity:     convertQty(Number(r.OrderQty), baseUnit, orderUnit),
+        Unit:         orderUnit,
         NetPrice:     (override !== undefined && override !== null && override !== '') ? Number(override) : null,
         DeliveryDate: (r.DeliveryDate ? new Date(r.DeliveryDate) : new Date()).toISOString().slice(0, 10),
       };
@@ -3795,14 +3813,20 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
         vendorName: rows[0].VendorName,
         sapVendorNumber: rows[0].SapVendorNumber,
         currency,
+        // Matches the vendor-unit conversion applied to the actual SAP PO
+        // above — the PDF sent to the supplier must show the same
+        // quantity/unit as the real SAP PO and the supplier's own
+        // paperwork, not the internal KG planning figure.
         items: rows.map((r, i) => {
           const override = overridesById.get(Number(r.SuggestionId));
+          const baseUnit = r.Uom || 'KG';
+          const orderUnit = r.OrderMoqUom || baseUnit;
           return {
             poItemNumber: String((i + 1) * 10).padStart(5, '0'),
             material: r.Material,
             materialText: r.MaterialText,
-            quantity: r.OrderQty,
-            uom: r.Uom || 'KG',
+            quantity: convertQty(Number(r.OrderQty), baseUnit, orderUnit),
+            uom: orderUnit,
             deliveryDate: r.DeliveryDate,
             netPrice: (override !== undefined && override !== null && override !== '') ? Number(override) : null,
           };
@@ -4164,15 +4188,38 @@ async function postGoodsReceiptToSap(order, shipment, callerUserId) {
   const lineNumber = Math.round(Number(order.PoItemNumber) / 10);
   const today = new Date().toISOString().slice(0, 10);
   try {
+    // Reference (RM07M-LFSNR) is the SUPPLIER's own reference for this
+    // delivery, not the Inbound Log's own shipment reference — per the user,
+    // LFSNR must be something the supplier themselves would recognise, so
+    // it can't be Nexus's internal "INB-000014"-style number. It's always
+    // populated by the time this runs: markShipmentReceived validates every
+    // line has a SupplierReference (already on file, or freshly entered as
+    // the delivery paperwork reference and saved back onto the order line)
+    // before any SAP call is attempted — see that function's comment.
+    // The Inbound Log shipment reference still goes to SAP, just in
+    // MKPF-BKTXT (AddressCode below) instead — that field was previously
+    // always sent blank here (it's genuinely used for a real address code
+    // in the unrelated create-po-and-receipt/freight-cost flow that shares
+    // GoodsReceiptHelper, see CreatePoAndReceiptItem.AddressCode, but this
+    // Inbound Log flow never populated it), so repurposing it for the
+    // shipment reference doesn't collide with anything already shown there.
+    // ReceivedQty is always stored in the material's SAP base unit (KG) —
+    // see markShipmentReceived's comment. SAP's goods-receipt posting here
+    // is against a specific PO line, so it needs the quantity expressed in
+    // that PO's own order unit (log.Vendor.OrderMoqUom — e.g. LB for
+    // DeWAL), the same unit the PO itself was created in, not the internal
+    // KG figure. A no-op when the vendor's unit is already KG.
+    const baseUnit = order.MaterialUom || 'KG';
+    const orderUnit = order.OrderMoqUom || baseUnit;
     const body = {
       PurchaseOrder:          order.PoNumber,
       LineNumber:             lineNumber,
-      Reference:              shipment.ShipmentReference || '',
+      Reference:              order.SupplierReference || '',
       TrackingNumber:         shipment.TrackingNumber || '',
-      AddressCode:            '',
+      AddressCode:            shipment.ShipmentReference || '',
       ShipmentCompletionDate: (shipment.ReceivedAtUtc ? new Date(shipment.ReceivedAtUtc) : new Date()).toISOString().slice(0, 10),
       PostingDate:            today,
-      Quantity:               Number(order.ReceivedQty),
+      Quantity:               convertQty(Number(order.ReceivedQty), baseUnit, orderUnit),
     };
 
     const sapResp = await axios.post(
@@ -4200,13 +4247,19 @@ async function postGoodsReceiptToSap(order, shipment, callerUserId) {
 // bulk-flips every linked order to 'Received', and posts each line's goods
 // receipt to SAP (see postGoodsReceiptToSap and markShipmentReceived's own
 // comment for why one line's SAP failure doesn't block the others). Body:
-// { receivedAt?, receivedQuantities?, skipSap? } — receivedAt defaults to
-// now; receivedQuantities is an optional { [suggestionId]: qty } map of the
-// operator-confirmed received quantity per order line (falls back to each
-// order's OrderQty when omitted); skipSap (testing phase only — see the
-// Inbound Log's "Skip SAP posting" checkbox) bypasses every SAP call for
-// this receive, recording every line as skipped instead of attempted, so
-// nothing books into SAP before the operator is ready.
+// { receivedAt?, receivedQuantities?, supplierReferences?, skipSap? } —
+// receivedAt defaults to now; receivedQuantities is an optional
+// { [suggestionId]: qty } map of the operator-confirmed received quantity
+// per order line (falls back to each order's OrderQty when omitted);
+// supplierReferences is an optional { [suggestionId]: ref } map of the
+// supplier's own delivery-paperwork reference, only needed for a line that
+// doesn't already have one on file (markShipmentReceived requires every
+// line to end up with one, since it's what's posted to SAP as RM07M-LFSNR —
+// see that function's and postGoodsReceiptToSap's comments); skipSap
+// (testing phase only — see the Inbound Log's "Skip SAP posting" checkbox)
+// bypasses every SAP call for this receive, recording every line as skipped
+// instead of attempted, so nothing books into SAP before the operator is
+// ready.
 router.post('/order-suggestions/shipments/:shipmentId/receive', requirePermission('LOG_MRP'), async (req, res) => {
   try {
     const receivedBy = req.session?.user?.username || 'unknown';
@@ -4215,6 +4268,7 @@ router.post('/order-suggestions/shipments/:shipmentId/receive', requirePermissio
       receivedBy,
       receivedAt: req.body?.receivedAt || null,
       receivedQuantities: req.body?.receivedQuantities || null,
+      supplierReferences: req.body?.supplierReferences || null,
       skipSap: !!req.body?.skipSap,
       postGoodsReceipt: (order, shipment) => postGoodsReceiptToSap(order, shipment, callerUserId),
     });

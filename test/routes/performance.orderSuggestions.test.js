@@ -152,6 +152,25 @@ test('groups same-vendor materials together, sorted by orderByDate, with a combi
   expect(group.moqMet).toBe(true); // 3300 >= the vendor's 3000 combined MOQ
 });
 
+// Each material's suggestedQty is computed in the material's SAP base unit
+// (KG), but a vendor's combined order-level MOQ (log.Vendor.OrderMoqQty) is
+// expressed in that vendor's OWN order unit (OrderMoqUom — e.g. LB for
+// DeWAL), which can differ from KG. Before this fix the two were compared
+// directly with no conversion at all.
+test('converts the combined KG total into the vendor order unit before comparing against a non-KG combined MOQ', async () => {
+  db.listVendorMaterialsForSuggestions.mockResolvedValueOnce([
+    // suggestedQty 2000 KG = ~4409.245 LB — short of a 5000 LB combined MOQ.
+    materialRow({ VendorMaterialId: 1, Material: 'M1', LeadTimeDaysOverride: 3, MaterialMoqQty: 1000, OrderMoqQty: 5000, OrderMoqUom: 'LB' }),
+  ]);
+  const res = await request(appMrp).get('/order-suggestions');
+
+  const group = res.body.data[0];
+  expect(group.combinedQty).toBe(2000); // raw KG sum, unconverted
+  expect(group.moqMet).toBe(false);
+  // 5000 LB - (2000 KG / 0.45359237) LB ≈ 590.755 LB short.
+  expect(group.moqShortfall).toBeCloseTo(590.755, 2);
+});
+
 // Isopar (Material 10010) is planned off a manual daily meter reading + a fixed weekday/weekend
 // L/day rate instead of SAP's StockQty/PredictedUsage — see buildSuggestionForRow's Isopar
 // override branch in routes/performance.js.

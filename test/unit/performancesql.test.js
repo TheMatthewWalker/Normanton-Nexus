@@ -88,7 +88,8 @@ describe('createDemandAdjustment', () => {
 // markShipmentReceived: (1) shipment lookup, (2) non-cancelled linked
 // orders, (3) UPDATE PurchaseOrderShipment, then one UPDATE
 // PurchaseOrderSuggestion per order (Status='Received' + ReceivedQty +
-// SapMaterialDocument/SapGrError/SapGrSkipped). postGoodsReceipt (when
+// SupplierReference + SapMaterialDocument/SapGrError/SapGrSkipped).
+// postGoodsReceipt (when
 // supplied) is an injected callback, not a DB call, so it doesn't add to
 // the query count — routes/performance.js supplies the real SapServer HTTP
 // call in production; these tests exercise markShipmentReceived's own
@@ -109,7 +110,7 @@ describe('markShipmentReceived', () => {
   }
 
   test('flips each order line straight to Received (not the retired Booked status)', async () => {
-    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100 }]);
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1' }]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
 
     await markShipmentReceived(1, { receivedBy: 'tester' });
@@ -121,8 +122,8 @@ describe('markShipmentReceived', () => {
 
   test('defaults each order line to its OrderQty when no receivedQuantities are given', async () => {
     queueShipmentAndOrders([
-      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100 },
-      { SuggestionId: 2, Material: 'MAT2', OrderQty: 50 },
+      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1' },
+      { SuggestionId: 2, Material: 'MAT2', OrderQty: 50, SupplierReference: 'SUP-2' },
     ]);
     dbRequest.query.mockResolvedValue({ recordset: [] }); // remaining UPDATE calls
 
@@ -134,8 +135,8 @@ describe('markShipmentReceived', () => {
 
   test('uses the confirmed receivedQuantities map, falling back to OrderQty for lines it omits', async () => {
     queueShipmentAndOrders([
-      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100 },
-      { SuggestionId: 2, Material: 'MAT2', OrderQty: 50 },
+      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1' },
+      { SuggestionId: 2, Material: 'MAT2', OrderQty: 50, SupplierReference: 'SUP-2' },
     ]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
 
@@ -144,6 +145,38 @@ describe('markShipmentReceived', () => {
     await markShipmentReceived(1, { receivedBy: 'tester', receivedQuantities: { 1: 80 } });
 
     expect(receivedQtyCalls()).toEqual([80, 50]);
+  });
+
+  // ReceivedQty is always stored in the material's SAP base unit (KG) —
+  // see lib/unitConversion.js's header comment — but an operator confirming
+  // receipt off the supplier's own delivery paperwork enters the quantity
+  // in the vendor's actual order unit (log.Vendor.OrderMoqUom — e.g. LB for
+  // DeWAL). A freshly-entered value must be converted back to KG before
+  // being stored; the "nothing entered, assume the full order arrived"
+  // default (falling back to OrderQty) is already in KG and must NOT be
+  // converted a second time.
+  test('converts a freshly-entered receivedQuantities value from the vendor order unit into the base unit before storing', async () => {
+    queueShipmentAndOrders([
+      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1', OrderMoqUom: 'LB', MaterialUom: 'KG' },
+    ]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    // Operator reads "50 LB" off the supplier's paperwork and types 50.
+    await markShipmentReceived(1, { receivedBy: 'tester', receivedQuantities: { 1: 50 } });
+
+    // 50 LB * 0.45359237 = 22.6796185 KG.
+    expect(receivedQtyCalls()[0]).toBeCloseTo(22.6796185, 6);
+  });
+
+  test('does not double-convert the OrderQty default for a vendor with a non-KG order unit', async () => {
+    queueShipmentAndOrders([
+      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1', OrderMoqUom: 'LB', MaterialUom: 'KG' },
+    ]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    await markShipmentReceived(1, { receivedBy: 'tester' }); // no receivedQuantities supplied
+
+    expect(receivedQtyCalls()).toEqual([100]); // OrderQty (already KG) passed through unchanged
   });
 
   test('rejects with a 400 naming the material when a received quantity is invalid, before writing anything', async () => {
@@ -178,7 +211,7 @@ describe('markShipmentReceived', () => {
   });
 
   test('never calls postGoodsReceipt when skipSap is true, and stamps every line SapGrSkipped', async () => {
-    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010' }]);
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010', SupplierReference: 'SUP-1' }]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
     const postGoodsReceipt = jest.fn().mockResolvedValue({ success: true, documentNumber: '5000000001' });
 
@@ -191,7 +224,7 @@ describe('markShipmentReceived', () => {
   });
 
   test('never calls postGoodsReceipt when none is supplied (skipSap omitted) — same as skipSap:true', async () => {
-    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100 }]);
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1' }]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
 
     const result = await markShipmentReceived(1, {});
@@ -200,14 +233,14 @@ describe('markShipmentReceived', () => {
   });
 
   test('stores the returned documentNumber and clears SapGrSkipped on a successful post', async () => {
-    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010' }]);
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010', SupplierReference: 'SUP-1' }]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
     const postGoodsReceipt = jest.fn().mockResolvedValue({ success: true, documentNumber: '5000000001' });
 
     const result = await markShipmentReceived(1, { postGoodsReceipt });
 
     expect(postGoodsReceipt).toHaveBeenCalledWith(
-      expect.objectContaining({ SuggestionId: 1, PoNumber: '4500012345', ReceivedQty: 100 }),
+      expect.objectContaining({ SuggestionId: 1, PoNumber: '4500012345', ReceivedQty: 100, SupplierReference: 'SUP-1' }),
       expect.objectContaining({ ShipmentReference: 'INB-000001', TrackingNumber: 'TRACK1' }),
     );
     expect(result.sapResults).toEqual([{ suggestionId: 1, material: 'MAT1', success: true, documentNumber: '5000000001' }]);
@@ -218,8 +251,8 @@ describe('markShipmentReceived', () => {
 
   test('records a per-line SAP failure but still books it and continues to the next line', async () => {
     queueShipmentAndOrders([
-      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010' },
-      { SuggestionId: 2, Material: 'MAT2', OrderQty: 50,  PoNumber: '4500012345', PoItemNumber: '00020' },
+      { SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010', SupplierReference: 'SUP-1' },
+      { SuggestionId: 2, Material: 'MAT2', OrderQty: 50,  PoNumber: '4500012345', PoItemNumber: '00020', SupplierReference: 'SUP-2' },
     ]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
     const postGoodsReceipt = jest.fn()
@@ -238,7 +271,7 @@ describe('markShipmentReceived', () => {
   });
 
   test('treats a thrown postGoodsReceipt as a failure rather than aborting the receive', async () => {
-    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010' }]);
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, PoNumber: '4500012345', PoItemNumber: '00010', SupplierReference: 'SUP-1' }]);
     dbRequest.query.mockResolvedValue({ recordset: [] });
     const postGoodsReceipt = jest.fn().mockRejectedValue(new Error('SapServer unreachable'));
 
@@ -246,6 +279,49 @@ describe('markShipmentReceived', () => {
 
     expect(result.orderCount).toBe(1);
     expect(result.sapResults).toEqual([{ suggestionId: 1, material: 'MAT1', success: false, error: 'SapServer unreachable' }]);
+  });
+
+  // Supplier reference — RM07M-LFSNR must be the SUPPLIER's own reference,
+  // not Nexus's internal shipment reference (see postGoodsReceiptToSap's
+  // comment in performance.js), so every non-cancelled line must end up
+  // with one before anything is written.
+  test('rejects with a 400 naming the material when a line has no SupplierReference on file and none was supplied, before writing anything', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100 }]);
+
+    await expect(markShipmentReceived(1, { receivedBy: 'tester' })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('MAT1'),
+    });
+
+    // Only the two lookups ran — no UPDATE was issued once validation failed.
+    expect(dbRequest.query).toHaveBeenCalledTimes(2);
+  });
+
+  test('accepts a freshly-supplied supplierReferences entry for a line with none on file, and saves it back onto the order', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100 }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    await markShipmentReceived(1, { receivedBy: 'tester', supplierReferences: { 1: 'PAPERWORK-99' } });
+
+    expect(inputCalls('supplierReference')).toEqual(['PAPERWORK-99']);
+  });
+
+  test('uses the SupplierReference already on file over a blank/whitespace supplierReferences entry', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100, SupplierReference: 'SUP-1' }]);
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    await markShipmentReceived(1, { receivedBy: 'tester', supplierReferences: { 1: '   ' } });
+
+    expect(inputCalls('supplierReference')).toEqual(['SUP-1']);
+  });
+
+  test('rejects with a 400 when a supplierReferences entry is only whitespace and nothing is on file', async () => {
+    queueShipmentAndOrders([{ SuggestionId: 1, Material: 'MAT1', OrderQty: 100 }]);
+
+    await expect(markShipmentReceived(1, { supplierReferences: { 1: '   ' } })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('MAT1'),
+    });
   });
 });
 
