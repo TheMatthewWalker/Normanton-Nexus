@@ -461,8 +461,14 @@ function buildSuggestionForRow(r, incomingByMaterial, today, asOfDate, horizonDa
     }
   }
 
-  const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
-  const transitTimeDays = isExw ? (Number(r.TransitTimeDays) || 0) : null;
+  // Transit time (log.Vendor.TransitTimeDays) now feeds the expected-
+  // dispatch-date calc for every Incoterm, not just EXW — per the user,
+  // their own process is the same regardless of who's technically
+  // responsible for the transit leg: they're notified when the supplier
+  // dispatches and create the shipment at that point, so knowing the
+  // expected dispatch date is useful universally. Defaults to 0 (dispatch
+  // date == delivery date) for a vendor with no transit time configured yet.
+  const transitTimeDays = Number(r.TransitTimeDays) || 0;
 
   return {
     vendorMaterialId: r.VendorMaterialId,
@@ -674,11 +680,11 @@ function validateVendorCombinedQty(totalQty, orderMoqQty, orderMaxQty) {
 }
 
 // Shared date-math for accepting a suggestion, used by both the single-item
-// and batch accept routes so the EXW ready-to-collect logic only lives in
-// one place.
+// and batch accept routes so the ready-to-collect/expected-dispatch logic
+// only lives in one place.
 function buildAcceptPayload({
   vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
-  leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes, deliveryDateOverride
+  leadTimeDays, transitTimeDays, isSpotPo, notes, deliveryDateOverride
 }) {
   const leadTime = Number(leadTimeDays) || 0;
   // A user-entered delivery date takes priority over the lead-time-derived
@@ -690,12 +696,18 @@ function buildAcceptPayload({
     ? overrideDate
     : addWorkingDaysUtc(orderDateObj, leadTime);
 
-  // EXW: the date actually quoted to the supplier is the ready-to-collect
-  // date, not the delivery date — see migrate_vendor_master_data.sql's DATE
-  // MATH block. Every other Incoterm leaves these columns NULL/unused.
-  const isExw = (incoterms || '').toUpperCase() === 'EXW';
-  const transitTime = isExw ? (Number(transitTimeDays) || 0) : null;
-  const readyToCollectDate = isExw ? addWorkingDaysUtc(deliveryDate, -(transitTime || 0)) : null;
+  // The expected dispatch date (when the supplier needs to ship/have goods
+  // ready by, for the order to land on deliveryDate) is now computed for
+  // EVERY order regardless of Incoterm — previously EXW-only (see
+  // migrate_vendor_master_data.sql's DATE MATH block for that original,
+  // narrower design). Per the user: their own process — get notified when
+  // the supplier dispatches, create the shipment at that point — is the
+  // same either way, so this is useful universally for spotting a late
+  // dispatch, not just for who's contractually arranging transit.
+  // TransitTimeDays defaults to 0 (dispatch date == delivery date) for a
+  // vendor with no transit time configured yet.
+  const transitTime = Number(transitTimeDays) || 0;
+  const readyToCollectDate = addWorkingDaysUtc(deliveryDate, -transitTime);
 
   return {
     vendorMaterialId, vendorId, material,
@@ -3404,7 +3416,7 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
   try {
     const {
       vendorMaterialId, vendorId, material, suggestedQty, orderQty,
-      orderDate, leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes,
+      orderDate, leadTimeDays, transitTimeDays, isSpotPo, notes,
       deliveryDate: deliveryDateOverride
     } = req.body;
 
@@ -3446,7 +3458,7 @@ router.post('/order-suggestions/accept', requirePermission('LOG_MRP'), async (re
     const orderDateObj = orderDate ? new Date(orderDate) : new Date();
     const payload = buildAcceptPayload({
       vendorMaterialId, vendorId, material, suggestedQty, orderQty: enforcedQty, orderDateObj,
-      leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes, deliveryDateOverride
+      leadTimeDays, transitTimeDays, isSpotPo, notes, deliveryDateOverride
     });
     const suggestionId = await db.acceptOrderSuggestion(payload);
 
@@ -3512,12 +3524,12 @@ router.post('/order-suggestions/accept-batch', requirePermission('LOG_MRP'), asy
     for (const item of enforcedItems) {
       const {
         vendorMaterialId, material, suggestedQty, orderQty,
-        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes,
+        leadTimeDays, transitTimeDays, isSpotPo, notes,
         deliveryDate: deliveryDateOverride
       } = item;
       const payload = buildAcceptPayload({
         vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDateObj,
-        leadTimeDays, transitTimeDays, incoterms, isSpotPo, notes, deliveryDateOverride
+        leadTimeDays, transitTimeDays, isSpotPo, notes, deliveryDateOverride
       });
       suggestionIds.push(await db.acceptOrderSuggestion(payload));
     }
@@ -3564,7 +3576,6 @@ async function insertManualOrderRow({ vendorMaterialId, orderQty, orderDate, del
     // the vendor's lead time, which may not match what was actually
     // agreed for this specific order.
     const deliveryDateObj = new Date(deliveryDate);
-    const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
     payload = {
       vendorMaterialId: r.VendorMaterialId,
       vendorId: r.VendorId,
@@ -3574,8 +3585,8 @@ async function insertManualOrderRow({ vendorMaterialId, orderQty, orderDate, del
       orderDate: orderDateObj,
       leadTimeDaysUsed: leadTimeDays,
       deliveryDate: deliveryDateObj,
-      transitTimeDaysUsed: isExw ? transitTimeDays : null,
-      readyToCollectDate: isExw ? addWorkingDaysUtc(deliveryDateObj, -transitTimeDays) : null,
+      transitTimeDaysUsed: transitTimeDays,
+      readyToCollectDate: addWorkingDaysUtc(deliveryDateObj, -transitTimeDays),
       isSpotPo,
       notes: notes || null,
     };
@@ -3583,7 +3594,7 @@ async function insertManualOrderRow({ vendorMaterialId, orderQty, orderDate, del
     payload = buildAcceptPayload({
       vendorMaterialId: r.VendorMaterialId, vendorId: r.VendorId, material: r.Material,
       suggestedQty: null, orderQty: qty, orderDateObj,
-      leadTimeDays, transitTimeDays, incoterms: r.Incoterms, isSpotPo, notes,
+      leadTimeDays, transitTimeDays, isSpotPo, notes,
     });
   }
 

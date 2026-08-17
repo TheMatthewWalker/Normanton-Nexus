@@ -9100,13 +9100,11 @@ function osRenderSuggestionList(groups) {
     document.getElementById('result-body').innerHTML = `
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
         <button class="btn-secondary" id="os-start-new-btn">Start New Order</button>
-        <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
         <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
       </div>
       <div class="sap-empty">Nothing needs ordering right now.</div>`;
     document.getElementById('os-start-new-btn').addEventListener('click', () => osOpenStartNewOrderPicker());
     document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
-    document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
     return;
   }
 
@@ -9155,7 +9153,7 @@ function osRenderSuggestionList(groups) {
           <td>${Number(s.currentStock).toLocaleString()} ${esc(s.uom || '')}</td>
           <td>${Number(s.safetyStockQty).toLocaleString()} ${esc(s.uom || '')}</td>
           <td>${formatDisplayDate(s.breachDate)}</td>
-          <td>${s.leadTimeDays}${s.transitTimeDays != null ? ` (+${s.transitTimeDays} transit)` : ''}d</td>
+          <td>${s.leadTimeDays}${s.transitTimeDays > 0 ? ` (+${s.transitTimeDays} transit)` : ''}d</td>
           <td><strong>${Number(s.suggestedQty).toLocaleString()}</strong> ${esc(s.uom || '')}${s.materialMoqQty ? `<div style="font-size:11px;color:var(--text-secondary,#666)">MOQ ${Number(s.materialMoqQty).toLocaleString()}</div>` : ''}</td>
           <td>${agreementCell}</td>
           <td style="text-align:right">${acceptCell}</td>
@@ -9190,8 +9188,6 @@ function osRenderSuggestionList(groups) {
       <div class="toolbar-hint" style="margin:0">Triggered off each material's safety stock floor — not just-in-time. Vendors with a combined order MOQ are grouped so you can see whether one order clears it; use Build Order to combine materials and hit the minimum.</div>
       <div style="display:flex;gap:8px;white-space:nowrap">
         <button class="btn-secondary" id="os-start-new-btn">Start New Order</button>
-        <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
-        <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
         <button class="btn-secondary" id="os-view-tracked-btn">View Tracked Orders →</button>
       </div>
     </div>
@@ -9200,8 +9196,6 @@ function osRenderSuggestionList(groups) {
 
   document.getElementById('os-start-new-btn').addEventListener('click', () => osOpenStartNewOrderPicker());
   document.getElementById('os-view-tracked-btn').addEventListener('click', () => runOrderSuggestionsTracked());
-  document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
-  document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.querySelectorAll('.os-accept-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const g = groups[Number(btn.dataset.gi)];
@@ -9799,13 +9793,34 @@ async function runOrderSuggestionsTracked(preserveExpanded) {
 
 const OS_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Booked', 'Received', 'Cancelled'];
 
-// Same "which date counts as due" logic as the Due Date column's display
-// (renderTrackedRow's dueLabel below) — a spot PO's actionable date is when
-// it needs collecting, not the (informational only) full delivery date.
-// No date at all sorts to the end.
-function osEffectiveDueDate(t) {
-  const d = t.IsSpotPo && t.ReadyToCollectDate ? t.ReadyToCollectDate : t.DeliveryDate;
+// Sort keys for Tracked Orders' bucket/supplier grouping — no date at all
+// sorts to the end either way.
+function osEffectiveDispatchDate(t) {
+  const d = t.ReadyToCollectDate || t.DeliveryDate;
   return d ? new Date(d).getTime() : Infinity;
+}
+function osEffectiveDeliveryDate(t) {
+  return t.DeliveryDate ? new Date(t.DeliveryDate).getTime() : Infinity;
+}
+
+// Classifies an 'Ordered', not-yet-shipped order's expected dispatch date
+// (ReadyToCollectDate — see buildAcceptPayload's comment in
+// routes/performance.js for how it's computed, now for every Incoterm, not
+// just EXW) against today: 'Overdue' feeds the Overdue for Shipping bucket
+// itself; 'Today'/'ThisWeek'/'Future' are shown as a badge on Needs
+// Shipment rows so an on-time order due to ship this week doesn't read the
+// same as one with months of headroom. Returns null when there's no
+// dispatch date yet (older orders accepted before this existed) — treated
+// as "unknown", not overdue.
+function osDispatchUrgency(t) {
+  if (!t.ReadyToCollectDate) return null;
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+  const dispatch = new Date(String(t.ReadyToCollectDate).slice(0, 10) + 'T00:00:00Z');
+  const diffDays = Math.round((dispatch.getTime() - today.getTime()) / 86400000);
+  if (diffDays < 0) return 'Overdue';
+  if (diffDays === 0) return 'Today';
+  if (diffDays <= 7) return 'ThisWeek';
+  return 'Future';
 }
 
 // Display-only mirror of Normanton-Nexus/lib/unitConversion.js's KG_PER_UNIT
@@ -9876,16 +9891,35 @@ function osRenderTrackedList(tracked) {
   // still opens the Inbound Shipment detail (openInboundShipmentDetail) —
   // not the Assign Shipment modal — since that's where the one remaining
   // way to touch a completed order lives: Undo Received.
-  const renderTrackedRow = (t) => {
-    // Whichever date is actually actionable/shown gets edited — same
-    // ReadyToCollectDate-for-spot-PO-else-DeliveryDate split as
-    // osEffectiveDueDate below and the dueLabel this replaced. osSaveOneTracked
-    // sends the edited value back under whichever of the two fields it came
-    // from, so a spot PO's full DeliveryDate (informational only) is left
-    // alone.
-    const isSpotDue = t.IsSpotPo && t.ReadyToCollectDate;
-    const dueValue  = daDateInputValue(isSpotDue ? t.ReadyToCollectDate : t.DeliveryDate);
+  const renderTrackedRow = (t, bucketKey) => {
+    const dispatchValue = daDateInputValue(t.ReadyToCollectDate);
+    const deliveryValue = daDateInputValue(t.DeliveryDate);
     const isCompleted = t.Status === 'Received' || t.Status === 'Booked';
+
+    // Overdue for Shipping rows get an extra line under Expected Delivery
+    // showing what the ETA would become if the supplier shipped TODAY
+    // (today + this order's own transit time, working days) against the
+    // originally planned delivery date — makes it obvious at a glance how
+    // late a delivery is already running, not just that it's late.
+    const overdueEtaHint = (bucketKey === 'overdueShipping' && t.DeliveryDate) ? (() => {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const newEta = osAddWorkingDaysUtc(todayIso, Number(t.TransitTimeDaysUsed) || 0);
+      const lateDays = Math.round((new Date(newEta + 'T00:00:00Z') - new Date(String(t.DeliveryDate).slice(0, 10) + 'T00:00:00Z')) / 86400000);
+      return `<div style="font-size:11px;color:var(--error,#DC2626);margin-top:2px">
+        if shipped today: ${formatDisplayDate(newEta)}${lateDays > 0 ? ` (${lateDays}d late)` : ''}
+      </div>`;
+    })() : '';
+
+    // Needs Shipment rows (not yet overdue) get a small badge on how soon
+    // they're due to ship, so a this-week order doesn't read the same as
+    // one with months of headroom — the same idea as Order Suggestions'
+    // Overdue/Due Soon badges, one tier further out.
+    const dispatchBadge = (bucketKey === 'needs') ? (() => {
+      const urgency = osDispatchUrgency(t);
+      if (urgency === 'Today') return '<div><span class="tile-badge" style="background:var(--warning,#D97706);color:#fff;font-size:10px">Ships Today</span></div>';
+      if (urgency === 'ThisWeek') return '<div><span class="tile-badge" style="background:var(--accent,#2563EB);color:#fff;font-size:10px">This Week</span></div>';
+      return '';
+    })() : '';
 
     if (isCompleted) {
       return `
@@ -9895,7 +9929,8 @@ function osRenderTrackedList(tracked) {
         <td>${esc(t.VendorName)}</td>
         <td>${Number(t.OrderQty).toLocaleString()}</td>
         <td>${formatDisplayDate(t.OrderDate)}</td>
-        <td>${formatDisplayDate(dueValue)}</td>
+        <td>${formatDisplayDate(dispatchValue) || '—'}</td>
+        <td>${formatDisplayDate(deliveryValue) || '—'}</td>
         <td>Received</td>
         <td>${esc(t.PoNumber || '-')}${t.PoItemNumber ? ` / ${esc(t.PoItemNumber)}` : ''}</td>
         <td>${esc(t.SupplierReference || '-')}</td>
@@ -9920,8 +9955,12 @@ function osRenderTrackedList(tracked) {
       <td><input class="tf-input os-qty-input" data-id="${t.SuggestionId}" type="number" step="0.001" min="0.001" value="${Number(t.OrderQty)}" style="padding:3px 6px;font-size:12px;width:90px"></td>
       <td>${formatDisplayDate(t.OrderDate)}</td>
       <td>
-        <input class="tf-input os-due-date-input" data-id="${t.SuggestionId}" data-spot-due="${isSpotDue ? '1' : ''}" type="date" value="${dueValue}" style="padding:3px 6px;font-size:12px;width:120px">
-        ${isSpotDue ? '<div style="font-size:10px;color:var(--text-secondary,#666)">ready to collect</div>' : ''}
+        <input class="tf-input os-dispatch-date-input" data-id="${t.SuggestionId}" type="date" value="${dispatchValue}" style="padding:3px 6px;font-size:12px;width:120px">
+        ${dispatchBadge}
+      </td>
+      <td>
+        <input class="tf-input os-delivery-date-input" data-id="${t.SuggestionId}" type="date" value="${deliveryValue}" style="padding:3px 6px;font-size:12px;width:120px">
+        ${overdueEtaHint}
       </td>
       <td>
         <select class="tf-input os-status-select" data-id="${t.SuggestionId}" style="padding:3px 6px;font-size:12px">
@@ -9947,20 +9986,32 @@ function osRenderTrackedList(tracked) {
     </tr>`;
   };
 
-  const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Due Date</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
+  const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Expected Dispatch</th><th>Expected Delivery</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
 
-  // Five-level hierarchy: bucket (Needs Booking / Needs Shipment / Assigned
-  // to Shipment / Completed / Cancelled) -> supplier -> order rows. Needs
-  // Booking comes first and takes priority over everything except
-  // Cancelled/Completed — an order that's just been accepted (Status still
-  // 'Accepted') hasn't actually been sent to the supplier yet, and
-  // previously fell straight into Needs Shipment alongside orders that were
-  // already placed, making it easy to forget the "tell the supplier" step
-  // entirely. It gets the red/priority dot since a forgotten order is the
-  // costliest mistake here. Every level starts collapsed — the point is to
-  // let the user open exactly one supplier at a time rather than face the
-  // whole list, reusing the ps-section pattern from Open Deliveries, nested
-  // this time.
+  // Six-level hierarchy: bucket (Overdue for Shipping / Needs Booking /
+  // Needs Shipment / Assigned to Shipment / Completed / Cancelled) ->
+  // supplier -> order rows. Needs Booking takes priority over everything
+  // except Overdue for Shipping/Cancelled/Completed — an order that's just
+  // been accepted (Status still 'Accepted') hasn't actually been sent to
+  // the supplier yet, and previously fell straight into Needs Shipment
+  // alongside orders that were already placed, making it easy to forget
+  // the "tell the supplier" step entirely. It gets the red/priority dot
+  // since a forgotten order is the costliest mistake here. Every level
+  // starts collapsed — the point is to let the user open exactly one
+  // supplier at a time rather than face the whole list, reusing the
+  // ps-section pattern from Open Deliveries, nested this time.
+  //
+  // Overdue for Shipping (osDispatchUrgency below) is Needs Shipment's own
+  // split-off, listed first/above it — an order that's been placed but
+  // whose expected dispatch date (order's own DeliveryDate minus the
+  // vendor's TransitTimeDays, working days — see buildAcceptPayload in
+  // routes/performance.js) has already passed, per the user's own process:
+  // they're notified when the supplier actually dispatches and create the
+  // shipment at that point, so a dispatch date come and gone with nothing
+  // shipped yet is the signal a supplier may be running late. A row with no
+  // known dispatch date yet (older orders accepted before this existed)
+  // just falls back into the plain Needs Shipment bucket rather than being
+  // misclassified.
   //
   // Completed (Status 'Received', or the retired 'Booked' — see the STATUS
   // LIFECYCLE ADDENDUM in sql/migrate_order_shipments.sql) used to stay in
@@ -9971,11 +10022,18 @@ function osRenderTrackedList(tracked) {
   // these rows locked read-only, matching assertOrderEditable's server-side
   // lock in performancesql.js.
   const BUCKET_DEFS = [
-    { key: 'needsBooking', label: 'Needs Booking',        dot: 'priority', match: t => t.Status === 'Accepted' },
-    { key: 'needs',        label: 'Needs Shipment',       dot: 'backlog',  match: t => t.Status === 'Ordered' && !t.ShipmentId },
-    { key: 'assigned',     label: 'Assigned to Shipment', dot: 'week',     match: t => t.Status === 'Ordered' && !!t.ShipmentId },
-    { key: 'completed',    label: 'Completed',            dot: 'today',    match: t => t.Status === 'Received' || t.Status === 'Booked' },
-    { key: 'cancelled',    label: 'Cancelled',            dot: 'other',    match: t => t.Status === 'Cancelled' },
+    { key: 'overdueShipping', label: 'Overdue for Shipping', dot: 'priority', sortBy: 'dispatch',
+      match: t => t.Status === 'Ordered' && !t.ShipmentId && osDispatchUrgency(t) === 'Overdue' },
+    { key: 'needsBooking', label: 'Needs Booking',        dot: 'priority', sortBy: 'delivery',
+      match: t => t.Status === 'Accepted' },
+    { key: 'needs',        label: 'Needs Shipment',       dot: 'backlog',  sortBy: 'dispatch',
+      match: t => t.Status === 'Ordered' && !t.ShipmentId && osDispatchUrgency(t) !== 'Overdue' },
+    { key: 'assigned',     label: 'Assigned to Shipment', dot: 'week',     sortBy: 'delivery',
+      match: t => t.Status === 'Ordered' && !!t.ShipmentId },
+    { key: 'completed',    label: 'Completed',            dot: 'today',    sortBy: 'delivery',
+      match: t => t.Status === 'Received' || t.Status === 'Booked' },
+    { key: 'cancelled',    label: 'Cancelled',            dot: 'other',    sortBy: 'delivery',
+      match: t => t.Status === 'Cancelled' },
   ];
 
   // data-group-key on both levels lets osCaptureExpandedGroups/
@@ -9995,7 +10053,7 @@ function osRenderTrackedList(tracked) {
       <span class="ps-chevron">v</span>
     </div>
     <div class="ps-section-body">
-      <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${groupRows.map(renderTrackedRow).join('')}</tbody></table></div>
+      <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${groupRows.map(t => renderTrackedRow(t, bucketKey)).join('')}</tbody></table></div>
     </div>
   </div>`;
 
@@ -10004,14 +10062,21 @@ function osRenderTrackedList(tracked) {
     if (!bucketRows.length) return '';
     const byVendor = {};
     bucketRows.forEach(t => { const key = t.VendorName || 'Unknown Vendor'; (byVendor[key] = byVendor[key] || []).push(t); });
-    // Sort each vendor's orders by the same due date shown in the Due Date
-    // column (ready-to-collect date for spot POs, delivery date otherwise) —
-    // earliest due first, no-date rows pushed to the end.
-    Object.values(byVendor).forEach(groupRows => groupRows.sort((a, b) => osEffectiveDueDate(a) - osEffectiveDueDate(b)));
+    // Shipping-focused buckets sort by expected dispatch date (soonest
+    // dispatch first — the actionable date there); everything else sorts by
+    // expected delivery date, same as before this bucket split existed.
+    const sortFn = bd.sortBy === 'dispatch' ? osEffectiveDispatchDate : osEffectiveDeliveryDate;
+    Object.values(byVendor).forEach(groupRows => groupRows.sort((a, b) => sortFn(a) - sortFn(b)));
     const vendorGroups = Object.keys(byVendor).sort((a, b) => a.localeCompare(b))
       .map(name => renderSupplierGroup(bd.key, name, byVendor[name])).join('');
+    // Selects/deselects every checkbox in this bucket at once — checked
+    // state reflects whether the whole bucket is currently fully selected,
+    // recomputed on every re-render rather than persisted, same lifetime as
+    // selectedTrackedIds itself.
+    const bucketFullySelected = bucketRows.every(t => selectedTrackedIds.has(Number(t.SuggestionId)));
     return `<div class="ps-section${collapsedCls}" data-group-key="${esc(bd.key)}">
       <div class="ps-section-header">
+        <input type="checkbox" class="os-bucket-select-all" data-bucket-key="${esc(bd.key)}" ${bucketFullySelected ? 'checked' : ''} title="Select all in ${esc(bd.label)}" onclick="event.stopPropagation()">
         <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
         <span class="ps-section-title">${bd.label}</span>
         <span class="ps-section-count">${bucketRows.length}</span>
@@ -10027,31 +10092,40 @@ function osRenderTrackedList(tracked) {
 
   document.getElementById('result-body').innerHTML = `
     <div class="lg-actions">
-      <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment, auto-ship, or save edits across several lines at once.</div></div>
+      <div><div class="lg-selection-title">Tracked orders</div><div class="toolbar-hint" id="os-selection-hint">Select order lines to create a shipment or save edits across several lines at once.</div></div>
       <div class="toolbar-spacer"></div>
       <input class="tf-input" id="os-search-input" type="text" placeholder="Search by part number or PO…" value="${esc(trackedSearchQuery)}" oninput="osApplySearch()" style="max-width:240px">
-      <button class="btn-secondary" id="os-add-manual-btn">+ Add Manual Order</button>
-      <button class="btn-secondary" id="os-upload-csv-btn">Upload CSV</button>
       <button class="btn-secondary" id="os-view-suggestions-btn">← Back to Suggestions</button>
-      <button type="button" class="btn-secondary" id="os-auto-shipment-btn" disabled>Auto-Shipment</button>
       <button type="button" class="btn-secondary" id="os-save-selected-btn" disabled>Save Selected</button>
       <button type="button" class="btn-submit" id="os-create-shipment-btn" disabled>Create Shipment</button>
-      <button type="button" class="btn-submit" id="os-create-po-btn" disabled>Create PO in SAP</button>
-      <button type="button" class="btn-submit" id="os-assign-schedule-btn" disabled>Assign to Schedule Agreement</button>
+      <button type="button" class="btn-submit" id="os-create-po-btn" disabled>Create PO / Assign Schedule</button>
     </div>
     ${rows.length ? `<div class="ps-sections">${bucketSections}</div>` : `<div class="sap-empty">${emptyMessage}</div>`}
   `;
 
   document.getElementById('os-view-suggestions-btn').addEventListener('click', () => runOrderSuggestions());
-  document.getElementById('os-add-manual-btn').addEventListener('click', () => openManualOrderModal());
-  document.getElementById('os-upload-csv-btn').addEventListener('click', () => openManualOrderCsvModal());
   document.getElementById('os-create-shipment-btn').addEventListener('click', () => openCreateShipmentModal());
-  document.getElementById('os-auto-shipment-btn').addEventListener('click', () => autoCreateShipments());
   document.getElementById('os-save-selected-btn').addEventListener('click', () => saveSelectedTrackedOrders());
-  document.getElementById('os-create-po-btn').addEventListener('click', () => openCreatePoModal());
-  document.getElementById('os-assign-schedule-btn').addEventListener('click', () => assignSelectedToScheduleAgreement());
-  document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
+  document.getElementById('os-create-po-btn').addEventListener('click', () => handleCreatePoOrAssignSchedule());
+  document.querySelectorAll('.ps-section-header').forEach(h => h.addEventListener('click', (e) => {
+    if (e.target.closest('input')) return; // don't collapse when the select-all checkbox is clicked
+    h.closest('.ps-section').classList.toggle('ps-section--collapsed');
+  }));
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
+  // Selects/deselects every checkbox in this bucket — the bucket may span
+  // several collapsed supplier sub-groups, so this reaches every .os-check
+  // under this bucket's section regardless of which are currently expanded.
+  document.querySelectorAll('.os-bucket-select-all').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const bucketSection = cb.closest('.ps-section');
+      bucketSection.querySelectorAll('.os-check').forEach(check => {
+        check.checked = cb.checked;
+        const id = Number(check.dataset.id);
+        if (cb.checked) selectedTrackedIds.add(id); else selectedTrackedIds.delete(id);
+      });
+      osRefreshSelectionUi();
+    });
+  });
   document.querySelectorAll('.os-save-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const t = rows.find(x => String(x.SuggestionId) === btn.dataset.id);
@@ -10194,76 +10268,96 @@ async function osiLoadFolder(shipmentId) {
 function onTrackedCheckToggle(e) {
   const id = Number(e.target.dataset.id);
   if (e.target.checked) selectedTrackedIds.add(id); else selectedTrackedIds.delete(id);
+  osRefreshSelectionUi();
+}
+
+// Reflects selectedTrackedIds onto the selection hint + toolbar buttons —
+// split out from onTrackedCheckToggle so the bucket "select all" checkbox
+// (which mutates several rows' selection state at once) can refresh the UI
+// once at the end instead of faking a per-row change event.
+function osRefreshSelectionUi() {
   const hint = document.getElementById('os-selection-hint');
   if (hint) hint.textContent = selectedTrackedIds.size
     ? `${selectedTrackedIds.size} order line${selectedTrackedIds.size === 1 ? '' : 's'} selected`
-    : 'Select order lines to create a shipment, auto-ship, or save edits across several lines at once.';
+    : 'Select order lines to create a shipment or save edits across several lines at once.';
   const btn = document.getElementById('os-create-shipment-btn');
   if (btn) btn.disabled = selectedTrackedIds.size === 0;
-  const autoBtn = document.getElementById('os-auto-shipment-btn');
-  if (autoBtn) autoBtn.disabled = selectedTrackedIds.size === 0;
   const saveSelBtn = document.getElementById('os-save-selected-btn');
   if (saveSelBtn) saveSelBtn.disabled = selectedTrackedIds.size === 0;
   const poBtn = document.getElementById('os-create-po-btn');
-  if (poBtn) poBtn.disabled = !osCreatePoSelectionValid();
-  const scheduleBtn = document.getElementById('os-assign-schedule-btn');
-  if (scheduleBtn) scheduleBtn.disabled = !osAssignScheduleAgreementSelectionValid();
+  if (poBtn) poBtn.disabled = !osCreatePoOrAssignScheduleSelectionValid();
 }
 
-// One PO per vendor, and only for lines that genuinely haven't been ordered
-// yet — the same rules the create-po route re-checks server-side (fresh from
-// the DB, not trusted from this in-memory copy), but validated here too so
-// the button doesn't invite a click that's just going to bounce with an
-// error.
-function osCreatePoSelectionValid() {
+// "Create PO / Assign Schedule" — merged per the user: no need to make a
+// buyer pick between two buttons for something the master data already
+// answers. Every selected line must genuinely not be ordered yet
+// (Status 'Accepted', no PoNumber already — the create-po/assign-schedule-
+// agreement routes re-check this fresh from the DB regardless). Lines with
+// a schedule agreement on file (ScheduleAgreement, joined live from
+// log.VendorMaterial) get assigned to it — no PO created in SAP, no vendor
+// grouping needed, since assigning just writes each line's own agreement
+// number/item independently. Everything else needs a real new PO, which
+// (same as before this merge) is one PO per vendor, so that subset must
+// span at most one vendor for the button to be clickable.
+function osCreatePoOrAssignScheduleSelectionValid() {
   if (!selectedTrackedIds.size) return false;
   const rows = trackedRows.filter(t => selectedTrackedIds.has(Number(t.SuggestionId)));
   if (rows.some(t => t.Status !== 'Accepted' || t.PoNumber)) return false;
-  const vendorIds = new Set(rows.map(t => t.VendorId));
-  return vendorIds.size === 1;
+  const poVendorIds = new Set(rows.filter(t => !t.ScheduleAgreement).map(t => t.VendorId));
+  return poVendorIds.size <= 1;
 }
 
-// Same not-yet-ordered rule as osCreatePoSelectionValid, but no same-vendor
-// grouping — unlike Create PO, assign-schedule-agreement doesn't create any
-// single shared SAP document to group lines under, it just writes each
-// line's own agreement number/item independently, so a mixed-vendor
-// selection is fine as long as every line individually has a schedule
-// agreement on file (ScheduleAgreement, joined live from log.VendorMaterial
-// by listOrderSuggestionsTracked).
-function osAssignScheduleAgreementSelectionValid() {
-  if (!selectedTrackedIds.size) return false;
-  const rows = trackedRows.filter(t => selectedTrackedIds.has(Number(t.SuggestionId)));
-  return rows.every(t => t.Status === 'Accepted' && !t.PoNumber && t.ScheduleAgreement);
-}
-
-// "Assign to Schedule Agreement" — the create-po route's own comment in
-// performance.js explains why this writes the same PoNumber/PoItemNumber
-// fields Create PO does, without ever calling SAP. No review modal like
-// Create PO's (no price/currency/delivery-date to check, nothing gets
-// posted anywhere) — just a confirm() naming each line's agreement, same
-// weight as Mark Received's confirm().
-async function assignSelectedToScheduleAgreement() {
-  const btn = document.getElementById('os-assign-schedule-btn');
-  if (!btn || !osAssignScheduleAgreementSelectionValid()) return;
-  const ids = [...selectedTrackedIds];
-  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+// Posts the schedule-agreement assignment for one explicit set of rows —
+// extracted from the old single-purpose button handler so
+// handleCreatePoOrAssignSchedule below can call it for just the
+// schedule-agreement subset of a mixed selection. No review modal (no
+// price/currency/delivery-date to check, nothing gets posted to SAP) — just
+// a confirm() naming each line's agreement, same weight as Mark Received's.
+async function assignScheduleAgreementForRows(rows) {
   const lines = rows.map(t => `${t.Material} — ${t.ScheduleAgreement}${t.ScheduleAgreementItem ? '/' + t.ScheduleAgreementItem : ''}`).join('\n');
-  if (!confirm(`Assign ${rows.length} order line${rows.length === 1 ? '' : 's'} to their schedule agreement? No PO is created in SAP — this records the agreement number/item against each line so it can be received and booked in later.\n\n${lines}`)) return;
-
-  btn.disabled = true; btn.textContent = 'Assigning…';
+  if (!confirm(`${rows.length} order line${rows.length === 1 ? '' : 's'} already have a schedule agreement on file and will be assigned to it — no PO is created in SAP, this just records the agreement number/item against each line so it can be received and booked in later.\n\n${lines}`)) {
+    return { cancelled: true };
+  }
   try {
     const res = await fetch('/api/performance/order-suggestions/assign-schedule-agreement', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ suggestionIds: ids }),
+      body: JSON.stringify({ suggestionIds: rows.map(t => t.SuggestionId) }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to assign schedule agreement');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// Splits the current selection into "has a schedule agreement" (assigned
+// immediately) vs "needs a real PO" (opens the existing Create PO review
+// modal, scoped to just that subset) — see osCreatePoOrAssignScheduleSelectionValid's
+// comment for why this split is safe to make automatically. If the
+// schedule-agreement half is assigned but the buyer then cancels the
+// PO-creation modal, the assigned lines are still done — that's correct,
+// not a partial failure, since they're two genuinely independent actions.
+async function handleCreatePoOrAssignSchedule() {
+  if (!osCreatePoOrAssignScheduleSelectionValid()) return;
+  const ids = [...selectedTrackedIds];
+  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+  const scheduleRows = rows.filter(t => t.ScheduleAgreement);
+  const poRows = rows.filter(t => !t.ScheduleAgreement);
+
+  if (scheduleRows.length) {
+    const result = await assignScheduleAgreementForRows(scheduleRows);
+    if (result.cancelled) return;
+    if (!result.success) { alert(result.error); return; }
+    scheduleRows.forEach(t => selectedTrackedIds.delete(Number(t.SuggestionId)));
+  }
+
+  if (poRows.length) {
+    openCreatePoModal(poRows);
+  } else {
     selectedTrackedIds = new Set();
     runOrderSuggestionsTracked(true);
-  } catch (err) {
-    alert(err.message);
-    btn.disabled = false; btn.textContent = 'Assign to Schedule Agreement';
   }
 }
 
@@ -10279,8 +10373,9 @@ async function osSaveOneTracked(t) {
   const poItemInput = document.querySelector(`.os-po-item-input[data-id="${t.SuggestionId}"]`);
   const supplierRefInput = document.querySelector(`.os-supplier-ref-input[data-id="${t.SuggestionId}"]`);
   const qtyInput = document.querySelector(`.os-qty-input[data-id="${t.SuggestionId}"]`);
-  const dueDateInput = document.querySelector(`.os-due-date-input[data-id="${t.SuggestionId}"]`);
-  if (!statusSelect || !poInput || !poItemInput || !supplierRefInput || !qtyInput || !dueDateInput) {
+  const dispatchDateInput = document.querySelector(`.os-dispatch-date-input[data-id="${t.SuggestionId}"]`);
+  const deliveryDateInput = document.querySelector(`.os-delivery-date-input[data-id="${t.SuggestionId}"]`);
+  if (!statusSelect || !poInput || !poItemInput || !supplierRefInput || !qtyInput || !dispatchDateInput || !deliveryDateInput) {
     return { success: false, error: 'Row is not on screen (try expanding its group).' };
   }
   const qtyValue = Number(qtyInput.value);
@@ -10300,14 +10395,12 @@ async function osSaveOneTracked(t) {
     notes: t.Notes || null,
     orderQty: qtyValue,
   };
-  // Whichever of the two due-date columns this row was actually rendered
-  // against (see renderTrackedRow's isSpotDue) is the one that gets updated —
-  // data-spot-due carries that choice through since t itself doesn't change
-  // between render and save.
-  if (dueDateInput.value) {
-    if (dueDateInput.dataset.spotDue) body.readyToCollectDate = dueDateInput.value;
-    else body.deliveryDate = dueDateInput.value;
-  }
+  // Expected Dispatch (ReadyToCollectDate) and Expected Delivery
+  // (DeliveryDate) are independent, both-optional fields server-side (see
+  // the PUT route in routes/performance.js) — each is sent only when it
+  // actually has a value, so leaving one blank never wipes the other.
+  if (dispatchDateInput.value) body.readyToCollectDate = dispatchDateInput.value;
+  if (deliveryDateInput.value) body.deliveryDate = deliveryDateInput.value;
   try {
     const res = await fetch(`/api/performance/order-suggestions/${t.SuggestionId}`, {
       method: 'PUT',
@@ -10362,9 +10455,8 @@ async function osDeleteTracked(t) {
 // Bulk save — for editing several rows (any mix of qty/status/PO/supplier
 // ref, across different suppliers/buckets) then ticking their checkboxes
 // and saving in one go, instead of hitting each row's own Save button.
-// Reuses the same .os-check selection already used for Create
-// Shipment/Auto-Shipment, since "tick the lines you're working on" is the
-// same gesture for all three actions.
+// Reuses the same .os-check selection already used for Create Shipment,
+// since "tick the lines you're working on" is the same gesture for both.
 async function saveSelectedTrackedOrders() {
   const btn = document.getElementById('os-save-selected-btn');
   if (!btn || selectedTrackedIds.size === 0) return;
@@ -10661,81 +10753,16 @@ function showCreateShipmentSuccess(data) {
   runOrderSuggestionsTracked();
 }
 
-// Same due date shown in the table's Due Date column — the raw value, not
-// the formatted label — used as the auto-shipment's Expected ETA below.
+// Expected delivery date, ISO — the raw value, not the formatted label.
 function getOrderDueDateIso(t) {
-  const raw = (t.IsSpotPo && t.ReadyToCollectDate) ? t.ReadyToCollectDate : t.DeliveryDate;
-  return raw ? String(raw).slice(0, 10) : null;
+  return t.DeliveryDate ? String(t.DeliveryDate).slice(0, 10) : null;
 }
 
-// "Auto-Shipment" — for vendors who are always delivered on the day
-// they're ordered, so there's nothing to fill in: no modal, one shipment
-// per selected order line (not one combined shipment, since each order can
-// have its own due date), haulier fixed to 'Supplier Transport', Expected
-// ETA taken straight from the order's own due date, tracking/dispatch left
-// blank to be filled in later from the Inbound Log if it turns out to
-// matter for that delivery.
-async function autoCreateShipments() {
-  const ids = [...selectedTrackedIds];
-  if (!ids.length) return;
-  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
-
-  const btn = document.getElementById('os-auto-shipment-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
-
-  const results = [];
-  for (const t of rows) {
-    try {
-      const res = await fetch('/api/performance/order-suggestions/shipments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          haulier: 'Supplier Transport',
-          modeOfTransport: 'Road',
-          expectedEta: getOrderDueDateIso(t),
-          suggestionIds: [t.SuggestionId],
-        }),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error?.message || 'Failed to create shipment');
-      results.push({ material: t.Material, success: true, reference: json.data.shipmentReference });
-    } catch (err) {
-      results.push({ material: t.Material, success: false, error: err.message });
-    }
-  }
-
-  selectedTrackedIds = new Set();
-  if (btn) { btn.disabled = false; btn.textContent = 'Auto-Shipment'; }
-  showAutoShipmentSummary(results);
-  runOrderSuggestionsTracked();
-}
-
-function showAutoShipmentSummary(results) {
-  const succeeded = results.filter(r => r.success).length;
-  openModal(`<div class="ps-modal lg-modal">
-    <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Auto-Shipment</div><div class="ps-modal-sub">${succeeded} of ${results.length} shipment${results.length === 1 ? '' : 's'} created</div></div>
-      <button class="ps-modal-close" onclick="closePickModal()">×</button>
-    </div>
-    <div class="ps-modal-body">
-      <ul style="margin:0;padding-left:18px;font-size:12px">
-        ${results.map(r => r.success
-          ? `<li>${esc(r.material)} → <strong>${esc(r.reference)}</strong></li>`
-          : `<li style="list-style:none;margin-left:-18px" class="sap-error">${esc(r.material)}: ${esc(r.error)}</li>`
-        ).join('')}
-      </ul>
-    </div>
-    <div class="ps-modal-actions">
-      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
-      <button type="button" class="btn-submit" id="asm-view-inbound-btn">Open Inbound Log</button>
-    </div>
-  </div>`);
-  document.getElementById('asm-view-inbound-btn').addEventListener('click', () => { closePickModal(); runInboundLog(); });
-}
-
-// "Create PO in SAP" — takes the current tracked-order selection (already
-// gated same-vendor/Accepted-only by osCreatePoSelectionValid, re-checked
-// again server-side since this posts a real document) and shows a review
+// "Create PO in SAP" — takes an explicit set of rows (already gated same-
+// vendor/Accepted-only by osCreatePoOrAssignScheduleSelectionValid,
+// re-checked again server-side since this posts a real document; the
+// schedule-agreement subset of a mixed selection is peeled off before this
+// is ever called — see handleCreatePoOrAssignSchedule) and shows a review
 // step before actually raising the SAP purchase order: vendor, currency
 // (prefilled from the vendor's own Currency field, editable), and each
 // line's material/qty/unit/delivery date plus an optional price override.
@@ -10743,10 +10770,8 @@ function showAutoShipmentSummary(results) {
 // the purchasing info record/condition records (ME12) when nothing is sent,
 // since nothing in Nexus's vendor/material master data stores a price (see
 // the create-po route's own comment in routes/performance.js).
-function openCreatePoModal() {
-  if (!osCreatePoSelectionValid()) return;
-  const ids = [...selectedTrackedIds];
-  const rows = trackedRows.filter(t => ids.includes(Number(t.SuggestionId)));
+function openCreatePoModal(rows) {
+  if (!rows.length) return;
   const vendorName = rows[0].VendorName;
   const vendorCurrency = rows[0].Currency || '';
 
@@ -10830,153 +10855,6 @@ async function submitCreatePo(rows) {
     btn.disabled = false; btn.textContent = 'Create PO';
   }
 }
-
-// Records an order that already exists outside the suggestion engine — the
-// user already has a lot in the pipeline, ordered before this feature
-// existed (or simply ahead of what the engine has flagged). Vendor and
-// material must already be configured together (Vendor Master Data) since
-// PurchaseOrderSuggestion.VendorMaterialId is a required FK; this modal
-// doesn't create new vendor/material rows, only orders against existing
-// ones.
-const MANUAL_ORDER_STATUS_OPTIONS = ['Accepted', 'Ordered', 'Received'];
-
-async function openManualOrderModal() {
-  const todayStr = new Date().toISOString().slice(0, 10);
-  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
-    <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Add Manual Order</div><div class="ps-modal-sub">Record an order already placed outside the suggestion engine</div></div>
-      <button class="ps-modal-close" onclick="closePickModal()">×</button>
-    </div>
-    <div class="ps-modal-body">
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Vendor</label>
-          <select class="tf-input" id="mo-vendor"><option value="">Loading…</option></select>
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Material</label>
-          <select class="tf-input" id="mo-material" disabled><option value="">Select vendor first</option></select>
-        </div>
-      </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px" id="mo-material-hint"></div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Order Qty</label>
-          <input class="tf-input" type="number" step="0.001" id="mo-qty">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Order Date</label>
-          <input class="tf-input" type="date" id="mo-order-date" value="${todayStr}">
-        </div>
-      </div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Delivery Date (optional)</label>
-          <input class="tf-input" type="date" id="mo-delivery-date">
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Status</label>
-          <select class="tf-input" id="mo-status">
-            ${MANUAL_ORDER_STATUS_OPTIONS.map(s => `<option value="${s}" ${s === 'Ordered' ? 'selected' : ''}>${s}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Leave Delivery Date blank to calculate it automatically from the vendor/material's lead time — set it if you already know the confirmed date.</div>
-      <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">PO Number</label>
-          <input class="tf-input" type="text" id="mo-po">
-        </div>
-      </div>
-      <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">Notes</label>
-          <input class="tf-input" type="text" id="mo-notes">
-        </div>
-      </div>
-      <div id="mo-result"></div>
-    </div>
-    <div class="ps-modal-actions">
-      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
-      <button type="button" class="btn-submit" id="mo-save-btn">Add Order</button>
-    </div>
-  </div>`);
-
-  const vendorSelect   = document.getElementById('mo-vendor');
-  const materialSelect = document.getElementById('mo-material');
-  const materialHint   = document.getElementById('mo-material-hint');
-
-  try {
-    const res  = await fetch('/api/performance/vendors');
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error?.message || 'Failed to load vendors');
-    const vendors = json.data;
-    vendorSelect.innerHTML = `<option value="">Select vendor</option>${vendors.map(v => `<option value="${esc(String(v.VendorId))}">${esc(v.VendorName)}</option>`).join('')}`;
-  } catch (err) {
-    vendorSelect.innerHTML = '<option value="">Failed to load vendors</option>';
-  }
-
-  vendorSelect.addEventListener('change', async () => {
-    const vendorId = vendorSelect.value;
-    materialHint.textContent = '';
-    materialSelect.disabled = true;
-    if (!vendorId) { materialSelect.innerHTML = '<option value="">Select vendor first</option>'; return; }
-    materialSelect.innerHTML = '<option value="">Loading…</option>';
-    try {
-      const res  = await fetch(`/api/performance/vendors/${encodeURIComponent(vendorId)}/materials`);
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error?.message || 'Failed to load materials');
-      const materials = json.data;
-      if (!materials.length) {
-        materialSelect.innerHTML = '<option value="">No materials configured for this vendor</option>';
-        materialHint.textContent = 'This vendor has no materials assigned yet — add one via Vendor Master Data first.';
-        return;
-      }
-      materialSelect.innerHTML = `<option value="">Select material</option>${materials.map(m => `<option value="${esc(String(m.VendorMaterialId))}">${esc(m.Material)}${m.MaterialText ? ' — ' + esc(m.MaterialText) : ''}</option>`).join('')}`;
-      materialSelect.disabled = false;
-    } catch (err) {
-      materialSelect.innerHTML = '<option value="">Failed to load materials</option>';
-    }
-  });
-
-  document.getElementById('mo-save-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('mo-save-btn');
-    const result = document.getElementById('mo-result');
-    result.innerHTML = '';
-
-    const vendorMaterialId = materialSelect.value;
-    const orderQty = document.getElementById('mo-qty').value;
-    if (!vendorMaterialId) { result.innerHTML = '<div class="sap-error">Select a vendor and material.</div>'; return; }
-    if (!orderQty || Number(orderQty) <= 0) { result.innerHTML = '<div class="sap-error">Order qty must be greater than 0.</div>'; return; }
-
-    const body = {
-      vendorMaterialId,
-      orderQty: Number(orderQty),
-      orderDate: document.getElementById('mo-order-date').value || null,
-      deliveryDate: document.getElementById('mo-delivery-date').value || null,
-      status: document.getElementById('mo-status').value,
-      poNumber: document.getElementById('mo-po').value.trim() || null,
-      notes: document.getElementById('mo-notes').value.trim() || null,
-    };
-
-    btn.disabled = true; btn.textContent = 'Saving…';
-    try {
-      const res = await fetch('/api/performance/order-suggestions/manual', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error?.message || 'Failed to add order');
-      closePickModal();
-      runOrderSuggestionsTracked();
-    } catch (err) {
-      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-      btn.disabled = false; btn.textContent = 'Add Order';
-    }
-  });
-}
-
 
 // ── Inbound Log — lists PurchaseOrderShipment records created from Tracked
 // Orders' bulk selection, and lets an operator mark one received. Mirrors
@@ -12094,183 +11972,6 @@ async function cancelInboundShipment(shipmentId, shipment) {
   }
 }
 
-
-// ── Bulk CSV upload for manual orders — same fields as openManualOrderModal,
-// but for pasting in a whole pipeline's worth of orders at once instead of
-// one at a time. Parsed entirely client-side (no CSV library bundled for
-// this app; the format is simple enough to hand-roll correctly, including
-// quoted fields with embedded delimiters) and posted as JSON rows to
-// /order-suggestions/manual/bulk, which resolves Vendor/Material by name.
-//
-// Delimiter is ';' rather than ',' — every PC on the network is set to a
-// locale (UK/EU) where Excel's default list separator is ';' (since ','
-// doubles as the decimal separator there), so a ',' delimiter would silently
-// mis-split a CSV exported/opened on any of those machines. Order Qty is
-// normalised for the same reason: those locales also use ',' as the decimal
-// point, so "5000,5" is accepted as 5000.5, not misread as two fields.
-const CSV_DELIMITER = ';';
-
-const MANUAL_ORDER_CSV_HEADERS = {
-  'vendor': 'vendor', 'vendor name': 'vendor',
-  'material': 'material', 'material code': 'material', 'material number': 'material',
-  'qty': 'orderQty', 'order qty': 'orderQty', 'order quantity': 'orderQty', 'orderqty': 'orderQty',
-  'order date': 'orderDate', 'orderdate': 'orderDate',
-  'delivery date': 'deliveryDate', 'deliverydate': 'deliveryDate',
-  'status': 'status',
-  'po': 'poNumber', 'po number': 'poNumber', 'ponumber': 'poNumber',
-  'supplier ref': 'supplierReference', 'supplier reference': 'supplierReference', 'supplierreference': 'supplierReference',
-  'notes': 'notes',
-};
-
-// Minimal RFC4180-style parser: handles quoted fields (embedded delimiters,
-// embedded newlines, "" for an escaped quote) and both CRLF and LF row
-// endings, since a spreadsheet export could produce either.
-function parseCsvText(text, delimiter = CSV_DELIMITER) {
-  const rows = [];
-  let row = [], field = '', inQuotes = false;
-  const pushField = () => { row.push(field); field = ''; };
-  const pushRow = () => { pushField(); rows.push(row); row = []; };
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; } }
-      else field += c;
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === delimiter) {
-      pushField();
-    } else if (c === '\n') {
-      pushRow();
-    } else if (c === '\r') {
-      // skip — the following \n (or EOF) ends the row
-    } else {
-      field += c;
-    }
-  }
-  if (field !== '' || row.length) pushRow();
-  return rows.filter(r => r.some(v => String(v).trim() !== ''));
-}
-
-// A comma-decimal qty ("5000,5") is only ambiguous with the ',' delimiter,
-// which this app no longer uses — safe to always normalise comma to dot.
-function normaliseCsvQty(value) {
-  const v = String(value || '').trim();
-  return /^-?\d+,\d+$/.test(v) ? v.replace(',', '.') : v;
-}
-
-// JS's Date constructor only reliably understands ISO (YYYY-MM-DD); the
-// network's locale writes dates as DD.MM.YY(YY) or DD/MM/YY(YY) (e.g.
-// "21.07.26"), which Date() silently turns into an Invalid Date — that then
-// fails server-side with "Validation failed for parameter 'orderDate'.
-// Invalid date." Converts the locale format to ISO before sending; already-
-// ISO values and anything unrecognised pass through unchanged so the server
-// still surfaces its own error for genuinely bad input.
-function normaliseCsvDate(value) {
-  const v = String(value || '').trim();
-  if (!v || /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
-  const m = v.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2}|\d{4})$/);
-  if (!m) return v;
-  const [, dd, mm, yy] = m;
-  const year = yy.length === 2 ? (Number(yy) < 50 ? `20${yy}` : `19${yy}`) : yy;
-  return `${year}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
-}
-
-function parseManualOrderCsv(text) {
-  const rows = parseCsvText(text);
-  if (!rows.length) return [];
-  const headerKeys = rows[0].map(h => MANUAL_ORDER_CSV_HEADERS[h.trim().toLowerCase()] || null);
-  if (!headerKeys.some(Boolean)) throw new Error('No recognised columns in the header row — see the template for expected column names.');
-  return rows.slice(1).map(cols => {
-    const obj = {};
-    headerKeys.forEach((key, i) => { if (key) obj[key] = (cols[i] || '').trim(); });
-    if (obj.orderQty) obj.orderQty = normaliseCsvQty(obj.orderQty);
-    if (obj.orderDate) obj.orderDate = normaliseCsvDate(obj.orderDate);
-    if (obj.deliveryDate) obj.deliveryDate = normaliseCsvDate(obj.deliveryDate);
-    return obj;
-  }).filter(obj => obj.vendor || obj.material);
-}
-
-function downloadManualOrderCsvTemplate() {
-  const header  = ['Vendor', 'Material', 'Order Qty', 'Order Date', 'Delivery Date', 'Status', 'PO Number', 'Supplier Reference', 'Notes'].join(CSV_DELIMITER);
-  const example = ['Example Vendor Ltd', '100123', '5000', '2026-07-16', '', 'Ordered', 'PO-12345', 'SUP-REF-001', ''].join(CSV_DELIMITER);
-  const blob = new Blob([`${header}\r\n${example}\r\n`], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = 'manual-orders-template.csv'; a.click();
-  URL.revokeObjectURL(url);
-}
-
-async function openManualOrderCsvModal() {
-  openModal(`<div class="ps-modal" style="max-width:560px;width:94vw">
-    <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Upload Orders CSV</div><div class="ps-modal-sub">Bulk-add manual orders instead of one at a time</div></div>
-      <button class="ps-modal-close" onclick="closePickModal()">×</button>
-    </div>
-    <div class="ps-modal-body">
-      <div class="toolbar-hint">Columns: Vendor, Material, Order Qty, Order Date, Delivery Date (optional), Status (optional — Accepted/Ordered/Booked/Received), PO Number (optional), Supplier Reference (optional), Notes (optional). Vendor and Material must already be configured together in Vendor Master Data. Uses <strong>;</strong> as the column delimiter, matching Excel's UK/EU default — just save/export as CSV as normal.</div>
-      <div style="margin:10px 0"><button type="button" class="btn-secondary" id="mc-template-btn">Download Template</button></div>
-      <input type="file" id="mc-file-input" accept=".csv,text/csv" style="margin-bottom:10px">
-      <div id="mc-preview"></div>
-      <div id="mc-result"></div>
-    </div>
-    <div class="ps-modal-actions">
-      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
-      <button type="button" class="btn-submit" id="mc-upload-btn" disabled>Upload</button>
-    </div>
-  </div>`);
-
-  let parsedRows = [];
-
-  document.getElementById('mc-template-btn').addEventListener('click', downloadManualOrderCsvTemplate);
-
-  document.getElementById('mc-file-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    const preview = document.getElementById('mc-preview');
-    const uploadBtn = document.getElementById('mc-upload-btn');
-    parsedRows = [];
-    preview.innerHTML = '';
-    uploadBtn.disabled = true;
-    if (!file) return;
-    try {
-      const text = await file.text();
-      parsedRows = parseManualOrderCsv(text);
-      if (!parsedRows.length) throw new Error('No data rows found in that file.');
-      preview.innerHTML = `<div class="toolbar-hint">${parsedRows.length} row${parsedRows.length === 1 ? '' : 's'} ready to upload.</div>`;
-      uploadBtn.disabled = false;
-    } catch (err) {
-      parsedRows = [];
-      preview.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-    }
-  });
-
-  document.getElementById('mc-upload-btn').addEventListener('click', async () => {
-    if (!parsedRows.length) return;
-    const btn = document.getElementById('mc-upload-btn');
-    const result = document.getElementById('mc-result');
-    result.innerHTML = '';
-    btn.disabled = true; btn.textContent = 'Uploading…';
-    try {
-      const res = await fetch('/api/performance/order-suggestions/manual/bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: parsedRows }),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error?.message || 'Upload failed');
-      const { succeeded, failed, results } = json.data;
-      const failures = results.filter(r => !r.success);
-      result.innerHTML = `
-        <div class="${failed ? 'sap-error' : 'toolbar-hint'}">${succeeded} of ${results.length} row${results.length === 1 ? '' : 's'} added${failed ? `, ${failed} failed` : ''}.</div>
-        ${failures.length ? `<ul style="margin:6px 0 0;padding-left:18px;font-size:12px">${failures.map(f => `<li>Row ${f.row}: ${esc(f.error)}</li>`).join('')}</ul>` : ''}
-      `;
-      if (succeeded) runOrderSuggestionsTracked();
-    } catch (err) {
-      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-    } finally {
-      btn.disabled = false; btn.textContent = 'Upload';
-    }
-  });
-}
 
 // ══════════════════════════════════════════════════════════════════════════
 // MRP Analysis — Logistics > Material Planning
