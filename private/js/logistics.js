@@ -156,10 +156,10 @@ function setupTiles() {
 async function checkSession() {
   try {
     const d = await fetch('/session-check').then(r => r.json());
-    if (!d.loggedIn) { alert('Your session has expired. Please log in again.'); window.location.href = '/'; return false; }
+    if (!d.loggedIn) { await alertDialog('Your session has expired. Please log in again.'); window.location.href = '/'; return false; }
     return true;
   } catch {
-    alert('Unable to verify your session. Please log in again.');
+    await alertDialog('Unable to verify your session. Please log in again.');
     window.location.href = '/';
     return false;
   }
@@ -609,14 +609,14 @@ function crOpenVatModal(override) {
 }
 
 async function crDeleteVatOverride(overrideId, label) {
-  if (!confirm(`Delete the VAT override for consignee ${label}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the VAT override for consignee ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/customs-report-admin/vat-overrides/${overrideId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runCustomsReportOverrides();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -714,14 +714,14 @@ function crOpenHsModal(description) {
 }
 
 async function crDeleteHsDescription(hsCodeId, label) {
-  if (!confirm(`Delete the description for commodity code ${label}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the description for commodity code ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/customs-report-admin/hs-descriptions/${hsCodeId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runCustomsReportOverrides();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -2054,6 +2054,78 @@ function openModal(html) {
   overlay.innerHTML = html; overlay.classList.remove('hidden');
 }
 function closePickModal() { const overlay = document.getElementById('ps-modal-overlay'); overlay.classList.add('hidden'); overlay.innerHTML = ''; }
+
+// ── Custom alert()/confirm() replacements ───────────────────────────────────
+// The browser's native window.alert/confirm are blocking and use whatever
+// bare OS dialog styling the browser feels like — this page uses its own
+// look everywhere else (ps-modal), so these are the same visual language.
+//
+// Deliberately their OWN overlay (created lazily, appended straight to
+// document.body) rather than reusing openModal/closePickModal's single
+// shared #ps-modal-overlay — a confirm here is very often triggered from a
+// button INSIDE an already-open ps-modal (Mark Received, Cancel Shipment,
+// Create PO's "post a real PO" check, Assign Schedule Agreement, ...), and
+// openModal's overlay.innerHTML = html would wholesale replace that parent
+// modal's content/form state instead of layering the confirm on top of it.
+// A higher z-index (400 vs .ps-modal-overlay's 300) is what actually makes
+// it stack above rather than just replace.
+function ensurePromptOverlay() {
+  let overlay = document.getElementById('ps-prompt-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'ps-prompt-overlay';
+    overlay.className = 'ps-modal-overlay hidden';
+    overlay.style.zIndex = '400';
+    document.body.appendChild(overlay);
+  }
+  return overlay;
+}
+function closePromptOverlay() {
+  const overlay = document.getElementById('ps-prompt-overlay');
+  if (overlay) { overlay.classList.add('hidden'); overlay.innerHTML = ''; }
+}
+
+// Promise-based replacement for window.alert(message) — resolves once OK is
+// clicked. white-space:pre-wrap preserves the \n-joined multi-line messages
+// several callers build (e.g. a per-line batch-save failure summary).
+function alertDialog(message, { title = 'Notice' } = {}) {
+  return new Promise(resolve => {
+    const overlay = ensurePromptOverlay();
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `<div class="ps-modal" style="max-width:440px;width:92vw">
+      <div class="ps-modal-header"><div class="ps-modal-title">${esc(title)}</div></div>
+      <div class="ps-modal-body"><div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${esc(message)}</div></div>
+      <div class="ps-modal-actions">
+        <button type="button" class="btn-submit" id="pad-ok-btn">OK</button>
+      </div>
+    </div>`;
+    document.getElementById('pad-ok-btn').addEventListener('click', () => { closePromptOverlay(); resolve(); });
+  });
+}
+
+// Promise-based replacement for window.confirm(message) — resolves true/false
+// on Confirm/Cancel. danger:true reddens the confirm button for a
+// destructive/hard-to-reverse action (delete, cancel shipment, reverse a
+// SAP posting, ...), matching the weight those already carried as a plain
+// browser confirm() but making the destructive ones visually distinct now
+// that there's a custom button to style.
+function confirmDialog(message, { title = 'Confirm', confirmLabel = 'Confirm', danger = false } = {}) {
+  return new Promise(resolve => {
+    const overlay = ensurePromptOverlay();
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `<div class="ps-modal" style="max-width:460px;width:92vw">
+      <div class="ps-modal-header"><div class="ps-modal-title">${esc(title)}</div></div>
+      <div class="ps-modal-body"><div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${esc(message)}</div></div>
+      <div class="ps-modal-actions">
+        <button type="button" class="btn-secondary" id="pcd-cancel-btn">Cancel</button>
+        <button type="button" class="btn-submit" id="pcd-confirm-btn"${danger ? ' style="background:var(--error,#DC2626);border-color:var(--error,#DC2626)"' : ''}>${esc(confirmLabel)}</button>
+      </div>
+    </div>`;
+    const finish = (result) => { closePromptOverlay(); resolve(result); };
+    document.getElementById('pcd-cancel-btn').addEventListener('click', () => finish(false));
+    document.getElementById('pcd-confirm-btn').addEventListener('click', () => finish(true));
+  });
+}
 
 
 function onShipmentForwarderModeChange() {
@@ -3471,7 +3543,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
 
     document.querySelectorAll('.sd-cost-reverse').forEach(b => {
       b.addEventListener('click', async () => {
-        if (!confirm('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.')) return;
+        if (!(await confirmDialog('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.', { confirmLabel: 'Reverse', danger: true }))) return;
         b.disabled = true; b.textContent = 'Reversing…';
         try {
           const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
@@ -4480,14 +4552,14 @@ function mgmOpenModal(mapping) {
 }
 
 async function mgmDeleteMapping(mappingId, label) {
-  if (!confirm(`Delete the mapping for ${label}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the mapping for ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/material-groups/${mappingId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runMaterialGroupMapping();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -4627,14 +4699,14 @@ function mruOpenModal(row) {
 }
 
 async function mruDeleteRow(id, label) {
-  if (!confirm(`Delete the conversion for ${label}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the conversion for ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/material-request-units/${id}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runMaterialRequestUnits();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -4964,14 +5036,14 @@ function ccOpenModal(row) {
 }
 
 async function ccDeleteRow(centerId, label) {
-  if (!confirm(`Delete cost centre ${label}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete cost centre ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/costcenters/${centerId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runCostCentres();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -5115,7 +5187,7 @@ function glaOpenModal(row) {
 }
 
 async function glaDeleteRow(elementId, label) {
-  if (!confirm(`Delete GL account ${label}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete GL account ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/costelements/${elementId}`, { method: 'DELETE' });
     const json = await res.json();
@@ -5123,7 +5195,7 @@ async function glaDeleteRow(elementId, label) {
     mgmCostElements = null;
     runGlAccounts();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -5265,14 +5337,14 @@ function fmmOpenModal(row) {
 }
 
 async function fmmDeleteRow(mappingId, label) {
-  if (!confirm(`Delete the mapping for "${label}"? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the mapping for "${label}"? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/forwarder-mode-mapping/${mappingId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runForwarderModeMapping();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -7543,14 +7615,14 @@ function vmNumOrNull(str) {
 }
 
 async function vmDeleteVendor(vendorId, vendorName) {
-  if (!confirm(`Delete vendor "${vendorName}" and all its material assignments? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete vendor "${vendorName}" and all its material assignments? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/performance/vendors/${vendorId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runVendorMasterData();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -7704,7 +7776,7 @@ async function vmAssignMaterial(vendor, material) {
   } catch (err) {
     const results = document.getElementById('vm-material-search-results');
     if (results) results.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-    else alert(err.message);
+    else await alertDialog(err.message);
   }
 }
 
@@ -7788,14 +7860,14 @@ function vmOpenMaterialEditModal(vendor, m) {
 }
 
 async function vmRemoveMaterial(vendor, vendorMaterialId, material) {
-  if (!confirm(`Remove ${material} from ${vendor.VendorName}?`)) return;
+  if (!(await confirmDialog(`Remove ${material} from ${vendor.VendorName}?`, { confirmLabel: 'Remove', danger: true }))) return;
   try {
     const res = await fetch(`/api/performance/vendors/${vendor.VendorId}/materials/${vendorMaterialId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Remove failed');
     vmShowVendorMaterials(vendor);
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -8364,11 +8436,11 @@ function ctRenderDeclaration(d, vendor) {
 
   const cancelBtn = document.getElementById('ct-decl-cancel-btn');
   if (cancelBtn) cancelBtn.addEventListener('click', async () => {
-    if (!confirm('Cancel this draft declaration?')) return;
+    if (!(await confirmDialog('Cancel this draft declaration?', { confirmLabel: 'Cancel Declaration', danger: true }))) return;
     try {
       await ctApi(`/declarations/${d.DeclarationId}/cancel`, { method: 'POST' });
       vendor ? ctShowVendorDashboard(vendor) : runConsignmentTracker();
-    } catch (err) { alert(err.message); }
+    } catch (err) { await alertDialog(err.message); }
   });
 
   const confirmBtn = document.getElementById('ct-decl-confirm-btn');
@@ -8626,14 +8698,14 @@ async function daSearchMaterials(q) {
 }
 
 async function daDeleteAdjustment(adjustmentId, material) {
-  if (!confirm(`Delete the demand adjustment for ${material}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the demand adjustment for ${material}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/performance/demand-adjustments/${adjustmentId}`, { method: 'DELETE' });
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Delete failed');
     runDemandAdjustments();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -8840,7 +8912,7 @@ async function itCheckReadingUsedByDeclaration(readingId) {
 }
 
 async function itDeleteReading(readingId, dateLabel) {
-  if (!confirm(`Delete the meter reading for ${dateLabel}? This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete the meter reading for ${dateLabel}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   try {
     const res = await fetch(`/api/performance/isopar/readings/${readingId}`, { method: 'DELETE' });
     const json = await res.json();
@@ -8849,7 +8921,7 @@ async function itDeleteReading(readingId, dateLabel) {
     itRenderRateSection();
     itCheckStockRisk();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   }
 }
 
@@ -9040,7 +9112,7 @@ function itRenderDeclarations(el, outstanding, current, history) {
 }
 
 async function itSubmitDeclaration(period, i) {
-  if (!confirm(`Submit the HMRC Tied Oil declaration for ${formatDisplayDate(period.start)} → ${formatDisplayDate(period.end)}? This is frozen once submitted and cannot be edited afterward.`)) return;
+  if (!(await confirmDialog(`Submit the HMRC Tied Oil declaration for ${formatDisplayDate(period.start)} → ${formatDisplayDate(period.end)}? This is frozen once submitted and cannot be edited afterward.`, { confirmLabel: 'Submit' }))) return;
   const resultEl = document.getElementById(`it-submit-result-${i}`);
   try {
     const res = await fetch('/api/performance/isopar/declarations', {
@@ -10184,7 +10256,7 @@ async function osRecreatePoPdf(poNumber, btn) {
     btn.textContent = 'Recreated ✓';
     setTimeout(() => { btn.disabled = false; btn.textContent = originalText; }, 2000);
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
     btn.disabled = false; btn.textContent = originalText;
   }
 }
@@ -10315,7 +10387,7 @@ function osCreatePoOrAssignScheduleSelectionValid() {
 // a confirm() naming each line's agreement, same weight as Mark Received's.
 async function assignScheduleAgreementForRows(rows) {
   const lines = rows.map(t => `${t.Material} — ${t.ScheduleAgreement}${t.ScheduleAgreementItem ? '/' + t.ScheduleAgreementItem : ''}`).join('\n');
-  if (!confirm(`${rows.length} order line${rows.length === 1 ? '' : 's'} already have a schedule agreement on file and will be assigned to it — no PO is created in SAP, this just records the agreement number/item against each line so it can be received and booked in later.\n\n${lines}`)) {
+  if (!(await confirmDialog(`${rows.length} order line${rows.length === 1 ? '' : 's'} already have a schedule agreement on file and will be assigned to it — no PO is created in SAP, this just records the agreement number/item against each line so it can be received and booked in later.\n\n${lines}`, { confirmLabel: 'Assign' }))) {
     return { cancelled: true };
   }
   try {
@@ -10349,7 +10421,7 @@ async function handleCreatePoOrAssignSchedule() {
   if (scheduleRows.length) {
     const result = await assignScheduleAgreementForRows(scheduleRows);
     if (result.cancelled) return;
-    if (!result.success) { alert(result.error); return; }
+    if (!result.success) { await alertDialog(result.error); return; }
     scheduleRows.forEach(t => selectedTrackedIds.delete(Number(t.SuggestionId)));
   }
 
@@ -10424,7 +10496,7 @@ async function osSaveTrackedStatus(t) {
   btn.disabled = true; btn.textContent = 'Saving…';
   const result = await osSaveOneTracked(t);
   if (!result.success) {
-    alert(result.error);
+    await alertDialog(result.error);
     btn.disabled = false; btn.textContent = 'Save';
     return;
   }
@@ -10438,7 +10510,7 @@ async function osSaveTrackedStatus(t) {
 // client-side — the server allows it at any stage — but this is
 // destructive and unrecoverable, so it gets an explicit confirm().
 async function osDeleteTracked(t) {
-  if (!confirm(`Delete this tracked order for ${t.Material} — ${t.VendorName}? This permanently removes it, it won't just be marked Cancelled. This cannot be undone.`)) return;
+  if (!(await confirmDialog(`Delete this tracked order for ${t.Material} — ${t.VendorName}? This permanently removes it, it won't just be marked Cancelled. This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
   const btn = document.querySelector(`.os-delete-btn[data-id="${t.SuggestionId}"]`);
   if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
   try {
@@ -10447,7 +10519,7 @@ async function osDeleteTracked(t) {
     if (!json.success) throw new Error(json.error?.message || 'Failed to delete order');
     runOrderSuggestionsTracked(true);
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
     if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
   }
 }
@@ -10472,7 +10544,7 @@ async function saveSelectedTrackedOrders() {
 
   const failed = results.filter(r => !r.success);
   if (failed.length) {
-    alert(`Saved ${results.length - failed.length} of ${results.length} line(s).\n\nFailed:\n` + failed.map(f => `${f.material}: ${f.error}`).join('\n'));
+    await alertDialog(`Saved ${results.length - failed.length} of ${results.length} line(s).\n\nFailed:\n` + failed.map(f => `${f.material}: ${f.error}`).join('\n'));
   }
   runOrderSuggestionsTracked(true);
 }
@@ -10831,7 +10903,7 @@ async function submitCreatePo(rows) {
     resultEl.innerHTML = '<div class="sap-error">Currency is required.</div>';
     return;
   }
-  if (!confirm(`Post a real purchase order to SAP for ${rows.length} line(s) from ${rows[0].VendorName}? This cannot be undone from here.`)) return;
+  if (!(await confirmDialog(`Post a real purchase order to SAP for ${rows.length} line(s) from ${rows[0].VendorName}? This cannot be undone from here.`, { confirmLabel: 'Create PO' }))) return;
 
   const priceOverrides = rows.map(t => {
     const input = document.querySelector(`.cpo-price-input[data-id="${CSS.escape(String(t.SuggestionId))}"]`);
@@ -11773,7 +11845,7 @@ async function renderAssociatedCosts(shipmentId, shipment) {
 
     document.querySelectorAll('.isd-cost-reverse').forEach(b => {
       b.addEventListener('click', async () => {
-        if (!confirm('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.')) return;
+        if (!(await confirmDialog('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.', { confirmLabel: 'Reverse', danger: true }))) return;
         b.disabled = true; b.textContent = 'Reversing…';
         try {
           const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
@@ -11873,7 +11945,7 @@ async function markInboundShipmentReceived(shipmentId, shipment) {
   const confirmMsg = skipSap
     ? `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Received using the confirmed quantities — SAP posting will be SKIPPED (testing mode).`
     : `Mark ${shipment.ShipmentReference || 'this shipment'} received? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be flipped to Received and posted as goods receipt in SAP using the confirmed quantities.`;
-  if (!confirm(confirmMsg)) return;
+  if (!(await confirmDialog(confirmMsg, { confirmLabel: 'Mark Received' }))) return;
 
   const btn = document.getElementById('isd-receive-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
@@ -11935,7 +12007,7 @@ async function undoInboundShipmentReceived(shipmentId, shipment) {
   const confirmMsg = skipSap
     ? `Undo Received on ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will move back to Ordered and this shipment will show as not yet received again — SAP reversal will be SKIPPED (testing mode / already reversed by hand).`
     : `Undo Received on ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be reversed in SAP and moved back to Ordered, and this shipment will show as not yet received again.`;
-  if (!confirm(confirmMsg)) return;
+  if (!(await confirmDialog(confirmMsg, { confirmLabel: 'Undo Received', danger: true }))) return;
 
   const btn = document.getElementById('isd-undo-receive-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Undoing…'; }
@@ -11973,7 +12045,7 @@ async function cancelInboundShipment(shipmentId, shipment) {
   const receivedNote = shipment.ReceivedAtUtc
     ? ` This shipment was already marked received — its orders will stay Booked, just unlinked from this shipment.`
     : '';
-  if (!confirm(`Cancel ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be unlinked and free to add to a different shipment.${receivedNote}`)) return;
+  if (!(await confirmDialog(`Cancel ${shipment.ShipmentReference || 'this shipment'}? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be unlinked and free to add to a different shipment.${receivedNote}`, { confirmLabel: 'Cancel Shipment', danger: true }))) return;
   const btn = document.getElementById('isd-cancel-btn');
   const result = document.getElementById('isd-result');
   if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
@@ -12104,7 +12176,7 @@ async function mrpRefreshHistory() {
     if (!json.success) throw new Error(json.error?.message || 'Refresh failed');
     await mrpLoadTrends();
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   } finally {
     if (btn.isConnected) { btn.disabled = false; btn.textContent = 'Refresh Now'; }
   }
@@ -12380,7 +12452,7 @@ async function mrpDownloadSalesTemplate() {
     a.remove();
     URL.revokeObjectURL(url);
   } catch (err) {
-    alert(err.message);
+    await alertDialog(err.message);
   } finally {
     btn.disabled = false; btn.textContent = 'Download Sales Template';
   }
