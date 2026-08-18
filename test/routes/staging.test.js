@@ -198,6 +198,62 @@ describe('POST /requests — validation', () => {
     expect(res.body.error.message).toMatch(/09:40/);
   });
 
+  // Regression coverage: a dueAtUtc outside Stores' working hours must not
+  // sail through just because it's far enough in the future — the lead-time
+  // check alone doesn't catch that. It must be snapped into the window
+  // instead of accepted as-is.
+  describe('snapping a dueAtUtc outside Stores\' working hours', () => {
+    beforeEach(() => {
+      jest.setSystemTime(new Date('2026-01-05T08:00:00.000Z')); // Monday 08:00 — plenty of lead time either way
+    });
+
+    // 20:00 Monday is 3 hours after the 17:00 close — within the 4-hour
+    // "assume same day" threshold, so it should revert to end of shift.
+    test('reverts to end of shift when the pick is within the 4-hour threshold past close', async () => {
+      db.createStagingRequest.mockResolvedValueOnce(200);
+      const res = await request(app).post('/requests').send({
+        ...validBody(), dueAtUtc: new Date('2026-01-05T20:00:00.000Z').toISOString(), // Monday 20:00
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.data.dueAtUtc).toBe('2026-01-05T17:00:00.000Z');
+      expect(db.createStagingRequest).toHaveBeenCalledWith(expect.objectContaining({
+        dueAtUtc: new Date('2026-01-05T17:00:00.000Z'),
+      }));
+    });
+
+    // 22:00 Monday is 5 hours after the 17:00 close — past the threshold,
+    // so it should move to the start of the next working day instead.
+    test('moves to the start of the next shift when the pick is further past close', async () => {
+      db.createStagingRequest.mockResolvedValueOnce(201);
+      const res = await request(app).post('/requests').send({
+        ...validBody(), dueAtUtc: new Date('2026-01-05T22:00:00.000Z').toISOString(), // Monday 22:00
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.data.dueAtUtc).toBe('2026-01-06T05:45:00.000Z'); // Tuesday 05:45
+    });
+
+    // A weekend pick, even with ample notice, has no shift to snap back
+    // to (no weekend shift) — it always moves forward to the next Monday.
+    test('moves a weekend pick forward to the next Monday\'s open', async () => {
+      db.createStagingRequest.mockResolvedValueOnce(202);
+      const res = await request(app).post('/requests').send({
+        ...validBody(), dueAtUtc: new Date('2026-01-10T12:00:00.000Z').toISOString(), // Saturday
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.data.dueAtUtc).toBe('2026-01-12T05:45:00.000Z'); // the following Monday 05:45
+    });
+
+    // A pick already inside the working window is untouched.
+    test('leaves a dueAtUtc already inside the working window unchanged', async () => {
+      db.createStagingRequest.mockResolvedValueOnce(203);
+      const res = await request(app).post('/requests').send({
+        ...validBody(), dueAtUtc: new Date('2026-01-05T14:30:00.000Z').toISOString(), // Monday 14:30
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.data.dueAtUtc).toBe('2026-01-05T14:30:00.000Z');
+    });
+  });
+
   test('creates the request when valid', async () => {
     db.createStagingRequest.mockResolvedValueOnce(123);
     const res = await request(app).post('/requests').send(validBody());

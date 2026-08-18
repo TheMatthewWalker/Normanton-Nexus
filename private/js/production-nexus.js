@@ -6402,9 +6402,15 @@ async function spSubmitRequest() {
   const btn = document.getElementById('sp-submit-btn');
   btn.disabled = true; btn.textContent = 'Submitting…';
   try {
-    await spApi('/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await spApi('/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     closeModal();
     await spRefreshList();
+    // The server snaps a Needed By picked outside Stores' working hours
+    // (05:45–17:00 Mon–Fri) to the nearest usable time — let the requester
+    // know if that happened, since what's stored may differ from their pick.
+    if (json.data?.dueAtUtc && json.data.dueAtUtc !== body.dueAtUtc) {
+      alert(`Needed By was outside Stores' working hours, so it's been set to the nearest available time: ${fmt(json.data.dueAtUtc)}.`);
+    }
   } catch (err) {
     resultEl.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
     btn.disabled = false; btn.textContent = 'Submit Request';
