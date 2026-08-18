@@ -198,26 +198,45 @@ async function doRunTurnsValClassRefresh(req) {
 // runTurnsValClassRefresh, for the same reason (this can also be triggered manually from the
 // MRP Analysis screen's "Refresh Now" button, which could otherwise race the weekly cron).
 
+// Goods-receipt history is bounded to the same ~5-year window BuildConsumptionHistoryRequest
+// already casts on the SapServer side (today.Year-4..today.Year+1, see that method's own
+// comment) — without this, MSEG/EKKO have no natural cutoff of their own and would pull
+// receipts back to whenever real SAP history begins (e.g. 2017), showing years of "order
+// quantity received" with no matching consumption figure next to them.
+function mrpHistorySinceDate() {
+  const earliestYear = new Date().getFullYear() - 4;
+  return `01.01.${earliestYear}`;
+}
+
 async function syncMrpHistory(req) {
   const runId = await db.startRefresh('MrpAnalysisHistory');
 
   try {
-    const [consumptionRows, receiptRows] = await Promise.all([
+    const sinceDate = mrpHistorySinceDate();
+    const [consumptionRows, receiptRows, rohMaterials] = await Promise.all([
       sap.getConsumptionByYear(req),
-      sap.getGoodsReceiptHistory(req),
+      sap.getGoodsReceiptHistory(req, sinceDate),
+      db.listRohMaterials(),
     ]);
+
+    // MRP Analysis exists to forecast what raw material to buy — finished/semi-finished
+    // consumption and receipts aren't useful here and just multiply the amount of history
+    // synced/stored/rendered for no benefit. See getConsumptionByYear's own comment in
+    // performancesql.js for the matching read-side filter.
+    const rohConsumptionRows = consumptionRows.filter(r => rohMaterials.has(r.material));
+    const rohReceiptRows     = receiptRows.filter(r => rohMaterials.has(r.material));
 
     // Plant is always 3012 for this app (see log.TurnsValClassSnapshot's own Plant column) —
     // SapServer's MRP Analysis endpoints don't return it themselves since every RFC read
     // behind them is already plant-filtered server-side.
-    await db.upsertMaterialConsumptionHistory(consumptionRows.map(r => ({
+    await db.upsertMaterialConsumptionHistory(rohConsumptionRows.map(r => ({
       material:    r.material,
       plant:       '3012',
       fiscalYear:  r.fiscalYear,
       consumedQty: r.qty,
     })));
 
-    await db.upsertMaterialReceiptHistory(receiptRows.map(r => ({
+    await db.upsertMaterialReceiptHistory(rohReceiptRows.map(r => ({
       material:        r.material,
       plant:           '3012',
       sapVendorNumber: r.vendor,
@@ -226,7 +245,7 @@ async function syncMrpHistory(req) {
       uom:             r.uom,
     })));
 
-    const total = consumptionRows.length + receiptRows.length;
+    const total = rohConsumptionRows.length + rohReceiptRows.length;
     await db.completeRefresh(runId, total);
     return { name: 'MrpAnalysisHistory', status: 'success', rowCount: total };
   } catch (err) {

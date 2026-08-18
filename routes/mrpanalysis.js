@@ -35,9 +35,22 @@ const router = express.Router();
 
 router.get('/trends', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const materials = Array.isArray(req.query.materials) ? req.query.materials
+    let materials = Array.isArray(req.query.materials) ? req.query.materials
       : (req.query.materials ? [req.query.materials] : null);
     const vendorId = req.query.vendorId ? Number(req.query.vendorId) : null;
+
+    // A vendor filter with no explicit material search should only show materials that
+    // vendor actually has ordering (goods-receipt) history for — not every ROH material with
+    // a blank column for a vendor that never supplied it. Resolving this narrows what
+    // consumption asks for too, so it has to happen before the (otherwise parallel) fetch
+    // below, not alongside it.
+    if (vendorId && !materials) {
+      const vendorMaterials = await db.listVendorMaterialsFromReceiptHistory(vendorId);
+      if (!vendorMaterials.length) {
+        return res.json({ success: true, data: { consumption: [], receipts: [] } });
+      }
+      materials = vendorMaterials;
+    }
 
     const [consumption, receipts] = await Promise.all([
       db.getConsumptionByYear(materials),

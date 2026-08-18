@@ -666,6 +666,14 @@ export async function upsertMaterialReceiptHistory(rows) {
 // (vendor-agnostic, same as SAP's own consumption tracking: a material's usage isn't
 // attributed to whichever vendor happened to supply it). materials optional filter, same
 // parameterised-IN-list convention as listOpenIncomingOrders/listDemandAdjustments above.
+// Every table this feature reads/writes is scoped to raw materials (SAP MaterialType 'ROH')
+// only — MRP Analysis exists to forecast what to buy, and only raw materials are bought this
+// way (finished/semi-finished consumption isn't useful here, and just multiplies the amount
+// of history synced/stored/rendered for no benefit — see runMrpHistoryRefresh's own comment).
+// JOIN (not LEFT JOIN) on TurnsValClassSnapshot.MaterialType = 'ROH' here is a belt-and-braces
+// read-side filter on top of the write-side one in runMrpHistoryRefresh — it also quietly
+// drops a material whose type has since changed in SAP, or that's fallen out of
+// TurnsValClassSnapshot entirely, rather than surfacing stale/unclassifiable rows.
 export async function getConsumptionByYear(materials = null) {
   const pool = await getPool();
   const request = pool.request();
@@ -675,16 +683,24 @@ export async function getConsumptionByYear(materials = null) {
       request.input(`cm${i}`, sql.NVarChar(18), m);
       return `@cm${i}`;
     }).join(',');
-    whereSql = `WHERE h.Material IN (${inClause})`;
+    whereSql = `AND h.Material IN (${inClause})`;
   }
   const { recordset } = await request.query(`
     SELECT h.Material, t.MaterialText, h.FiscalYear, h.ConsumedQty
     FROM log.MaterialConsumptionHistory h
-    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material
-    ${whereSql}
+    JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material AND t.MaterialType = 'ROH'
+    WHERE 1 = 1 ${whereSql}
     ORDER BY h.Material, h.FiscalYear
   `);
   return recordset;
+}
+
+// Same ~5-year window runMrpHistoryRefresh bounds the goods-receipt SAP pull to (see
+// mrpHistorySinceDate in performancesync.js) — belt-and-braces read-side floor here too, so a
+// stray old row (e.g. from before that bound existed, or a future change loosening it) can't
+// resurface years of "order quantity received" with no matching consumption figure next to it.
+function earliestMrpHistoryYear() {
+  return new Date().getFullYear() - 4;
 }
 
 // Year-on-year goods-receipt (order quantity received) per material, resolvable per vendor —
@@ -705,17 +721,47 @@ export async function getReceiptHistoryByVendor(materials = null, vendorId = nul
     request.input('vendorId', sql.Int, vendorId);
     conditions.push('h.VendorId = @vendorId');
   }
-  const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  request.input('earliestYear', sql.Int, earliestMrpHistoryYear());
+  conditions.push('h.FiscalYear >= @earliestYear');
+  const whereSql = `AND ${conditions.join(' AND ')}`;
 
   const { recordset } = await request.query(`
     SELECT h.Material, t.MaterialText, h.VendorId, v.VendorName, h.SapVendorNumber, h.FiscalYear, h.ReceivedQty, h.Uom
     FROM log.MaterialReceiptHistory h
     LEFT JOIN log.Vendor v ON v.VendorId = h.VendorId
-    LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material
-    ${whereSql}
+    JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material AND t.MaterialType = 'ROH'
+    WHERE 1 = 1 ${whereSql}
     ORDER BY h.Material, h.FiscalYear, v.VendorName
   `);
   return recordset;
+}
+
+// Distinct materials a vendor actually has goods-receipt history for — used by
+// GET /trends (routes/mrpanalysis.js) so picking a vendor with no material filter shows only
+// what that vendor has actually supplied, not every ROH material with a blank column for it.
+export async function listVendorMaterialsFromReceiptHistory(vendorId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('vendorId', sql.Int, vendorId)
+    .input('earliestYear', sql.Int, earliestMrpHistoryYear())
+    .query(`
+      SELECT DISTINCT h.Material
+      FROM log.MaterialReceiptHistory h
+      JOIN log.TurnsValClassSnapshot t ON t.Material = h.Material AND t.MaterialType = 'ROH'
+      WHERE h.VendorId = @vendorId AND h.FiscalYear >= @earliestYear
+    `);
+  return recordset.map(r => r.Material);
+}
+
+// Every current ROH (raw material) material code — used by runMrpHistoryRefresh
+// (routes/performancesync.js) to filter SapServer's consumption/goods-receipt pulls down to
+// raw materials before storing them; see getConsumptionByYear's own comment for why.
+export async function listRohMaterials() {
+  const pool = await getPool();
+  const { recordset } = await pool.request().query(`
+    SELECT Material FROM log.TurnsValClassSnapshot WHERE MaterialType = 'ROH'
+  `);
+  return new Set(recordset.map(r => r.Material));
 }
 
 // Saves one forecast calculation as a new, immutable snapshot — never updates an existing
@@ -779,18 +825,18 @@ export async function listMrpForecastRuns(targetYear = null) {
   return recordset;
 }
 
-// Every material at plant 3012, for the Sales Breakdown method's downloadable template —
-// see routes/mrpanalysis.js's GET /products/export. TurnsValClassSnapshot already covers
-// every material at the plant, not just procurement-relevant ones (its own daily sync calls
-// SapServer with no filter — see doRunTurnsValClassRefresh in performancesync.js), so this is
-// a genuinely full product list, not scoped to a "finished goods" subset the schema has no
-// clean way to identify — the operator filling in the download just leaves raw-material rows
-// blank.
+// Finished goods (SAP MaterialType 'FERT') at plant 3012, for the Sales Breakdown method's
+// downloadable template — see routes/mrpanalysis.js's GET /products/export. Per the user:
+// this method starts from what's actually sold (FERT), not every material — the operator
+// only ever needs to enter Expected Sales Units against something sellable; the raw materials
+// it explodes down to (profit centre 2012, via SapServer's ExplodeBom) come back separately,
+// they're never part of this input list.
 export async function listMaterialsForSalesExport() {
   const pool = await getPool();
   const { recordset } = await pool.request().query(`
     SELECT Material, MaterialText, MaterialType, ProfitCentre, Uom
     FROM log.TurnsValClassSnapshot
+    WHERE MaterialType = 'FERT'
     ORDER BY Material
   `);
   return recordset;

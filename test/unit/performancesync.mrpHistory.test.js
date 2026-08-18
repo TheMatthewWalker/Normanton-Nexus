@@ -35,9 +35,17 @@ function queueStartRefresh(runId = 42) {
   dbRequest.query.mockResolvedValueOnce({ recordset: [{ RunId: runId }] });
 }
 
+// listRohMaterials' own SELECT — issued in the same Promise.all as the two SapServer calls,
+// so the second query overall (right after startRefresh's). Only materials in this set survive
+// into the upserts — see syncMrpHistory's own comment for why non-ROH rows are dropped.
+function queueRohMaterials(materials) {
+  dbRequest.query.mockResolvedValueOnce({ recordset: materials.map(Material => ({ Material })) });
+}
+
 describe('runMrpHistoryRefresh', () => {
   test('upserts consumption history stamped with Plant 3012, from the SapServer response shape', async () => {
     queueStartRefresh();
+    queueRohMaterials(['30005R']);
     sapClientMock.get
       .mockResolvedValueOnce({ data: { success: true, data: [{ material: '30005R', fiscalYear: 2025, qty: 100 }] } }) // consumption-by-year
       .mockResolvedValueOnce({ data: { success: true, data: [] } }); // goods-receipt-history
@@ -54,8 +62,24 @@ describe('runMrpHistoryRefresh', () => {
     expect(materialInputs.some(c => c[2] === 100)).toBe(true);
   });
 
+  test('drops a material SapServer returned that is not a ROH material, before storing anything', async () => {
+    queueStartRefresh();
+    queueRohMaterials(['30005R']); // NOT '99999X'
+    sapClientMock.get
+      .mockResolvedValueOnce({ data: { success: true, data: [{ material: '30005R', fiscalYear: 2025, qty: 100 }, { material: '99999X', fiscalYear: 2025, qty: 999 }] } })
+      .mockResolvedValueOnce({ data: { success: true, data: [] } });
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    const result = await runMrpHistoryRefresh();
+
+    expect(result.rowCount).toBe(1); // only the ROH material counted
+    const materialInputs = dbRequest.input.mock.calls.filter(c => typeof c[0] === 'string' && (c[0].startsWith('i0_') || c[0].startsWith('u0_')));
+    expect(materialInputs.some(c => c[2] === '99999X')).toBe(false);
+  });
+
   test('logs the refresh via RefreshLog with the combined consumption+receipt row count', async () => {
     queueStartRefresh(42);
+    queueRohMaterials(['A', 'B']);
     sapClientMock.get
       .mockResolvedValueOnce({ data: { success: true, data: [{ material: 'A', fiscalYear: 2025, qty: 1 }, { material: 'B', fiscalYear: 2025, qty: 2 }] } })
       .mockResolvedValueOnce({ data: { success: true, data: [{ material: 'A', vendor: '1', year: 2025, qty: 1, uom: 'KG' }] } });
@@ -68,6 +92,18 @@ describe('runMrpHistoryRefresh', () => {
     expect(completeCall).toBeDefined();
     const totalRowsInput = dbRequest.input.mock.calls.find(c => c[0] === 'totalRows');
     expect(totalRowsInput[2]).toBe(3);
+  });
+
+  test('bounds the goods-receipt-history SAP call to a sinceDate ~5 years back, matching the consumption window', async () => {
+    queueStartRefresh();
+    queueRohMaterials([]);
+    sapClientMock.get.mockResolvedValue({ data: { success: true, data: [] } });
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    await runMrpHistoryRefresh();
+
+    const grCall = sapClientMock.get.mock.calls.find(c => c[0] === '/api/mrp-analysis/goods-receipt-history');
+    expect(grCall[1].params.sinceDate).toBe(`01.01.${new Date().getFullYear() - 4}`);
   });
 
   test('reports status failed (via failRefresh) rather than throwing when the SAP call rejects', async () => {

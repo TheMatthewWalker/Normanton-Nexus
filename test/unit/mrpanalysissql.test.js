@@ -17,6 +17,9 @@ let upsertMaterialConsumptionHistory;
 let upsertMaterialReceiptHistory;
 let getConsumptionByYear;
 let getReceiptHistoryByVendor;
+let listVendorMaterialsFromReceiptHistory;
+let listRohMaterials;
+let listMaterialsForSalesExport;
 let createMrpForecastRun;
 let listMrpForecastRuns;
 let getMrpForecastRunDetail;
@@ -25,6 +28,7 @@ beforeAll(async () => {
   ({
     upsertMaterialConsumptionHistory, upsertMaterialReceiptHistory,
     getConsumptionByYear, getReceiptHistoryByVendor,
+    listVendorMaterialsFromReceiptHistory, listRohMaterials, listMaterialsForSalesExport,
     createMrpForecastRun, listMrpForecastRuns, getMrpForecastRunDetail,
   } = await import('../../routes/performancesql.js'));
 });
@@ -97,12 +101,14 @@ describe('upsertMaterialReceiptHistory', () => {
 });
 
 describe('getConsumptionByYear', () => {
-  test('queries with no material filter when none is given', async () => {
+  test('queries with no material filter when none is given, but still requires MaterialType ROH', async () => {
     dbRequest.query.mockResolvedValueOnce({ recordset: [{ Material: '30005R', FiscalYear: 2025, ConsumedQty: 100 }] });
 
     const rows = await getConsumptionByYear();
 
-    expect(dbRequest.query.mock.calls[0][0]).not.toContain('WHERE');
+    const queryText = dbRequest.query.mock.calls[0][0];
+    expect(queryText).not.toContain('h.Material IN');
+    expect(queryText).toContain("t.MaterialType = 'ROH'");
     expect(rows).toEqual([{ Material: '30005R', FiscalYear: 2025, ConsumedQty: 100 }]);
   });
 
@@ -118,12 +124,15 @@ describe('getConsumptionByYear', () => {
 });
 
 describe('getReceiptHistoryByVendor', () => {
-  test('queries with no filters when none are given', async () => {
+  test('queries with no filters when none are given, but still requires MaterialType ROH', async () => {
     dbRequest.query.mockResolvedValueOnce({ recordset: [] });
 
     await getReceiptHistoryByVendor();
 
-    expect(dbRequest.query.mock.calls[0][0]).not.toContain('WHERE');
+    const queryText = dbRequest.query.mock.calls[0][0];
+    expect(queryText).not.toContain('h.Material IN');
+    expect(queryText).not.toContain('h.VendorId = @vendorId');
+    expect(queryText).toContain("t.MaterialType = 'ROH'");
   });
 
   test('combines a material filter and a vendor filter with AND', async () => {
@@ -136,6 +145,44 @@ describe('getReceiptHistoryByVendor', () => {
     expect(queryText).toContain('h.VendorId = @vendorId');
     expect(queryText).toContain(' AND ');
     expect(inputCalls('vendorId')).toEqual([7]);
+  });
+});
+
+describe('listVendorMaterialsFromReceiptHistory', () => {
+  test('returns the distinct ROH materials that vendor has goods-receipt history for', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Material: '30005R' }, { Material: '30006R' }] });
+
+    const materials = await listVendorMaterialsFromReceiptHistory(7);
+
+    expect(materials).toEqual(['30005R', '30006R']);
+    const queryText = dbRequest.query.mock.calls[0][0];
+    expect(queryText).toContain("t.MaterialType = 'ROH'");
+    expect(queryText).toContain('h.VendorId = @vendorId');
+    expect(inputCalls('vendorId')).toEqual([7]);
+  });
+});
+
+describe('listRohMaterials', () => {
+  test('returns a Set of every ROH material', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Material: '30005R' }, { Material: '30006R' }] });
+
+    const materials = await listRohMaterials();
+
+    expect(materials).toBeInstanceOf(Set);
+    expect(materials.has('30005R')).toBe(true);
+    expect(materials.has('30006R')).toBe(true);
+    expect(dbRequest.query.mock.calls[0][0]).toContain("MaterialType = 'ROH'");
+  });
+});
+
+describe('listMaterialsForSalesExport', () => {
+  test('only queries FERT (finished goods) materials, not raw materials', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ Material: 'FG1', MaterialType: 'FERT' }] });
+
+    const rows = await listMaterialsForSalesExport();
+
+    expect(dbRequest.query.mock.calls[0][0]).toContain("MaterialType = 'FERT'");
+    expect(rows).toEqual([{ Material: 'FG1', MaterialType: 'FERT' }]);
   });
 });
 

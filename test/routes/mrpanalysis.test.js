@@ -48,6 +48,43 @@ describe('GET /trends', () => {
     expect(res.body.data.consumption).toHaveLength(1);
     expect(res.body.data.receipts).toHaveLength(1);
   });
+
+  test('a vendor filter with no material search is narrowed to that vendor\'s own ordering history first', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ Material: '30005R' }] }) // listVendorMaterialsFromReceiptHistory
+      .mockResolvedValueOnce({ recordset: [{ Material: '30005R', FiscalYear: 2025, ConsumedQty: 100 }] }) // getConsumptionByYear
+      .mockResolvedValueOnce({ recordset: [{ Material: '30005R', VendorId: 7, FiscalYear: 2025, ReceivedQty: 90 }] }); // getReceiptHistoryByVendor
+
+    const res = await request(app).get('/trends?vendorId=7');
+
+    expect(res.status).toBe(200);
+    // The consumption query must have been scoped to just '30005R', not every ROH material.
+    const consumptionCall = dbRequest.query.mock.calls[1][0];
+    expect(consumptionCall).toContain('h.Material IN (@cm0)');
+    expect(res.body.data.consumption).toHaveLength(1);
+    expect(res.body.data.receipts).toHaveLength(1);
+  });
+
+  test('a vendor with no ordering history at all returns empty without querying consumption', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] }); // listVendorMaterialsFromReceiptHistory — nothing
+
+    const res = await request(app).get('/trends?vendorId=7');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ consumption: [], receipts: [] });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('an explicit material search alongside a vendor filter is used as-is, no vendor-history resolution', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [] }) // getConsumptionByYear
+      .mockResolvedValueOnce({ recordset: [] }); // getReceiptHistoryByVendor
+
+    const res = await request(app).get('/trends?materials=30005R&vendorId=7');
+
+    expect(res.status).toBe(200);
+    expect(dbRequest.query).toHaveBeenCalledTimes(2); // no listVendorMaterialsFromReceiptHistory call
+  });
 });
 
 describe('POST /forecast/percentage', () => {
