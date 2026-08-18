@@ -353,3 +353,38 @@ export async function deleteBinRestriction(restrictionId) {
   await pool.request().input('restrictionId', sql.Int, restrictionId)
     .query('DELETE FROM log.StagingBinRestriction WHERE RestrictionId = @restrictionId');
 }
+
+// records that already have an identical Material+StorageType+Bin restriction
+// are skipped (NOT EXISTS below) rather than inserted as a duplicate, so a
+// re-uploaded/overlapping CSV is safe to import again.
+export async function bulkImportBinRestrictions(records, createdBy) {
+  const pool = await getPool();
+  let inserted = 0, skipped = 0;
+  const errors = [];
+
+  for (const r of records) {
+    try {
+      const result = await pool.request()
+        .input('material',    sql.NVarChar(18),  r.material)
+        .input('storageType', sql.NVarChar(3),   r.storageType)
+        .input('bin',          sql.NVarChar(10),  r.bin || null)
+        .input('notes',         sql.NVarChar(200), r.notes || null)
+        .input('createdBy',      sql.NVarChar(100), createdBy || null)
+        .query(`
+          INSERT INTO log.StagingBinRestriction (Material, StorageType, Bin, Notes, CreatedBy)
+          SELECT @material, @storageType, @bin, @notes, @createdBy
+          WHERE NOT EXISTS (
+            SELECT 1 FROM log.StagingBinRestriction
+            WHERE Material = @material AND StorageType = @storageType
+              AND ISNULL(Bin, '') = ISNULL(@bin, '')
+          )
+        `);
+      if (result.rowsAffected[0] > 0) inserted++;
+      else skipped++;
+    } catch (err) {
+      errors.push({ material: r.material, error: err.message });
+    }
+  }
+
+  return { inserted, skipped, errors };
+}

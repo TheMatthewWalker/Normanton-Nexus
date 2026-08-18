@@ -760,4 +760,17 @@ router.delete('/bin-restrictions/:id', requirePermission('LOG_SUPER'), async (re
   }
 });
 
+router.post('/bin-restrictions/bulk', requirePermission('LOG_SUPER'), async (req, res) => {
+  try {
+    const { records } = req.body;
+    if (!Array.isArray(records) || records.length === 0) {
+      return res.status(400).json({ success: false, error: { message: 'records array is required and must not be empty' } });
+    }
+    const result = await db.bulkImportBinRestrictions(records, actor(req));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 export default router;

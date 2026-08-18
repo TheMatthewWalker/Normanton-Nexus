@@ -6454,7 +6454,8 @@ function spRenderBinRestrictions(restrictions) {
     </tr>`).join('');
 
   document.getElementById('result-body').innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+      <button class="btn-secondary" id="sp-br-import-btn">Import CSV</button>
       <button class="btn-submit" id="sp-br-add-btn">+ Add Restriction</button>
     </div>
     ${restrictions.length ? `
@@ -6467,6 +6468,7 @@ function spRenderBinRestrictions(restrictions) {
   `;
 
   document.getElementById('sp-br-add-btn').addEventListener('click', () => spOpenBinRestrictionModal(null));
+  document.getElementById('sp-br-import-btn').addEventListener('click', () => spOpenBinRestrictionImportModal());
   document.querySelectorAll('.sp-br-edit').forEach(btn => {
     btn.addEventListener('click', () => {
       const r = restrictions.find(x => String(x.RestrictionId) === btn.dataset.id);
@@ -6601,6 +6603,211 @@ async function spDeleteBinRestriction(restrictionId) {
     runStagingBinRestrictions();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ── Bin Restrictions — CSV Bulk Import ────────────────────────────────────────
+let pendingBinRestrictionCsvRecords = [];
+
+function spOpenBinRestrictionImportModal() {
+  pendingBinRestrictionCsvRecords = [];
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:600px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Import Bin Restrictions (CSV)</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-section-label" style="margin-top:0">Expected Format</div>
+      <div style="margin-bottom:16px">
+        <code style="display:block;background:var(--surface2,#1e1e2e);border:1px solid var(--border,#333);
+          border-radius:6px;padding:10px 14px;font-size:13px;color:var(--text-muted,#aaa);line-height:1.6">
+          material,storageType,bin,notes<br>
+          30005R,SA,BIN-001,Manual FIFO placement
+        </code>
+        <div style="font-size:12px;color:var(--text-muted,#888);margin-top:6px">
+          bin and notes are optional — leave blank to restrict to any bin in that storage type.
+          Rows matching an existing Material + Storage Type + Bin combination are skipped.
+        </div>
+        <button type="button" onclick="spDownloadBinRestrictionCsvTemplate()"
+          style="margin-top:8px;background:none;border:none;color:var(--accent,#7c3aed);
+            cursor:pointer;font-size:13px;text-decoration:underline;padding:0">
+          Download blank template
+        </button>
+      </div>
+
+      <div class="tf-section-label">Select File</div>
+      <div id="sp-br-csv-drop-zone" style="border:2px dashed var(--border,#444);border-radius:8px;
+        padding:32px;text-align:center;cursor:pointer;color:var(--text-muted,#888);
+        transition:border-color .2s"
+        onclick="document.getElementById('sp-br-csv-file-input').click()"
+        ondragover="event.preventDefault();this.style.borderColor='var(--accent,#7c3aed)'"
+        ondragleave="this.style.borderColor=''"
+        ondrop="spHandleBinRestrictionCsvDrop(event)">
+        Drop CSV here or click to browse
+        <input type="file" id="sp-br-csv-file-input" accept=".csv,.txt"
+          style="display:none" onchange="spHandleBinRestrictionCsvFile(this)">
+      </div>
+
+      <div id="sp-br-csv-preview" style="margin-top:20px"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+    </div>
+  </div>`;
+}
+
+function spDownloadBinRestrictionCsvTemplate() {
+  const csv = 'material,storageType,bin,notes\r\n30005R,SA,BIN-001,Manual FIFO placement\r\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = 'bin-restrictions-template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function spHandleBinRestrictionCsvDrop(e) {
+  e.preventDefault();
+  document.getElementById('sp-br-csv-drop-zone').style.borderColor = '';
+  const file = e.dataTransfer?.files?.[0];
+  if (file) spParseBinRestrictionCsvFile(file);
+}
+
+function spHandleBinRestrictionCsvFile(input) {
+  const file = input.files?.[0];
+  if (file) spParseBinRestrictionCsvFile(file);
+  input.value = '';
+}
+
+function spParseBinRestrictionCsvFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => spRenderBinRestrictionCsvPreview(e.target.result);
+  reader.readAsText(file);
+}
+
+function spRenderBinRestrictionCsvPreview(text) {
+  const previewEl = document.getElementById('sp-br-csv-preview');
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) {
+    previewEl.innerHTML = '<div class="sap-error">✕ File must have a header row and at least one data row</div>';
+    return;
+  }
+
+  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
+  const missing = ['material', 'storagetype'].filter(h => !headers.includes(h));
+  if (missing.length) {
+    previewEl.innerHTML = `<div class="sap-error">✕ Missing columns: ${esc(missing.join(', '))}</div>`;
+    return;
+  }
+
+  const idx = {
+    material:    headers.indexOf('material'),
+    storageType: headers.indexOf('storagetype'),
+    bin:         headers.indexOf('bin'),
+    notes:       headers.indexOf('notes'),
+  };
+
+  const records = [], rowErrors = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    const raw = {
+      material:    cols[idx.material] ?? '',
+      storageType: cols[idx.storageType] ?? '',
+      bin:         idx.bin   >= 0 ? (cols[idx.bin]   ?? '') : '',
+      notes:       idx.notes >= 0 ? (cols[idx.notes] ?? '') : '',
+    };
+
+    const errs = [];
+    if (!raw.material) errs.push('material is required');
+    if (!raw.storageType) errs.push('storageType is required');
+
+    if (errs.length) {
+      rowErrors.push({ row: i, errors: errs });
+    } else {
+      records.push({
+        material:    raw.material,
+        storageType: raw.storageType,
+        bin:         raw.bin || null,
+        notes:       raw.notes || null,
+      });
+    }
+  }
+
+  pendingBinRestrictionCsvRecords = records;
+
+  let html = `<div class="tf-section-label" style="margin-top:0">
+    Preview — ${records.length} valid row${records.length !== 1 ? 's' : ''}, ${rowErrors.length} error${rowErrors.length !== 1 ? 's' : ''}
+  </div>`;
+
+  if (rowErrors.length) {
+    html += `<div class="sap-error" style="margin-bottom:12px">
+      ${rowErrors.map(e => `Row ${e.row}: ${esc(e.errors.join(', '))}`).join('<br>')}
+    </div>`;
+  }
+
+  if (records.length) {
+    html += `<div style="overflow-x:auto;margin-bottom:16px;max-height:260px;overflow-y:auto">
+      <table class="pn-batch-table">
+        <thead><tr><th>Material</th><th>Storage Type</th><th>Bin</th><th>Notes</th></tr></thead>
+        <tbody>
+          ${records.map(r => `<tr>
+            <td>${esc(r.material)}</td>
+            <td>${esc(r.storageType)}</td>
+            <td>${r.bin ? esc(r.bin) : '<span style="color:var(--text-muted)">Any</span>'}</td>
+            <td>${esc(r.notes || '—')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="tf-actions" style="padding-top:0">
+      <div id="sp-br-csv-submit-result"></div>
+      <button type="button" class="btn-submit" id="sp-br-csv-submit-btn"
+        onclick="spSubmitBinRestrictionCsvBulk()">
+        Import ${records.length} restriction${records.length !== 1 ? 's' : ''}
+      </button>
+    </div>`;
+  }
+
+  previewEl.innerHTML = html;
+}
+
+async function spSubmitBinRestrictionCsvBulk() {
+  if (!pendingBinRestrictionCsvRecords.length) return;
+  if (!await checkSession()) return;
+
+  const btn      = document.getElementById('sp-br-csv-submit-btn');
+  const resultEl = document.getElementById('sp-br-csv-submit-result');
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  resultEl.innerHTML = '';
+
+  try {
+    const json = await spApi('/bin-restrictions/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records: pendingBinRestrictionCsvRecords }),
+    });
+
+    const errLines = (json.errors || []).map(e => `${esc(e.material ?? '')}: ${esc(e.error)}`).join('<br>');
+
+    resultEl.innerHTML = `
+      <div class="tf-success" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <div class="tf-success-title">Import Complete</div>
+        <div style="font-size:13px;color:var(--text-muted,#aaa)">
+          ${json.inserted} inserted &nbsp;·&nbsp; ${json.skipped} already existed
+          ${errLines ? `<br><span style="color:var(--danger,#ef4444)">${errLines}</span>` : ''}
+        </div>
+      </div>`;
+    pendingBinRestrictionCsvRecords = [];
+    btn.textContent = 'Import complete';
+    runStagingBinRestrictions();
+  } catch (err) {
+    resultEl.innerHTML = `<div class="sap-error tf-inline-error">✕ ${esc(err.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = 'Retry import';
   }
 }
 

@@ -35,6 +35,7 @@ const db = {
   createBinRestriction: jest.fn(),
   updateBinRestriction: jest.fn(),
   deleteBinRestriction: jest.fn(),
+  bulkImportBinRestrictions: jest.fn(),
   recordStagingDelivery: jest.fn(),
 };
 jest.unstable_mockModule('../../routes/stagingsql.js', () => db);
@@ -394,6 +395,35 @@ describe('bin-restrictions — LOG_SUPER gate', () => {
   test('DELETE is rejected for a user without LOG_SUPER', async () => {
     const res = await request(app).delete('/bin-restrictions/1');
     expect(res.status).toBe(403);
+  });
+});
+
+describe('POST /bin-restrictions/bulk — CSV import', () => {
+  test('rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/bin-restrictions/bulk').send({ records: [{ material: '30005R', storageType: 'SA' }] });
+    expect(res.status).toBe(403);
+    expect(db.bulkImportBinRestrictions).not.toHaveBeenCalled();
+  });
+
+  test('400s when records is missing or empty', async () => {
+    const res1 = await request(appLogSuper).post('/bin-restrictions/bulk').send({});
+    expect(res1.status).toBe(400);
+    const res2 = await request(appLogSuper).post('/bin-restrictions/bulk').send({ records: [] });
+    expect(res2.status).toBe(400);
+    expect(db.bulkImportBinRestrictions).not.toHaveBeenCalled();
+  });
+
+  test('delegates to db.bulkImportBinRestrictions and returns its summary', async () => {
+    db.bulkImportBinRestrictions.mockResolvedValueOnce({ inserted: 2, skipped: 1, errors: [] });
+    const records = [
+      { material: '30005R', storageType: 'SA', bin: 'BIN-001', notes: null },
+      { material: '30006R', storageType: 'SB', bin: null, notes: 'x' },
+    ];
+    const res = await request(appLogSuper).post('/bin-restrictions/bulk').send({ records });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, inserted: 2, skipped: 1, errors: [] });
+    expect(db.bulkImportBinRestrictions).toHaveBeenCalledWith(records, expect.any(String));
   });
 });
 
