@@ -39,6 +39,7 @@ import express from 'express';
 import sql     from 'mssql';
 import { getNexusOperationsPool } from '../config.js';
 import { requirePermission } from '../middleware/auth.js';
+import { lookupCostElement } from './shipmentcost.js';
 
 const router = express.Router();
 const getPool = getNexusOperationsPool;
@@ -47,23 +48,12 @@ const canView = requirePermission('LOG_MRP');
 
 const INBOUND_COST_CENTER = '0000002012';
 
-// Looks up the SAP cost-element (GL) code for a direction/tier pair —
-// same table + convention as shipmentcost.js's /estimate route.
-async function lookupElementCode(pool, direction, tier) {
-  const { recordset } = await pool.request()
-    .input('direction', sql.NVarChar, direction)
-    .input('tier',      sql.NVarChar, tier)
-    .query(`SELECT TOP 1 elementCode FROM log.CostElements
-            WHERE direction = @direction AND tier = @tier`);
-  return recordset[0]?.elementCode ?? null;
-}
-
 // Shared by "Add Cost" on an existing shipment and Manual Inbound Shipment
 // creation (which auto-creates one line from its Price field) — see
 // performancesql.js's createManualOrderShipment comment. modeOfTransport
 // defaults from the shipment's own value when not supplied explicitly.
 export async function insertInboundCostLine(pool, { poShipmentID, costCenter, tier, amount, information, modeOfTransport }) {
-  const elementCode = await lookupElementCode(pool, 'inbound', tier === 'premium' ? 'premium' : 'standard');
+  const elementCode = await lookupCostElement(pool, 'inbound', tier === 'premium' ? 'premium' : 'standard');
   if (!elementCode) {
     const err = new Error(`No inbound ${tier} cost element configured in log.CostElements.`);
     err.statusCode = 422;

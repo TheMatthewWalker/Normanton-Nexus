@@ -45,6 +45,19 @@ function extractSapErrorMessage(body, fallback) {
 const router = express.Router();
 const getPool = getNexusOperationsPool;
 
+// Looks up the SAP cost-element (GL) code for a direction/tier pair — shared
+// with routes/inboundcosts.js's insertInboundCostLine (that file used to
+// carry its own copy of this exact query) and this file's own POST /manual
+// below. Same table/convention as the /estimate route further down.
+export async function lookupCostElement(pool, direction, tier) {
+    const { recordset } = await pool.request()
+        .input('direction', sql.NVarChar, direction)
+        .input('tier',      sql.NVarChar, tier)
+        .query(`SELECT TOP 1 elementCode FROM log.CostElements
+                WHERE direction = @direction AND tier = @tier`);
+    return recordset[0]?.elementCode ?? null;
+}
+
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
@@ -216,6 +229,97 @@ router.post('/', requirePermission('LOG_PLANNING'), async (req, res) => {
     }
 });
 
+// ── Create a manual cost line — not linked to any shipment ─────────────────
+// For the odd invoice that arrives with no shipment behind it at all (per
+// the user) — both shipmentID and poShipmentID stay NULL; the manual*
+// columns (migrations/nexus_operations/20260818120000_add_manual_shipment_costs.cjs) carry what would
+// otherwise come from the linked shipment (haulier, dates, location,
+// tracking) so this line reads the same as any other in GET /unprocessed,
+// GET /processed, and POST /post-migo below. costElement is expected to
+// already reflect the direction+tier the frontend looked up (same
+// lookupCostElement call the client-side modal uses) — re-resolved here
+// server-side only as a fallback if the client didn't send one, same
+// never-trust-the-client-alone reasoning POST / above already applies to
+// costElement/costCenter.
+router.post('/manual', requirePermission('LOG_PLANNING'), async (req, res) => {
+    try {
+        const {
+            direction, tier, costType, costCenter, expectedCost,
+            forwarderID, modeOfTransport, incurredDate, reference,
+            country, postcode, trackingNumber,
+        } = req.body;
+        let { costElement } = req.body;
+
+        if (direction !== 'inbound' && direction !== 'outbound') {
+            return res.status(400).json({ success: false, error: "direction must be 'inbound' or 'outbound'." });
+        }
+        if (tier !== 'standard' && tier !== 'premium') {
+            return res.status(400).json({ success: false, error: "tier must be 'standard' or 'premium'." });
+        }
+        const expectedCostNum = Number(expectedCost);
+        if (!Number.isFinite(expectedCostNum) || expectedCostNum <= 0) {
+            return res.status(400).json({ success: false, error: 'expectedCost must be a positive number.' });
+        }
+        if (!costCenter || !String(costCenter).trim()) {
+            return res.status(400).json({ success: false, error: 'costCenter is required.' });
+        }
+        if (!forwarderID) {
+            return res.status(400).json({ success: false, error: 'forwarderID (haulier) is required.' });
+        }
+        if (!modeOfTransport || !String(modeOfTransport).trim()) {
+            return res.status(400).json({ success: false, error: 'modeOfTransport is required.' });
+        }
+        if (!incurredDate) {
+            return res.status(400).json({ success: false, error: 'incurredDate is required.' });
+        }
+        if (!reference || !String(reference).trim()) {
+            return res.status(400).json({ success: false, error: 'reference is required.' });
+        }
+        if (!country || !String(country).trim()) {
+            return res.status(400).json({ success: false, error: 'country is required.' });
+        }
+        if (!postcode || !String(postcode).trim()) {
+            return res.status(400).json({ success: false, error: 'postcode is required.' });
+        }
+
+        const pool = await getPool();
+
+        if (!costElement || !String(costElement).trim()) {
+            costElement = await lookupCostElement(pool, direction, tier);
+            if (!costElement) {
+                return res.status(422).json({ success: false, error: `No ${direction} ${tier} cost element configured in log.CostElements.` });
+            }
+        }
+
+        const result = await pool.request()
+            .input('costType',             sql.NVarChar,       costType || '1')
+            .input('costElement',          sql.NVarChar,       costElement)
+            .input('costCenter',           sql.NVarChar,       costCenter)
+            .input('expectedCost',         sql.Decimal(18, 2), expectedCostNum)
+            .input('modeOfTransport',      sql.NVarChar(20),   modeOfTransport)
+            .input('manualReference',      sql.NVarChar(100),  String(reference).trim())
+            .input('manualForwarderID',    sql.BigInt,         Number(forwarderID))
+            .input('manualCountry',        sql.NVarChar(50),   String(country).trim())
+            .input('manualPostcode',       sql.NVarChar(20),   String(postcode).trim())
+            .input('manualTrackingNumber', sql.NVarChar(50),   trackingNumber ? String(trackingNumber).trim() : null)
+            .input('manualIncurredDate',   sql.DateTime,       new Date(incurredDate))
+            .query(`INSERT INTO log.ShipmentCost
+                      (shipmentID, poShipmentID, costType, costElement, costCenter,
+                       expectedCost, actualCost, migoStatus, modeOfTransport,
+                       manualReference, manualForwarderID, manualCountry, manualPostcode,
+                       manualTrackingNumber, manualIncurredDate)
+                    OUTPUT INSERTED.costID
+                    VALUES (NULL, NULL, @costType, @costElement, @costCenter,
+                            @expectedCost, @expectedCost, 0, @modeOfTransport,
+                            @manualReference, @manualForwarderID, @manualCountry, @manualPostcode,
+                            @manualTrackingNumber, @manualIncurredDate)`);
+
+        res.status(201).json({ success: true, data: { costID: result.recordset[0].costID, costElement } });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Cost estimate for a shipment — used by booking modal ──────────────────────
 // Returns: isKN, isKennethHowley, direction, tier, elementCode,
 //          chargeableWeight, expectedCost (KN only), rateFound
@@ -307,21 +411,27 @@ router.get('/estimate/:shipmentId', async (req, res) => {
     }
 });
 
-// ── Unprocessed costs (migoStatus = 0) ───────────────────────────────────────
-// Unified outbound + inbound — a single UNION ALL rather than two separate
-// tiles/endpoints, per the user: inbound cost lines (log.
-// ShipmentCost.poShipmentID set, from routes/inboundcosts.js) belong in the
-// exact same log as outbound (shipmentID set), and post through the same
-// POST /post-migo below. `direction` distinguishes the two in the UI;
-// `shipmentRef` is a display-ready reference for both (outbound has no
-// text reference of its own, so it's the zero-padded shipmentID, matching
-// the frontend's existing formatting).
-router.get('/unprocessed', async (req, res) => {
-    try {
-        const pool = await getPool();
-        const result = await pool.request()
-            .query(`SELECT
+// ── Shared cost-list query — unprocessed + processed ────────────────────────
+// Unified outbound + inbound + manual — a single UNION ALL rather than
+// separate tiles/endpoints per source, per the user: inbound cost lines
+// (log.ShipmentCost.poShipmentID set, from routes/inboundcosts.js) and
+// manual cost lines (both FKs NULL, from POST /manual above) belong in the
+// exact same log as outbound (shipmentID set), and post/reverse through the
+// same POST /post-migo / POST /:costId/reverse. `direction` distinguishes
+// outbound/inbound for SAP purposes (manual rows resolve it from their own
+// costElement via log.CostElements, same join GET /estimate already uses);
+// `sourceType` is the three-way outbound/inbound/manual discriminator the
+// frontend badges on and POST /post-migo's grouping key relies on (a manual
+// line's own costID could otherwise collide numerically with a real
+// shipmentID/poShipmentID). `shipmentRef` is a display-ready reference for
+// all three (outbound has no text reference of its own, so it's the
+// zero-padded shipmentID; manual uses its free-text manualReference).
+// migoPredicate/orderBy are the only things GET /unprocessed and GET
+// /processed below vary — both pass fixed literals, never request input.
+function buildCostListQuery(migoPredicate, orderBy) {
+    return `SELECT
                 sc.costID,
+                'outbound' AS sourceType,
                 'outbound' AS direction,
                 sm.shipmentID,
                 RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
@@ -338,17 +448,20 @@ router.get('/unprocessed', async (req, res) => {
                 sc.modeOfTransport,
                 sm.destinationCountry,
                 sm.destinationPostCode,
-                sm.trackingNumber
+                sm.trackingNumber,
+                sc.materialDocument,
+                sc.purchaseOrder
             FROM log.ShipmentCost sc
             INNER JOIN log.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
             LEFT  JOIN log.CostCenters  cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN log.CostElements ce ON ce.elementCode = sc.costElement
-            WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.shipmentID IS NOT NULL
+            WHERE ${migoPredicate} AND sc.shipmentID IS NOT NULL
 
             UNION ALL
 
             SELECT
                 sc.costID,
+                'inbound' AS sourceType,
                 'inbound' AS direction,
                 NULL AS shipmentID,
                 ps.ShipmentReference AS shipmentRef,
@@ -371,15 +484,72 @@ router.get('/unprocessed', async (req, res) => {
                 -- yet, so this is '-' for those until that's addressed.
                 d.destinationCountry,
                 d.destinationPostCode,
-                ps.TrackingNumber AS trackingNumber
+                ps.TrackingNumber AS trackingNumber,
+                sc.materialDocument,
+                sc.purchaseOrder
             FROM log.ShipmentCost sc
             INNER JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
             LEFT  JOIN log.CostCenters   cc ON cc.centerCode  = sc.costCenter
             LEFT  JOIN log.CostElements  ce ON ce.elementCode = sc.costElement
             LEFT  JOIN log.Destinations  d  ON d.destinationID = ps.OriginDestinationID
-            WHERE ISNULL(sc.migoStatus, 0) = 0 AND sc.poShipmentID IS NOT NULL
+            WHERE ${migoPredicate} AND sc.poShipmentID IS NOT NULL
 
-            ORDER BY plannedCollection ASC, shipmentID ASC`);
+            UNION ALL
+
+            -- Manual cost lines (migrations/nexus_operations/20260818120000_add_manual_shipment_costs.cjs) —
+            -- neither FK is set, so every column that would otherwise come
+            -- from the linked shipment is read from the row's own manual*
+            -- columns instead. Direction isn't stored directly; it's
+            -- resolved from the row's costElement, same as GET /estimate.
+            SELECT
+                sc.costID,
+                'manual' AS sourceType,
+                ISNULL(ce.direction, 'outbound') AS direction,
+                NULL AS shipmentID,
+                sc.manualReference AS shipmentRef,
+                sc.manualForwarderID AS forwarderID,
+                sc.manualIncurredDate AS plannedCollection,
+                sc.manualIncurredDate AS actualCollection,
+                sc.manualIncurredDate AS deliveredDate,
+                (SELECT TOP 1 forwarderName FROM log.Forwarders WHERE forwarderID = sc.manualForwarderID) AS forwarderName,
+                cc.centerCode  AS costCenter,
+                ce.elementCode AS costElement,
+                sc.expectedCost,
+                sc.actualCost,
+                sc.costType,
+                sc.modeOfTransport,
+                sc.manualCountry AS destinationCountry,
+                sc.manualPostcode AS destinationPostCode,
+                sc.manualTrackingNumber AS trackingNumber,
+                sc.materialDocument,
+                sc.purchaseOrder
+            FROM log.ShipmentCost sc
+            LEFT  JOIN log.CostCenters  cc ON cc.centerCode  = sc.costCenter
+            LEFT  JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+            WHERE ${migoPredicate} AND sc.shipmentID IS NULL AND sc.poShipmentID IS NULL
+
+            ORDER BY ${orderBy}`;
+}
+
+// ── Unprocessed costs (migoStatus = 0) ───────────────────────────────────────
+router.get('/unprocessed', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query(buildCostListQuery('ISNULL(sc.migoStatus, 0) = 0', 'plannedCollection ASC, shipmentID ASC'));
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Processed costs (migoStatus = 1) — already posted to SAP, with a
+// Material Document/PO Number to reverse via POST /:costId/reverse below.
+router.get('/processed', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query(buildCostListQuery('ISNULL(sc.migoStatus, 0) = 1', 'deliveredDate DESC, costID DESC'));
         res.json({ success: true, data: result.recordset });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -611,7 +781,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
 
         const fetched = await req2.query(`
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
-                   'outbound' AS direction, sm.shipmentID AS refID,
+                   'outbound' AS direction, 'outbound' AS sourceType, sm.shipmentID AS refID,
                    RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
                    sm.forwarderID, sm.actualCollection, sm.ActualDelivery AS deliveredDate, sm.trackingNumber,
                    sm.destinationCountry, sm.destinationPostCode
@@ -622,14 +792,33 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             UNION ALL
 
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
-                   'inbound' AS direction, ps.ShipmentId AS refID,
+                   'inbound' AS direction, 'inbound' AS sourceType, ps.ShipmentId AS refID,
                    ps.ShipmentReference AS shipmentRef,
                    ps.ForwarderID AS forwarderID, ps.DispatchDate AS actualCollection, ps.ReceivedAtUtc AS deliveredDate, ps.TrackingNumber AS trackingNumber,
                    d.destinationCountry, d.destinationPostCode
             FROM log.ShipmentCost sc
             INNER JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
             LEFT  JOIN log.Destinations d ON d.destinationID = ps.OriginDestinationID
-            WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0`);
+            WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0
+
+            UNION ALL
+
+            -- Manual cost lines (migrations/nexus_operations/20260818120000_add_manual_shipment_costs.cjs) — no
+            -- shipment to key off, so refID is the line's own costID and the
+            -- grouping key below uses sourceType (not direction, which is
+            -- still resolved via CostElements for the GL/vendor logic
+            -- further down) to keep this from colliding with a real
+            -- shipmentID/poShipmentID that happens to equal the same number.
+            SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
+                   ISNULL(ce.direction, 'outbound') AS direction, 'manual' AS sourceType, sc.costID AS refID,
+                   sc.manualReference AS shipmentRef,
+                   sc.manualForwarderID AS forwarderID, sc.manualIncurredDate AS actualCollection,
+                   sc.manualIncurredDate AS deliveredDate, sc.manualTrackingNumber AS trackingNumber,
+                   sc.manualCountry AS destinationCountry, sc.manualPostcode AS destinationPostCode
+            FROM log.ShipmentCost sc
+            LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+            WHERE sc.costID IN (${inClause}) AND ISNULL(sc.migoStatus, 0) = 0
+                  AND sc.shipmentID IS NULL AND sc.poShipmentID IS NULL`);
 
         if (!fetched.recordset.length)
             return res.status(404).json({ success: false, error: 'No unprocessed records found for the given IDs.' });
@@ -653,17 +842,22 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             });
         }
 
-        // Group cost lines by direction+shipment — direction is part of the
-        // key because outbound shipmentID and inbound poShipmentID are
-        // separate identity spaces and can collide numerically.
+        // Group cost lines by sourceType+shipment — sourceType (not
+        // direction) is part of the key because outbound shipmentID, inbound
+        // poShipmentID, and a manual line's own costID are three separate
+        // identity spaces and can collide numerically. Each manual line ends
+        // up its own one-line group (no aggregation across unrelated manual
+        // invoices) since refID is just that line's costID.
         const groups = {};
         for (const r of deliverable) {
-            const key = `${r.direction}:${r.refID}`;
+            const key = `${r.sourceType}:${r.refID}`;
             if (!groups[key]) {
                 groups[key] = {
                     direction:            r.direction,
-                    shipmentID:           r.direction === 'outbound' ? r.refID : null,
-                    poShipmentID:         r.direction === 'inbound'  ? r.refID : null,
+                    sourceType:           r.sourceType,
+                    shipmentID:           r.sourceType === 'outbound' ? r.refID : null,
+                    poShipmentID:         r.sourceType === 'inbound'  ? r.refID : null,
+                    manualCostID:         r.sourceType === 'manual'   ? r.refID : null,
                     shipmentReference:    r.shipmentRef,
                     actualCollectionDate: r.actualCollection,
                     deliveredDate:        r.deliveredDate,
@@ -711,6 +905,14 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
         // from firing every group at once.
         for (const group of Object.values(groups)) {
             const deliveredDayStr = group.deliveredDate ? new Date(group.deliveredDate).toISOString().slice(0, 10) : today;
+            // The result payload's "shipmentID" field is whichever ID actually
+            // identifies this group to the caller — a manual line has neither
+            // a real shipmentID nor poShipmentID, so it falls back to its own
+            // costID (the frontend keys off the separate costID field on each
+            // result anyway; this is informational).
+            const groupRefLabel = group.sourceType === 'inbound' ? group.poShipmentID
+                : group.sourceType === 'manual' ? group.manualCostID
+                : group.shipmentID;
 
             // MaterialGroup is looked up per line (not per group) because
             // costElement/GL account can differ line-to-line within the
@@ -741,7 +943,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             } catch (lookupErr) {
                 for (const costID of group._costIDs) {
                     results.push({
-                        shipmentID: group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                        shipmentID: groupRefLabel,
                         direction:  group.direction,
                         costID,
                         success:    false,
@@ -786,7 +988,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
                                     SET migoStatus = 1, materialDocument = @materialDocument, purchaseOrder = @purchaseOrder
                                     WHERE costID = @costID`);
                         results.push({
-                            shipmentID:    group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                            shipmentID:    groupRefLabel,
                             direction:     group.direction,
                             costID,
                             success:       true,
@@ -795,7 +997,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
                         });
                     } else {
                         results.push({
-                            shipmentID:    group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                            shipmentID:    groupRefLabel,
                             direction:     group.direction,
                             costID,
                             success:       false,
@@ -816,7 +1018,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
                 const message = extractSapErrorMessage(groupErr.response?.data, groupErr.message);
                 for (const costID of group._costIDs) {
                     results.push({
-                        shipmentID: group.direction === 'inbound' ? group.poShipmentID : group.shipmentID,
+                        shipmentID: groupRefLabel,
                         direction:  group.direction,
                         costID,
                         success:    false,

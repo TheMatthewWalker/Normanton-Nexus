@@ -130,6 +130,7 @@ function setupTiles() {
       if (fn === 'freightSpend')        runFreightSpend();
       if (fn === 'haulierOtif')         runHaulierOtif();
       if (fn === 'unprocessedCosts')    runUnprocessedCosts();
+      if (fn === 'processedCosts')      runProcessedCosts();
       if (fn === 'turnsValClassTable')  runTurnsValClassTable();
       if (fn === 'turnsValClassSummary')runTurnsValClassSummary();
       if (fn === 'stockValueByPrice')   runStockValueByPrice();
@@ -5799,7 +5800,9 @@ async function runUnprocessedCosts() {
       return `
       <tr data-cost-id="${r.costID}" class="migo-row" ${delivered ? '' : 'style="opacity:0.6"'}>
         <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}" ${delivered ? '' : 'disabled title="Not delivered/received yet"'}></td>
-        <td>${r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>'}</td>
+        <td>${r.sourceType === 'manual'
+          ? '<span style="color:#6B7280">Manual</span>'
+          : (r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>')}</td>
         <td>${esc(r.shipmentRef || (r.shipmentID != null ? String(r.shipmentID).padStart(6,'0') : '—'))}</td>
         <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
         <td>${fmt(r.plannedCollection)}</td>
@@ -5818,6 +5821,7 @@ async function runUnprocessedCosts() {
     body.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;padding:10px 0 12px;border-bottom:1px solid var(--border);margin-bottom:12px">
         <span id="migo-sel-count" style="font-size:13px;color:var(--text-dim)">0 selected</span>
+        ${hasPlanning() ? '<button id="migo-manual-btn" class="btn-secondary">+ Manual Cost</button>' : ''}
         <button id="migo-post-btn" class="btn-export" disabled style="margin-left:auto">Post to SAP</button>
       </div>
       <div style="overflow-x:auto">
@@ -5843,6 +5847,7 @@ async function runUnprocessedCosts() {
     });
 
     document.getElementById('migo-post-btn').addEventListener('click', postMigoSelected);
+    document.getElementById('migo-manual-btn')?.addEventListener('click', () => openManualCostModal(runUnprocessedCosts));
 
   } catch (err) {
     body.innerHTML = `<div class="sap-error">Error loading unprocessed costs: ${esc(err.message)}</div>`;
@@ -5943,6 +5948,305 @@ async function postMigoSelected() {
   }
 }
 
+// ── Processed Freight Costs ───────────────────────────────────────────────────
+// Companion to Unprocessed Costs above — lines already posted to SAP
+// (migoStatus = 1), with a Reverse action per row using the same
+// POST /:costId/reverse endpoint (and the same confirm/refresh pattern) the
+// Search Shipment modal's Associated Costs tile already uses — see
+// renderShipmentAssociatedCosts's `.sd-cost-reverse` handler above.
+async function runProcessedCosts() {
+  showResultPanel('Processed Freight Costs', 'Cost lines already posted to SAP — reverse a goods receipt if needed');
+  const body = document.getElementById('result-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
+
+  try {
+    const resp = await fetch('/api/shipmentcost/processed');
+    const json = await resp.json();
+    if (!json.success) throw new Error(json.error);
+
+    const rows = json.data;
+    if (!rows.length) {
+      body.innerHTML = '<div class="sap-empty">No processed cost lines found.</div>';
+      return;
+    }
+
+    document.getElementById('result-row-badge').textContent = `${rows.length} line${rows.length !== 1 ? 's' : ''}`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+
+    const fmt        = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
+    const gbp        = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
+    const location   = r => {
+      const cc = (r.destinationCountry  || '').slice(0, 2).toUpperCase();
+      const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
+      return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
+    };
+    const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
+    const canEdit = hasPlanning();
+
+    const thead = `<tr>
+      <th>Dir.</th>
+      <th>Shipment</th>
+      <th>Type</th>
+      <th>Delivered</th>
+      <th>Haulier</th>
+      <th>Mode</th>
+      <th>Cost Centre</th>
+      <th>Cost Element</th>
+      <th style="text-align:right">Expected</th>
+      <th>Location</th>
+      <th>Tracking</th>
+      <th>PO Number</th>
+      <th>Material Doc</th>
+      ${canEdit ? '<th></th>' : ''}
+    </tr>`;
+
+    const tbody = rows.map(r => `
+      <tr data-cost-id="${r.costID}" class="migo-row">
+        <td>${r.sourceType === 'manual'
+          ? '<span style="color:#6B7280">Manual</span>'
+          : (r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>')}</td>
+        <td>${esc(r.shipmentRef || (r.shipmentID != null ? String(r.shipmentID).padStart(6,'0') : '—'))}</td>
+        <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
+        <td>${fmt(r.deliveredDate)}</td>
+        <td>${esc(r.forwarderName || '—')}</td>
+        <td>${esc(r.modeOfTransport || '—')}</td>
+        <td class="pn-batch-mono">${esc(r.costCenter  || '—')}</td>
+        <td class="pn-batch-mono">${esc(r.costElement || '—')}</td>
+        <td style="text-align:right">${gbp(r.expectedCost)}</td>
+        <td class="pn-batch-mono">${location(r)}</td>
+        <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
+        <td class="pn-batch-mono">${esc(r.purchaseOrder || '—')}</td>
+        <td class="pn-batch-mono">${esc(r.materialDocument || '—')}</td>
+        ${canEdit ? `<td style="white-space:nowrap"><button type="button" class="btn-secondary pc-reverse-btn" data-cost-id="${r.costID}" style="padding:2px 8px;font-size:11px">Reverse</button></td>` : ''}
+      </tr>`).join('');
+
+    body.innerHTML = `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead>${thead}</thead>
+          <tbody id="pc-tbody">${tbody}</tbody>
+        </table>
+      </div>`;
+
+    document.querySelectorAll('.pc-reverse-btn').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!(await confirmDialog('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.', { confirmLabel: 'Reverse', danger: true }))) return;
+        b.disabled = true; b.textContent = 'Reversing…';
+        try {
+          const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
+          const json2 = await res2.json();
+          if (!json2.success) throw new Error(json2.error || json2.message || 'Reversal failed');
+          runProcessedCosts();
+        } catch (err) {
+          b.disabled = false; b.textContent = 'Reverse';
+          const row = b.closest('tr');
+          if (row) row.insertAdjacentHTML('afterend', `<tr><td colspan="14"><div class="sap-error">${esc(err.message)}</div></td></tr>`);
+        }
+      });
+    });
+
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">Error loading processed costs: ${esc(err.message)}</div>`;
+  }
+}
+
+// ── Manual Cost modal — not linked to any shipment ──────────────────────────
+// For the odd invoice that arrives with no shipment behind it at all, per
+// the user. Modeled on openManualInboundShipmentModal (Mode -> Haulier via
+// loadForwarderOptionsByMode) and renderShipmentAssociatedCosts's GL
+// Account/Cost Type/Cost Centre dropdowns. onSaved is called after a
+// successful POST so the caller (currently only Unprocessed Costs) can
+// refresh its own list.
+async function openManualCostModal(onSaved) {
+  openModal(`<div class="ps-modal lg-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Manual Cost</div><div class="ps-modal-sub">Not linked to any shipment — e.g. a standalone invoice</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Direction</label>
+          <select class="tf-input" id="mc-direction">
+            <option value="outbound">Outbound</option>
+            <option value="inbound">Inbound</option>
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Tier</label>
+          <select class="tf-input" id="mc-tier">
+            <option value="standard">Standard</option>
+            <option value="premium">Premium</option>
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Cost Type</label>
+          <select class="tf-input" id="mc-cost-type"></select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Cost Centre</label>
+          <select class="tf-input" id="mc-cost-center"></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Cost Element (GL Account)</label>
+          <select class="tf-input" id="mc-cost-element"></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Amount (£)</label>
+          <input class="tf-input" type="number" step="0.01" min="0.01" id="mc-amount">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Mode of Transport</label>
+          <select class="tf-input" id="mc-mode">
+            <option value="">— Select mode —</option>
+            ${OS_TRANSPORT_MODES.map(m => `<option value="${m}">${m}</option>`).join('')}
+          </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Haulier</label>
+          <select class="tf-input" id="mc-haulier" disabled><option value="">Select mode of transport first</option></select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Invoice / Incurred Date</label>
+          <input class="tf-input" type="date" id="mc-date">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Reference / Description</label>
+          <input class="tf-input" type="text" id="mc-reference" placeholder="e.g. haulier invoice number or description">
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Country</label>
+          <input class="tf-input" type="text" id="mc-country">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Postcode</label>
+          <input class="tf-input" type="text" id="mc-postcode">
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Tracking Number <span style="color:var(--text-secondary,#666);font-weight:400">(optional)</span></label>
+          <input class="tf-input" type="text" id="mc-tracking">
+        </div>
+      </div>
+      <div id="mc-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="mc-save-btn">Add Cost</button>
+    </div>
+  </div>`);
+
+  const directionSelect = document.getElementById('mc-direction');
+  const tierSelect      = document.getElementById('mc-tier');
+  const elementSelect   = document.getElementById('mc-cost-element');
+  const centerSelect    = document.getElementById('mc-cost-center');
+
+  // Cost Centre — same direction-based default the rest of the app already
+  // uses (0000002012 inbound / 0000002004 PTFE outbound — see
+  // routes/inboundcosts.js's INBOUND_COST_CENTER and
+  // renderShipmentAssociatedCosts's outbound default above).
+  function applyCostCenterDefault() {
+    const def = directionSelect.value === 'inbound' ? '0000002012' : '0000002004';
+    if ([...centerSelect.options].some(o => o.value === def)) centerSelect.value = def;
+  }
+
+  fetch('/api/costcenters').then(r => r.json()).then(data => {
+    const centres = Array.isArray(data) ? data : (data.data || []);
+    centerSelect.innerHTML = centres.map(c =>
+      `<option value="${esc(c.centerCode || '')}">${esc(c.centerCode || '')} — ${esc(c.centerDescription || '')}</option>`
+    ).join('');
+    applyCostCenterDefault();
+  }).catch(() => { centerSelect.innerHTML = '<option value="">Failed to load cost centres</option>'; });
+
+  fetch('/api/costtypes').then(r => r.json()).then(types => {
+    const sel = document.getElementById('mc-cost-type');
+    if (!Array.isArray(types)) return;
+    sel.innerHTML = types.map(t =>
+      `<option value="${esc(String(t.typeID))}">${esc(t.typeDescription || '')}</option>`
+    ).join('');
+  }).catch(() => {});
+
+  // Cost Element — filtered to the chosen direction (mgmLoadCostElements is
+  // the same cached GL-account loader renderShipmentAssociatedCosts uses),
+  // auto-selected to the direction+tier pair looked up server-side the same
+  // way lookupCostElement does, but still freely editable afterward.
+  function applyElementOptions(elements) {
+    const direction = directionSelect.value;
+    const tier      = tierSelect.value;
+    const filtered  = elements.filter(e => e.direction === direction);
+    elementSelect.innerHTML = filtered.map(e =>
+      `<option value="${esc(e.elementCode)}">${esc(e.elementCode)} — ${esc(e.elementDescription || '')}</option>`
+    ).join('');
+    const match = filtered.find(e => e.tier === tier);
+    if (match) elementSelect.value = match.elementCode;
+  }
+
+  const elements = await mgmLoadCostElements();
+  applyElementOptions(elements);
+  applyCostCenterDefault();
+
+  directionSelect.addEventListener('change', () => { applyElementOptions(elements); applyCostCenterDefault(); });
+  tierSelect.addEventListener('change', () => applyElementOptions(elements));
+
+  document.getElementById('mc-mode').addEventListener('change', () => {
+    loadForwarderOptionsByMode('mc-haulier', document.getElementById('mc-mode').value);
+  });
+
+  document.getElementById('mc-save-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('mc-save-btn');
+    const result = document.getElementById('mc-result');
+    result.innerHTML = '';
+
+    const body = {
+      direction:       directionSelect.value,
+      tier:             tierSelect.value,
+      costType:         document.getElementById('mc-cost-type').value,
+      costCenter:       centerSelect.value,
+      costElement:      elementSelect.value,
+      expectedCost:     Number(document.getElementById('mc-amount').value),
+      forwarderID:      document.getElementById('mc-haulier').value || null,
+      modeOfTransport:  document.getElementById('mc-mode').value || null,
+      incurredDate:     document.getElementById('mc-date').value || null,
+      reference:        document.getElementById('mc-reference').value.trim(),
+      country:          document.getElementById('mc-country').value.trim(),
+      postcode:         document.getElementById('mc-postcode').value.trim(),
+      trackingNumber:   document.getElementById('mc-tracking').value.trim() || null,
+    };
+
+    if (!body.costCenter) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
+    if (!body.costElement) { result.innerHTML = '<div class="sap-error">Select a Cost Element.</div>'; return; }
+    if (!body.expectedCost || body.expectedCost <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
+    if (!body.forwarderID) { result.innerHTML = '<div class="sap-error">Select a mode of transport and haulier.</div>'; return; }
+    if (!body.modeOfTransport) { result.innerHTML = '<div class="sap-error">Select a mode of transport.</div>'; return; }
+    if (!body.incurredDate) { result.innerHTML = '<div class="sap-error">Enter the invoice/incurred date.</div>'; return; }
+    if (!body.reference) { result.innerHTML = '<div class="sap-error">Enter a reference or description.</div>'; return; }
+    if (!body.country) { result.innerHTML = '<div class="sap-error">Enter a country.</div>'; return; }
+    if (!body.postcode) { result.innerHTML = '<div class="sap-error">Enter a postcode.</div>'; return; }
+
+    btn.disabled = true; btn.textContent = 'Adding…';
+    try {
+      const res = await fetch('/api/shipmentcost/manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Failed to add cost');
+      closePickModal();
+      if (onSaved) onSaved();
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Add Cost';
+    }
+  });
+}
 
 // ── Freight Spend Analytics ───────────────────────────────────────────────────
 function destroyFreightCharts() {

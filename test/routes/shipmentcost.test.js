@@ -1,10 +1,12 @@
 // routes/shipmentcost.js (883 lines) — representative sample of the plain
 // CRUD + validation endpoints, plus the LOG_PLANNING permission gate on
 // every write route. The SAP-posting-heavy body logic of /post-migo and
-// /:costId/reverse (beyond the permission check) and /estimate, /unprocessed
-// aren't covered here yet — they pull in lib/sapCredentials.js +
+// /:costId/reverse (beyond the permission check) and /estimate aren't
+// covered here yet — they pull in lib/sapCredentials.js +
 // routes/materialgroups.js + a live-posting axios flow and are a natural
-// next slice — see CLAUDE.md.
+// next slice — see CLAUDE.md. POST /manual and the manual-cost leg of
+// GET /unprocessed / GET /processed (both read-only three-way UNION ALL
+// queries, added for manual/unlinked cost entry) are covered below.
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
@@ -135,6 +137,102 @@ describe('POST / (create)', () => {
     const res = await request(appPlanning).post('/').send({ shipmentID: 1, costElement: 'X', costCenter: 'Y', expectedCost: 100 });
     expect(res.status).toBe(201);
     expect(res.body.costID).toBe(42);
+  });
+});
+
+describe('GET /unprocessed', () => {
+  test('returns the combined recordset (outbound/inbound/manual union)', async () => {
+    queueResults({ recordset: [{ costID: 1, sourceType: 'manual', direction: 'outbound' }] });
+    const res = await request(app).get('/unprocessed');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: [{ costID: 1, sourceType: 'manual', direction: 'outbound' }] });
+  });
+});
+
+describe('GET /processed', () => {
+  test('returns the combined recordset', async () => {
+    queueResults({ recordset: [{ costID: 2, sourceType: 'outbound', migoStatus: 1 }] });
+    const res = await request(app).get('/processed');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: [{ costID: 2, sourceType: 'outbound', migoStatus: 1 }] });
+  });
+});
+
+describe('POST /manual (create manual cost line)', () => {
+  const validBody = {
+    direction: 'outbound',
+    tier: 'standard',
+    costType: '1',
+    costCenter: '0000002004',
+    costElement: '601200',
+    expectedCost: 150,
+    forwarderID: 7,
+    modeOfTransport: 'Road',
+    incurredDate: '2026-08-01',
+    reference: 'Haulier invoice INV-123',
+    country: 'GB',
+    postcode: 'LS1',
+  };
+
+  test('is rejected for a user without LOG_PLANNING', async () => {
+    const res = await request(app).post('/manual').send(validBody);
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rejects an invalid direction', async () => {
+    const res = await request(appPlanning).post('/manual').send({ ...validBody, direction: 'sideways' });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rejects an invalid tier', async () => {
+    const res = await request(appPlanning).post('/manual').send({ ...validBody, tier: 'gold' });
+    expect(res.status).toBe(400);
+  });
+
+  test('rejects a non-positive expectedCost', async () => {
+    const res = await request(appPlanning).post('/manual').send({ ...validBody, expectedCost: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  test.each([
+    ['costCenter', ''],
+    ['forwarderID', null],
+    ['modeOfTransport', ''],
+    ['incurredDate', null],
+    ['reference', '  '],
+    ['country', ''],
+    ['postcode', ''],
+  ])('requires %s', async (field, badValue) => {
+    const res = await request(appPlanning).post('/manual').send({ ...validBody, [field]: badValue });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('creates a manual cost line with both FKs NULL and returns costID', async () => {
+    queueResults({ recordset: [{ costID: 99 }] });
+    const res = await request(appPlanning).post('/manual').send(validBody);
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ success: true, data: { costID: 99, costElement: '601200' } });
+  });
+
+  test('falls back to a server-side cost element lookup when the client omits one', async () => {
+    queueResults(
+      { recordset: [{ elementCode: '601300' }] }, // lookupCostElement
+      { recordset: [{ costID: 100 }] },            // INSERT
+    );
+    const { costElement, ...bodyWithoutElement } = validBody;
+    const res = await request(appPlanning).post('/manual').send(bodyWithoutElement);
+    expect(res.status).toBe(201);
+    expect(res.body.data.costElement).toBe('601300');
+  });
+
+  test('422s when no cost element is configured for the direction/tier and none was supplied', async () => {
+    queueResults({ recordset: [] }); // lookupCostElement finds nothing
+    const { costElement, ...bodyWithoutElement } = validBody;
+    const res = await request(appPlanning).post('/manual').send(bodyWithoutElement);
+    expect(res.status).toBe(422);
   });
 });
 
