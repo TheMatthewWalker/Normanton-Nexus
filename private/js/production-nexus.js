@@ -5947,6 +5947,59 @@ async function openRetryModal(processCode, recordId, batchRef) {
 const SP_LOCATIONS = ['Mixing', 'Extrusion', 'Convoluting', 'Tape Wrap', 'Braiding', 'Coverline', 'Drumming'];
 const SP_MIN_LEAD_HOURS = 4;
 
+// Stores only work 05:45–17:00, Monday–Friday — no weekend shift. Mirrors
+// routes/staging.js's own addStoresLeadTime/etc: a request raised outside
+// that window has its lead time start counting from the next 05:45 open,
+// and a request raised close to the 17:00 close has the overflow carry over
+// into the next working day's morning (e.g. a 4-hour request at 15:00 lands
+// at 07:45 the next working day — 2 hours to close, 2 more from 05:45).
+const SP_STORES_OPEN  = { hours: 5,  minutes: 45 };
+const SP_STORES_CLOSE = { hours: 17, minutes: 0 };
+
+function spIsStoresWorkingDay(date) {
+  const day = date.getDay();
+  return day >= 1 && day <= 5;
+}
+
+function spAtLocalTime(date, { hours, minutes }) {
+  const d = new Date(date);
+  d.setHours(hours, minutes, 0, 0);
+  return d;
+}
+
+function spNextStoresOpen(date) {
+  const d = spAtLocalTime(date, SP_STORES_OPEN);
+  if (d < date) d.setDate(d.getDate() + 1);
+  while (!spIsStoresWorkingDay(d)) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function spClampToStoresWindow(date) {
+  if (spIsStoresWorkingDay(date)) {
+    const open = spAtLocalTime(date, SP_STORES_OPEN);
+    const close = spAtLocalTime(date, SP_STORES_CLOSE);
+    if (date >= open && date < close) return new Date(date);
+  }
+  return spNextStoresOpen(date);
+}
+
+function spAddStoresLeadTime(fromDate, hours) {
+  let cursor = spClampToStoresWindow(fromDate);
+  let remainingMs = hours * 60 * 60 * 1000;
+  while (remainingMs > 0) {
+    const close = spAtLocalTime(cursor, SP_STORES_CLOSE);
+    const availableMs = close - cursor;
+    if (remainingMs <= availableMs) {
+      cursor = new Date(cursor.getTime() + remainingMs);
+      remainingMs = 0;
+    } else {
+      remainingMs -= availableMs;
+      cursor = spNextStoresOpen(new Date(close.getTime() + 1));
+    }
+  }
+  return cursor;
+}
+
 async function spApi(path, opts) {
   const r = await fetch('/api/staging' + path, opts);
   let json = null;
@@ -6037,7 +6090,7 @@ async function spCancelRequest(requestId) {
 }
 
 function spDefaultDueLocal() {
-  const d = new Date(Date.now() + SP_MIN_LEAD_HOURS * 60 * 60 * 1000);
+  const d = spAddStoresLeadTime(new Date(), SP_MIN_LEAD_HOURS);
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 16);
 }
@@ -6098,7 +6151,7 @@ function spOpenRequestModal() {
           <input class="tf-input" type="datetime-local" id="sp-due" value="${spDefaultDueLocal()}">
         </div>
       </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Use the 4 hours button, or pick your own time — it must be more than ${SP_MIN_LEAD_HOURS} hours from now, so Stores always has a fair chance to get to it.</div>
+      <div class="toolbar-hint" style="margin:2px 0 10px">Use the 4 hours button, or pick your own time — it must allow at least ${SP_MIN_LEAD_HOURS} working hours' notice. Stores works 05:45–17:00, Monday–Friday, so a request outside those hours counts from the next working day's 05:45.</div>
       <div class="tf-row">
         <div class="tf-field tf-field--wide">
           <label class="tf-label">Notes <span class="tf-optional">(optional)</span></label>
@@ -6119,7 +6172,7 @@ function spOpenRequestModal() {
 
   document.querySelectorAll('.sp-due-preset').forEach(btn => {
     btn.addEventListener('click', () => {
-      const d = new Date(Date.now() + Number(btn.dataset.hours) * 60 * 60 * 1000);
+      const d = spAddStoresLeadTime(new Date(), Number(btn.dataset.hours));
       d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
       document.getElementById('sp-due').value = d.toISOString().slice(0, 16);
     });
