@@ -5742,7 +5742,118 @@ function renderSimpleTable(rows, cols) {
 }
 
 
+// ── Shared cost-list filter bar (Unprocessed + Processed Costs) ────────────
+// Client-side filtering over the already-fetched dataset — both tiles' full
+// result sets are small enough that there's no need to round-trip to the
+// server per filter change. Export CSV (the generic #btn-export-csv /
+// exportResultCSV() near the top of this file, already wired for a few
+// other tiles via the shared `currentResult` array) always exports whatever
+// is CURRENTLY FILTERED, so "narrow down, then export" reflects exactly
+// what's on screen — the point being to spot variances/gaps against what's
+// expected, per the user.
+function costFilterBarHtml(idPrefix, rows) {
+  const distinctModes = [...new Set(rows.map(r => r.modeOfTransport).filter(Boolean))].sort();
+  return `
+    <div class="tf-row" style="align-items:flex-end;flex-wrap:wrap;gap:8px;padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid var(--border)">
+      <div class="tf-field">
+        <label class="tf-label">Direction</label>
+        <select class="tf-input" id="${idPrefix}-f-direction" style="width:110px">
+          <option value="">All</option>
+          <option value="outbound">Outbound</option>
+          <option value="inbound">Inbound</option>
+          <option value="manual">Manual</option>
+        </select>
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Type</label>
+        <select class="tf-input" id="${idPrefix}-f-type" style="width:110px">
+          <option value="">All</option>
+          <option value="1">Freight</option>
+          <option value="2">Customs</option>
+        </select>
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Mode</label>
+        <select class="tf-input" id="${idPrefix}-f-mode" style="width:120px">
+          <option value="">All</option>
+          ${distinctModes.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Cost Centre</label>
+        <input class="tf-input" type="text" id="${idPrefix}-f-costcentre" style="width:110px" placeholder="filter…">
+      </div>
+      <div class="tf-field">
+        <label class="tf-label">Cost Element</label>
+        <input class="tf-input" type="text" id="${idPrefix}-f-costelement" style="width:110px" placeholder="filter…">
+      </div>
+      <div class="tf-field tf-field--wide">
+        <label class="tf-label">Search <span style="color:var(--text-secondary,#666);font-weight:400">(shipment, haulier, location, tracking, PO, doc)</span></label>
+        <input class="tf-input" type="text" id="${idPrefix}-f-search" style="min-width:220px" placeholder="search…">
+      </div>
+      <div class="tf-field">
+        <button type="button" class="btn-secondary" id="${idPrefix}-f-clear">Clear Filters</button>
+      </div>
+    </div>`;
+}
+
+function readCostFilters(idPrefix) {
+  return {
+    direction:   document.getElementById(`${idPrefix}-f-direction`)?.value || '',
+    type:        document.getElementById(`${idPrefix}-f-type`)?.value || '',
+    mode:        document.getElementById(`${idPrefix}-f-mode`)?.value || '',
+    costCentre:  (document.getElementById(`${idPrefix}-f-costcentre`)?.value  || '').trim().toLowerCase(),
+    costElement: (document.getElementById(`${idPrefix}-f-costelement`)?.value || '').trim().toLowerCase(),
+    search:      (document.getElementById(`${idPrefix}-f-search`)?.value     || '').trim().toLowerCase(),
+  };
+}
+
+// direction here matches sourceType (outbound/inbound/manual — what the Dir.
+// column badge actually shows), not the resolved SAP direction a manual
+// line's costElement carries internally — see GET /unprocessed's sourceType.
+function filterCostRows(rows, f) {
+  return rows.filter(r => {
+    if (f.direction && r.sourceType !== f.direction) return false;
+    if (f.type && String(r.costType) !== f.type) return false;
+    if (f.mode && r.modeOfTransport !== f.mode) return false;
+    if (f.costCentre && !String(r.costCenter || '').toLowerCase().includes(f.costCentre)) return false;
+    if (f.costElement && !String(r.costElement || '').toLowerCase().includes(f.costElement)) return false;
+    if (f.search) {
+      const haystack = [
+        r.shipmentRef, r.forwarderName, r.trackingNumber,
+        r.destinationCountry, r.destinationPostCode,
+        r.purchaseOrder, r.materialDocument,
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(f.search)) return false;
+    }
+    return true;
+  });
+}
+
+// Wires the filter bar built by costFilterBarHtml above to re-run onChange
+// with the current filter values — selects fire immediately, text inputs
+// are debounced so filtering doesn't run on every keystroke. Attached once
+// per tile load (the filter bar itself is never re-rendered, only the
+// table body below it), unlike the row-level listeners which get rebound
+// on every filtered redraw since the tbody's own innerHTML is replaced.
+function wireCostFilterBar(idPrefix, onChange) {
+  const selectIds = [`${idPrefix}-f-direction`, `${idPrefix}-f-type`, `${idPrefix}-f-mode`];
+  const textIds   = [`${idPrefix}-f-costcentre`, `${idPrefix}-f-costelement`, `${idPrefix}-f-search`];
+  selectIds.forEach(id => document.getElementById(id)?.addEventListener('change', onChange));
+  let debounceTimer;
+  textIds.forEach(id => document.getElementById(id)?.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(onChange, 200);
+  }));
+  document.getElementById(`${idPrefix}-f-clear`)?.addEventListener('click', () => {
+    [...selectIds, ...textIds].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    onChange();
+  });
+}
+
 // ── Unprocessed Freight Costs ─────────────────────────────────────────────────
+let ucAllRows = [];
+
 async function runUnprocessedCosts() {
   showResultPanel('Unprocessed Freight Costs', 'Cost lines awaiting MIGO posting — tick rows and press Post to SAP');
   const body = document.getElementById('result-body');
@@ -5753,23 +5864,11 @@ async function runUnprocessedCosts() {
     const json = await resp.json();
     if (!json.success) throw new Error(json.error);
 
-    const rows = json.data;
-    if (!rows.length) {
+    ucAllRows = json.data;
+    if (!ucAllRows.length) {
       body.innerHTML = '<div class="sap-empty">No unprocessed cost lines found.</div>';
       return;
     }
-
-    document.getElementById('result-row-badge').textContent = `${rows.length} line${rows.length !== 1 ? 's' : ''}`;
-    document.getElementById('result-row-badge').classList.remove('hidden');
-
-    const fmt        = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
-    const gbp        = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
-    const location   = r => {
-      const cc = (r.destinationCountry  || '').slice(0, 2).toUpperCase();
-      const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
-      return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
-    };
-    const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
 
     const thead = `<tr>
       <th style="width:32px"><input type="checkbox" id="migo-check-all" title="Select all"></th>
@@ -5788,37 +5887,8 @@ async function runUnprocessedCosts() {
       <th>Result</th>
     </tr>`;
 
-    // Nothing posts to SAP until the shipment has actually been delivered
-    // (outbound: marked delivered from the in-transit section) or received
-    // (inbound: Mark Received on the Inbound Log) — stops costs going to
-    // SAP before the service is fully tendered, in case a price adjustment
-    // is still needed. See POST /post-migo, which enforces this
-    // server-side too (this is just so the checkbox doesn't invite a click
-    // that'll only bounce).
-    const tbody = rows.map(r => {
-      const delivered = Boolean(r.deliveredDate);
-      return `
-      <tr data-cost-id="${r.costID}" class="migo-row" ${delivered ? '' : 'style="opacity:0.6"'}>
-        <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}" ${delivered ? '' : 'disabled title="Not delivered/received yet"'}></td>
-        <td>${r.sourceType === 'manual'
-          ? '<span style="color:#6B7280">Manual</span>'
-          : (r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>')}</td>
-        <td>${esc(r.shipmentRef || (r.shipmentID != null ? String(r.shipmentID).padStart(6,'0') : '—'))}</td>
-        <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
-        <td>${fmt(r.plannedCollection)}</td>
-        <td>${fmt(r.deliveredDate)}</td>
-        <td>${esc(r.forwarderName || '—')}</td>
-        <td>${esc(r.modeOfTransport || '—')}</td>
-        <td class="pn-batch-mono">${esc(r.costCenter  || '—')}</td>
-        <td class="pn-batch-mono">${esc(r.costElement || '—')}</td>
-        <td style="text-align:right">${gbp(r.expectedCost)}</td>
-        <td class="pn-batch-mono">${location(r)}</td>
-        <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
-        <td class="migo-result-cell">${delivered ? '' : '<span style="color:var(--text-muted);font-size:11px">Awaiting delivery</span>'}</td>
-      </tr>`;
-    }).join('');
-
     body.innerHTML = `
+      ${costFilterBarHtml('uc', ucAllRows)}
       <div style="display:flex;align-items:center;gap:10px;padding:10px 0 12px;border-bottom:1px solid var(--border);margin-bottom:12px">
         <span id="migo-sel-count" style="font-size:13px;color:var(--text-dim)">0 selected</span>
         ${hasPlanning() ? '<button id="migo-manual-btn" class="btn-secondary">+ Manual Cost</button>' : ''}
@@ -5827,31 +5897,91 @@ async function runUnprocessedCosts() {
       <div style="overflow-x:auto">
         <table class="pn-batch-table">
           <thead>${thead}</thead>
-          <tbody id="migo-tbody">${tbody}</tbody>
+          <tbody id="migo-tbody"></tbody>
         </table>
       </div>`;
-
-    // Select-all toggle (skips rows disabled for not being delivered/received yet)
-    document.getElementById('migo-check-all').addEventListener('change', function () {
-      document.querySelectorAll('.migo-check:not(:disabled)').forEach(cb => { cb.checked = this.checked; });
-      updateMigoSelection();
-    });
-
-    // Individual checkbox changes
-    document.getElementById('migo-tbody').addEventListener('change', e => {
-      if (e.target.classList.contains('migo-check')) {
-        updateMigoSelection();
-        const all = document.querySelectorAll('.migo-check');
-        document.getElementById('migo-check-all').checked = [...all].every(cb => cb.checked);
-      }
-    });
 
     document.getElementById('migo-post-btn').addEventListener('click', postMigoSelected);
     document.getElementById('migo-manual-btn')?.addEventListener('click', () => openManualCostModal(runUnprocessedCosts));
 
+    // Select-all toggle (skips rows disabled for not being delivered/received
+    // yet) and individual checkbox changes — wired once against the thead
+    // checkbox and the (persistent, only its innerHTML is replaced) tbody
+    // element, not re-wired on every filtered redraw.
+    document.getElementById('migo-check-all').addEventListener('change', function () {
+      document.querySelectorAll('.migo-check:not(:disabled)').forEach(cb => { cb.checked = this.checked; });
+      updateMigoSelection();
+    });
+    document.getElementById('migo-tbody').addEventListener('change', e => {
+      if (e.target.classList.contains('migo-check')) {
+        updateMigoSelection();
+        const all = document.querySelectorAll('.migo-check');
+        document.getElementById('migo-check-all').checked = all.length > 0 && [...all].every(cb => cb.checked);
+      }
+    });
+
+    wireCostFilterBar('uc', () => renderUnprocessedTbody(filterCostRows(ucAllRows, readCostFilters('uc'))));
+    renderUnprocessedTbody(ucAllRows);
+
   } catch (err) {
     body.innerHTML = `<div class="sap-error">Error loading unprocessed costs: ${esc(err.message)}</div>`;
   }
+}
+
+// Redraws just the tbody for a given (possibly filtered) row set — see
+// costFilterBarHtml/wireCostFilterBar above. Also refreshes the row-count
+// badge and the export dataset (currentResult, read by the generic
+// exportResultCSV()/#btn-export-csv — see near the top of this file), so
+// Export CSV always reflects whatever's currently filtered.
+function renderUnprocessedTbody(rows) {
+  currentResult = rows;
+  document.getElementById('btn-export-csv').classList.remove('hidden');
+  const badge = document.getElementById('result-row-badge');
+  badge.textContent = rows.length === ucAllRows.length
+    ? `${rows.length} line${rows.length !== 1 ? 's' : ''}`
+    : `${rows.length} of ${ucAllRows.length} line${ucAllRows.length !== 1 ? 's' : ''}`;
+  badge.classList.remove('hidden');
+
+  const fmt        = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
+  const gbp        = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
+  const location   = r => {
+    const cc = (r.destinationCountry  || '').slice(0, 2).toUpperCase();
+    const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
+    return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
+  };
+  const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
+
+  // Nothing posts to SAP until the shipment has actually been delivered
+  // (outbound: marked delivered from the in-transit section) or received
+  // (inbound: Mark Received on the Inbound Log) — stops costs going to
+  // SAP before the service is fully tendered, in case a price adjustment
+  // is still needed. See POST /post-migo, which enforces this
+  // server-side too (this is just so the checkbox doesn't invite a click
+  // that'll only bounce).
+  document.getElementById('migo-tbody').innerHTML = rows.length ? rows.map(r => {
+    const delivered = Boolean(r.deliveredDate);
+    return `
+    <tr data-cost-id="${r.costID}" class="migo-row" ${delivered ? '' : 'style="opacity:0.6"'}>
+      <td><input type="checkbox" class="migo-check" data-cost-id="${r.costID}" ${delivered ? '' : 'disabled title="Not delivered/received yet"'}></td>
+      <td>${r.sourceType === 'manual'
+        ? '<span style="color:#6B7280">Manual</span>'
+        : (r.direction === 'inbound' ? '<span style="color:#0369A1">In</span>' : '<span style="color:#B45309">Out</span>')}</td>
+      <td>${esc(r.shipmentRef || (r.shipmentID != null ? String(r.shipmentID).padStart(6,'0') : '—'))}</td>
+      <td>${esc(TYPE_LABEL[r.costType] || r.costType || '—')}</td>
+      <td>${fmt(r.plannedCollection)}</td>
+      <td>${fmt(r.deliveredDate)}</td>
+      <td>${esc(r.forwarderName || '—')}</td>
+      <td>${esc(r.modeOfTransport || '—')}</td>
+      <td class="pn-batch-mono">${esc(r.costCenter  || '—')}</td>
+      <td class="pn-batch-mono">${esc(r.costElement || '—')}</td>
+      <td style="text-align:right">${gbp(r.expectedCost)}</td>
+      <td class="pn-batch-mono">${location(r)}</td>
+      <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
+      <td class="migo-result-cell">${delivered ? '' : '<span style="color:var(--text-muted);font-size:11px">Awaiting delivery</span>'}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="14" style="text-align:center;color:var(--text-secondary,#666)">No lines match the current filters.</td></tr>';
+
+  updateMigoSelection();
 }
 
 function updateMigoSelection() {
@@ -5954,6 +6084,8 @@ async function postMigoSelected() {
 // POST /:costId/reverse endpoint (and the same confirm/refresh pattern) the
 // Search Shipment modal's Associated Costs tile already uses — see
 // renderShipmentAssociatedCosts's `.sd-cost-reverse` handler above.
+let pcAllRows = [];
+
 async function runProcessedCosts() {
   showResultPanel('Processed Freight Costs', 'Cost lines already posted to SAP — reverse a goods receipt if needed');
   const body = document.getElementById('result-body');
@@ -5964,25 +6096,13 @@ async function runProcessedCosts() {
     const json = await resp.json();
     if (!json.success) throw new Error(json.error);
 
-    const rows = json.data;
-    if (!rows.length) {
+    pcAllRows = json.data;
+    if (!pcAllRows.length) {
       body.innerHTML = '<div class="sap-empty">No processed cost lines found.</div>';
       return;
     }
 
-    document.getElementById('result-row-badge').textContent = `${rows.length} line${rows.length !== 1 ? 's' : ''}`;
-    document.getElementById('result-row-badge').classList.remove('hidden');
-
-    const fmt        = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
-    const gbp        = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
-    const location   = r => {
-      const cc = (r.destinationCountry  || '').slice(0, 2).toUpperCase();
-      const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
-      return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
-    };
-    const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
     const canEdit = hasPlanning();
-
     const thead = `<tr>
       <th>Dir.</th>
       <th>Shipment</th>
@@ -6000,7 +6120,48 @@ async function runProcessedCosts() {
       ${canEdit ? '<th></th>' : ''}
     </tr>`;
 
-    const tbody = rows.map(r => `
+    body.innerHTML = `
+      ${costFilterBarHtml('pc', pcAllRows)}
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table">
+          <thead>${thead}</thead>
+          <tbody id="pc-tbody"></tbody>
+        </table>
+      </div>`;
+
+    wireCostFilterBar('pc', () => renderProcessedTbody(filterCostRows(pcAllRows, readCostFilters('pc'))));
+    renderProcessedTbody(pcAllRows);
+
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">Error loading processed costs: ${esc(err.message)}</div>`;
+  }
+}
+
+// Redraws just the tbody for a given (possibly filtered) row set — mirrors
+// renderUnprocessedTbody above. Reverse-button listeners are attached fresh
+// each call since the buttons themselves are brand-new DOM nodes on every
+// redraw (no delegation needed here, unlike the thead-level select-all
+// checkbox on Unprocessed Costs).
+function renderProcessedTbody(rows) {
+  currentResult = rows;
+  document.getElementById('btn-export-csv').classList.remove('hidden');
+  const badge = document.getElementById('result-row-badge');
+  badge.textContent = rows.length === pcAllRows.length
+    ? `${rows.length} line${rows.length !== 1 ? 's' : ''}`
+    : `${rows.length} of ${pcAllRows.length} line${pcAllRows.length !== 1 ? 's' : ''}`;
+  badge.classList.remove('hidden');
+
+  const fmt        = d => d ? new Date(d).toLocaleDateString('en-GB') : '—';
+  const gbp        = v => v != null ? `£${Number(v).toFixed(2)}` : '—';
+  const location   = r => {
+    const cc = (r.destinationCountry  || '').slice(0, 2).toUpperCase();
+    const pc = (r.destinationPostCode || '').slice(0, 2).toUpperCase();
+    return cc && pc ? `${cc} ${pc}` : (cc || pc || '—');
+  };
+  const TYPE_LABEL = { '1': 'Freight', '2': 'Customs' };
+  const canEdit = hasPlanning();
+
+  document.getElementById('pc-tbody').innerHTML = rows.length ? rows.map(r => `
       <tr data-cost-id="${r.costID}" class="migo-row">
         <td>${r.sourceType === 'manual'
           ? '<span style="color:#6B7280">Manual</span>'
@@ -6018,36 +6179,24 @@ async function runProcessedCosts() {
         <td class="pn-batch-mono">${esc(r.purchaseOrder || '—')}</td>
         <td class="pn-batch-mono">${esc(r.materialDocument || '—')}</td>
         ${canEdit ? `<td style="white-space:nowrap"><button type="button" class="btn-secondary pc-reverse-btn" data-cost-id="${r.costID}" style="padding:2px 8px;font-size:11px">Reverse</button></td>` : ''}
-      </tr>`).join('');
+      </tr>`).join('') : `<tr><td colspan="14" style="text-align:center;color:var(--text-secondary,#666)">No lines match the current filters.</td></tr>`;
 
-    body.innerHTML = `
-      <div style="overflow-x:auto">
-        <table class="pn-batch-table">
-          <thead>${thead}</thead>
-          <tbody id="pc-tbody">${tbody}</tbody>
-        </table>
-      </div>`;
-
-    document.querySelectorAll('.pc-reverse-btn').forEach(b => {
-      b.addEventListener('click', async () => {
-        if (!(await confirmDialog('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.', { confirmLabel: 'Reverse', danger: true }))) return;
-        b.disabled = true; b.textContent = 'Reversing…';
-        try {
-          const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
-          const json2 = await res2.json();
-          if (!json2.success) throw new Error(json2.error || json2.message || 'Reversal failed');
-          runProcessedCosts();
-        } catch (err) {
-          b.disabled = false; b.textContent = 'Reverse';
-          const row = b.closest('tr');
-          if (row) row.insertAdjacentHTML('afterend', `<tr><td colspan="14"><div class="sap-error">${esc(err.message)}</div></td></tr>`);
-        }
-      });
+  document.querySelectorAll('.pc-reverse-btn').forEach(b => {
+    b.addEventListener('click', async () => {
+      if (!(await confirmDialog('Reverse this posting in SAP? This creates a reversing material document — the line will drop back into Unprocessed Costs afterwards.', { confirmLabel: 'Reverse', danger: true }))) return;
+      b.disabled = true; b.textContent = 'Reversing…';
+      try {
+        const res2 = await fetch(`/api/shipmentcost/${b.dataset.costId}/reverse`, { method: 'POST' });
+        const json2 = await res2.json();
+        if (!json2.success) throw new Error(json2.error || json2.message || 'Reversal failed');
+        runProcessedCosts();
+      } catch (err) {
+        b.disabled = false; b.textContent = 'Reverse';
+        const row = b.closest('tr');
+        if (row) row.insertAdjacentHTML('afterend', `<tr><td colspan="14"><div class="sap-error">${esc(err.message)}</div></td></tr>`);
+      }
     });
-
-  } catch (err) {
-    body.innerHTML = `<div class="sap-error">Error loading processed costs: ${esc(err.message)}</div>`;
-  }
+  });
 }
 
 // ── Manual Cost modal — not linked to any shipment ──────────────────────────
@@ -7192,9 +7341,13 @@ async function runStockHistoryForecast() {
 
   body.innerHTML = `
     <div class="tf-row">
+      <div class="tf-field">
+        <label class="tf-label">Material Number</label>
+        <input class="tf-input" id="shf-search-material" type="text" placeholder="Part number" autocomplete="off">
+      </div>
       <div class="tf-field tf-field--wide">
-        <label class="tf-label">Material search</label>
-        <input class="tf-input" id="shf-search" type="text" placeholder="Material code or description" autocomplete="off">
+        <label class="tf-label">Description</label>
+        <input class="tf-input" id="shf-search-desc" type="text" placeholder="Material description" autocomplete="off">
       </div>
       <div class="tf-field">
         <label class="tf-label">MRP Controller</label>
@@ -7232,8 +7385,10 @@ async function runStockHistoryForecast() {
     <div id="shf-vendor-view" class="hidden"></div>`;
 
   document.getElementById('shf-search-btn').addEventListener('click', shfSearchMaterials);
-  document.getElementById('shf-search').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); shfSearchMaterials(); }
+  ['shf-search-material', 'shf-search-desc'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); shfSearchMaterials(); }
+    });
   });
   document.getElementById('shf-all-btn').addEventListener('click', () => shfLoadChart(null, 'All Materials (combined)'));
   document.getElementById('shf-add-adjustment-link').addEventListener('click', () => {
@@ -7296,7 +7451,8 @@ async function shfOnVendorChange(vendorId) {
   }
 
   // Clear the other two filters — they're mutually exclusive with vendor mode.
-  document.getElementById('shf-search').value = '';
+  document.getElementById('shf-search-material').value = '';
+  document.getElementById('shf-search-desc').value = '';
   document.getElementById('shf-picker').innerHTML = '';
   document.getElementById('shf-mrp-controller').value = '';
   shfMrpController = '';
@@ -7385,15 +7541,21 @@ function shfDestroyVendorRowCharts(material) {
 }
 
 async function shfSearchMaterials() {
-  const q = document.getElementById('shf-search').value.trim();
+  const material = document.getElementById('shf-search-material').value.trim();
+  const materialText = document.getElementById('shf-search-desc').value.trim();
   const picker = document.getElementById('shf-picker');
-  if (!q) { picker.innerHTML = ''; return; }
+  if (!material && !materialText) { picker.innerHTML = ''; return; }
 
   picker.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Searching…</div>';
 
   try {
+    // Two independent fields (not one combined OR'd search) — a known exact part number
+    // in the Material Number field won't also pull in unrelated materials whose
+    // description happens to contain matching text, and vice versa.
+    const materialParam = material ? `&material=${encodeURIComponent(material)}` : '';
+    const materialTextParam = materialText ? `&materialText=${encodeURIComponent(materialText)}` : '';
     const ctrlParam = shfMrpController ? `&mrpController=${encodeURIComponent(shfMrpController)}` : '';
-    const resp = await fetch(`/api/performance/turns-valclass?search=${encodeURIComponent(q)}${ctrlParam}`);
+    const resp = await fetch(`/api/performance/turns-valclass?${materialParam}${materialTextParam}${ctrlParam}`.replace('?&', '?'));
     const json = await resp.json();
     if (!json.success) throw new Error(json.error?.message || 'Search failed');
 
@@ -9632,7 +9794,7 @@ function showOsContextMenu(event, material, materialText) {
 // leaving to search for the material manually.
 function goToMaterialForecast(material, materialText) {
   runStockHistoryForecast();
-  const searchInput = document.getElementById('shf-search');
+  const searchInput = document.getElementById('shf-search-material');
   if (searchInput) searchInput.value = material;
   const title = `${material}${materialText ? ' — ' + materialText : ''}`;
   shfLoadChart(material, title);
