@@ -129,6 +129,16 @@ describe('GET /requests/:id', () => {
 });
 
 describe('POST /requests — validation', () => {
+  // Frozen at a Monday midday so the Stores-working-hours lead-time check
+  // (05:45–17:00 Mon–Fri, see routes/staging.js's addStoresLeadTime) always
+  // has the same "now" to compute from — a real-clock evening/weekend run
+  // would otherwise push the minimum well past the +8h padding below.
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-05T12:00:00.000Z')); // a Monday
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
   const validBody = () => ({
     material: '30005R',
     quantityRequested: 10,
@@ -159,7 +169,33 @@ describe('POST /requests — validation', () => {
   test('rejects a dueAtUtc less than the minimum lead time from now', async () => {
     const res = await request(app).post('/requests').send({ ...validBody(), dueAtUtc: new Date(Date.now() + 30 * 60000).toISOString() });
     expect(res.status).toBe(400);
-    expect(res.body.error.message).toMatch(/at least 4 hours/);
+    expect(res.body.error.message).toMatch(/at least 4 working hours/);
+  });
+
+  // Monday 15:00 is within Stores hours, but 15:00 + 4h = 19:00 is past the
+  // 17:00 close — the overflow (2h) should roll over to 05:45 the next
+  // working day, landing the minimum at 07:45 Tuesday (07:40 once the
+  // 5-minute submission grace period is subtracted) rather than 19:00.
+  test('rolls a lead time that would land after 17:00 over to the next working day', async () => {
+    jest.setSystemTime(new Date('2026-01-05T15:00:00.000Z')); // Monday 15:00
+    const res = await request(app).post('/requests').send({
+      ...validBody(), dueAtUtc: new Date('2026-01-06T07:39:00.000Z').toISOString(), // just before the 07:40 grace boundary
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/07:40/);
+  });
+
+  // A request raised outside working hours (here, a Saturday) counts its
+  // 4-hour lead time from the next working day's 05:45 open — Monday, since
+  // Stores run no weekend shift — landing the minimum at 09:45 Monday
+  // (09:40 once the 5-minute submission grace period is subtracted).
+  test('counts the lead time from the next working day\'s open when raised at the weekend', async () => {
+    jest.setSystemTime(new Date('2026-01-03T10:00:00.000Z')); // Saturday
+    const res = await request(app).post('/requests').send({
+      ...validBody(), dueAtUtc: new Date('2026-01-05T09:39:00.000Z').toISOString(), // just before the 09:40 grace boundary
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/09:40/);
   });
 
   test('creates the request when valid', async () => {
@@ -176,6 +212,12 @@ describe('POST /requests — validation', () => {
 // client-supplied quantityRequested, since the unit dropdown's conversion
 // factor is only ever a client-side preview.
 describe('POST /requests — unit conversion', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-05T12:00:00.000Z')); // a Monday
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
   const unitBody = () => ({
     material: '30007R',
     requestUnit: 'Spool',

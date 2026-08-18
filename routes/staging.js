@@ -132,6 +132,73 @@ const NEEDED_BY_MIN_LEAD_HOURS = 4;
 // later never spuriously fails the minimum-lead-time check below.
 const NEEDED_BY_GRACE_MINUTES = 5;
 
+// ── Stores working hours (Needed By lead time) ──────────────────────────────
+// Stores only work 05:45–17:00, Monday–Friday — no weekend shift. The
+// 4-hour minimum lead time above is counted in *working* time, not flat
+// clock time: a request raised outside that window (evenings, nights,
+// weekends) has its 4 hours start from the next 05:45 open rather than
+// landing at some hour nobody's there to see, and a request raised close to
+// the 17:00 close has the overflow carry over into the next working day's
+// morning (e.g. a 4-hour request at 15:00 lands at 07:45 the next working
+// day — 2 hours to close, 2 more from 05:45).
+const STORES_OPEN  = { hours: 5,  minutes: 45 };
+const STORES_CLOSE = { hours: 17, minutes: 0 };
+
+function isStoresWorkingDay(date) {
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  return day >= 1 && day <= 5;
+}
+
+function atLocalTime(date, { hours, minutes }) {
+  const d = new Date(date);
+  d.setHours(hours, minutes, 0, 0);
+  return d;
+}
+
+// Next instant at/after `date` that Stores are open — same day if `date` is
+// before today's open, otherwise the following working day's 05:45.
+function nextStoresOpen(date) {
+  const d = atLocalTime(date, STORES_OPEN);
+  if (d < date) d.setDate(d.getDate() + 1);
+  while (!isStoresWorkingDay(d)) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+// Rolls `date` forward to the next moment Stores are actually open —
+// unchanged if `date` already falls inside today's working window.
+function clampToStoresWindow(date) {
+  if (isStoresWorkingDay(date)) {
+    const open = atLocalTime(date, STORES_OPEN);
+    const close = atLocalTime(date, STORES_CLOSE);
+    if (date >= open && date < close) return new Date(date);
+  }
+  return nextStoresOpen(date);
+}
+
+// Adds `hours` of Stores working time to `fromDate`, rolling any time past
+// 17:00 over to the next working day's 05:45 (weekends skipped).
+function addStoresLeadTime(fromDate, hours) {
+  let cursor = clampToStoresWindow(fromDate);
+  let remainingMs = hours * 60 * 60 * 1000;
+  while (remainingMs > 0) {
+    const close = atLocalTime(cursor, STORES_CLOSE);
+    const availableMs = close - cursor;
+    if (remainingMs <= availableMs) {
+      cursor = new Date(cursor.getTime() + remainingMs);
+      remainingMs = 0;
+    } else {
+      remainingMs -= availableMs;
+      cursor = nextStoresOpen(new Date(close.getTime() + 1));
+    }
+  }
+  return cursor;
+}
+
+function formatStoresTime(date) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 // ── Material search (no LOG_MRP gate — see stagingsql.js's searchMaterials) ──
 
 router.get('/materials', async (req, res) => {
@@ -233,11 +300,15 @@ router.post('/requests', async (req, res) => {
       return res.status(400).json({ success: false, error: { message: 'dueAtUtc (Needed By) is required.' } });
     }
     const due = new Date(dueAtUtc);
-    const minDue = new Date(Date.now() + NEEDED_BY_MIN_LEAD_HOURS * 60 * 60 * 1000 - NEEDED_BY_GRACE_MINUTES * 60 * 1000);
+    const minDue = new Date(
+      addStoresLeadTime(new Date(), NEEDED_BY_MIN_LEAD_HOURS).getTime() - NEEDED_BY_GRACE_MINUTES * 60 * 1000
+    );
     if (due < minDue) {
       return res.status(400).json({
         success: false,
-        error: { message: `Needed By must be at least ${NEEDED_BY_MIN_LEAD_HOURS} hours from now.` },
+        error: {
+          message: `Needed By must allow at least ${NEEDED_BY_MIN_LEAD_HOURS} working hours' notice — Stores works 05:45–17:00, Monday–Friday. The earliest available time is ${formatStoresTime(minDue)}.`,
+        },
       });
     }
 
