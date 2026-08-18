@@ -9982,10 +9982,10 @@ function osRenderTrackedList(tracked) {
       </div>`;
     })() : '';
 
-    // Needs Shipment rows (not yet overdue) get a small badge on how soon
-    // they're due to ship, so a this-week order doesn't read the same as
-    // one with months of headroom — the same idea as Order Suggestions'
-    // Overdue/Due Soon badges, one tier further out.
+    // Ordered rows (not yet overdue) get a small badge on how soon they're
+    // due to ship, so a this-week order doesn't read the same as one with
+    // months of headroom — the same idea as Order Suggestions' Overdue/Due
+    // Soon badges, one tier further out.
     const dispatchBadge = (bucketKey === 'needs') ? (() => {
       const urgency = osDispatchUrgency(t);
       if (urgency === 'Today') return '<div><span class="tile-badge" style="background:var(--warning,#D97706);color:#fff;font-size:10px">Ships Today</span></div>';
@@ -10061,19 +10061,19 @@ function osRenderTrackedList(tracked) {
   const tableHead = '<thead><tr><th></th><th>Material</th><th>Vendor</th><th>Qty</th><th>Order Date</th><th>Expected Dispatch</th><th>Expected Delivery</th><th>Status</th><th>PO Number</th><th>Supplier Ref</th><th>Shipment</th><th></th></tr></thead>';
 
   // Six-level hierarchy: bucket (Overdue for Shipping / Needs Booking /
-  // Needs Shipment / Assigned to Shipment / Completed / Cancelled) ->
-  // supplier -> order rows. Needs Booking takes priority over everything
-  // except Overdue for Shipping/Cancelled/Completed — an order that's just
-  // been accepted (Status still 'Accepted') hasn't actually been sent to
-  // the supplier yet, and previously fell straight into Needs Shipment
-  // alongside orders that were already placed, making it easy to forget
-  // the "tell the supplier" step entirely. It gets the red/priority dot
-  // since a forgotten order is the costliest mistake here. Every level
-  // starts collapsed — the point is to let the user open exactly one
-  // supplier at a time rather than face the whole list, reusing the
-  // ps-section pattern from Open Deliveries, nested this time.
+  // Ordered / Assigned to Shipment / Completed / Cancelled) -> supplier ->
+  // order rows. Needs Booking takes priority over everything except
+  // Overdue for Shipping/Cancelled/Completed — an order that's just been
+  // accepted (Status still 'Accepted') hasn't actually been sent to the
+  // supplier yet, and previously fell straight into Ordered alongside
+  // orders that were already placed, making it easy to forget the "tell
+  // the supplier" step entirely. It gets the red/priority dot since a
+  // forgotten order is the costliest mistake here. Every level starts
+  // collapsed — the point is to let the user open exactly one supplier at
+  // a time rather than face the whole list, reusing the ps-section pattern
+  // from Open Deliveries, nested this time.
   //
-  // Overdue for Shipping (osDispatchUrgency below) is Needs Shipment's own
+  // Overdue for Shipping (osDispatchUrgency below) is Ordered's own
   // split-off, listed first/above it — an order that's been placed but
   // whose expected dispatch date (order's own DeliveryDate minus the
   // vendor's TransitTimeDays, working days — see buildAcceptPayload in
@@ -10082,7 +10082,7 @@ function osRenderTrackedList(tracked) {
   // shipment at that point, so a dispatch date come and gone with nothing
   // shipped yet is the signal a supplier may be running late. A row with no
   // known dispatch date yet (older orders accepted before this existed)
-  // just falls back into the plain Needs Shipment bucket rather than being
+  // just falls back into the plain Ordered bucket rather than being
   // misclassified.
   //
   // Completed (Status 'Received', or the retired 'Booked' — see the STATUS
@@ -10098,7 +10098,7 @@ function osRenderTrackedList(tracked) {
       match: t => t.Status === 'Ordered' && !t.ShipmentId && osDispatchUrgency(t) === 'Overdue' },
     { key: 'needsBooking', label: 'Needs Booking',        dot: 'priority', sortBy: 'delivery',
       match: t => t.Status === 'Accepted' },
-    { key: 'needs',        label: 'Needs Shipment',       dot: 'backlog',  sortBy: 'dispatch',
+    { key: 'needs',        label: 'Ordered',              dot: 'backlog',  sortBy: 'dispatch',
       match: t => t.Status === 'Ordered' && !t.ShipmentId && osDispatchUrgency(t) !== 'Overdue' },
     { key: 'assigned',     label: 'Assigned to Shipment', dot: 'week',     sortBy: 'delivery',
       match: t => t.Status === 'Ordered' && !!t.ShipmentId },
