@@ -7178,6 +7178,8 @@ function scRenderCountDetail(doc, backFn) {
     </div>
     ${invalidCount ? `<div id="sc-invalid-materials"></div>` : ''}
     ${isOpen && canSubmitHere ? `<button class="btn-submit" type="button" id="sc-submit-btn">Submit for Approval</button>` : ''}
+    ${scIsAdmin && lines.length ? `<button class="btn-back-tiles" type="button" id="sc-recompute-btn" style="margin-left:8px" title="Re-derives every line's variance from what's already stored — fixes counts with lines entered before the group-variance fix, no live SAP calls">Recompute Variances</button>` : ''}
+    <div id="sc-recompute-result" style="margin-top:10px"></div>
   `;
 
   const lineForm = document.getElementById('sc-line-form');
@@ -7189,7 +7191,29 @@ function scRenderCountDetail(doc, backFn) {
   const reopenBtn = document.getElementById('sc-reopen-btn');
   if (reopenBtn) reopenBtn.addEventListener('click', () => scReopenCount(doc, backFn));
 
+  const recomputeBtn = document.getElementById('sc-recompute-btn');
+  if (recomputeBtn) recomputeBtn.addEventListener('click', () => scRecomputeVariances(doc, backFn));
+
   if (invalidCount) scRenderInvalidMaterials(doc, backFn);
+}
+
+// Multiple lines for the same material/bin used to each get compared
+// independently against the same full SAP quantity — see addCountLine's
+// header comment in stockcountsql.js. This re-derives every line's
+// variance from what's already stored (no live SAP calls), for counts that
+// have lines entered before that fix went in.
+async function scRecomputeVariances(doc, backFn) {
+  const resultEl = document.getElementById('sc-recompute-result');
+  try {
+    const json = await scApi(`/counts/${doc.CountId}/recompute`, { method: 'POST' });
+    // Reload first (scReloadCountDetail replaces the whole panel, including
+    // this message's own container), then show the result — the reverse
+    // order would flash the message for a moment before it's wiped out.
+    await scReloadCountDetail(doc.CountId, backFn);
+    alert(`Recomputed ${json.data.lineCount} line(s) across ${json.data.groupCount} material/location group(s).`);
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
 }
 
 async function scSubmitLine(e, doc, backFn) {

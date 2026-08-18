@@ -271,6 +271,24 @@ router.get('/counts/:id/report', async (req, res) => {
   }
 });
 
+// Remediation for counts with lines entered before the group-variance fix
+// (multiple lines for the same material/bin each compared independently
+// against the same full SAP quantity — see addCountLine's header comment in
+// stockcountsql.js for the exact bug and its fix). Re-derives every line's
+// variance from what's already stored, no live SAP calls — safe to re-run.
+router.post('/counts/:id/recompute', requirePermission('LOG_SUPER'), async (req, res) => {
+  try {
+    const doc = await db.getCountDocument(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, error: 'Count not found' });
+
+    const result = await db.recomputeGroupVariances(req.params.id);
+    await audit('STOCKCOUNT_OK', actor(req), `Count #${req.params.id} variances recomputed (${result.groupCount} group(s), ${result.lineCount} line(s))`, req);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Historical reports (across every count) ───────────────────────────────────
 
 router.get('/reports/finance', requirePermission('FIN_STOCK_APPROVE'), async (req, res) => {
@@ -358,12 +376,29 @@ router.post('/counts/:id/lines', async (req, res) => {
     const isInvalidMaterial = !materialInfo;
 
     let sapQty = null, resolvedStorageType = storageType || null, resolvedBin = bin || null, isBatchManaged = false;
+    let cumulativeCountedQty = Number(countedQty);
+    let siblingLineIds = [];
+
     if (!isInvalidMaterial) {
       const comparison = await resolveSapComparisonForLine(doc, { material, storageType, bin });
       sapQty = comparison.sapQty;
       resolvedStorageType = comparison.storageType;
       resolvedBin = comparison.bin;
       isBatchManaged = comparison.isBatchManaged;
+
+      // Fold this line into any existing lines already entered for the same
+      // (Material, StorageType, Bin) in this count — comparing each line
+      // independently against the full SAP quantity was a real bug: two
+      // lines of 12,000kg for the same material/bin both showed "matched"
+      // against SAP's one 12,000kg, and a third 6,000kg line then showed a
+      // spurious 6,000kg *shortfall* instead of the ~18,000kg *surplus* the
+      // three lines actually represented together. Only the newest line in
+      // a group carries the group's live variance at any moment — see
+      // addCountLine's header comment in stockcountsql.js.
+      const siblings = await db.getGroupSiblingLines(countId, material, resolvedStorageType, resolvedBin);
+      const priorTotal = siblings.reduce((sum, s) => sum + Number(s.CountedQty), 0);
+      cumulativeCountedQty = priorTotal + Number(countedQty);
+      siblingLineIds = siblings.map(s => s.LineId);
     }
 
     const lineId = await db.addCountLine(countId, {
@@ -377,12 +412,15 @@ router.post('/counts/:id/lines', async (req, res) => {
       // undefined by the frontend there).
       ticketNumber,
       countedQty: Number(countedQty),
+      cumulativeCountedQty,
       sapQty,
       unitPrice: materialInfo?.unitPrice ?? null,
       isInvalidMaterial,
       isBatchManaged,
       enteredBy: actor(req),
     });
+
+    if (siblingLineIds.length) await db.zeroLineVariances(siblingLineIds);
 
     res.json({
       success: true,
@@ -414,16 +452,32 @@ router.get('/counts/:id/invalid-lines', async (req, res) => {
 
 // Inline correct-and-clear — resolves the new material against the snapshot
 // again (it must actually validate, or this would just swap one invalid
-// code for another) and updates the line in place.
+// code for another), runs the now-known-valid material through the same
+// SAP comparison + group-variance folding as a freshly-added line (see
+// POST /counts/:id/lines above and addCountLine's header comment) rather
+// than just clearing the invalid flag and leaving SapQty/Variance at their
+// insert-time NULLs forever — that used to silently exclude every corrected
+// line from reports/finance totals.
 router.put('/counts/:id/invalid-lines/:lineId', async (req, res) => {
   const { material } = req.body;
   if (!material) return res.status(400).json({ success: false, error: 'material is required' });
 
   try {
+    const line = await db.getCountLineById(req.params.lineId);
+    if (!line) return res.status(404).json({ success: false, error: 'Line not found' });
+
+    const doc = await db.getCountDocument(line.CountId);
+    if (!doc) return res.status(404).json({ success: false, error: 'Count not found' });
+
     const materialInfo = await db.searchMaterialForCount(material);
     if (!materialInfo) {
       return res.status(422).json({ success: false, error: `"${material}" does not validate against the material master either.` });
     }
+
+    const comparison = await resolveSapComparisonForLine(doc, { material, storageType: line.StorageType, bin: line.Bin });
+    const siblings = await db.getGroupSiblingLines(line.CountId, material, comparison.storageType, comparison.bin, line.LineId);
+    const priorTotal = siblings.reduce((sum, s) => sum + Number(s.CountedQty), 0);
+    const cumulativeCountedQty = priorTotal + Number(line.CountedQty);
 
     const updated = await db.correctInvalidMaterialLine(req.params.lineId, {
       material: materialInfo.material,
@@ -431,8 +485,14 @@ router.put('/counts/:id/invalid-lines/:lineId', async (req, res) => {
       uom: materialInfo.uom,
       unitPrice: materialInfo.unitPrice,
       isInvalidMaterial: false,
+      countedQty: Number(line.CountedQty),
+      cumulativeCountedQty,
+      sapQty: comparison.sapQty,
+      isBatchManaged: comparison.isBatchManaged,
     });
     if (!updated) return res.status(404).json({ success: false, error: 'Line not found' });
+
+    if (siblings.length) await db.zeroLineVariances(siblings.map(s => s.LineId));
 
     await audit('STOCKCOUNT_OK', actor(req), `Count line #${req.params.lineId} corrected to material ${materialInfo.material}`, req);
     res.json({ success: true, data: { lineId: req.params.lineId, material: materialInfo.material } });

@@ -110,6 +110,125 @@ describe('addCountLine', () => {
 
     expect(dbRequest.input).toHaveBeenCalledWith('ticketNumber', expect.anything(), 'TKT-1042');
   });
+
+  // The actual bug: variance must be computed from the *group's* running
+  // total (cumulativeCountedQty), not this line's own CountedQty — two
+  // lines of 12,000kg against a 12,000kg SAP figure must not both show as
+  // "matched". CountedQty itself (the line's own physical entry) is
+  // unaffected either way — only VarianceQty/VarianceValue should move.
+  test('computes VarianceQty from cumulativeCountedQty (the group running total), not the line\'s own CountedQty', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ LineId: 102 }] });
+
+    await db.addCountLine(2, {
+      material: '10006', countedQty: 12000, cumulativeCountedQty: 24000, sapQty: 12000, unitPrice: 1,
+      isInvalidMaterial: false, isBatchManaged: false, enteredBy: 'j.smith',
+    });
+
+    expect(dbRequest.input).toHaveBeenCalledWith('countedQty', expect.anything(), 12000); // this line's own entry, unchanged
+    expect(dbRequest.input).toHaveBeenCalledWith('varianceQty', expect.anything(), 12000); // 24000 - 12000, not 12000 - 12000
+    expect(dbRequest.input).toHaveBeenCalledWith('varianceValue', expect.anything(), 12000);
+  });
+
+  test('falls back to countedQty for the variance basis when cumulativeCountedQty is not given (first/only line in its group)', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ LineId: 101 }] });
+
+    await db.addCountLine(2, {
+      material: '10006', countedQty: 12000, sapQty: 12000, unitPrice: 1,
+      isInvalidMaterial: false, isBatchManaged: false, enteredBy: 'j.smith',
+    });
+
+    expect(dbRequest.input).toHaveBeenCalledWith('varianceQty', expect.anything(), 0);
+  });
+});
+
+describe('getGroupSiblingLines', () => {
+  test('matches NULL StorageType/Bin (PRODUCTION, no WM concept) as equal to NULL, not excluded', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [{ LineId: 1, CountedQty: 50 }] });
+
+    await db.getGroupSiblingLines(3, '40001', null, null);
+
+    const sql = dbRequest.query.mock.calls[0][0];
+    expect(sql).toContain('StorageType IS NULL AND @storageType IS NULL');
+    expect(sql).toContain('Bin IS NULL AND @bin IS NULL');
+    expect(sql).not.toContain('LineId <>'); // no excludeLineId given
+  });
+
+  test('excludes the given lineId when correcting an invalid line in place', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+    await db.getGroupSiblingLines(3, '40001', 'PTF', 'B01', 5);
+    expect(dbRequest.query.mock.calls[0][0]).toContain('LineId <> @excludeLineId');
+    expect(dbRequest.input).toHaveBeenCalledWith('excludeLineId', expect.anything(), 5);
+  });
+});
+
+describe('zeroLineVariances', () => {
+  test('no-ops on an empty array without querying', async () => {
+    await db.zeroLineVariances([]);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('zeroes VarianceQty/VarianceValue for every given line', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+    await db.zeroLineVariances([101, 102]);
+    const sql = dbRequest.query.mock.calls[0][0];
+    expect(sql).toContain('VarianceQty = 0');
+    expect(sql).toContain('VarianceValue = 0');
+    expect(sql).toContain('LineId IN (@id0,@id1)');
+  });
+});
+
+describe('recomputeGroupVariances', () => {
+  // Reproduces the exact reported scenario: bin CONTAINER2, material 10006,
+  // three lines of 12,000/12,000/6,000kg (30,000kg total) against a SAP
+  // figure of 12,000kg — the group's real variance is +18,000kg, and only
+  // the last-entered line should carry it; the earlier two should end up
+  // at zero.
+  test('replays a group in entry order, zeroing all but the last line, attributing the real cumulative variance there', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [
+        { LineId: 101, Material: '10006', StorageType: 'PTF', Bin: 'CONTAINER2', CountedQty: 12000, SapQty: 12000, UnitPrice: 1 },
+        { LineId: 102, Material: '10006', StorageType: 'PTF', Bin: 'CONTAINER2', CountedQty: 12000, SapQty: 12000, UnitPrice: 1 },
+        { LineId: 103, Material: '10006', StorageType: 'PTF', Bin: 'CONTAINER2', CountedQty: 6000,  SapQty: 12000, UnitPrice: 1 },
+      ],
+    });
+    dbRequest.query.mockResolvedValue({ recordset: [] }); // the three subsequent UPDATEs
+
+    const result = await db.recomputeGroupVariances(2);
+
+    expect(result).toEqual({ groupCount: 1, lineCount: 3 });
+
+    const updateCalls = dbRequest.input.mock.calls.filter(c => c[0] === 'varianceQty');
+    expect(updateCalls.map(c => c[2])).toEqual([0, 0, 18000]);
+    const valueCalls = dbRequest.input.mock.calls.filter(c => c[0] === 'varianceValue');
+    expect(valueCalls.map(c => c[2])).toEqual([0, 0, 18000]);
+  });
+
+  test('skips a group with no SAP comparison at all (SapQty never set on any line)', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ LineId: 1, Material: 'X', StorageType: null, Bin: null, CountedQty: 5, SapQty: null, UnitPrice: null }],
+    });
+
+    const result = await db.recomputeGroupVariances(2);
+
+    expect(result).toEqual({ groupCount: 1, lineCount: 0 });
+    expect(dbRequest.query).toHaveBeenCalledTimes(1); // only the initial SELECT, no UPDATEs
+  });
+
+  test('groups PRODUCTION lines (NULL StorageType/Bin) by material only, not conflating different materials', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [
+        { LineId: 1, Material: 'A', StorageType: null, Bin: null, CountedQty: 10, SapQty: 10, UnitPrice: 1 },
+        { LineId: 2, Material: 'B', StorageType: null, Bin: null, CountedQty: 20, SapQty: 15, UnitPrice: 1 },
+      ],
+    });
+    dbRequest.query.mockResolvedValue({ recordset: [] });
+
+    const result = await db.recomputeGroupVariances(2);
+
+    expect(result).toEqual({ groupCount: 2, lineCount: 2 });
+    const varianceCalls = dbRequest.input.mock.calls.filter(c => c[0] === 'varianceQty').map(c => c[2]);
+    expect(varianceCalls).toEqual(expect.arrayContaining([0, 5])); // A: 10-10=0, B: 20-15=5 (each is its group's only/last line)
+  });
 });
 
 describe('getOrCreatePtfeCountForWeek', () => {

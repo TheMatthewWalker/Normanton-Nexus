@@ -266,15 +266,94 @@ export async function countHasIncompleteBins(countId) {
   return recordset.length > 0;
 }
 
+// Every OTHER valid (IsInvalidMaterial = 0) line already in this count for
+// the same (Material, StorageType, Bin) "group" — PRODUCTION has no
+// StorageType/Bin (both NULL on every line there), so its grouping is
+// Material-only, which is correct: 1716 has no bin concept to split on.
+// Used to fold a group's SAP comparison across however many lines an
+// operator ends up entering for the same physical location, instead of
+// comparing each line independently against the full SAP quantity (see
+// addCountLine's header comment for why that was a real bug).
+export async function getGroupSiblingLines(countId, material, storageType, bin, excludeLineId = null) {
+  const pool = await getPool();
+  const request = pool.request()
+    .input('countId', sql.Int, countId)
+    .input('material', sql.NVarChar(18), material)
+    .input('storageType', sql.NVarChar(3), storageType || null)
+    .input('bin', sql.NVarChar(10), bin || null);
+  let excludeClause = '';
+  if (excludeLineId != null) {
+    request.input('excludeLineId', sql.Int, excludeLineId);
+    excludeClause = 'AND LineId <> @excludeLineId';
+  }
+  const { recordset } = await request.query(`
+    SELECT LineId, CountedQty
+    FROM log.StockCountLine
+    WHERE CountId = @countId AND Material = @material
+      AND ((StorageType = @storageType) OR (StorageType IS NULL AND @storageType IS NULL))
+      AND ((Bin = @bin) OR (Bin IS NULL AND @bin IS NULL))
+      AND IsInvalidMaterial = 0
+      ${excludeClause}
+  `);
+  return recordset;
+}
+
+// Zeroes VarianceQty/VarianceValue on lines superseded by a newer line (or a
+// just-corrected line) for the same group — see addCountLine's header
+// comment. SapQty/CountedQty are left untouched (still the real SAP figure
+// and what was actually physically counted on that line, for the record);
+// only the *variance* attribution moves to whichever line most recently
+// closed out the group's running total, so the group's variance is never
+// double- (or triple-, or zero-) counted across its lines.
+export async function zeroLineVariances(lineIds) {
+  if (!lineIds || !lineIds.length) return;
+  const pool = await getPool();
+  const request = pool.request();
+  const placeholders = lineIds.map((id, i) => {
+    request.input(`id${i}`, sql.Int, id);
+    return `@id${i}`;
+  });
+  await request.query(`
+    UPDATE log.StockCountLine SET VarianceQty = 0, VarianceValue = 0, UpdatedAtUtc = getutcdate()
+    WHERE LineId IN (${placeholders.join(',')})
+  `);
+}
+
+export async function getCountLineById(lineId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request()
+    .input('lineId', sql.Int, lineId)
+    .query(`SELECT ${LINE_COLUMNS} FROM log.StockCountLine WHERE LineId = @lineId`);
+  return recordset[0] || null;
+}
+
 // material/isInvalidMaterial/isBatchManaged/sapQty/unitPrice are all resolved
 // by the caller (routes/stockcount.js — material lookup + SAP comparison
 // query) before calling this; this layer just persists the frozen snapshot,
 // per the migration's "freeze figures at entry/comparison time" convention.
+//
+// countedQty is this line's own physical entry (what's displayed/audited).
+// cumulativeCountedQty is what variance is actually computed FROM — the
+// running total of every OTHER valid line already in this line's
+// (Material, StorageType, Bin) group plus this one — defaulting to
+// countedQty itself when this is the first/only line in its group. Two
+// count lines for the same material/bin used to each get compared
+// independently against the *same* full SAP quantity: entering 12,000kg
+// twice against a bin SAP also showed 12,000kg in reported "matched" on
+// both lines, and a third 6,000kg line then showed a spurious 6,000kg
+// *shortfall* instead of the real ~18,000kg *surplus* the three lines
+// actually represented together (30,000kg counted vs. 12,000kg in SAP).
+// The caller (routes/stockcount.js) is responsible for computing
+// cumulativeCountedQty via getGroupSiblingLines and for zeroing out the
+// group's prior lines via zeroLineVariances immediately after this call,
+// so only ever one line in a group carries the group's live variance at
+// any moment — see routes/stockcount.js's POST /counts/:id/lines.
 export async function addCountLine(countId, {
   material, materialText, uom, namedLocation, storageType, bin, ticketNumber,
-  countedQty, sapQty, unitPrice, isInvalidMaterial, isBatchManaged, enteredBy,
+  countedQty, cumulativeCountedQty, sapQty, unitPrice, isInvalidMaterial, isBatchManaged, enteredBy,
 }) {
-  const varianceQty = sapQty != null ? countedQty - sapQty : null;
+  const varianceBasis = cumulativeCountedQty ?? countedQty;
+  const varianceQty = sapQty != null ? varianceBasis - sapQty : null;
   const varianceValue = (varianceQty != null && unitPrice != null) ? varianceQty * unitPrice : null;
 
   const pool = await getPool();
@@ -313,7 +392,22 @@ export async function addCountLine(countId, {
 // re-resolves material/uom/price against the snapshot and flips
 // IsInvalidMaterial off. Caller re-validates the new material code and
 // passes the resolved fields in, same division of responsibility as addCountLine.
-export async function correctInvalidMaterialLine(lineId, { material, materialText, uom, unitPrice, isInvalidMaterial }) {
+// Also resolves this line into its (now-known-valid) material's SAP
+// comparison and group variance — a correction used to just clear
+// IsInvalidMaterial and leave SapQty/VarianceQty/VarianceValue at their
+// insert-time NULLs forever, silently excluding the corrected line from
+// every report/finance total. cumulativeCountedQty/sapQty/isBatchManaged
+// are resolved by the caller the same way as addCountLine's — see
+// routes/stockcount.js's PUT /counts/:id/invalid-lines/:lineId, which also
+// zeroes the line's group siblings via zeroLineVariances immediately after.
+export async function correctInvalidMaterialLine(lineId, {
+  material, materialText, uom, unitPrice, isInvalidMaterial,
+  countedQty, cumulativeCountedQty, sapQty, isBatchManaged,
+}) {
+  const varianceBasis = cumulativeCountedQty ?? countedQty;
+  const varianceQty = sapQty != null && varianceBasis != null ? varianceBasis - sapQty : null;
+  const varianceValue = (varianceQty != null && unitPrice != null) ? varianceQty * unitPrice : null;
+
   const pool = await getPool();
   const { recordset } = await pool.request()
     .input('lineId',       sql.Int, lineId)
@@ -322,15 +416,78 @@ export async function correctInvalidMaterialLine(lineId, { material, materialTex
     .input('uom',           sql.NVarChar(3),  uom || null)
     .input('unitPrice',      sql.Decimal(15, 4), unitPrice ?? null)
     .input('isInvalidMaterial', sql.Bit, isInvalidMaterial ? 1 : 0)
+    .input('sapQty',             sql.Decimal(15, 3), sapQty ?? null)
+    .input('varianceQty',         sql.Decimal(15, 3), varianceQty)
+    .input('varianceValue',        sql.Decimal(18, 2), varianceValue)
+    .input('isBatchManaged',        sql.Bit, isBatchManaged ? 1 : 0)
     .query(`
       UPDATE log.StockCountLine
         SET Material = @material, MaterialText = @materialText, Uom = @uom,
             UnitPrice = @unitPrice, IsInvalidMaterial = @isInvalidMaterial,
+            SapQty = @sapQty, VarianceQty = @varianceQty, VarianceValue = @varianceValue,
+            IsBatchManaged = @isBatchManaged,
             UpdatedAtUtc = getutcdate()
       OUTPUT INSERTED.LineId
       WHERE LineId = @lineId
     `);
   return recordset.length > 0;
+}
+
+// Remediation for lines entered before the group-variance fix above (or any
+// count whose lines otherwise drifted out of the "only the group's most-
+// recently-entered line carries live variance" invariant) — regroups every
+// valid line by (Material, StorageType, Bin), replays them in LineId (entry)
+// order, and re-zeroes/re-attributes variance exactly as addCountLine/
+// correctInvalidMaterialLine do for a newly-added line. Reuses each group's
+// own most-recently-entered SapQty as the group's SAP baseline rather than
+// re-querying SAP live — that figure was already a real SAP snapshot at the
+// time that line was entered, and reusing it keeps this a DB-only operation
+// (no SapServer round-trips, safe to run from routes/stockcount.js's
+// POST /counts/:id/recompute).
+export async function recomputeGroupVariances(countId) {
+  const pool = await getPool();
+  const { recordset: lines } = await pool.request()
+    .input('countId', sql.Int, countId)
+    .query(`
+      SELECT LineId, Material, StorageType, Bin, CountedQty, SapQty, UnitPrice
+      FROM log.StockCountLine
+      WHERE CountId = @countId AND IsInvalidMaterial = 0
+      ORDER BY LineId
+    `);
+
+  const groups = new Map();
+  for (const line of lines) {
+    const key = `${line.Material}::${line.StorageType ?? ''}::${line.Bin ?? ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(line);
+  }
+
+  let lineCount = 0;
+  for (const groupLines of groups.values()) {
+    const sapQty = groupLines[groupLines.length - 1].SapQty;
+    if (sapQty == null) continue; // no SAP comparison on this group at all — nothing to recompute
+
+    let cumulative = 0;
+    for (let i = 0; i < groupLines.length; i++) {
+      cumulative += Number(groupLines[i].CountedQty);
+      const isLast = i === groupLines.length - 1;
+      const varianceQty = isLast ? cumulative - Number(sapQty) : 0;
+      const unitPrice = groupLines[i].UnitPrice;
+      const varianceValue = unitPrice != null ? varianceQty * Number(unitPrice) : null;
+
+      await pool.request()
+        .input('lineId', sql.Int, groupLines[i].LineId)
+        .input('varianceQty', sql.Decimal(15, 3), varianceQty)
+        .input('varianceValue', sql.Decimal(18, 2), varianceValue)
+        .query(`
+          UPDATE log.StockCountLine SET VarianceQty = @varianceQty, VarianceValue = @varianceValue, UpdatedAtUtc = getutcdate()
+          WHERE LineId = @lineId
+        `);
+      lineCount++;
+    }
+  }
+
+  return { groupCount: groups.size, lineCount };
 }
 
 export async function markBinComplete(countId, storageType, bin, completedBy) {

@@ -31,6 +31,10 @@ const db = {
   countHasIncompleteBins: jest.fn(),
   addCountLine: jest.fn(),
   correctInvalidMaterialLine: jest.fn(),
+  getGroupSiblingLines: jest.fn(),
+  zeroLineVariances: jest.fn(),
+  getCountLineById: jest.fn(),
+  recomputeGroupVariances: jest.fn(),
   markBinComplete: jest.fn(),
   updateCountStatus: jest.fn(),
   getCountReportByMaterial: jest.fn(),
@@ -78,6 +82,7 @@ beforeEach(() => {
   notifyMock.mockReset();
   notifyMock.mockResolvedValue(undefined);
   dbRequest.query.mockResolvedValue({ recordset: [] }); // audit() defaults to succeeding
+  db.getGroupSiblingLines.mockResolvedValue([]); // default: first line in its group, no siblings to fold in
 });
 
 describe('GET /materials', () => {
@@ -220,6 +225,77 @@ describe('POST /counts/:id/lines', () => {
     expect(db.addCountLine).toHaveBeenCalledWith('1', expect.objectContaining({ sapQty: 95, storageType: 'PDR', bin: 'B01' }));
   });
 
+  // Reproduces the exact reported bug: bin CONTAINER2 has 12,000kg of
+  // material 10006 in SAP. Entering 12,000kg twice (e.g. by accident, or two
+  // physical piles the operator wants recorded separately) used to show
+  // "matched" on both lines, comparing each one independently against the
+  // same 12,000kg SAP figure — and a third 6,000kg line then showed a
+  // spurious 6,000kg *shortfall* instead of the real ~18,000kg *surplus*
+  // the three lines actually represent together (30,000kg counted vs.
+  // 12,000kg in SAP). Only the newest line in the group should carry the
+  // group's live variance; every earlier line in the group gets zeroed.
+  describe('PTFE_WEEKLY: multiple lines for the same material/bin fold into one group variance', () => {
+    const doc = { CountId: 2, CountType: 'PTFE_WEEKLY', Status: 'Open' };
+    const materialInfo = { material: '10006', materialText: 'GFL PTFE Polymer', uom: 'KG', unitPrice: 1 };
+
+    test('line 1 of 12,000kg matches the 12,000kg SAP shows (baseline, no siblings)', async () => {
+      db.getCountDocument.mockResolvedValueOnce(doc);
+      db.searchMaterialForCount.mockResolvedValueOnce(materialInfo);
+      axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['PTF', 'SA'] } }); // LAGP bin-storage-types
+      axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 12000 }] } }); // LQUA
+      db.getGroupSiblingLines.mockResolvedValueOnce([]); // first line — nothing already counted
+      db.addCountLine.mockResolvedValueOnce(101);
+
+      const res = await request(app).post('/counts/2/lines').send({ material: '10006', storageType: 'PTF', bin: 'CONTAINER2', countedQty: 12000 });
+
+      expect(res.status).toBe(200);
+      expect(db.addCountLine).toHaveBeenCalledWith('2', expect.objectContaining({
+        countedQty: 12000, cumulativeCountedQty: 12000, sapQty: 12000,
+      }));
+      expect(db.zeroLineVariances).not.toHaveBeenCalled(); // no siblings yet, nothing to zero
+    });
+
+    test('line 2 of another 12,000kg is folded on top of line 1, not compared independently', async () => {
+      db.getCountDocument.mockResolvedValueOnce(doc);
+      db.searchMaterialForCount.mockResolvedValueOnce(materialInfo);
+      axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['PTF', 'SA'] } }); // LAGP bin-storage-types
+      axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 12000 }] } }); // LQUA — still 12,000, SAP hasn't changed
+      db.getGroupSiblingLines.mockResolvedValueOnce([{ LineId: 101, CountedQty: 12000 }]); // line 1 already counted
+      db.addCountLine.mockResolvedValueOnce(102);
+
+      const res = await request(app).post('/counts/2/lines').send({ material: '10006', storageType: 'PTF', bin: 'CONTAINER2', countedQty: 12000 });
+
+      expect(res.status).toBe(200);
+      // cumulativeCountedQty = 12000 (line1) + 12000 (this line) = 24000, vs SAP 12000 -> this line carries +12000
+      expect(db.addCountLine).toHaveBeenCalledWith('2', expect.objectContaining({
+        countedQty: 12000, cumulativeCountedQty: 24000, sapQty: 12000,
+      }));
+      // line 1 is superseded — its variance gets zeroed so the group total isn't double-counted
+      expect(db.zeroLineVariances).toHaveBeenCalledWith([101]);
+    });
+
+    test('line 3 of 6,000kg brings the group to a real ~18,000kg surplus, not a false 6,000kg shortfall', async () => {
+      db.getCountDocument.mockResolvedValueOnce(doc);
+      db.searchMaterialForCount.mockResolvedValueOnce(materialInfo);
+      axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: ['PTF', 'SA'] } }); // LAGP bin-storage-types
+      axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 12000 }] } }); // LQUA
+      db.getGroupSiblingLines.mockResolvedValueOnce([
+        { LineId: 101, CountedQty: 12000 }, { LineId: 102, CountedQty: 12000 },
+      ]);
+      db.addCountLine.mockResolvedValueOnce(103);
+
+      const res = await request(app).post('/counts/2/lines').send({ material: '10006', storageType: 'PTF', bin: 'CONTAINER2', countedQty: 6000 });
+
+      expect(res.status).toBe(200);
+      // cumulativeCountedQty = 12000 + 12000 + 6000 = 30000, vs SAP 12000 -> +18000 surplus, not -6000
+      const call = db.addCountLine.mock.calls[0][1];
+      expect(call.cumulativeCountedQty).toBe(30000);
+      expect(call.sapQty).toBe(12000);
+      expect(call.cumulativeCountedQty - call.sapQty).toBe(18000);
+      expect(db.zeroLineVariances).toHaveBeenCalledWith([101, 102]);
+    });
+  });
+
   // Every physical lot counted on paper gets its own ticket + label — the
   // cross-reference is per-line, not once for the whole count.
   test('RAW_MATERIAL: passes a per-line ticketNumber through to addCountLine', async () => {
@@ -334,31 +410,89 @@ describe('GET /counts/:id/invalid-lines', () => {
 });
 
 describe('PUT /counts/:id/invalid-lines/:lineId', () => {
+  const line = { LineId: 5, CountId: 1, StorageType: 'PDR', Bin: 'B01', CountedQty: 40 };
+  const doc = { CountId: 1, CountType: 'RAW_MATERIAL', Status: 'Open', StorageLocation: '1710' };
+
   test('400s without a material', async () => {
     const res = await request(app).put('/counts/1/invalid-lines/5').send({});
     expect(res.status).toBe(400);
   });
 
+  test('404s when the line does not exist', async () => {
+    db.getCountLineById.mockResolvedValueOnce(null);
+    const res = await request(app).put('/counts/1/invalid-lines/999').send({ material: '30005R' });
+    expect(res.status).toBe(404);
+    expect(db.searchMaterialForCount).not.toHaveBeenCalled();
+  });
+
   test('422s when the replacement material still does not validate', async () => {
+    db.getCountLineById.mockResolvedValueOnce(line);
+    db.getCountDocument.mockResolvedValueOnce(doc);
     db.searchMaterialForCount.mockResolvedValueOnce(null);
     const res = await request(app).put('/counts/1/invalid-lines/5').send({ material: 'STILLBOGUS' });
     expect(res.status).toBe(422);
     expect(db.correctInvalidMaterialLine).not.toHaveBeenCalled();
   });
 
-  test('404s when the line does not exist', async () => {
-    db.searchMaterialForCount.mockResolvedValueOnce({ material: '30005R', materialText: 'Wire', uom: 'M', unitPrice: 1 });
+  // The correction used to just clear IsInvalidMaterial and leave SapQty/
+  // Variance at their insert-time NULLs forever, silently excluding the
+  // corrected line from every report/finance total — it now runs the same
+  // SAP comparison + group-variance folding as a freshly-added line.
+  test('resolves the SAP comparison, folds into the line\'s group, and clears the invalid flag', async () => {
+    db.getCountLineById.mockResolvedValueOnce(line);
+    db.getCountDocument.mockResolvedValueOnce(doc);
+    db.searchMaterialForCount.mockResolvedValueOnce({ material: '30005R', materialText: 'Wire', uom: 'M', unitPrice: 2 });
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 100 }] } }); // LQUA comparison
+    db.getGroupSiblingLines.mockResolvedValueOnce([{ LineId: 6, CountedQty: 10 }]); // another valid line already in this group
+    db.correctInvalidMaterialLine.mockResolvedValueOnce(true);
+
+    const res = await request(app).put('/counts/1/invalid-lines/5').send({ material: '30005R' });
+
+    expect(res.status).toBe(200);
+    expect(db.getGroupSiblingLines).toHaveBeenCalledWith(1, '30005R', 'PDR', 'B01', 5);
+    // cumulativeCountedQty = 10 (sibling) + 40 (this line's own CountedQty) = 50
+    expect(db.correctInvalidMaterialLine).toHaveBeenCalledWith('5', expect.objectContaining({
+      material: '30005R', isInvalidMaterial: false, countedQty: 40, cumulativeCountedQty: 50, sapQty: 100,
+    }));
+    expect(db.zeroLineVariances).toHaveBeenCalledWith([6]);
+  });
+
+  test('404s when correctInvalidMaterialLine itself finds nothing to update', async () => {
+    db.getCountLineById.mockResolvedValueOnce(line);
+    db.getCountDocument.mockResolvedValueOnce(doc);
+    db.searchMaterialForCount.mockResolvedValueOnce({ material: '30005R', uom: 'M' });
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [] } });
+    db.getGroupSiblingLines.mockResolvedValueOnce([]);
     db.correctInvalidMaterialLine.mockResolvedValueOnce(false);
-    const res = await request(app).put('/counts/1/invalid-lines/999').send({ material: '30005R' });
+
+    const res = await request(app).put('/counts/1/invalid-lines/5').send({ material: '30005R' });
+    expect(res.status).toBe(404);
+    expect(db.zeroLineVariances).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /counts/:id/recompute', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/counts/1/recompute');
+    expect(res.status).toBe(403);
+    expect(db.recomputeGroupVariances).not.toHaveBeenCalled();
+  });
+
+  test('404s when the count does not exist', async () => {
+    db.getCountDocument.mockResolvedValueOnce(null);
+    const res = await request(appLogSuper).post('/counts/999/recompute');
     expect(res.status).toBe(404);
   });
 
-  test('corrects the line and clears the invalid flag', async () => {
-    db.searchMaterialForCount.mockResolvedValueOnce({ material: '30005R', materialText: 'Wire', uom: 'M', unitPrice: 1 });
-    db.correctInvalidMaterialLine.mockResolvedValueOnce(true);
-    const res = await request(app).put('/counts/1/invalid-lines/5').send({ material: '30005R' });
+  test('recomputes and returns the group/line counts', async () => {
+    db.getCountDocument.mockResolvedValueOnce({ CountId: 1, CountType: 'PTFE_WEEKLY', Status: 'Open' });
+    db.recomputeGroupVariances.mockResolvedValueOnce({ groupCount: 1, lineCount: 3 });
+
+    const res = await request(appLogSuper).post('/counts/1/recompute');
+
     expect(res.status).toBe(200);
-    expect(db.correctInvalidMaterialLine).toHaveBeenCalledWith('5', expect.objectContaining({ material: '30005R', isInvalidMaterial: false }));
+    expect(res.body.data).toEqual({ groupCount: 1, lineCount: 3 });
+    expect(db.recomputeGroupVariances).toHaveBeenCalledWith('1');
   });
 });
 
