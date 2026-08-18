@@ -175,6 +175,32 @@ function clampToStoresWindow(date) {
   return nextStoresOpen(date);
 }
 
+// Closing instant of the most recent working day at/before `date`.
+function previousStoresClose(date) {
+  const d = atLocalTime(date, STORES_CLOSE);
+  if (d > date) d.setDate(d.getDate() - 1);
+  while (!isStoresWorkingDay(d)) d.setDate(d.getDate() - 1);
+  return d;
+}
+
+// A user can pick any Needed By date/time, including one outside Stores'
+// working window — the lead-time check alone doesn't catch that (a request
+// raised with plenty of notice can still name a delivery time nobody's
+// there to see, e.g. 8pm). Snap it to the nearest usable instant instead of
+// just rejecting: if it's within the minimum lead time of the *previous*
+// close, assume "as soon as possible today" and pull it back to that
+// close; otherwise push it forward to the next working day's open.
+function snapToStoresWindow(date) {
+  if (isStoresWorkingDay(date)) {
+    const open = atLocalTime(date, STORES_OPEN);
+    const close = atLocalTime(date, STORES_CLOSE);
+    if (date >= open && date < close) return new Date(date);
+  }
+  const prevClose = previousStoresClose(date);
+  if (date - prevClose <= NEEDED_BY_MIN_LEAD_HOURS * 60 * 60 * 1000) return prevClose;
+  return nextStoresOpen(date);
+}
+
 // Adds `hours` of Stores working time to `fromDate`, rolling any time past
 // 17:00 over to the next working day's 05:45 (weekends skipped).
 function addStoresLeadTime(fromDate, hours) {
@@ -197,6 +223,17 @@ function addStoresLeadTime(fromDate, hours) {
 function formatStoresTime(date) {
   const pad = n => String(n).padStart(2, '0');
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// Full local date/time (DD/MM/YYYY HH:MM) — for contexts spanning more than
+// one year (the KPI export), where formatStoresTime's day/month-only form
+// would be ambiguous. Deliberately local (getDate/getHours, not
+// getUTC*/toISOString) — the server runs on GMT/BST, and a UTC-formatted
+// timestamp reads an hour off wall-clock time for anyone looking at it
+// whenever BST is in effect.
+function formatLocalDateTime(date) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 // ── Material search (no LOG_MRP gate — see stagingsql.js's searchMaterials) ──
@@ -299,7 +336,11 @@ router.post('/requests', async (req, res) => {
     if (!dueAtUtc) {
       return res.status(400).json({ success: false, error: { message: 'dueAtUtc (Needed By) is required.' } });
     }
-    const due = new Date(dueAtUtc);
+    // Snap first, then check lead time against the *snapped* value — a raw
+    // out-of-hours pick (e.g. 8pm) must not sail through the lead-time
+    // check on its own distance from "now"; only the actual usable Stores
+    // instant it resolves to counts.
+    const due = snapToStoresWindow(new Date(dueAtUtc));
     const minDue = new Date(
       addStoresLeadTime(new Date(), NEEDED_BY_MIN_LEAD_HOURS).getTime() - NEEDED_BY_GRACE_MINUTES * 60 * 1000
     );
@@ -325,7 +366,11 @@ router.post('/requests', async (req, res) => {
       const pool = await getNexusPool();
       await notify(pool, {
         title: 'New Staging Post Request',
-        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${due.toISOString().slice(0, 16).replace('T', ' ')}.`,
+        // Local (formatStoresTime), not due.toISOString() — the warehouse
+        // page already renders DueAtUtc through the browser's local
+        // toLocaleString, and a UTC-formatted string here would read an
+        // hour off that whenever BST is in effect.
+        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${formatStoresTime(due)}.`,
         severity: 1,
         category: 'logistics',
         actionLabel: 'Open Staging Post',
@@ -336,7 +381,9 @@ router.post('/requests', async (req, res) => {
       console.error('[staging notify]', notifyErr.message);
     }
 
-    res.json({ success: true, data: { requestId } });
+    // dueAtUtc echoed back so the requester can see if their pick got
+    // snapped into Stores' working window (e.g. an 8pm pick becoming 17:00).
+    res.json({ success: true, data: { requestId, dueAtUtc: due.toISOString() } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
@@ -639,9 +686,11 @@ router.get('/kpi/export', async (req, res) => {
         location: r.Location,
         status: r.Status,
         reqBy: r.RequestedBy,
-        reqAt: r.RequestedAtUtc ? new Date(r.RequestedAtUtc).toISOString().slice(0, 16).replace('T', ' ') : '',
-        dueAt: r.DueAtUtc ? new Date(r.DueAtUtc).toISOString().slice(0, 16).replace('T', ' ') : '',
-        compAt: r.CompletedAtUtc ? new Date(r.CompletedAtUtc).toISOString().slice(0, 16).replace('T', ' ') : '',
+        // Local (formatLocalDateTime), not toISOString() — reads an hour
+        // off wall-clock time whenever BST is in effect otherwise.
+        reqAt: r.RequestedAtUtc ? formatLocalDateTime(new Date(r.RequestedAtUtc)) : '',
+        dueAt: r.DueAtUtc ? formatLocalDateTime(new Date(r.DueAtUtc)) : '',
+        compAt: r.CompletedAtUtc ? formatLocalDateTime(new Date(r.CompletedAtUtc)) : '',
         onTime: r.Status === 'Completed' ? (new Date(r.CompletedAtUtc) <= new Date(r.DueAtUtc) ? 'Yes' : 'No') : '',
       });
     });
