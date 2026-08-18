@@ -5660,7 +5660,7 @@ function parseCSVFile(file) {
   reader.readAsText(file);
 }
 
-function parseCSVLine(line) {
+function parseCSVLine(line, delimiter = ',') {
   // Basic CSV parser — handles quoted fields
   const fields = [];
   let cur = '', inQuote = false;
@@ -5669,7 +5669,7 @@ function parseCSVLine(line) {
     if (ch === '"') {
       if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
       else inQuote = !inQuote;
-    } else if (ch === ',' && !inQuote) {
+    } else if (ch === delimiter && !inQuote) {
       fields.push(cur.trim()); cur = '';
     } else {
       cur += ch;
@@ -5677,6 +5677,15 @@ function parseCSVLine(line) {
   }
   fields.push(cur.trim());
   return fields;
+}
+
+// Excel on machines set to a comma-decimal locale (e.g. UK/EU regional
+// settings some users have) exports "CSV" with ';' as the field separator
+// instead of ','. Pick whichever delimiter is more common in the header row.
+function detectCSVDelimiter(headerLine) {
+  const commas = (headerLine.match(/,/g) || []).length;
+  const semicolons = (headerLine.match(/;/g) || []).length;
+  return semicolons > commas ? ';' : ',';
 }
 
 function renderCSVPreview(text) {
@@ -5687,8 +5696,9 @@ function renderCSVPreview(text) {
     return;
   }
 
+  const delimiter = detectCSVDelimiter(lines[0]);
   const EXPECTED_HEADERS = ['deliveryID','customerID','dispatchDate','deliveryService','deliveryPriority','picksheetComment'];
-  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
+  const headers = parseCSVLine(lines[0], delimiter).map(h => h.toLowerCase().replace(/\s/g, ''));
   const missing = EXPECTED_HEADERS.filter(h => !headers.includes(h));
   if (missing.length) {
     document.getElementById('csv-preview').innerHTML =
@@ -5701,7 +5711,7 @@ function renderCSVPreview(text) {
 
   const records = [], rowErrors = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = parseCSVLine(lines[i]);
+    const cols = parseCSVLine(lines[i], delimiter);
     const raw  = {
       deliveryID:       cols[idx.deliveryID]       ?? '',
       customerID:       cols[idx.customerID]        ?? '',
@@ -6629,6 +6639,8 @@ function spOpenBinRestrictionImportModal() {
         <div style="font-size:12px;color:var(--text-muted,#888);margin-top:6px">
           bin and notes are optional — leave blank to restrict to any bin in that storage type.
           Rows matching an existing Material + Storage Type + Bin combination are skipped.
+          Comma- or semicolon-separated files are both accepted (semicolon-delimited is what Excel
+          exports on a UK-regional PC).
         </div>
         <button type="button" onclick="spDownloadBinRestrictionCsvTemplate()"
           style="margin-top:8px;background:none;border:none;color:var(--accent,#7c3aed);
@@ -6696,7 +6708,8 @@ function spRenderBinRestrictionCsvPreview(text) {
     return;
   }
 
-  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
+  const delimiter = detectCSVDelimiter(lines[0]);
+  const headers = parseCSVLine(lines[0], delimiter).map(h => h.toLowerCase().replace(/\s/g, ''));
   const missing = ['material', 'storagetype'].filter(h => !headers.includes(h));
   if (missing.length) {
     previewEl.innerHTML = `<div class="sap-error">✕ Missing columns: ${esc(missing.join(', '))}</div>`;
@@ -6712,7 +6725,7 @@ function spRenderBinRestrictionCsvPreview(text) {
 
   const records = [], rowErrors = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = parseCSVLine(lines[i]);
+    const cols = parseCSVLine(lines[i], delimiter);
     const raw = {
       material:    cols[idx.material] ?? '',
       storageType: cols[idx.storageType] ?? '',
