@@ -225,6 +225,17 @@ function formatStoresTime(date) {
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+// Full local date/time (DD/MM/YYYY HH:MM) — for contexts spanning more than
+// one year (the KPI export), where formatStoresTime's day/month-only form
+// would be ambiguous. Deliberately local (getDate/getHours, not
+// getUTC*/toISOString) — the server runs on GMT/BST, and a UTC-formatted
+// timestamp reads an hour off wall-clock time for anyone looking at it
+// whenever BST is in effect.
+function formatLocalDateTime(date) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 // ── Material search (no LOG_MRP gate — see stagingsql.js's searchMaterials) ──
 
 router.get('/materials', async (req, res) => {
@@ -355,7 +366,11 @@ router.post('/requests', async (req, res) => {
       const pool = await getNexusPool();
       await notify(pool, {
         title: 'New Staging Post Request',
-        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${due.toISOString().slice(0, 16).replace('T', ' ')}.`,
+        // Local (formatStoresTime), not due.toISOString() — the warehouse
+        // page already renders DueAtUtc through the browser's local
+        // toLocaleString, and a UTC-formatted string here would read an
+        // hour off that whenever BST is in effect.
+        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${formatStoresTime(due)}.`,
         severity: 1,
         category: 'logistics',
         actionLabel: 'Open Staging Post',
@@ -671,9 +686,11 @@ router.get('/kpi/export', async (req, res) => {
         location: r.Location,
         status: r.Status,
         reqBy: r.RequestedBy,
-        reqAt: r.RequestedAtUtc ? new Date(r.RequestedAtUtc).toISOString().slice(0, 16).replace('T', ' ') : '',
-        dueAt: r.DueAtUtc ? new Date(r.DueAtUtc).toISOString().slice(0, 16).replace('T', ' ') : '',
-        compAt: r.CompletedAtUtc ? new Date(r.CompletedAtUtc).toISOString().slice(0, 16).replace('T', ' ') : '',
+        // Local (formatLocalDateTime), not toISOString() — reads an hour
+        // off wall-clock time whenever BST is in effect otherwise.
+        reqAt: r.RequestedAtUtc ? formatLocalDateTime(new Date(r.RequestedAtUtc)) : '',
+        dueAt: r.DueAtUtc ? formatLocalDateTime(new Date(r.DueAtUtc)) : '',
+        compAt: r.CompletedAtUtc ? formatLocalDateTime(new Date(r.CompletedAtUtc)) : '',
         onTime: r.Status === 'Completed' ? (new Date(r.CompletedAtUtc) <= new Date(r.DueAtUtc) ? 'Yes' : 'No') : '',
       });
     });
