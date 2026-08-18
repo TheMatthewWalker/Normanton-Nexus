@@ -10117,8 +10117,17 @@ function osRenderTrackedList(tracked) {
   // below) — the point of searching is to surface matches immediately, not
   // make the user open every bucket/supplier to find them.
   const collapsedCls = query ? '' : ' ps-section--collapsed';
-  const renderSupplierGroup = (bucketKey, name, groupRows) => `<div class="ps-section${collapsedCls} ps-section--nested" data-group-key="${esc(bucketKey)}::${esc(name)}">
+  // Same "select all" pattern as the bucket-level checkbox below, one level
+  // down — a bucket often spans several suppliers, and selecting a whole
+  // bucket just to act on one supplier's lines meant ticking each row by
+  // hand. checked state (and the bucket/group checkboxes staying in sync
+  // with each other and with individual row ticks) is recomputed by
+  // osSyncSelectAllCheckboxes on every selection change, not just here.
+  const renderSupplierGroup = (bucketKey, name, groupRows) => {
+    const groupFullySelected = groupRows.every(t => selectedTrackedIds.has(Number(t.SuggestionId)));
+    return `<div class="ps-section${collapsedCls} ps-section--nested" data-group-key="${esc(bucketKey)}::${esc(name)}">
     <div class="ps-section-header">
+      <input type="checkbox" class="os-group-select-all" ${groupFullySelected ? 'checked' : ''} title="Select all from ${esc(name)}" onclick="event.stopPropagation()">
       <span class="ps-section-dot ps-section-dot--other"></span>
       <span class="ps-section-title">${esc(name)}</span>
       <span class="ps-section-count">${groupRows.length}</span>
@@ -10128,6 +10137,7 @@ function osRenderTrackedList(tracked) {
       <div style="overflow-x:auto"><table class="pn-batch-table admin-table">${tableHead}<tbody>${groupRows.map(t => renderTrackedRow(t, bucketKey)).join('')}</tbody></table></div>
     </div>
   </div>`;
+  };
 
   const bucketSections = BUCKET_DEFS.map(bd => {
     const bucketRows = rows.filter(bd.match);
@@ -10184,13 +10194,18 @@ function osRenderTrackedList(tracked) {
     h.closest('.ps-section').classList.toggle('ps-section--collapsed');
   }));
   document.querySelectorAll('.os-check').forEach(input => input.addEventListener('change', onTrackedCheckToggle));
-  // Selects/deselects every checkbox in this bucket — the bucket may span
-  // several collapsed supplier sub-groups, so this reaches every .os-check
-  // under this bucket's section regardless of which are currently expanded.
-  document.querySelectorAll('.os-bucket-select-all').forEach(cb => {
+  // Selects/deselects every checkbox under this section at once — a bucket
+  // may span several collapsed supplier sub-groups (reaching every .os-check
+  // regardless of which are currently expanded), a supplier group is just
+  // the rows directly under it. Same handler for both levels — .closest
+  // ('.ps-section') from a checkbox that itself lives one level inside a
+  // nested supplier section resolves to that nested section first, so a
+  // group checkbox only ever touches its own rows even though the selector
+  // matches bucket- and group-level checkboxes alike.
+  document.querySelectorAll('.os-bucket-select-all, .os-group-select-all').forEach(cb => {
     cb.addEventListener('change', () => {
-      const bucketSection = cb.closest('.ps-section');
-      bucketSection.querySelectorAll('.os-check').forEach(check => {
+      const section = cb.closest('.ps-section');
+      section.querySelectorAll('.os-check').forEach(check => {
         check.checked = cb.checked;
         const id = Number(check.dataset.id);
         if (cb.checked) selectedTrackedIds.add(id); else selectedTrackedIds.delete(id);
@@ -10358,6 +10373,30 @@ function osRefreshSelectionUi() {
   if (saveSelBtn) saveSelBtn.disabled = selectedTrackedIds.size === 0;
   const poBtn = document.getElementById('os-create-po-btn');
   if (poBtn) poBtn.disabled = !osCreatePoOrAssignScheduleSelectionValid();
+  osSyncSelectAllCheckboxes();
+}
+
+// Keeps the bucket- and supplier-group-level "select all" checkboxes
+// reflecting reality after ANY selection change — ticking/unticking one row
+// by hand, or a group/bucket checkbox toggling rows out from under a
+// DIFFERENT (e.g. parent) checkbox, would otherwise leave a stale checked
+// state on checkboxes this particular change didn't directly touch. Reads
+// straight from the DOM's own .os-check ticks rather than recomputing from
+// trackedRows/selectedTrackedIds, so it stays correct regardless of which
+// handler triggered it.
+function osSyncSelectAllCheckboxes() {
+  document.querySelectorAll('.ps-section--nested[data-group-key]').forEach(groupSection => {
+    const cb = groupSection.querySelector('.os-group-select-all');
+    if (!cb) return;
+    const checks = [...groupSection.querySelectorAll('.os-check')];
+    cb.checked = checks.length > 0 && checks.every(c => c.checked);
+  });
+  document.querySelectorAll('.ps-sections > .ps-section[data-group-key]').forEach(bucketSection => {
+    const cb = bucketSection.querySelector(':scope > .ps-section-header .os-bucket-select-all');
+    if (!cb) return;
+    const checks = [...bucketSection.querySelectorAll('.os-check')];
+    cb.checked = checks.length > 0 && checks.every(c => c.checked);
+  });
 }
 
 // "Create PO / Assign Schedule" — merged per the user: no need to make a
