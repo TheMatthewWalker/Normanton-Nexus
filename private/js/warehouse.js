@@ -7178,7 +7178,7 @@ function scRenderCountDetail(doc, backFn) {
     </div>
     ${invalidCount ? `<div id="sc-invalid-materials"></div>` : ''}
     ${isOpen && canSubmitHere ? `<button class="btn-submit" type="button" id="sc-submit-btn">Submit for Approval</button>` : ''}
-    ${scIsAdmin && lines.length ? `<button class="btn-back-tiles" type="button" id="sc-recompute-btn" style="margin-left:8px" title="Re-derives every line's variance from what's already stored — fixes counts with lines entered before the group-variance fix, no live SAP calls">Recompute Variances</button>` : ''}
+    ${(scIsAdmin || doc.CountType === 'PTFE_WEEKLY') && sessionPermissions.includes('LOG_SUPER') && lines.length ? `<button class="btn-back-tiles" type="button" id="sc-recompute-btn" style="margin-left:8px" title="Re-derives every line's variance from what's already stored — fixes counts with lines entered before the group-variance fix, no live SAP calls">Recompute Variances</button>` : ''}
     <div id="sc-recompute-result" style="margin-top:10px"></div>
   `;
 
