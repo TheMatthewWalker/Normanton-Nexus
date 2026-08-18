@@ -1735,7 +1735,11 @@ router.get('/otif-report', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_RE
 
 
 // ── Bulk mark collected ───────────────────────────────────────────────────────
-router.post('/mark-collected-bulk', requirePermission('LOG_PLANNING'), async (req, res) => {
+// Also reachable by WAREHOUSE_OP — Warehouse's own Outbound Deliveries tile
+// (private/js/warehouse.js's wdSubmitMarkCollected) uses this same route to
+// confirm a shipment collected; everything else on Awaiting Collection
+// (date changes, loading lists, unbook) stays LOG_PLANNING-only.
+router.post('/mark-collected-bulk', requireAnyPermission(['LOG_PLANNING', 'WAREHOUSE_OP']), async (req, res) => {
   const shipmentIds = normalizeIdList(req.body.shipmentIDs);
   if (!shipmentIds.length) return res.status(400).json({ success: false, error: 'No shipments selected.' });
 

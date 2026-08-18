@@ -28,16 +28,19 @@ jest.unstable_mockModule('../../routes/sapStaging.js', () => ({
   reverseStagedPackage: reverseStagedPackageMock,
 }));
 
-const logSuperUser = { ...operatorUser, permissions: ['LOG_SUPER'] };
+const logSuperUser    = { ...operatorUser, permissions: ['LOG_SUPER'] };
+const warehouseOpUser = { ...operatorUser, permissions: ['WAREHOUSE_OP'] };
 
 let deliveryRouter;
 let app;
 let appLogSuper;
+let appWarehouseOp;
 
 beforeAll(async () => {
   ({ default: deliveryRouter } = await import('../../routes/deliverymain.js'));
   app = buildTestApp(deliveryRouter, { sessionUser: operatorUser });
   appLogSuper = buildTestApp(deliveryRouter, { sessionUser: logSuperUser });
+  appWarehouseOp = buildTestApp(deliveryRouter, { sessionUser: warehouseOpUser });
 });
 
 beforeEach(() => {
@@ -109,15 +112,21 @@ describe('POST /bulk', () => {
 });
 
 describe('DELETE /:deliveryId/packaging-holding', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).delete('/1/packaging-holding');
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
   test('404s when the delivery does not exist', async () => {
     queueResults({ recordset: [] });
-    const res = await request(app).delete('/999/packaging-holding');
+    const res = await request(appWarehouseOp).delete('/999/packaging-holding');
     expect(res.status).toBe(404);
   });
 
   test('409s when the delivery is not actually pending packaging data', async () => {
     queueResults({ recordset: [{ pendingPackagingData: false }] });
-    const res = await request(app).delete('/1/packaging-holding');
+    const res = await request(appWarehouseOp).delete('/1/packaging-holding');
     expect(res.status).toBe(409);
   });
 
@@ -128,7 +137,7 @@ describe('DELETE /:deliveryId/packaging-holding', () => {
     );
     reverseStagedPackageMock.mockResolvedValueOnce({ attempted: true, success: false, error: 'SAP session lost' });
 
-    const res = await request(app).delete('/1/packaging-holding');
+    const res = await request(appWarehouseOp).delete('/1/packaging-holding');
 
     expect(res.status).toBe(422);
     expect(res.body.failures).toEqual([{ palletItemID: 10, sapMaterial: '30005R', sapBatch: 'B1', error: 'SAP session lost' }]);
@@ -142,7 +151,7 @@ describe('DELETE /:deliveryId/packaging-holding', () => {
     );
     reverseStagedPackageMock.mockResolvedValueOnce({ attempted: true, success: true });
 
-    const res = await request(app).delete('/1/packaging-holding');
+    const res = await request(appWarehouseOp).delete('/1/packaging-holding');
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true });
@@ -181,8 +190,14 @@ describe('PATCH /:deliveryId/uncomplete', () => {
 });
 
 describe('POST /:deliveryId/stage-batch', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
+    expect(res.status).toBe(403);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
   test('400s when material or batch is missing', async () => {
-    const res = await request(app).post('/1/stage-batch').send({ material: '30005R' });
+    const res = await request(appWarehouseOp).post('/1/stage-batch').send({ material: '30005R' });
     expect(res.status).toBe(400);
     expect(axiosMock.post).not.toHaveBeenCalled();
   });
@@ -193,7 +208,7 @@ describe('POST /:deliveryId/stage-batch', () => {
     });
     queueResults({ recordset: [] }); // the audit insert
 
-    const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
+    const res = await request(appWarehouseOp).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
 
     expect(res.status).toBe(200);
     expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('TR 4500007777'));
@@ -205,7 +220,7 @@ describe('POST /:deliveryId/stage-batch', () => {
     });
     queueResults({ recordset: [] }); // the audit insert
 
-    const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
+    const res = await request(appWarehouseOp).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
 
     expect(res.status).toBe(422);
     expect(res.body.error).toBe('SAP rejected the transfer order.');

@@ -122,7 +122,7 @@ router.post('/', requirePermission('LOG_SUPER'), async (req, res) => {
 });
 
 // ── Open Picksheets — active deliveries with destination name ──
-router.get('/open-picksheets', async (req, res) => {
+router.get('/open-picksheets', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
@@ -142,7 +142,7 @@ router.get('/open-picksheets', async (req, res) => {
 // ── Packaging Holding — deliveries the SAP sync found completed outside
 // Nexus (see runSapSync's reconciliation step below), waiting for someone
 // to confirm their real packaging data via the normal pallet builder ──
-router.get('/packaging-holding', async (req, res) => {
+router.get('/packaging-holding', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
@@ -201,7 +201,7 @@ async function cancelHeldPicksheet(pool, deliveryId) {
 // palletmain.js's pallet delete — a partial pallet could exist if the
 // delivery was picked in Nexus for a while before it got completed outside
 // the app and swept into holding.
-router.delete('/:deliveryId/packaging-holding', async (req, res) => {
+router.delete('/:deliveryId/packaging-holding', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
 
@@ -236,7 +236,7 @@ router.delete('/:deliveryId/packaging-holding', async (req, res) => {
 // every delivery currently sitting in the holding area. Best-effort per
 // delivery — one failing SAP reversal doesn't block the rest; failures are
 // reported back so the caller can see which ones still need attention.
-router.delete('/packaging-holding/all', async (req, res) => {
+router.delete('/packaging-holding/all', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
         const idsRes = await pool.request()
@@ -448,7 +448,7 @@ router.patch('/:deliveryId/cancel-picksheet', async (req, res) => {
 // which breaks under some reverse-proxy/TLS setups (observed as a bare
 // "fetch failed" with no further detail after a server restart). Calling
 // SapServer directly removes that extra, fragile hop entirely.
-router.get('/:deliveryId/picksheet-materials', async (req, res) => {
+router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const deliveryId = req.params.deliveryId;
         const pool = await getPool();
@@ -699,7 +699,7 @@ router.get('/:deliveryId/picksheet-materials', async (req, res) => {
 // add the package locally — an app-side "added" pallet package that was
 // never actually moved in SAP would be exactly the kind of mismatch this
 // bin-allocation feature exists to prevent.
-router.post('/:deliveryId/stage-batch', async (req, res) => {
+router.post('/:deliveryId/stage-batch', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const deliveryId = req.params.deliveryId;
         const { material, batch } = req.body || {};
@@ -1002,7 +1002,7 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
 // both SAP calls are skipped entirely for this path. Completing here just
 // records the real packaging data locally (from whatever pallets were just
 // built) and clears pendingPackagingData, releasing it into Create Shipment.
-router.patch('/:deliveryId/complete', async (req, res) => {
+router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
 

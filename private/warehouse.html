@@ -179,8 +179,8 @@
         </div>
       </div>
 
-      <!-- Picking Operations -->
-      <div class="pn-section">
+      <!-- Picking Operations — WAREHOUSE_OP permission required (see JS applyPermissionVisibility) -->
+      <div class="pn-section" data-permission="WAREHOUSE_OP">
         <div class="pn-section-hdr">Picking Operations</div>
         <div class="tile-grid">
 
@@ -215,6 +215,28 @@
             <span class="tile-badge tile-badge--soon">SOON</span>
             <div class="tile-title">Closed Picksheets</div>
             <div class="tile-desc">Completed delivery history and picking records</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="inboundDeliveriesOp">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Inbound Deliveries</div>
+            <div class="tile-desc">Mark inbound shipments as arrived and confirm quantities for SAP goods receipt</div>
+          </div>
+
+          <div class="sap-tile sap-tile--live" data-fn="outboundDeliveriesOp">
+            <div class="tile-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </div>
+            <span class="tile-badge tile-badge--live">LIVE</span>
+            <div class="tile-title">Outbound Deliveries</div>
+            <div class="tile-desc">Shipments awaiting collection — confirm as collected when the driver leaves site</div>
           </div>
 
         </div>

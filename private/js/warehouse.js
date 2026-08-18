@@ -4,6 +4,8 @@
 let activeDT          = null;
 let currentResult     = [];
 let sessionPermissions = [];
+let sessionRole        = '';
+let sessionUsername    = '';
 let pendingCSVRecords  = [];
 
 // ── Session check on load ─────────────────────────────────────────────────────
@@ -12,6 +14,9 @@ let pendingCSVRecords  = [];
   if (!d.loggedIn) { window.location.href = '/'; return; }
   document.getElementById('session-user').textContent = d.username;
   sessionPermissions = d.permissions || [];
+  sessionRole        = d.role       || '';
+  sessionUsername    = d.username   || '';
+  applyPermissionVisibility();
   setupTiles();
   setupSupervisorSection();
   pollStagingOpenCount();
@@ -77,6 +82,21 @@ async function pollPackagingHoldingCount() {
   } catch { /* leave the static LIVE badge in place on failure */ }
 }
 
+// data-permission accepts a comma-separated list, meaning "any of these" —
+// same convention as logistics.js/production-nexus.js/quality.js. Gates the
+// whole Picking Operations section (Open Picksheets, Picksheets on Hold,
+// Closed Picksheets, Inbound Deliveries, Outbound Deliveries) behind
+// WAREHOUSE_OP; the real enforcement is server-side (requirePermission on
+// the underlying routes) — this just keeps tiles a warehouse operator can't
+// use out of the grid.
+function applyPermissionVisibility() {
+  document.querySelectorAll('[data-permission]').forEach(el => {
+    const codes   = el.dataset.permission.split(',').map(c => c.trim()).filter(Boolean);
+    const allowed = sessionRole === 'superadmin' || codes.some(code => sessionPermissions.includes(code));
+    el.style.display = allowed ? '' : 'none';
+  });
+}
+
 function setupTiles() {
   document.querySelectorAll('.sap-tile--live[data-fn]').forEach(tile => {
     tile.addEventListener('click', () => {
@@ -86,6 +106,8 @@ function setupTiles() {
       if (fn === 'transferRequirements') runTransferRequirements();
       if (fn === 'openPicksheets') runOpenPicksheets();
       if (fn === 'packagingHolding') runPackagingHolding();
+      if (fn === 'inboundDeliveriesOp')  runInboundDeliveriesOp();
+      if (fn === 'outboundDeliveriesOp') runOutboundDeliveriesOp();
       if (fn === 'addPicksheet')   showAddPicksheetForm();
       if (fn === 'csvUpload')      showCSVUpload();
       if (fn === 'sapSync')        runSAPSync();
@@ -3760,6 +3782,481 @@ async function deleteAllHeldPicksheets() {
     runPackagingHolding();
   } catch (err) {
     wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
+}
+
+// ── Inbound Deliveries (operator-friendly Inbound Log) ────────────────────────
+// Warehouse-side, read-mostly view of Logistics' Inbound Log (see
+// routes/performance.js's /order-suggestions/shipments*, gated
+// requireAnyPermission(['LOG_MRP','WAREHOUSE_OP'])). Same bucket format as
+// the planner-facing tile (Late/Today/Upcoming/Completed/Cancelled), but the
+// detail view only exposes what an operator actually needs on the goods-in
+// bay: confirm the quantity that showed up, enter the supplier's paperwork
+// reference if missing, and Mark Arrived — which posts the goods receipt to
+// SAP (order-suggestions/shipments/:id/receive) using those confirmed
+// quantities. No shipment-header editing, cancel, undo-receive, documents or
+// cost lines here — those stay planner-only in Logistics' own Inbound Log.
+let wdInboundRows = [];
+
+// Mirrors logistics.js's osKgToOrderUnit/OS_KG_PER_UNIT — display-only
+// conversion for a vendor whose delivery paperwork uses a unit other than
+// the material's SAP base unit (e.g. LB for DeWAL, see log.Vendor.OrderMoqUom).
+const WD_KG_PER_UNIT = { KG: 1, LB: 0.45359237 };
+function wdKgToOrderUnit(qtyKg, unit) {
+  const factor = WD_KG_PER_UNIT[(unit || 'KG').toUpperCase()];
+  if (!factor) return qtyKg;
+  return Math.round((qtyKg / factor) * 1000) / 1000;
+}
+
+const WD_IL_BUCKETS = [
+  { key: 'late',      label: 'Late',      dot: 'backlog' },
+  { key: 'today',     label: 'Today',     dot: 'today' },
+  { key: 'upcoming',  label: 'Upcoming',  dot: 'week' },
+  { key: 'completed', label: 'Completed', dot: 'month' },
+  { key: 'cancelled', label: 'Cancelled', dot: 'other' },
+];
+
+// Mirrors logistics.js's ilBucketFor exactly, so the same shipment lands in
+// the same bucket regardless of which page is looking at it.
+function wdIlBucketFor(s) {
+  if (s.CancelledAtUtc) return 'cancelled';
+  if (s.ReceivedAtUtc) return 'completed';
+  if (!s.ExpectedEta) return 'upcoming';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const eta = new Date(s.ExpectedEta); eta.setHours(0, 0, 0, 0);
+  if (eta.getTime() < today.getTime()) return 'late';
+  if (eta.getTime() === today.getTime()) return 'today';
+  return 'upcoming';
+}
+
+function wdFormatDate(value) {
+  return value ? new Date(value).toLocaleDateString('en-GB') : '—';
+}
+
+async function runInboundDeliveriesOp() {
+  if (!await checkSession()) return;
+  showResultPanel('Inbound Deliveries', 'Mark inbound shipments as arrived and confirm quantities for SAP goods receipt');
+  try {
+    const res  = await fetch('/api/performance/order-suggestions/shipments');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load shipments');
+    wdInboundRows = json.data || [];
+    document.getElementById('result-row-badge').textContent = `${wdInboundRows.length} shipments`;
+    document.getElementById('result-row-badge').classList.remove('hidden');
+    wdRenderInboundDeliveries();
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function wdRenderInboundDeliveries() {
+  if (!wdInboundRows.length) {
+    document.getElementById('result-body').innerHTML = '<div class="sap-empty">No inbound shipments right now.</div>';
+    return;
+  }
+
+  const renderRow = s => `
+    <tr class="ps-row" data-id="${esc(String(s.ShipmentId))}">
+      <td><strong>${esc(s.ShipmentReference || `#${s.ShipmentId}`)}</strong></td>
+      <td>${s.IsManual ? `<span style="color:var(--text-secondary,#666)">Manual — ${esc(s.OriginName || 'no origin')}</span>` : esc(s.Suppliers || '-')}</td>
+      <td>${wdFormatDate(s.ExpectedEta)}</td>
+      <td>${s.OrderCount}</td>
+      <td>${s.CancelledAtUtc
+        ? `<span style="color:var(--text-secondary,#666)">Cancelled ${wdFormatDate(s.CancelledAtUtc)}</span>`
+        : (s.ReceivedAtUtc ? `Received ${wdFormatDate(s.ReceivedAtUtc)}` : '<span style="color:var(--text-secondary,#666)">Pending</span>')}</td>
+    </tr>`;
+
+  const sections = WD_IL_BUCKETS.map(bd => {
+    const bucketRows = wdInboundRows.filter(s => wdIlBucketFor(s) === bd.key)
+      .sort((a, b) => {
+        if (bd.key === 'cancelled') return new Date(b.CancelledAtUtc).getTime() - new Date(a.CancelledAtUtc).getTime();
+        if (bd.key === 'completed') return new Date(b.ReceivedAtUtc).getTime() - new Date(a.ReceivedAtUtc).getTime();
+        const ta = a.ExpectedEta ? new Date(a.ExpectedEta).getTime() : Infinity;
+        const tb = b.ExpectedEta ? new Date(b.ExpectedEta).getTime() : Infinity;
+        return ta - tb;
+      });
+    if (!bucketRows.length) return '';
+    const collapsed = (bd.key === 'completed' || bd.key === 'cancelled') ? ' ps-section--collapsed' : '';
+    return `<div class="ps-section${collapsed}" data-group-key="${bd.key}">
+      <div class="ps-section-header">
+        <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
+        <span class="ps-section-title">${bd.label}</span>
+        <span class="ps-section-count">${bucketRows.length}</span>
+        <span class="ps-chevron">v</span>
+      </div>
+      <div class="ps-section-body">
+        <div style="overflow-x:auto"><table class="ps-table">
+          <thead><tr><th>Reference</th><th>Supplier</th><th>ETA</th><th>Orders</th><th>Status</th></tr></thead>
+          <tbody>${bucketRows.map(renderRow).join('')}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `<div class="ps-sections">${sections}</div>`;
+
+  document.querySelectorAll('#result-body .ps-section-header').forEach(h => {
+    h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed'));
+  });
+  document.querySelectorAll('#result-body .ps-row').forEach(row => {
+    row.addEventListener('click', () => wdOpenInboundDetail(Number(row.dataset.id)));
+  });
+}
+
+async function wdOpenInboundDetail(shipmentId) {
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Loading…</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body" id="wd-isd-body"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
+    <div class="ps-modal-actions" id="wd-isd-actions"></div>
+  </div>`;
+  await wdRefreshInboundDetail(shipmentId);
+}
+
+async function wdRefreshInboundDetail(shipmentId) {
+  const body    = document.getElementById('wd-isd-body');
+  const actions = document.getElementById('wd-isd-actions');
+  if (!body) return;
+  try {
+    const res  = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load shipment');
+    const s = json.data;
+
+    document.querySelector('#ps-modal-overlay .ps-modal-title').textContent = s.ShipmentReference || `Shipment #${s.ShipmentId}`;
+
+    const canReceive = !s.CancelledAtUtc && !s.ReceivedAtUtc;
+
+    const ordersRows = s.orders.map(o => {
+      const isCancelled = o.Status === 'Cancelled';
+      const receivedUnit = o.OrderMoqUom || o.Uom || 'KG';
+      const qtyReceivedCell = canReceive
+        ? (isCancelled
+          ? '<span style="color:var(--text-secondary,#666)">—</span>'
+          : `<input class="tf-input wd-received-qty" type="number" step="0.001" min="0"
+                    data-suggestion-id="${o.SuggestionId}" data-material="${esc(o.Material)}"
+                    value="${wdKgToOrderUnit(Number(o.OrderQty), receivedUnit)}" style="width:90px">
+             <span style="font-size:11px;color:var(--text-secondary,#666)">${esc(receivedUnit)}</span>`)
+        : (o.ReceivedQty != null
+            ? `${wdKgToOrderUnit(Number(o.ReceivedQty), receivedUnit).toLocaleString()} ${esc(receivedUnit)}`
+            : '-');
+
+      const supplierRefCell = (canReceive && !isCancelled)
+        ? (o.SupplierReference
+          ? esc(o.SupplierReference)
+          : `<input class="tf-input wd-supplier-ref" type="text"
+                    data-suggestion-id="${o.SuggestionId}" data-material="${esc(o.Material)}"
+                    placeholder="Enter paperwork ref" style="width:110px">`)
+        : esc(o.SupplierReference || '-');
+
+      const sapGrCell = canReceive ? '' : `<td>${
+        isCancelled ? '<span style="color:var(--text-secondary,#666)">—</span>'
+        : o.SapMaterialDocument ? `<span title="Material document">✓ ${esc(o.SapMaterialDocument)}</span>`
+        : (o.SapGrSkipped && o.SapGrError) ? `<span class="sap-error">Not posted</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
+        : o.SapGrError ? `<span class="sap-error">Failed</span><div style="font-size:11px;color:var(--error,#DC2626)">${esc(o.SapGrError)}</div>`
+        : '-'
+      }</td>`;
+
+      return `
+      <tr class="admin-row">
+        <td><strong>${esc(o.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(o.MaterialText || '')}</div></td>
+        <td>${esc(o.VendorName)}</td>
+        <td>${Number(o.OrderQty).toLocaleString()} ${esc(o.Uom || 'KG')}</td>
+        <td>${qtyReceivedCell}</td>
+        <td>${esc(o.PoNumber || '-')}</td>
+        <td>${supplierRefCell}</td>
+        ${sapGrCell}
+      </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Supplier</label><div>${s.IsManual ? `Manual — ${esc(s.OriginName || '—')}` : esc(s.Suppliers || '—')}</div></div>
+        <div class="tf-field"><label class="tf-label">Expected ETA</label><div>${wdFormatDate(s.ExpectedEta)}</div></div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">Tracking Number</label><div>${esc(s.TrackingNumber || '—')}</div></div>
+        <div class="tf-field"><label class="tf-label">Status</label><div>${
+          s.CancelledAtUtc ? `Cancelled ${wdFormatDate(s.CancelledAtUtc)}`
+          : s.ReceivedAtUtc ? `Received ${wdFormatDate(s.ReceivedAtUtc)}`
+          : 'Not yet received'
+        }</div></div>
+      </div>
+      <div id="wd-isd-result"></div>
+      ${s.orders.length ? `
+      <div class="tf-section-label">Order Lines</div>
+      ${canReceive ? '<div class="toolbar-hint">Qty Received defaults to what was ordered — adjust any line to confirm a short or over delivery. Only the confirmed quantity is posted as goods receipt in SAP.</div>' : ''}
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Material</th><th>Vendor</th><th>Qty Ordered</th><th>Qty Received</th><th>PO Number</th><th>Supplier Ref</th>${canReceive ? '' : '<th>SAP GR</th>'}</tr></thead>
+          <tbody>${ordersRows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No order lines on this shipment.</div>'}`;
+
+    actions.innerHTML = canReceive
+      ? '<button type="button" class="btn-submit" id="wd-isd-receive-btn">Mark Arrived — Post to SAP</button>'
+      : '';
+
+    if (canReceive) {
+      document.getElementById('wd-isd-receive-btn').addEventListener('click', () => wdMarkInboundReceived(shipmentId, s));
+    }
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+async function wdMarkInboundReceived(shipmentId, shipment) {
+  const orderCount = shipment.orders?.length || 0;
+  const result = document.getElementById('wd-isd-result');
+
+  const receivedQuantities = {};
+  for (const input of document.querySelectorAll('.wd-received-qty')) {
+    const suggestionId = input.dataset.suggestionId;
+    const qty = Number(input.value);
+    if (input.value.trim() === '' || !Number.isFinite(qty) || qty < 0) {
+      if (result) result.innerHTML = `<div class="sap-error">Enter a valid received quantity for ${esc(input.dataset.material || 'every order line')}.</div>`;
+      return;
+    }
+    receivedQuantities[suggestionId] = qty;
+  }
+
+  const supplierReferences = {};
+  for (const input of document.querySelectorAll('.wd-supplier-ref')) {
+    const suggestionId = input.dataset.suggestionId;
+    const ref = input.value.trim();
+    if (!ref) {
+      if (result) result.innerHTML = `<div class="sap-error">Enter the supplier's delivery paperwork reference for ${esc(input.dataset.material || 'every order line')}.</div>`;
+      return;
+    }
+    supplierReferences[suggestionId] = ref;
+  }
+
+  if (!(await wConfirm({
+    title: 'Mark Arrived',
+    message: `Mark ${shipment.ShipmentReference || 'this shipment'} arrived? ${orderCount} order line${orderCount === 1 ? '' : 's'} will be posted as goods receipt in SAP using the confirmed quantities.`,
+    confirmText: 'Mark Arrived',
+  }))) return;
+
+  const btn = document.getElementById('wd-isd-receive-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Marking…'; }
+  try {
+    const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/receive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ receivedQuantities, supplierReferences, skipSap: false }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to mark shipment received');
+    await wdRefreshInboundDetail(shipmentId);
+    runInboundDeliveriesOp();
+
+    const sapResults = json.data?.sapResults || [];
+    const noPo    = sapResults.filter(r => r.skipped && r.noPo);
+    const zeroQty = sapResults.filter(r => r.skipped && r.zeroQty);
+    const failed  = sapResults.filter(r => r.success === false && !r.skipped);
+    const newResult = document.getElementById('wd-isd-result');
+    if (newResult && (noPo.length || zeroQty.length || failed.length)) {
+      const parts = [];
+      if (noPo.length) parts.push(`<div class="sap-error">${noPo.length} order line${noPo.length === 1 ? '' : 's'} had no SAP PO number/item on file — nothing was posted. Ask Logistics to fix the PO before this can go through.</div>`);
+      if (zeroQty.length) parts.push(`<div class="toolbar-hint">${zeroQty.length} order line${zeroQty.length === 1 ? '' : 's'} confirmed at 0 received — nothing was posted to SAP for ${zeroQty.length === 1 ? 'it' : 'them'}.</div>`);
+      if (failed.length) parts.push(`<div class="sap-error">${failed.length} order line${failed.length === 1 ? '' : 's'} failed to post to SAP — see the SAP GR column for details.</div>`);
+      newResult.innerHTML = parts.join('');
+    }
+  } catch (err) {
+    if (result) result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Mark Arrived — Post to SAP'; }
+  }
+}
+
+// ── Outbound Deliveries (operator-friendly Awaiting Collection) ───────────────
+// Warehouse-side view of Logistics' Awaiting Collection tile (see
+// routes/shipmentmain.js's GET /queue/awaiting-collection, POST
+// /mark-collected-bulk — gated requireAnyPermission(['LOG_PLANNING',
+// 'WAREHOUSE_OP'])). Same grouped-by-haulier bucket layout, but the only
+// action offered is Mark Collected — no date changes, loading lists or
+// unbooking, which stay planner-only in Logistics.
+let wdCollectionRows = [];
+let wdSelectedCollectionIds = new Set();
+
+async function runOutboundDeliveriesOp() {
+  if (!await checkSession()) return;
+  showResultPanel('Outbound Deliveries', 'Confirm shipments as collected when the driver leaves site');
+  try {
+    const res  = await fetch('/api/shipmentmain/queue/awaiting-collection');
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load shipments');
+    wdCollectionRows = json.data || [];
+    wdSelectedCollectionIds = new Set();
+    const badge = document.getElementById('result-row-badge');
+    badge.textContent = `${wdCollectionRows.length} open`;
+    badge.classList.remove('hidden');
+    if (!wdCollectionRows.length) {
+      document.getElementById('result-body').innerHTML = '<div class="sap-empty">No shipments are currently awaiting collection.</div>';
+      return;
+    }
+    wdRenderOutboundDeliveries();
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function wdRenderOutboundDeliveries() {
+  const grouped = wdCollectionRows.reduce((acc, row) => {
+    const key = row.forwarderName || 'Unassigned';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(row);
+    return acc;
+  }, {});
+
+  const sections = Object.keys(grouped).sort((a, b) => a.localeCompare(b)).map(name => {
+    const rows = grouped[name].slice().sort((a, b) => {
+      const aD = new Date(a.plannedCollection || 0).getTime();
+      const bD = new Date(b.plannedCollection || 0).getTime();
+      return aD - bD || Number(a.shipmentID || 0) - Number(b.shipmentID || 0);
+    }).map(row => {
+      const ref = String(row.shipmentID || '').padStart(8, '0');
+      return `<tr class="ps-row wd-collection-row" data-id="${esc(String(row.shipmentID))}">
+        <td class="lg-check-cell"><input type="checkbox" class="wd-collection-check" data-id="${esc(String(row.shipmentID))}"></td>
+        <td>${esc(ref)}</td>
+        <td>${wdFormatDate(row.plannedCollection)}</td>
+        <td>${esc(row.trackingNumber || '')}</td>
+        <td>${esc(row.destinationName || '—')}</td>
+      </tr>`;
+    }).join('');
+
+    return `<div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">${esc(name)}</span><span class="ps-section-count">${grouped[name].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Collection</th><th>Tracking</th><th>Destination</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    <div class="lg-actions">
+      <div><div class="lg-selection-title">Awaiting Collection</div>
+      <div class="toolbar-hint" id="wd-collection-hint">Tick shipments as they're loaded, then Mark Collected.</div></div>
+      <div class="toolbar-spacer"></div>
+      <button class="btn-secondary" id="wd-col-clear-btn" disabled>Clear</button>
+      <button class="btn-submit"    id="wd-col-collect-btn" disabled>Mark Collected</button>
+    </div>
+    <div id="wd-collection-msg" class="lg-selection-msg hidden"></div>
+    <div class="ps-sections">${sections}</div>`;
+
+  document.querySelectorAll('#result-body .ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
+  document.querySelectorAll('.wd-collection-check').forEach(cb => cb.addEventListener('change', wdOnCollectionToggle));
+  document.getElementById('wd-col-clear-btn').addEventListener('click', wdClearCollectionSelection);
+  document.getElementById('wd-col-collect-btn').addEventListener('click', wdMarkCollectedBulk);
+}
+
+function wdOnCollectionToggle(e) {
+  const id = Number(e.target.dataset.id);
+  if (e.target.checked) wdSelectedCollectionIds.add(id); else wdSelectedCollectionIds.delete(id);
+  wdUpdateCollectionUI();
+}
+
+function wdClearCollectionSelection() {
+  wdSelectedCollectionIds = new Set();
+  document.querySelectorAll('.wd-collection-check').forEach(cb => { cb.checked = false; });
+  wdUpdateCollectionUI();
+}
+
+function wdUpdateCollectionUI() {
+  const count = wdSelectedCollectionIds.size;
+  const hint  = document.getElementById('wd-collection-hint');
+  const msg   = document.getElementById('wd-collection-msg');
+  if (hint) hint.textContent = count ? `${count} shipment(s) selected.` : "Tick shipments as they're loaded, then Mark Collected.";
+  if (msg && !count) msg.classList.add('hidden');
+  document.getElementById('wd-col-clear-btn')?.toggleAttribute('disabled', count === 0);
+  document.getElementById('wd-col-collect-btn')?.toggleAttribute('disabled', count === 0);
+}
+
+function wdShowCollectionMsg(text, isError = true) {
+  const msg = document.getElementById('wd-collection-msg');
+  if (!msg) return;
+  msg.textContent = text;
+  msg.className = `lg-selection-msg${isError ? '' : ' lg-selection-msg--success'}`;
+  msg.classList.remove('hidden');
+}
+
+function wdMarkCollectedBulk() {
+  const rows = wdCollectionRows.filter(r => wdSelectedCollectionIds.has(Number(r.shipmentID)));
+  if (!rows.length) return;
+
+  const mixed = new Set(rows.map(r => String(r.forwarderID || r.forwarderName || 'unassigned'))).size > 1;
+  const now = new Date().toLocaleString('en-GB');
+
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Mark as Collected</div>
+      <div class="ps-modal-sub">${rows.length} shipment(s)${mixed ? ' — <span style="color:#b45309">multiple hauliers selected</span>' : ''}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      ${mixed ? `<div class="lg-selection-msg lg-selection-msg--warning" style="margin-bottom:16px">These shipments are assigned to different hauliers. Please confirm they're being collected together on the same vehicle.</div>` : ''}
+      <div class="transfer-form">
+        <div class="tf-row">
+          <div class="tf-field"><label class="tf-label">Operator Name</label><input class="tf-input" id="wd-cl-operator" type="text" placeholder="e.g. Jim Smith" value="${esc(sessionUsername)}"></div>
+          <div class="tf-field"><label class="tf-label">Driver Name</label><input class="tf-input" id="wd-cl-driver" type="text" placeholder="e.g. Dave Jones"></div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field"><label class="tf-label">Vehicle Registration</label><input class="tf-input" id="wd-cl-reg" type="text" placeholder="e.g. AB12 CDE"></div>
+          <div class="tf-field"><label class="tf-label">Trailer Number</label><input class="tf-input" id="wd-cl-trailer" type="text" placeholder="e.g. TRL-456"></div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide"><label class="tf-label">Timestamp (auto)</label><input class="tf-input" value="${esc(now)}" readonly></div>
+        </div>
+        <div id="wd-cl-result" style="margin-top:8px;font-size:13px;color:var(--error)"></div>
+      </div>
+    </div>
+    <div class="ps-modal-actions">
+      <button class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button class="btn-submit" id="wd-cl-submit-btn">${mixed ? 'Confirm (Mixed Hauliers)' : 'Confirm'}</button>
+    </div>
+  </div>`;
+
+  document.getElementById('wd-cl-submit-btn').addEventListener('click', () => wdSubmitMarkCollected(rows, mixed));
+}
+
+async function wdSubmitMarkCollected(rows, mixed) {
+  const operator = document.getElementById('wd-cl-operator').value.trim();
+  const driver   = document.getElementById('wd-cl-driver').value.trim();
+  const reg      = document.getElementById('wd-cl-reg').value.trim();
+  const trailer  = document.getElementById('wd-cl-trailer').value.trim();
+  const result   = document.getElementById('wd-cl-result');
+  const btn      = document.getElementById('wd-cl-submit-btn');
+
+  if (!operator) { result.textContent = 'Operator name is required.'; return; }
+
+  const description = [
+    mixed ? 'mixed hauliers confirmed' : null,
+    `operator=${operator}`,
+    driver  ? `driver=${driver}`   : null,
+    reg     ? `reg=${reg}`         : null,
+    trailer ? `trailer=${trailer}` : null,
+  ].filter(Boolean).join(' | ');
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+
+  try {
+    const res = await fetch('/api/shipmentmain/mark-collected-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shipmentIDs: rows.map(r => r.shipmentID), description }),
+    });
+    const json = await res.json();
+    if (!json.success && !json.data?.completed?.length) throw new Error(json.error || 'Failed to mark as collected');
+    const { completed = [], failed = [] } = json.data || {};
+    closePickModal();
+    wdShowCollectionMsg(
+      [completed.length ? `${completed.length} shipment(s) marked as collected.` : '',
+       failed.length    ? `${failed.length} failed: ${failed.map(f => f.error).join('; ')}` : ''].filter(Boolean).join(' '),
+      failed.length === 0
+    );
+    await runOutboundDeliveriesOp();
+  } catch (err) {
+    result.textContent = err.message;
+    btn.disabled = false; btn.textContent = mixed ? 'Confirm (Mixed Hauliers)' : 'Confirm';
   }
 }
 

@@ -4135,7 +4135,12 @@ router.delete('/order-suggestions/:suggestionId', requirePermission('LOG_MRP'), 
 // transport / tracking numbers for orders that travel via a haulier;
 // SupplierReference above for vendors who deliver themselves) — see
 // sql/migrate_order_shipments.sql for the full reasoning.
-router.get('/order-suggestions/shipments', requirePermission('LOG_MRP'), async (req, res) => {
+// Also reachable by WAREHOUSE_OP — Warehouse's own Inbound Deliveries tile
+// (private/js/warehouse.js's runInboundDeliveriesOp) reads this same list to
+// show operators the same bucket layout Logistics sees, but its detail view
+// only exposes Mark Arrived/confirm-quantity — everything else stays
+// LOG_MRP-only below.
+router.get('/order-suggestions/shipments', requireAnyPermission(['LOG_MRP', 'WAREHOUSE_OP']), async (req, res) => {
   try {
     const data = await db.listOrderShipments();
     res.json({ success: true, data });
@@ -4216,8 +4221,9 @@ router.post('/order-suggestions/shipments/manual', requirePermission('LOG_MRP'),
 });
 
 // Inbound Log's shipment detail view — header fields plus every linked
-// order line.
-router.get('/order-suggestions/shipments/:shipmentId', requirePermission('LOG_MRP'), async (req, res) => {
+// order line. Also reachable by WAREHOUSE_OP (see the list route above) —
+// Warehouse's own detail modal renders a subset of this same payload.
+router.get('/order-suggestions/shipments/:shipmentId', requireAnyPermission(['LOG_MRP', 'WAREHOUSE_OP']), async (req, res) => {
   try {
     const data = await db.getOrderShipmentWithOrders(req.params.shipmentId);
     if (!data) return res.status(404).json({ success: false, error: { message: 'Shipment not found.' } });
@@ -4408,7 +4414,13 @@ async function postGoodsReceiptToSap(order, shipment, callerUserId) {
 // bypasses every SAP call for this receive, recording every line as skipped
 // instead of attempted, so nothing books into SAP before the operator is
 // ready.
-router.post('/order-suggestions/shipments/:shipmentId/receive', requirePermission('LOG_MRP'), async (req, res) => {
+//
+// Also reachable by WAREHOUSE_OP — this is the actual "GR feature" a
+// warehouse operator uses (private/js/warehouse.js's wdMarkInboundReceived)
+// to mark a shipment arrived and post its goods receipt; skipSap is always
+// sent false from that side, since the "skip SAP" testing bypass stays
+// planner-only.
+router.post('/order-suggestions/shipments/:shipmentId/receive', requireAnyPermission(['LOG_MRP', 'WAREHOUSE_OP']), async (req, res) => {
   try {
     const receivedBy = req.session?.user?.username || 'unknown';
     const callerUserId = req.session?.user?.userID;
