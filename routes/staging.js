@@ -175,6 +175,32 @@ function clampToStoresWindow(date) {
   return nextStoresOpen(date);
 }
 
+// Closing instant of the most recent working day at/before `date`.
+function previousStoresClose(date) {
+  const d = atLocalTime(date, STORES_CLOSE);
+  if (d > date) d.setDate(d.getDate() - 1);
+  while (!isStoresWorkingDay(d)) d.setDate(d.getDate() - 1);
+  return d;
+}
+
+// A user can pick any Needed By date/time, including one outside Stores'
+// working window — the lead-time check alone doesn't catch that (a request
+// raised with plenty of notice can still name a delivery time nobody's
+// there to see, e.g. 8pm). Snap it to the nearest usable instant instead of
+// just rejecting: if it's within the minimum lead time of the *previous*
+// close, assume "as soon as possible today" and pull it back to that
+// close; otherwise push it forward to the next working day's open.
+function snapToStoresWindow(date) {
+  if (isStoresWorkingDay(date)) {
+    const open = atLocalTime(date, STORES_OPEN);
+    const close = atLocalTime(date, STORES_CLOSE);
+    if (date >= open && date < close) return new Date(date);
+  }
+  const prevClose = previousStoresClose(date);
+  if (date - prevClose <= NEEDED_BY_MIN_LEAD_HOURS * 60 * 60 * 1000) return prevClose;
+  return nextStoresOpen(date);
+}
+
 // Adds `hours` of Stores working time to `fromDate`, rolling any time past
 // 17:00 over to the next working day's 05:45 (weekends skipped).
 function addStoresLeadTime(fromDate, hours) {
@@ -299,7 +325,11 @@ router.post('/requests', async (req, res) => {
     if (!dueAtUtc) {
       return res.status(400).json({ success: false, error: { message: 'dueAtUtc (Needed By) is required.' } });
     }
-    const due = new Date(dueAtUtc);
+    // Snap first, then check lead time against the *snapped* value — a raw
+    // out-of-hours pick (e.g. 8pm) must not sail through the lead-time
+    // check on its own distance from "now"; only the actual usable Stores
+    // instant it resolves to counts.
+    const due = snapToStoresWindow(new Date(dueAtUtc));
     const minDue = new Date(
       addStoresLeadTime(new Date(), NEEDED_BY_MIN_LEAD_HOURS).getTime() - NEEDED_BY_GRACE_MINUTES * 60 * 1000
     );
@@ -336,7 +366,9 @@ router.post('/requests', async (req, res) => {
       console.error('[staging notify]', notifyErr.message);
     }
 
-    res.json({ success: true, data: { requestId } });
+    // dueAtUtc echoed back so the requester can see if their pick got
+    // snapped into Stores' working window (e.g. an 8pm pick becoming 17:00).
+    res.json({ success: true, data: { requestId, dueAtUtc: due.toISOString() } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
