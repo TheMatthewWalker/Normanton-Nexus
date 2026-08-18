@@ -10892,7 +10892,7 @@ async function saveSelectedTrackedOrders() {
   runOrderSuggestionsTracked(true);
 }
 
-const OS_TRANSPORT_MODES = ['Road', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
+const OS_TRANSPORT_MODES = ['Road', 'Groupage', 'Sea', 'Air', 'Rail', 'Courier', 'Other'];
 
 // Populates a <select id="selectId"> with approved forwarders (forwarderID
 // as the value — it doubles as the SAP vendor code, see routes/forwarders.js
