@@ -52,20 +52,68 @@ describe('GET /trends', () => {
 
 describe('POST /forecast/percentage', () => {
   test('applies the percentage against the baseline year only, ignoring other years', async () => {
+    // 2020 — always a closed, past year no matter when this test runs — so this exercises the
+    // non-annualised path deterministically without needing to mock the system clock.
     dbRequest.query.mockResolvedValueOnce({
       recordset: [
-        { Material: '30005R', MaterialText: 'Widget', FiscalYear: 2025, ConsumedQty: 1000 },
-        { Material: '30005R', MaterialText: 'Widget', FiscalYear: 2024, ConsumedQty: 999999 }, // wrong year — must be excluded
+        { Material: '30005R', MaterialText: 'Widget', FiscalYear: 2020, ConsumedQty: 1000 },
+        { Material: '30005R', MaterialText: 'Widget', FiscalYear: 2019, ConsumedQty: 999999 }, // wrong year — must be excluded
       ],
     });
 
     const res = await request(app)
       .post('/forecast/percentage')
-      .send({ baselineYear: 2025, percentageChange: 10 });
+      .send({ baselineYear: 2020, percentageChange: 10 });
 
     expect(res.status).toBe(200);
+    expect(res.body.data.isPartialYearBaseline).toBe(false);
     expect(res.body.data.materials).toEqual([
-      { material: '30005R', materialText: 'Widget', predictedQty: 1100, uom: null },
+      { material: '30005R', materialText: 'Widget', actualQty: 1000, annualisedQty: null, predictedQty: 1100, uom: null },
+    ]);
+  });
+
+  // Choosing the current, still-in-progress calendar year as the baseline must not let a
+  // partial year's consumption-to-date be read as if it were the whole year's — see
+  // applyPercentage's own comment in routes/mrpanalysis.js for why. Uses the real current date
+  // (no clock mocking) so this only proves the annualisation actually ran, not a fixed
+  // expected number — the elapsed-fraction arithmetic itself is exercised precisely by
+  // asserting predictedQty is strictly greater than a naive (unannualised) 10% uplift would
+  // give, which only holds if annualisation actually happened (unless run on Dec 31st UTC).
+  test('annualises a partial current-year baseline to a full-year run rate before applying the percentage', async () => {
+    const thisYear = new Date().getUTCFullYear();
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [{ Material: '30005R', MaterialText: 'Widget', FiscalYear: thisYear, ConsumedQty: 1000 }],
+    });
+
+    const res = await request(app)
+      .post('/forecast/percentage')
+      .send({ baselineYear: thisYear, percentageChange: 10 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.isPartialYearBaseline).toBe(true);
+    const [material] = res.body.data.materials;
+    expect(material.actualQty).toBe(1000);
+    expect(material.annualisedQty).toBeGreaterThanOrEqual(1000);
+    expect(material.predictedQty).toBeGreaterThanOrEqual(1100); // naive (unannualised) +10% would be exactly 1100
+    expect(material.predictedQty).toBeCloseTo(material.annualisedQty * 1.1, 2);
+  });
+
+  test('does not annualise a past baseline year even when other years in the same response are the current year', async () => {
+    const thisYear = new Date().getUTCFullYear();
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [
+        { Material: '30005R', MaterialText: 'Widget', FiscalYear: 2020, ConsumedQty: 1000 },
+        { Material: '30005R', MaterialText: 'Widget', FiscalYear: thisYear, ConsumedQty: 1 }, // present but must be ignored
+      ],
+    });
+
+    const res = await request(app)
+      .post('/forecast/percentage')
+      .send({ baselineYear: 2020, percentageChange: 10 });
+
+    expect(res.body.data.isPartialYearBaseline).toBe(false);
+    expect(res.body.data.materials).toEqual([
+      { material: '30005R', materialText: 'Widget', actualQty: 1000, annualisedQty: null, predictedQty: 1100, uom: null },
     ]);
   });
 

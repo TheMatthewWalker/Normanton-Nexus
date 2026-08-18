@@ -80,20 +80,63 @@ router.get('/refresh-status', requirePermission('LOG_MRP'), async (req, res) => 
 // ── Forecast — Percentage method ────────────────────────────────────────────
 // Predicted qty = the material's ConsumedQty for baselineYear, extrapolated by
 // percentageChange% — "using the percentage increase against the previous/current year's
-// usage" per the user's own description of the feature. Preview only reads
-// MaterialConsumptionHistory; save writes the snapshot the preview already showed the
-// operator, not a fresh recompute (so what gets saved is exactly what was reviewed).
+// usage" per the user's own description of the feature. When baselineYear is the current,
+// still-in-progress calendar year, ConsumedQty is only a year-to-date total — annualisationFactor/
+// applyPercentage below annualise it to a full-year run rate first, so choosing this year as
+// the baseline doesn't understate the prediction just because the year isn't finished yet.
+// Preview only reads MaterialConsumptionHistory; save writes the snapshot the preview already
+// showed the operator, not a fresh recompute (so what gets saved is exactly what was reviewed).
 
-function applyPercentage(consumptionRows, baselineYear, percentageChange) {
+function daysInYear(year) {
+  return ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0) ? 366 : 365;
+}
+
+// 1 on Jan 1st, 365/366 on Dec 31st.
+function dayOfYear(date) {
+  const start = Date.UTC(date.getUTCFullYear(), 0, 1);
+  const today = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  return Math.floor((today - start) / 86400000) + 1;
+}
+
+// log.MaterialConsumptionHistory.ConsumedQty for the CURRENT (still in progress) calendar
+// year is a year-to-date total, not a full year's — see runMrpHistoryRefresh/
+// SapServer.PerformanceHelpers.ParseConsumptionHistoryByYear, which sums MVER's GSV01..GSV12
+// for whichever months have actually posted so far, nothing more. Applying "+X%" straight to
+// that partial total would badly understate the following year's requirement (e.g. 8 months
+// of data read as if it were the whole year). Only the current calendar year needs this —
+// any other baseline year is already a complete, closed total. Guards the elapsed-days
+// denominator at a minimum of 1 day so Jan 1st doesn't divide by zero / blow up the estimate.
+//
+// This assumes SAP's fiscal year (GJAHR, what FiscalYear actually is) lines up with the
+// calendar year on this system — same caveat ParseConsumptionHistoryByYear's own comment
+// already carries; there's no fiscal-year-start configured anywhere to do this properly if
+// that's ever not true.
+function annualisationFactor(baselineYear, now = new Date()) {
+  if (Number(baselineYear) !== now.getUTCFullYear()) return 1;
+  return daysInYear(now.getUTCFullYear()) / Math.max(dayOfYear(now), 1);
+}
+
+function applyPercentage(consumptionRows, baselineYear, percentageChange, now = new Date()) {
   const factor = 1 + (Number(percentageChange) || 0) / 100;
-  return consumptionRows
+  const annualise = annualisationFactor(baselineYear, now);
+  const isPartialYearBaseline = annualise !== 1;
+
+  const materials = consumptionRows
     .filter(r => r.FiscalYear === Number(baselineYear))
-    .map(r => ({
-      material:     r.Material,
-      materialText: r.MaterialText,
-      predictedQty: Math.round(Number(r.ConsumedQty) * factor * 1000) / 1000,
-      uom:          null,
-    }));
+    .map(r => {
+      const actualQty = Number(r.ConsumedQty);
+      const annualisedQty = actualQty * annualise;
+      return {
+        material:      r.Material,
+        materialText:  r.MaterialText,
+        actualQty:     Math.round(actualQty * 1000) / 1000,
+        annualisedQty: isPartialYearBaseline ? Math.round(annualisedQty * 1000) / 1000 : null,
+        predictedQty:  Math.round(annualisedQty * factor * 1000) / 1000,
+        uom:           null,
+      };
+    });
+
+  return { materials, isPartialYearBaseline };
 }
 
 router.post('/forecast/percentage', requirePermission('LOG_MRP'), async (req, res) => {
@@ -105,9 +148,12 @@ router.post('/forecast/percentage', requirePermission('LOG_MRP'), async (req, re
     }
 
     const consumptionRows = await db.getConsumptionByYear(materials || null);
-    const predicted = applyPercentage(consumptionRows, baselineYear, percentageChange);
+    const { materials: predicted, isPartialYearBaseline } = applyPercentage(consumptionRows, baselineYear, percentageChange);
 
-    res.json({ success: true, data: { baselineYear: Number(baselineYear), percentageChange: Number(percentageChange), materials: predicted } });
+    res.json({
+      success: true,
+      data: { baselineYear: Number(baselineYear), percentageChange: Number(percentageChange), isPartialYearBaseline, materials: predicted },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }

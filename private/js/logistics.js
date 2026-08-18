@@ -12400,15 +12400,20 @@ async function mrpPreviewPercentage() {
     }
 
     mrpPctPreviewData = { targetYear, baselineYear, percentageChange, materials: json.data.materials };
+    const partial = json.data.isPartialYearBaseline;
 
     resultEl.innerHTML = `
+      ${partial ? `<div class="toolbar-hint">${baselineYear} isn't finished yet, so its consumption-to-date has been annualised to a full-year run rate first (Actual YTD ÷ fraction of the year elapsed) before applying the % change — that's what "Annualised" below shows.</div>` : ''}
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>Material</th><th>Predicted Qty for ${targetYear}</th></tr></thead>
+          <thead><tr><th>Material</th>${partial ? `<th>Actual YTD (${baselineYear})</th><th>Annualised (${baselineYear})</th>` : `<th>Actual (${baselineYear})</th>`}<th>Predicted Qty for ${targetYear}</th></tr></thead>
           <tbody>
             ${json.data.materials.map(m => `
               <tr class="admin-row">
                 <td><strong>${esc(m.material)}</strong>${m.materialText ? `<div style="font-size:11px;color:var(--text-secondary,#666)">${esc(m.materialText)}</div>` : ''}</td>
+                ${partial
+                  ? `<td>${Number(m.actualQty).toLocaleString()}</td><td>${Number(m.annualisedQty).toLocaleString()}</td>`
+                  : `<td>${Number(m.actualQty).toLocaleString()}</td>`}
                 <td>${Number(m.predictedQty).toLocaleString()}</td>
               </tr>`).join('')}
           </tbody>
