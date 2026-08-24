@@ -3229,36 +3229,19 @@ function renderShipmentDetailModal(shipment, deliveries) {
 
   const plannedRaw = shipment.plannedCollection || shipment.plannedDelivery;
   const plannedStr = plannedRaw ? new Date(plannedRaw).toLocaleDateString('en-GB') : '—';
+  const canBook = canEdit && !shipment.bookingStatus && !shipment.shipmentCancelled;
 
   document.querySelector('#ps-modal-overlay').innerHTML = `<div class="ps-modal">
     <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Shipment ${esc(shipmentRef)}</div><div class="ps-modal-sub">${esc(shipment.destinationName || '')} — ${esc(shipment.incoTerms || '')}</div></div>
+      <div><div class="ps-modal-title">Shipment ${esc(shipmentRef)}</div><div class="ps-modal-sub">${esc(shipment.destinationName || '')} — ${esc(shipment.incoTerms || '')} — Planned ${esc(plannedStr)}</div></div>
       <button class="ps-modal-close" onclick="closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
       <div class="sd-grid">
-        <div class="sd-section">
-          <div class="sd-section-title">Details</div>
-          <table style="font-size:13px;width:100%;border-collapse:collapse">
-            <tr><td style="padding:4px 0;color:var(--text-muted);width:110px">Destination</td><td>${esc(shipment.destinationName || '—')}</td></tr>
-            <tr><td style="padding:4px 0;color:var(--text-muted)">Planned Date</td><td>${esc(plannedStr)}</td></tr>
-            <tr><td style="padding:4px 0;color:var(--text-muted)">Incoterms</td><td>${esc(shipment.incoTerms || '—')}</td></tr>
-            <tr><td style="padding:4px 0;color:var(--text-muted)">Gross Weight</td><td>${esc(String(shipment.grossWeight ?? '—'))} kg</td></tr>
-            <tr><td style="padding:4px 0;color:var(--text-muted)">Net Weight</td><td>${esc(String(shipment.netWeight ?? '—'))} kg</td></tr>
-            <tr><td style="padding:4px 0;color:var(--text-muted)">Pallets</td><td>${esc(String(shipment.palletCount ?? '—'))}</td></tr>
-          </table>
-        </div>
-        <div class="sd-section">
-          <div class="sd-section-title">Customs</div>
-          <div class="sd-customs-row">
-            <span class="sd-badge ${esc(badgeClass)}">${esc(badgeText)}</span>
-            ${toggleHtml}
-            <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
-          </div>
-          ${shipment.customsID ? `<div style="margin-top:8px;font-size:12px;color:var(--text-muted)">ID: ${esc(String(shipment.customsID))}</div>` : ''}
-        </div>
+        ${renderShipmentContactCard(shipment)}
+        ${renderShipmentPackagingCard(shipment)}
       </div>
-      <div class="sd-grid" style="margin-bottom:16px">
+      <div class="sd-grid sd-grid--3col">
         <div class="sd-section">
           <div class="sd-section-title">Haulier</div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
@@ -3276,7 +3259,16 @@ function renderShipmentDetailModal(shipment, deliveries) {
             ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
             <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
           </div>
-        </div>` : ''}
+        </div>` : '<div class="sd-section"></div>'}
+        <div class="sd-section">
+          <div class="sd-section-title">Customs</div>
+          <div class="sd-customs-row">
+            <span class="sd-badge ${esc(badgeClass)}">${esc(badgeText)}</span>
+            ${toggleHtml}
+            <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
+          </div>
+          ${shipment.customsID ? `<div style="margin-top:8px;font-size:12px;color:var(--text-muted)">ID: ${esc(String(shipment.customsID))}</div>` : ''}
+        </div>
       </div>
       <div class="sd-section" style="margin-bottom:16px">
         <div class="sd-section-title">Associated Costs</div>
@@ -3288,11 +3280,17 @@ function renderShipmentDetailModal(shipment, deliveries) {
     <div class="ps-modal-actions">
       <button class="btn-secondary" onclick="openShipmentEventLog(${shipment.shipmentID}, '${esc(shipmentRef)}')">Event Log</button>
       ${canEdit ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
+      ${canBook ? `<button class="btn-submit" id="sd-book-btn">Book</button>` : ''}
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
   </div>`;
 
   renderShipmentAssociatedCosts(shipment.shipmentID);
+  loadShipmentContactEmail(shipment);
+  loadShipmentPackagingList(shipment, deliveries);
+
+  const bookBtn = document.getElementById('sd-book-btn');
+  if (bookBtn) bookBtn.addEventListener('click', () => openBookSingleShipmentModal(shipment));
 
   // Load hauliers (edit UI only — canEdit gates the select/save row's existence)
   if (canEdit) loadApprovedForwarders().then(forwarders => {
@@ -3376,6 +3374,372 @@ function renderShipmentDetailModal(shipment, deliveries) {
   if (deliveriesBtn) deliveriesBtn.addEventListener('click', () => {
     openShipmentDeliveriesPanel(shipment.shipmentID, shipment, deliveries);
   });
+}
+
+
+// ── Customer contact card (Shipment Details modal) ──────────────────────────
+// Forwarders frequently ask for the consignee's email when booking — shown
+// here alongside the full delivery address so an operator doesn't have to
+// leave the modal to look either up. Address fields come straight off the
+// shipment record already fetched by openShipmentDetailModal; the email
+// address(es) are a separate fetch since they live per-destination
+// (log.Email, keyed by destinationID) and aren't part of ShipmentMain.
+function renderShipmentContactCard(shipment) {
+  const address = [shipment.destinationStreet, shipment.destinationCity, shipment.destinationPostCode, shipment.destinationCountry]
+    .filter(Boolean).join(', ') || '—';
+  return `<div class="sd-section">
+    <div class="sd-section-title">Customer</div>
+    <table class="sd-contact-table">
+      <tr><td>Delivery To</td><td>${esc(shipment.destinationName || '—')}</td></tr>
+      <tr><td>Address</td><td>${esc(address)}</td></tr>
+      <tr><td>Email</td><td class="sd-contact-email" id="sd-contact-email">Loading…</td></tr>
+    </table>
+  </div>`;
+}
+
+async function loadShipmentContactEmail(shipment) {
+  const el = document.getElementById('sd-contact-email');
+  if (!el) return;
+  if (!shipment.destinationID) { el.textContent = '—'; return; }
+  try {
+    const res = await fetch(`/api/destinations/${encodeURIComponent(shipment.destinationID)}/emails`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load email addresses');
+    const addresses = json.addresses || [];
+    el.textContent = addresses.length ? addresses.join(', ') : '—';
+  } catch (err) {
+    el.textContent = '—';
+  }
+}
+
+
+// ── Packaging card (Shipment Details modal) ─────────────────────────────────
+// Totals come straight off the shipment record (already fetched); the pallet
+// list itself needs a separate fetch per delivery, since pallets are linked
+// to a delivery (log.DeliveryLink) rather than directly to the shipment — a
+// shipment can bundle several deliveries. Manual shipments (no SAP
+// deliveries at all) list their ManualCargoItem lines instead.
+function renderShipmentPackagingCard(shipment) {
+  const gross  = shipment.grossWeight != null ? Number(shipment.grossWeight).toFixed(1) : '—';
+  const net    = shipment.netWeight   != null ? Number(shipment.netWeight).toFixed(1)   : '—';
+  const volume = shipment.shipmentVolume != null ? Number(shipment.shipmentVolume).toFixed(3) : '—';
+  return `<div class="sd-section">
+    <div class="sd-section-title">Packaging</div>
+    <div class="sd-pkg-totals">
+      <span>Net <strong>${esc(net)} kg</strong></span>
+      <span>Gross <strong>${esc(gross)} kg</strong></span>
+      <span>Volume <strong>${esc(volume)} m³</strong></span>
+      <span>Pallets <strong>${esc(String(shipment.palletCount ?? '—'))}</strong></span>
+    </div>
+    <div class="sd-pkg-list" id="sd-pkg-list"><div class="ps-pcard-empty">Loading…</div></div>
+  </div>`;
+}
+
+async function loadShipmentPackagingList(shipment, deliveries) {
+  const list = document.getElementById('sd-pkg-list');
+  if (!list) return;
+  try {
+    if (shipment.isManual) {
+      const res  = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/manual-cargo`);
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Failed to load cargo lines');
+      const lines = json.data || [];
+      if (!lines.length) { list.innerHTML = '<div class="ps-pcard-empty">No cargo lines recorded.</div>'; return; }
+      list.innerHTML = lines.map(c => {
+        const dims  = [c.Length, c.Width, c.Height].filter(Boolean).join('x');
+        const label = [c.PackageCount > 1 ? `${c.PackageCount}x` : null, c.Description].filter(Boolean).join(' ') || 'Cargo';
+        return `<div class="sd-pkg-item"><span>${esc(label)}</span><span>${dims ? `${esc(dims)}cm @ ` : ''}${esc(Number(c.Weight ?? 0).toFixed(1))} KG</span></div>`;
+      }).join('');
+      return;
+    }
+
+    if (!deliveries || !deliveries.length) { list.innerHTML = '<div class="ps-pcard-empty">No pallets linked to this shipment.</div>'; return; }
+    const results = await Promise.all(deliveries.map(async d => {
+      try {
+        const res  = await fetch(`/api/deliverymain/${encodeURIComponent(d.deliveryID)}/pallets`);
+        const json = await res.json();
+        return json.success ? (json.data || []) : [];
+      } catch (_) { return []; }
+    }));
+    const pallets = results.flat();
+    if (!pallets.length) { list.innerHTML = '<div class="ps-pcard-empty">No pallets linked to this shipment.</div>'; return; }
+    list.innerHTML = pallets.map(p => {
+      const dims = [p.palletLength, p.palletWidth, p.palletHeight].filter(Boolean).join('x');
+      const wt   = p.grossWeight != null ? Number(p.grossWeight).toFixed(1) : '—';
+      return `<div class="sd-pkg-item"><span>${esc(p.palletType || 'Pallet')}</span><span>${dims ? `${esc(dims)}cm @ ` : ''}${esc(wt)} KG</span></div>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="sap-error" style="padding:8px">${esc(err.message)}</div>`;
+  }
+}
+
+
+// ── Book (single shipment) — Shipment Details modal ─────────────────────────
+// A lighter-weight alternative to the multi-select Awaiting Booking modal
+// (openBookingModal) for booking one job at a time from its detail view.
+// Standard hauliers must already have a General Freight cost line recorded
+// (via "+ Add Cost" under Associated Costs, above) before this will let them
+// book — unlike the bulk modal, this flow doesn't accept a cost amount
+// itself, it only asks for the ETA and tracking number. EXW/Customer Collect
+// shipments are exempt (no freight cost to record — the customer arranges
+// their own carrier). Kuehne & Nagel keeps its existing rate-lookup-at-
+// booking-time behaviour and is sent through the same freight-booking API +
+// document-upload path as the bulk modal, just inline rather than as a
+// separate "Verify Documents" screen.
+async function openBookSingleShipmentModal(shipment) {
+  const haulier     = shipment.forwarderName || '';
+  const isKn        = isKnHaulier(haulier);
+  const isCC        = isCustomerCollectHaulier(haulier);
+  const isExw       = isExWorksIncoterms(shipment.incoTerms);
+  const isHowley    = normalizeHaulierName(haulier).includes('howley');
+  const shipmentRef = String(shipment.shipmentID || '').padStart(8, '0');
+
+  if (!haulier || !shipment.forwarderID) {
+    await wConfirmLg({ title: 'Haulier Required', message: 'Assign a haulier (see the Haulier card, above) before booking this shipment.', confirmText: 'OK', variant: '' });
+    return;
+  }
+
+  if (!isKn && !isCC && !isExw && !isHowley) {
+    try {
+      const res  = await fetch(`/api/shipmentcost/shipment/${encodeURIComponent(shipment.shipmentID)}`);
+      const json = await res.json();
+      const hasFreight = json.success && (json.data || []).some(c => String(c.costType) === '1');
+      if (!hasFreight) {
+        await wConfirmLg({ title: 'General Freight Cost Required', message: 'Add a General Freight cost entry (Associated Costs → + Add Cost) before this shipment can be booked.', confirmText: 'OK', variant: '' });
+        return;
+      }
+    } catch (err) {
+      await wConfirmLg({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+      return;
+    }
+  }
+
+  if (isKn && !shipment.plannedCollection) {
+    await wConfirmLg({ title: 'Planned Collection Required', message: 'Set a planned collection date (Edit Dates & Status) before booking with Kuehne & Nagel.', confirmText: 'OK', variant: '' });
+    return;
+  }
+
+  const etaVal      = shipment.plannedDelivery ? new Date(shipment.plannedDelivery).toISOString().slice(0, 10) : '';
+  const title       = isCC ? 'Customer Collect Booking' : isKn ? 'Kuehne & Nagel Booking' : `Book ${haulier}`;
+  const actionLabel = isCC ? 'Send Email and Book' : isKn ? 'Send via API and Book' : 'Book';
+  const trackingFieldHtml = isKn
+    ? `<div class="tf-field"><label class="tf-label">Tracking Number</label><div class="tf-input" style="background:var(--surface2);color:var(--text-muted)">Provided by Kuehne &amp; Nagel on booking</div></div>`
+    : `<div class="tf-field"><label class="tf-label">Tracking Number${isCC ? ' (optional)' : ''}</label><input class="tf-input" type="text" id="sd-book-tracking" value="${esc(shipment.trackingNumber || '')}"></div>`;
+
+  openModal(`<div class="ps-modal" style="max-width:560px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">${esc(title)}</div><div class="ps-modal-sub">${esc(shipmentRef)} — ${esc(shipment.destinationName || '')}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field"><label class="tf-label">ETA (Planned Delivery)</label><input class="tf-input" type="date" id="sd-book-eta" value="${esc(etaVal)}"></div>
+        ${trackingFieldHtml}
+      </div>
+      ${isKn ? `<div id="sd-book-kn-cost" style="font-size:12px;color:var(--text-muted);margin:4px 0 12px">Calculating cost…</div>
+      <div id="sd-book-kn-docs"><div class="sap-loading"><div class="spinner"></div>Loading documents…</div></div>` : ''}
+      <div id="sd-book-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="sd-book-submit-btn">${esc(actionLabel)}</button>
+    </div>
+  </div>`);
+
+  document.getElementById('sd-book-submit-btn').addEventListener('click', () => submitSingleShipmentBooking(shipment, { isKn, isCC }));
+
+  if (isKn) {
+    loadSingleBookingKnCost(shipment);
+    loadSingleBookingDocs(shipment);
+  }
+}
+
+async function loadSingleBookingKnCost(shipment) {
+  const el = document.getElementById('sd-book-kn-cost');
+  if (!el) return;
+  try {
+    const res  = await fetch(`/api/shipmentcost/estimate/${encodeURIComponent(shipment.shipmentID)}`);
+    const json = await res.json();
+    if (json.success && json.data?.rateFound) {
+      const d = json.data;
+      el.dataset.expectedCost = d.expectedCost;
+      el.dataset.elementCode  = d.elementCode || '';
+      el.dataset.customsCost  = d.customsCost != null ? String(d.customsCost) : '';
+      const customsLabel = d.customsCost > 0 ? ` + £${d.customsCost} customs (DDP)` : ` + £0 customs (${d.incoTerms || 'DAP'})`;
+      el.textContent = `Expected cost: £${d.expectedCost} — ${d.chargeableWeight} kg × £${d.agreedRate}/kg (min £${d.minimumCharge})${customsLabel}`;
+    } else {
+      el.textContent = json.data?.message || 'No rate found — add the freight cost manually after booking.';
+      el.style.color = 'var(--error)';
+    }
+  } catch (err) {
+    el.textContent = 'Rate lookup failed — add the freight cost manually after booking.';
+    el.style.color = 'var(--error)';
+  }
+}
+
+async function loadSingleBookingDocs(shipment) {
+  const container = document.getElementById('sd-book-kn-docs');
+  if (!container) return;
+  try {
+    const res  = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/documents/folder`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load documents.');
+    renderSingleBookingDocs(shipment, json.data);
+  } catch (err) {
+    container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function renderSingleBookingDocs(shipment, data) {
+  const container = document.getElementById('sd-book-kn-docs');
+  if (!container) return;
+  const existing = bookingDocumentAssignments.get(Number(shipment.shipmentID));
+  const rowsHtml = data.files.map(f => {
+    const cat = (existing ? bvdCategoryForFile(existing, f.fileName) : null) ?? f.guessedCategory ?? '';
+    return `<tr class="admin-row">
+      <td>${esc(f.fileName)}</td>
+      <td>
+        <select class="tf-input sd-book-cat-select" data-filename="${esc(f.fileName)}">
+          ${BOOKING_DOC_CATEGORIES.map(c => `<option value="${esc(c.value)}" ${c.value === cat ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+        </select>
+      </td>
+      <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="toolbar-hint" style="margin-bottom:8px">Packing list, invoice${data.customsRequired ? ' and customs declaration' : ''} must all be categorised — they'll be uploaded to Kuehne &amp; Nagel automatically once booked.</div>
+    ${!data.files.length
+      ? '<div class="sap-empty">No documents in this shipment’s folder yet.</div>'
+      : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table"><thead><tr><th>File</th><th>Category</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`}
+    <div id="sd-book-docs-status" style="margin-top:10px;font-size:12px"></div>
+  `;
+
+  function updateAssignment() {
+    const assignment = { packingList: null, invoice: null, customs: null };
+    container.querySelectorAll('.sd-book-cat-select').forEach(sel => {
+      const fileName = sel.dataset.filename;
+      if (sel.value === 'packing-list') assignment.packingList = fileName;
+      if (sel.value === 'invoice')      assignment.invoice     = fileName;
+      if (sel.value === 'customs')      assignment.customs     = fileName;
+    });
+    bookingDocumentAssignments.set(Number(shipment.shipmentID), assignment);
+    const missing = [];
+    if (!assignment.packingList) missing.push('Packing List');
+    if (!assignment.invoice)     missing.push('Commercial Invoice');
+    if (data.customsRequired && !assignment.customs) missing.push('Customs Declaration');
+    const statusEl = document.getElementById('sd-book-docs-status');
+    if (statusEl) {
+      statusEl.style.color = missing.length ? 'var(--error)' : 'var(--success,#16A34A)';
+      statusEl.textContent = missing.length ? `Missing: ${missing.join(', ')}.` : 'All required documents categorised — ready to book.';
+    }
+  }
+
+  container.querySelectorAll('.sd-book-cat-select').forEach(sel => sel.addEventListener('change', updateAssignment));
+  updateAssignment();
+}
+
+async function submitSingleShipmentBooking(shipment, { isKn, isCC }) {
+  const button = document.getElementById('sd-book-submit-btn');
+  const result = document.getElementById('sd-book-result');
+  const originalText = button.textContent;
+  const eta = document.getElementById('sd-book-eta')?.value || '';
+  let trackingNumber = document.getElementById('sd-book-tracking')?.value.trim() || '';
+
+  button.disabled = true;
+  button.textContent = 'Working...';
+  result.innerHTML = '';
+
+  let docWarning = null;
+  try {
+    let expectedCost = null, elementCode = null, customsCost = null, costCenter = null, skipCost = true;
+
+    if (isKn) {
+      const docs = bookingDocumentAssignments.get(Number(shipment.shipmentID));
+      if (!docs || !docs.packingList || !docs.invoice || (shipment.customsRequired && !docs.customs)) {
+        throw new Error('Documents must be categorised (Packing List, Invoice' + (shipment.customsRequired ? ', Customs Declaration' : '') + ') before this shipment can be booked.');
+      }
+
+      const response = await fetch(`/api/freight-booking/shipment/${encodeURIComponent(shipment.shipmentID)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plannedCollection: shipment.plannedCollection }),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || 'Failed to send to Kuehne & Nagel.');
+      trackingNumber = String(json.trackingNumber || trackingNumber || '').trim();
+
+      if (trackingNumber) {
+        const files = [
+          { fileName: docs.packingList, category: 'packing-list' },
+          { fileName: docs.invoice,     category: 'invoice' },
+          ...(docs.customs ? [{ fileName: docs.customs, category: 'customs' }] : []),
+        ];
+        try {
+          const uploadRes  = await fetch(`/api/freight-booking/${encodeURIComponent(shipment.shipmentID)}/documents/upload-to-kn`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bookingID: trackingNumber, files }),
+          });
+          const uploadJson = await uploadRes.json();
+          const failedFiles = uploadJson.data?.failed || [];
+          if (!uploadJson.success || failedFiles.length) {
+            const detail = failedFiles.map(f => `${f.fileName}: ${f.error}`).join('; ') || uploadJson.error || 'unknown error';
+            docWarning = `Booked (tracking ${trackingNumber}), but document upload to KN failed — ${detail}. Upload manually via the KN portal.`;
+          }
+        } catch (uploadErr) {
+          docWarning = `Booked (tracking ${trackingNumber}), but document upload to KN failed — ${uploadErr.message}. Upload manually via the KN portal.`;
+        }
+      }
+
+      const costEl = document.getElementById('sd-book-kn-cost');
+      if (costEl?.dataset.expectedCost) {
+        expectedCost = Number(costEl.dataset.expectedCost);
+        elementCode  = costEl.dataset.elementCode || null;
+        customsCost  = costEl.dataset.customsCost !== '' ? Number(costEl.dataset.customsCost) : null;
+        costCenter   = '0000002004';
+        skipCost = false;
+      }
+    } else if (isCC) {
+      const response = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/send-collection-email`, { method: 'POST' });
+      const json = await response.json();
+      if (!response.ok || !json.success) throw new Error(json.error || 'Failed to send collection email.');
+    } else {
+      if (!trackingNumber) throw new Error('Tracking number is required.');
+    }
+
+    const res = await fetch('/api/shipmentmain/mark-booked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shipments: [{
+          shipmentID:        shipment.shipmentID,
+          plannedCollection: null,
+          plannedDelivery:   eta || null,
+          trackingNumber:    trackingNumber || '',
+          forwarderID:       shipment.forwarderID || null,
+          forwarderMode:     null,
+          expectedCost, costCenter, elementCode, skipCost, customsCost,
+        }],
+      }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to mark shipment as booked.');
+
+    if (currentShipmentView === 'awaiting-booking') await runShipmentBooking();
+
+    if (docWarning) {
+      result.innerHTML = `<div class="sap-error tf-inline-error">${esc(docWarning)}</div>`;
+      button.disabled = false;
+      button.textContent = originalText;
+      return;
+    }
+    closePickModal();
+  } catch (err) {
+    result.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 
@@ -7387,8 +7751,8 @@ async function runStockHistoryForecast() {
         <canvas id="shf-chart" style="max-height:320px"></canvas>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
-        <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Expected Stock Level (Next 26 Weeks)</div>
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.</div>
+        <div id="shf-stock-chart-heading" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Expected Stock Level (Next 26 Weeks)</div>
+        <div id="shf-stock-chart-desc" style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.</div>
         <canvas id="shf-stock-chart" style="max-height:280px"></canvas>
         <div id="shf-stock-deliveries" style="margin-top:10px"></div>
       </div>
@@ -7689,17 +8053,23 @@ function shfBuildConsumptionChartConfig(row, accuracy) {
 // magnitude. See routes/performance.js.
 function shfClampStock(v) { return Math.max(0, v); }
 
-// Builds the Chart.js config for the weekly "Expected Stock Level" chart, given a stockForecast
-// ({ asOfDate, currentStock, weeks: [{ weekEnding, weeklyUsage, incomingQty, deliveries,
-// expectedStock }] }) already truncated to 26 weeks server-side. Shared by the single-
-// material/combined view and each vendor-filter grid row.
+// Builds the Chart.js config for the "Expected Stock Level" chart, given a stockForecast
+// ({ asOfDate, currentStock, bucketDays, weeks: [{ weekEnding, weeklyUsage, incomingQty,
+// deliveries, expectedStock }] }) already truncated to its horizon server-side (26 weeks
+// normally; ISOPAR_DAILY_FORECAST_HORIZON_DAYS days when bucketDays is 1 — see
+// buildWeeklyStockForecast's comment in routes/performance.js for why Isopar alone gets
+// day-bucketed entries instead of week-bucketed ones). The `weeks`/`weekEnding`/`weeklyUsage`
+// field names are unchanged either way — only the label/axis text below adapts. Shared by the
+// single-material/combined view and each vendor-filter grid row.
 function shfBuildStockChartConfig(stockForecast) {
+  const isDaily = stockForecast.bucketDays === 1;
+  const usageLabel = isDaily ? 'Daily Usage' : 'Weekly Usage';
   const stockLabels = [stockForecast.asOfDate, ...stockForecast.weeks.map(w => w.weekEnding)];
   const rawStock     = [stockForecast.currentStock, ...stockForecast.weeks.map(w => w.expectedStock)];
   const stockSeries  = rawStock.map(shfClampStock);
   const usageSeries  = [null, ...stockForecast.weeks.map(w => w.weeklyUsage)];
-  // A week with one or more incoming deliveries gets a larger, distinct point on the stock line
-  // itself, so a delivery's effect is visible directly, not only in the list below the chart.
+  // A bucket with one or more incoming deliveries gets a larger, distinct point on the stock
+  // line itself, so a delivery's effect is visible directly, not only in the list below the chart.
   const hasDelivery = [false, ...stockForecast.weeks.map(w => (w.deliveries || []).length > 0)];
   const pointRadius = hasDelivery.map(d => d ? 6 : 2);
   const pointStyle  = hasDelivery.map(d => d ? 'rectRot' : 'circle');
@@ -7710,7 +8080,7 @@ function shfBuildStockChartConfig(stockForecast) {
       labels: stockLabels,
       datasets: [
         { label: 'Expected Stock Level', data: stockSeries, borderColor: '#7C3AED', backgroundColor: 'rgba(124,58,237,0.10)', fill: true, tension: 0.2, pointRadius, pointStyle, pointBackgroundColor: '#7C3AED', yAxisID: 'y' },
-        { label: 'Weekly Usage', data: usageSeries, borderColor: '#DC2626', backgroundColor: 'transparent', fill: false, borderDash: [3, 3], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y1' },
+        { label: usageLabel, data: usageSeries, borderColor: '#DC2626', backgroundColor: 'transparent', fill: false, borderDash: [3, 3], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y1' },
       ],
     },
     options: {
@@ -7718,10 +8088,27 @@ function shfBuildStockChartConfig(stockForecast) {
       scales: {
         x: { ticks: { color: '#8DA3BE', font: { size: 10 }, maxRotation: 60, minRotation: 60 }, grid: { color: 'rgba(0,0,0,0.06)' } },
         y:  { position: 'left',  min: 0, ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.06)' }, title: { display: true, text: 'Stock', color: '#8DA3BE', font: { size: 10 } } },
-        y1: { position: 'right', ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { display: false }, title: { display: true, text: 'Weekly Usage', color: '#8DA3BE', font: { size: 10 } } },
+        y1: { position: 'right', ticks: { color: '#8DA3BE', font: { size: 10 } }, grid: { display: false }, title: { display: true, text: usageLabel, color: '#8DA3BE', font: { size: 10 } } },
       },
     },
   };
+}
+
+// Updates the "Expected Stock Level" panel's heading/description to match the loaded
+// stockForecast's granularity — daily buckets for Isopar's own single-material view (see
+// shfBuildStockChartConfig), weekly for everything else. No-op for the vendor-filter grid rows,
+// which don't have their own heading/description elements.
+function shfUpdateStockChartHeading(stockForecast) {
+  const heading = document.getElementById('shf-stock-chart-heading');
+  const desc = document.getElementById('shf-stock-chart-desc');
+  if (!heading || !desc) return;
+  if (stockForecast.bucketDays === 1) {
+    heading.textContent = `Expected Stock Level (Next ${stockForecast.weeks.length} Days)`;
+    desc.textContent = 'Projected forward day by day from the latest meter reading using the planning rate, plus open incoming deliveries — Isopar’s small tank means a weekly view can hide a stockout or overfill that actually lands mid-week. Untick a delivery below to simulate it arriving late or being lost.';
+  } else {
+    heading.textContent = 'Expected Stock Level (Next 26 Weeks)';
+    desc.textContent = 'Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.';
+  }
 }
 
 // Renders the "Incoming Deliveries" checklist under a stock chart — one row per delivery
@@ -7824,6 +8211,7 @@ async function shfLoadChart(material, title) {
     const stockForecast = json.stockForecast;
     const stockCanvas = document.getElementById('shf-stock-chart');
     if (stockForecast && stockCanvas) {
+      shfUpdateStockChartHeading(stockForecast);
       const chart = new Chart(stockCanvas, shfBuildStockChartConfig(stockForecast));
       turnsCharts.push(chart);
       shfStockChartRef.instance = chart;
@@ -7861,6 +8249,7 @@ async function shfRefetchStockChart() {
     const json = await shfFetchHistory({ material: shfCurrentMaterial, mrpController: shfMrpController, excludeDeliveryIds: shfExcludedDeliveryIds });
     if (!json.stockForecast) return;
 
+    shfUpdateStockChartHeading(json.stockForecast);
     if (shfStockChartRef.instance) {
       const idx = turnsCharts.indexOf(shfStockChartRef.instance);
       if (idx !== -1) turnsCharts.splice(idx, 1);

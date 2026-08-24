@@ -95,6 +95,11 @@ function normalizeShipmentUpdates(input) {
       shipmentID,
       trackingNumber:    String(item?.trackingNumber || '').trim(),
       plannedCollection: item?.plannedCollection ? new Date(item.plannedCollection) : null,
+      // Bug fix: this was never mapped, so the "Planned Delivery" date typed/
+      // auto-filled in the booking modal was silently discarded on submit —
+      // mark-booked's UPDATE always saw item.plannedDelivery === undefined
+      // and left the shipment's existing value (usually still NULL) in place.
+      plannedDelivery:   item?.plannedDelivery ? new Date(item.plannedDelivery) : null,
       forwarderID:       item?.forwarderID === '' || item?.forwarderID == null ? null : Number.parseInt(String(item.forwarderID), 10),
       forwarderMode:     String(item?.forwarderMode || '').trim() || null,
       expectedCost:      Number.isFinite(cost) ? cost : null,
@@ -2769,6 +2774,7 @@ router.get('/:shipmentId/details', async (req, res) => {
           sm.ActualDelivery   AS actualDelivery,
           sm.forwarderID, sm.trackingNumber, sm.incoTerms,
           sm.customsID,
+          CAST(ISNULL(sm.IsManual,         0) AS bit) AS isManual,
           CAST(ISNULL(sm.bookingStatus,    0) AS bit) AS bookingStatus,
           CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS collectionStatus,
           CAST(ISNULL(sm.DeliveryStatus,   0) AS bit) AS deliveryStatus,
