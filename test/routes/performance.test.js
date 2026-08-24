@@ -142,6 +142,34 @@ describe('consignment customers', () => {
   });
 });
 
+describe('GET /turns-valclass', () => {
+  test('is rejected without LOG_MRP', async () => {
+    const res = await request(app).get('/turns-valclass');
+    expect(res.status).toBe(403);
+  });
+
+  test('material and materialText filter independently, each scoped to its own column', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+    const res = await request(appMrp).get('/turns-valclass').query({ material: '30005R', materialText: 'widget' });
+    expect(res.status).toBe(200);
+    const sql = dbRequest.query.mock.calls[0][0];
+    expect(sql).toContain('Material LIKE @material');
+    expect(sql).toContain('MaterialText LIKE @materialText');
+    expect(sql).not.toContain('@search');
+    expect(dbRequest.input).toHaveBeenCalledWith('material', expect.anything(), '%30005R%');
+    expect(dbRequest.input).toHaveBeenCalledWith('materialText', expect.anything(), '%widget%');
+  });
+
+  test('material alone does not also match on description', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+    const res = await request(appMrp).get('/turns-valclass').query({ material: '30005R' });
+    expect(res.status).toBe(200);
+    const sql = dbRequest.query.mock.calls[0][0];
+    expect(sql).toContain('WHERE Material LIKE @material\n');
+    expect(sql).not.toContain('MaterialText LIKE');
+  });
+});
+
 describe('GET /turns-valclass/refresh-status', () => {
   test('is rejected for a user with none of LOG_ADMIN/LOG_MRP/LOG_REPORTS', async () => {
     const res = await request(app).get('/turns-valclass/refresh-status');

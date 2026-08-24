@@ -2337,7 +2337,7 @@ router.get('/turns-valclass/refresh-status', requireAnyPermission(['LOG_ADMIN', 
 // materialType, profitCentre, search (matches Material or MaterialText).
 router.get('/turns-valclass', requirePermission('LOG_MRP'), async (req, res) => {
   try {
-    const { plant, valuationClass, mrpController, materialType, profitCentre, search } = req.query;
+    const { plant, valuationClass, mrpController, materialType, profitCentre, search, material, materialText } = req.query;
     const pool = await getPool();
     const request = pool.request();
 
@@ -2351,6 +2351,12 @@ router.get('/turns-valclass', requirePermission('LOG_MRP'), async (req, res) => 
       where.push('(Material LIKE @search OR MaterialText LIKE @search)');
       request.input('search', sql.VarChar(42), `%${search}%`);
     }
+    // `material`/`materialText` are separate, independently-combinable filters (each scoped
+    // to its own column) — distinct from `search`, which OR's both columns together. Used by
+    // the Stock History & Forecast tile's two-field search so a user who already knows the
+    // exact part number isn't also matching on description text.
+    if (material)     { where.push('Material LIKE @material');         request.input('material', sql.VarChar(20), `%${material}%`); }
+    if (materialText) { where.push('MaterialText LIKE @materialText'); request.input('materialText', sql.VarChar(42), `%${materialText}%`); }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
