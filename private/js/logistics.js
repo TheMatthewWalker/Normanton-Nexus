@@ -4781,7 +4781,7 @@ function mruParseCSVFile(file) {
   reader.readAsText(file);
 }
 
-function mruParseCSVLine(line) {
+function mruParseCSVLine(line, delimiter = ',') {
   // Basic CSV parser — handles quoted fields, same idiom as warehouse.js's
   // Bulk CSV Import.
   const fields = [];
@@ -4791,7 +4791,7 @@ function mruParseCSVLine(line) {
     if (ch === '"') {
       if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
       else inQuote = !inQuote;
-    } else if (ch === ',' && !inQuote) {
+    } else if (ch === delimiter && !inQuote) {
       fields.push(cur.trim()); cur = '';
     } else {
       cur += ch;
@@ -4799,6 +4799,16 @@ function mruParseCSVLine(line) {
   }
   fields.push(cur.trim());
   return fields;
+}
+
+// Excel on machines set to a comma-decimal locale (e.g. UK/EU regional
+// settings some users have) exports "CSV" with ';' as the field separator
+// instead of ','. Pick whichever delimiter is more common in the header row.
+// Same idiom as warehouse.js's Bulk CSV Import.
+function mruDetectCSVDelimiter(headerLine) {
+  const commas = (headerLine.match(/,/g) || []).length;
+  const semicolons = (headerLine.match(/;/g) || []).length;
+  return semicolons > commas ? ';' : ',';
 }
 
 function mruRenderCSVPreview(text) {
@@ -4809,8 +4819,9 @@ function mruRenderCSVPreview(text) {
     return;
   }
 
+  const delimiter = mruDetectCSVDelimiter(lines[0]);
   const EXPECTED_HEADERS = ['material', 'unit', 'conversionqty'];
-  const headers = mruParseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s/g, ''));
+  const headers = mruParseCSVLine(lines[0], delimiter).map(h => h.toLowerCase().replace(/\s/g, ''));
   const missing = EXPECTED_HEADERS.filter(h => !headers.includes(h));
   if (missing.length) {
     document.getElementById('mru-csv-preview').innerHTML =
@@ -4823,7 +4834,7 @@ function mruRenderCSVPreview(text) {
 
   const records = [], rowErrors = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = mruParseCSVLine(lines[i]);
+    const cols = mruParseCSVLine(lines[i], delimiter);
     const raw = {
       material: cols[idx.material] ?? '',
       unit: cols[idx.unit] ?? '',
