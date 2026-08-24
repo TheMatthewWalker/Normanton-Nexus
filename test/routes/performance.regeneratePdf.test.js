@@ -99,7 +99,10 @@ test('rebuilds the PDF with an EXW-aware, unit-converted item and saves it to LO
 });
 
 test('uses the SAP-queried price for the matching PO item when the lookup succeeds', async () => {
-  axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: { '00010': 4.55 } } });
+  // Keyed by bare integer ("10"), not the 5-digit padded PO item number
+  // ("00010") — see PurchasingHelper.ParsePoPrices' own comment on the
+  // SapServer side for why (POCOND's real ITM_NUMBER field is 6 digits).
+  axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: { '10': 4.55 } } });
   db.listOrderSuggestionsByPoNumber.mockResolvedValueOnce([orderLine()]);
 
   await request(app).post('/order-suggestions/regenerate-pdf').send({ poNumber: '4500012345' });

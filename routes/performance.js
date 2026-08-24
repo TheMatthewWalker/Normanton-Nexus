@@ -3792,9 +3792,14 @@ function buildPoPdfItems(rows, { overridesById = new Map(), pricesByPoItem = {} 
     const baseUnit = r.Uom || 'KG';
     const orderUnit = r.OrderMoqUom || baseUnit;
     const isExw = (r.Incoterms || '').toUpperCase() === 'EXW';
+    // pricesByPoItem is keyed by a bare integer string ("10", not "00010") —
+    // see PurchasingHelper.ParsePoPrices' own comment on the SapServer side:
+    // POCOND's real ITM_NUMBER field is 6 digits ("000010"), not the 5-digit
+    // x10 numbering used here, so both sides normalize to a plain integer
+    // rather than relying on either one's padding width matching the other.
     const netPrice = (override !== undefined && override !== null && override !== '')
       ? Number(override)
-      : (pricesByPoItem[poItemNumber] ?? null);
+      : (pricesByPoItem[String(Number(poItemNumber))] ?? null);
     return {
       poItemNumber,
       material: r.Material,
