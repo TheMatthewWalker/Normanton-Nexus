@@ -120,7 +120,7 @@ function makeIsoparDailyUsageFn(weekdayRateLPerDay, weekendRateLPerDay) {
   };
 }
 
-function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = [], adjustments = [], dailyUsageFnOverride = null) {
+function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomingDeliveries = [], adjustments = [], dailyUsageFnOverride = null, bucketDays = 7) {
   const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
 
   // Calendar-month windows for i = 0..12, each [monthStart, monthEnd) — only
@@ -132,12 +132,18 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
   const horizonEnd = monthEnds[monthEnds.length - 1];
   const dailyUsage = dailyUsageFnOverride || makeDailyUsageFn(predictedMonthly, start, adjustments);
 
+  // bucketDays controls the forecast's granularity — 7 (the default) buckets by calendar week,
+  // 1 buckets by calendar day. Isopar (Material 10010) is called with bucketDays: 1 — its tank
+  // is small enough relative to daily usage that a week-wide bucket can hide a stockout/overfill
+  // that actually lands mid-week, which matters when a few days is the difference between running
+  // out and ordering too much. The field names below (weeks/weekEnding/weeklyUsage) are kept as-is
+  // regardless of bucketDays — callers read bucketDays itself (returned below) to know which.
   const weeks = [];
   let runningStock = currentStock;
   let weekStart = start;
 
   while (weekStart < horizonEnd) {
-    const weekEnd = new Date(Math.min(weekStart.getTime() + 7 * 86400000, horizonEnd.getTime()));
+    const weekEnd = new Date(Math.min(weekStart.getTime() + bucketDays * 86400000, horizonEnd.getTime()));
 
     // Open orders (accepted-but-not-received) expected to land this week —
     // added before that week's usage is deducted, since goods arrive then
@@ -173,6 +179,7 @@ function buildWeeklyStockForecast(currentStock, predictedMonthly, today, incomin
     asOfDate: start.toISOString().slice(0, 10),
     currentStock: Math.round(currentStock * 100) / 100,
     weeks,
+    bucketDays,
   };
 }
 
@@ -209,6 +216,7 @@ function mergeWeeklyForecasts(forecasts, materials = []) {
     asOfDate: forecasts[0].asOfDate,
     currentStock: Math.round(forecasts.reduce((sum, f) => sum + f.currentStock, 0) * 100) / 100,
     weeks,
+    bucketDays: forecasts[0].bucketDays,
   };
 }
 
@@ -219,6 +227,12 @@ function mergeWeeklyForecasts(forecasts, materials = []) {
 // frequent supplier date slips, so a buffer is kept on purpose.
 const ORDER_REVIEW_HORIZON_DAYS = 14;   // how far ahead to surface upcoming shortages, not just overdue ones
 const ORDER_COVERAGE_BUFFER_DAYS = 30;  // extra cover beyond lead time, so the next order isn't due immediately
+// How far ahead the Isopar-specific daily stock forecast (Stock History & Forecast tile and the
+// Build Order preview, when viewing Material 10010 alone) runs, in place of the usual 26-week
+// horizon everyone else gets — day-level buckets over 26 weeks would be ~180 chart points, so this
+// is trimmed down to keep the chart readable while still covering several times the order review
+// window above.
+const ISOPAR_DAILY_FORECAST_HORIZON_DAYS = 60;
 // Fallback rounding increment (in the vendor's own order unit) for a
 // material with no MaterialMoqQty lot size on file, when that order unit
 // differs from the material's SAP base unit (see buildSuggestionForRow) —
@@ -2644,6 +2658,14 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         : []
     );
 
+    // Isopar gets day-bucketed forecast entries instead of the usual week-bucketed ones (see
+    // buildWeeklyStockForecast's bucketDays comment) — but only when it's the one material in
+    // scope. mergeWeeklyForecasts sums per-material forecasts index-by-index, which requires
+    // every forecast in the merge to share the same bucket grid, so a combined/multi-material
+    // view (including "Show All") stays on the standard weekly buckets even if Isopar happens
+    // to be one of the materials in it.
+    const singleIsoparView = materialsInScope.length === 1 && materialsInScope[0] === ISOPAR_MATERIAL;
+
     const perMaterialForecasts = data.map(r => {
       const onHandStock = (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0);
 
@@ -2671,16 +2693,17 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         .filter(o => o.DeliveryDate && !excludeDeliveryIds.has(o.SuggestionId))
         .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
       const materialAdjustments = adjustmentsByMaterial.get(r.material) || [];
-      return buildWeeklyStockForecast(effectiveOnHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments, isoparDailyUsageFnOverride);
+      return buildWeeklyStockForecast(effectiveOnHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments, isoparDailyUsageFnOverride, (isIsopar && singleIsoparView) ? 1 : 7);
     });
     const stockForecast = mergeWeeklyForecasts(perMaterialForecasts, materialsInScope);
 
-    // The chart only needs a 26-week horizon — the vendor's longest lead time is 16 weeks, so
+    // The chart only needs a 26-week horizon (or, for Isopar's own daily view, the shorter
+    // ISOPAR_DAILY_FORECAST_HORIZON_DAYS) — the vendor's longest lead time is 16 weeks, so
     // 26 weeks of runway is enough to judge stock position without the full 13-month/~56-week
     // computation making the graph harder to read. buildWeeklyStockForecast itself still computes
     // the full horizon (other callers, e.g. order-suggestion breach-date detection, need it) —
     // this is a response-level truncation only.
-    stockForecast.weeks = stockForecast.weeks.slice(0, 26);
+    stockForecast.weeks = stockForecast.weeks.slice(0, singleIsoparView ? ISOPAR_DAILY_FORECAST_HORIZON_DAYS : 26);
 
     // ── Recorded accuracy overlay (log.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen
@@ -3009,7 +3032,10 @@ async function computeIsoparStockRisk() {
 
   // predictedMonthly is irrelevant here (dailyUsageFnOverride replaces it entirely) — the
   // 13-zero array is only there to size buildWeeklyStockForecast's usual 13-month horizon.
-  const forecast = buildWeeklyStockForecast(onHandStock, new Array(13).fill(0), new Date(), incomingDeliveries, [], dailyUsageFnOverride);
+  // bucketDays: 1 — Isopar's tank is small enough relative to daily usage that the default
+  // 7-day bucket could put the actual stockout/overfill date up to 6 days later than reported,
+  // which defeats the point of a "warn me before it happens" banner.
+  const forecast = buildWeeklyStockForecast(onHandStock, new Array(13).fill(0), new Date(), incomingDeliveries, [], dailyUsageFnOverride, 1);
   const maxCapacity = planningRate.MaxStockCapacityQty != null ? Number(planningRate.MaxStockCapacityQty) : null;
 
   const reviewHorizonEnd = addDaysUtc(new Date(), ORDER_REVIEW_HORIZON_DAYS);
@@ -3406,8 +3432,10 @@ router.post('/order-suggestions/preview', requirePermission('LOG_MRP'), async (r
       const draftDelivery = { date: deliveryDateObj, qty: Number(item.orderQty) || 0, id: null, poNumber: 'Draft' };
       const materialAdjustments = adjustmentsByMaterial.get(item.material) || [];
 
-      const stockForecast = buildWeeklyStockForecast(effectiveOnHandStock, predictedMonthly, new Date(), [...realDeliveries, draftDelivery], materialAdjustments, isoparDailyUsageFnOverride);
-      stockForecast.weeks = stockForecast.weeks.slice(0, 26); // same 26-week horizon as /turns-valclass/history
+      // Isopar gets its own day-bucketed forecast (see buildWeeklyStockForecast's bucketDays
+      // comment) — same reasoning as /turns-valclass/history below.
+      const stockForecast = buildWeeklyStockForecast(effectiveOnHandStock, predictedMonthly, new Date(), [...realDeliveries, draftDelivery], materialAdjustments, isoparDailyUsageFnOverride, isIsopar ? 1 : 7);
+      stockForecast.weeks = stockForecast.weeks.slice(0, isIsopar ? ISOPAR_DAILY_FORECAST_HORIZON_DAYS : 26); // same horizon as /turns-valclass/history
 
       return { material: item.material, materialText: r.MaterialText, stockForecast };
     });
