@@ -76,6 +76,7 @@ import debugRoutes             from './routes/debugsap.js';
 import authRoutes              from './routes/auth.js';
 import adminRoutes             from './routes/useradmin.js';
 import dbExplorerRoutes        from './routes/dbexplorer.js';
+import bapiInspectorRoutes     from './routes/bapiInspector.js';
 import deployRoutes            from './routes/deploy.js';
 import { requireLogin, requireRole, requireDepartment } from './middleware/auth.js';
 import { SqlSessionStore }     from './lib/sqlSessionStore.js';
@@ -459,6 +460,11 @@ app.get('/api/health', (req, res) => {
 // would, since it has no matching routes, but this way is explicit). Own
 // requireSuperadmin gate lives inside routes/dbexplorer.js.
 app.use('/api/admin/dbexplorer', requireLogin, dbExplorerRoutes);
+
+// ── BAPI/RFC Structure Inspector — superadmin only. Own requireSuperadmin
+// gate lives inside routes/bapiInspector.js, same convention as DB Explorer
+// immediately above.
+app.use('/api/admin/bapi-inspector', requireLogin, bapiInspectorRoutes);
 
 // ── Admin routes (requires admin role minimum) ────────────────────────────────
 app.use('/api/admin', requireLogin, requireRole('admin'), adminRoutes);

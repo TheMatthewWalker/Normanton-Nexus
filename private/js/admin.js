@@ -63,6 +63,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     dbxNav.addEventListener('click', () => { setupDbExplorer(); }, { once: true });
   }
 
+  // Set up BAPI Inspector when that section is first opened (superadmin only)
+  const bapiNav = document.getElementById('nav-bapi-inspector');
+  if (bapiNav) {
+    bapiNav.addEventListener('click', () => { setupBapiInspector(); }, { once: true });
+  }
+
   // Set up Bulk Create Users when that section is first opened (superadmin only)
   const bulkCreateNav = document.getElementById('nav-bulk-create');
   if (bulkCreateNav) {
@@ -124,6 +130,12 @@ function applyRoleVisibility() {
   // also use for plain SELECTs and can't be locked to superadmin outright.
   const sqlNav = document.getElementById('nav-sql');
   if (sqlNav) sqlNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
+
+  // Show BAPI Inspector nav only for superadmin — same client-side
+  // convenience as above. The real gate is server-side (routes/
+  // bapiInspector.js's own requireSuperadmin).
+  const bapiNav = document.getElementById('nav-bapi-inspector');
+  if (bapiNav) bapiNav.style.display = (sessionRole === 'superadmin') ? '' : 'none';
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -1521,6 +1533,86 @@ function setupSqlConsole() {
       if (exportBtn2) exportBtn2.style.display = 'none';
     });
   }
+}
+
+// ── BAPI/RFC Structure Inspector (superadmin only) ──────────────────────────
+
+const BAPI_DIRECTION_TAG = {
+  IMPORT:   'nx-tag--accent',
+  EXPORT:   'nx-tag--live',
+  TABLE:    'nx-tag--warn',
+  CHANGING: 'nx-tag--error',
+};
+
+function setupBapiInspector() {
+  const input   = document.getElementById('bapi-function-name');
+  const lookBtn = document.getElementById('bapi-lookup-btn');
+
+  if (input) {
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); runBapiLookup(); }
+    });
+  }
+  if (lookBtn) lookBtn.addEventListener('click', runBapiLookup);
+}
+
+async function runBapiLookup() {
+  const input      = document.getElementById('bapi-function-name');
+  const lookBtn    = document.getElementById('bapi-lookup-btn');
+  const resultsEl  = document.getElementById('bapi-results-body');
+  const functionName = (input?.value || '').trim();
+
+  if (!functionName) {
+    resultsEl.innerHTML = '<div class="empty-state error-state">Enter a BAPI/RFC function name first.</div>';
+    return;
+  }
+
+  lookBtn.disabled = true;
+  resultsEl.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Querying SAP…</div>';
+
+  try {
+    const data = await api('/api/admin/bapi-inspector/lookup', 'POST', { functionName });
+    renderBapiResults(functionName, data.data || []);
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="empty-state error-state">✕ ${esc(err.message)}</div>`;
+  } finally {
+    lookBtn.disabled = false;
+  }
+}
+
+function renderBapiResults(functionName, params) {
+  const resultsEl = document.getElementById('bapi-results-body');
+
+  if (!params.length) {
+    resultsEl.innerHTML = `<div class="empty-state">${esc(functionName)} returned no parameters — check the name is a real, callable RFC/BAPI (SE37).</div>`;
+    return;
+  }
+
+  resultsEl.innerHTML = params.map(p => {
+    const tagClass = BAPI_DIRECTION_TAG[p.direction] || 'nx-tag';
+    const typeHtml = p.paramType ? `<span class="bapi-param-type">${esc(p.paramType)}</span>` : '';
+
+    const fieldsHtml = (p.fields && p.fields.length)
+      ? `<div class="table-wrap"><table>
+          <thead><tr><th>Field</th><th>Type</th><th>Length</th></tr></thead>
+          <tbody>${p.fields.map(f => `<tr>
+            <td style="font-family:'JetBrains Mono',monospace">${esc(f.fieldName)}</td>
+            <td>${esc(f.fieldType)}</td>
+            <td>${esc(f.length)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`
+      : (p.paramType ? '<div class="bapi-param-scalar">Structure has no field info available.</div>'
+                      : '<div class="bapi-param-scalar">Scalar parameter — no sub-fields.</div>');
+
+    return `<div class="bapi-param">
+      <div class="bapi-param-head">
+        <span class="bapi-param-name">${esc(p.paramName)}</span>
+        <span class="nx-tag ${tagClass}">${esc(p.direction || '?')}</span>
+        ${typeHtml}
+      </div>
+      ${fieldsHtml}
+    </div>`;
+  }).join('');
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────

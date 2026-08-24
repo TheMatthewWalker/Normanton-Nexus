@@ -3741,8 +3741,40 @@ async function queryPoPricesFromSap(poNumber, callerUserId) {
     );
     return (resp.data?.success && resp.data.data) ? resp.data.data : {};
   } catch (err) {
-    console.error(`[queryPoPricesFromSap] Failed to read price for PO ${poNumber}:`, err.message);
+    // Logs the SapServer response body (not just axios's own message) when
+    // there is one — a 404/500 from an out-of-date SapServer deployment
+    // (this endpoint missing entirely) looks identical to a genuine RFC
+    // failure from err.message alone, and both fall back to "Per SAP
+    // condition" on the PDF identically, so this is the only place that
+    // distinguishes them without reproducing the failure again.
+    console.error(`[queryPoPricesFromSap] Failed to read price for PO ${poNumber}:`,
+      err.response ? `HTTP ${err.response.status} — ${JSON.stringify(err.response.data)}` : err.message);
     return {};
+  }
+}
+
+// Looks up the acting user's own display name (First+Last, falling back to
+// Username) for the PO PDF's supplier-notice sign-off block — same
+// FirstName/LastName -> DisplayName convention routes/labels.js already
+// uses for "who did this" fields elsewhere in the app. Best-effort: a
+// lookup failure must not block PDF generation, so this returns null
+// (poPdf.js already renders a blank signature line when purchaserName is
+// unset) rather than throwing.
+async function getUserDisplayName(userId) {
+  if (!userId) return null;
+  try {
+    const pool = await getNexusPool();
+    const result = await pool.request()
+      .input('userID', sql.Int, userId)
+      .query(`
+        SELECT COALESCE(NULLIF(RTRIM(ISNULL(FirstName,'')+' '+ISNULL(LastName,'')), ''), Username) AS DisplayName
+        FROM dbo.PortalUsers
+        WHERE UserID = @userID
+      `);
+    return result.recordset[0]?.DisplayName || null;
+  } catch (err) {
+    console.error(`[getUserDisplayName] Failed to look up user ${userId}:`, err.message);
+    return null;
   }
 }
 
@@ -3930,7 +3962,10 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
       // through explicitly rather than relying on buildPoPdfItems' own
       // (Tracked-Orders-reload) fallback of reading r.PoItemNumber.
       const rowsWithPoItem = rows.map((r, i) => ({ ...r, PoItemNumber: String((i + 1) * 10).padStart(5, '0') }));
-      const pricesByPoItem = await queryPoPricesFromSap(poNumber, callerUserId);
+      const [pricesByPoItem, purchaserName] = await Promise.all([
+        queryPoPricesFromSap(poNumber, callerUserId),
+        getUserDisplayName(callerUserId),
+      ]);
       const pdfBuffer = await buildPoPdf({
         poNumber,
         poDate: docDate || today,
@@ -3938,6 +3973,7 @@ router.post('/order-suggestions/create-po', requirePermission('LOG_MRP'), async 
         sapVendorNumber: rows[0].SapVendorNumber,
         currency,
         incoterms: rows[0].Incoterms || null,
+        purchaserName,
         // Matches the vendor-unit conversion applied to the actual SAP PO
         // above — the PDF sent to the supplier must show the same
         // quantity/unit as the real SAP PO and the supplier's own
@@ -3989,7 +4025,10 @@ router.post('/order-suggestions/regenerate-pdf', requirePermission('LOG_MRP'), a
       return res.status(404).json({ success: false, error: { message: `No order lines found for PO ${poNumber}.` } });
     }
 
-    const pricesByPoItem = await queryPoPricesFromSap(poNumber, callerUserId);
+    const [pricesByPoItem, purchaserName] = await Promise.all([
+      queryPoPricesFromSap(poNumber, callerUserId),
+      getUserDisplayName(callerUserId),
+    ]);
     const pdfBuffer = await buildPoPdf({
       poNumber,
       poDate: rows[0].OrderDate,
@@ -3997,6 +4036,7 @@ router.post('/order-suggestions/regenerate-pdf', requirePermission('LOG_MRP'), a
       sapVendorNumber: rows[0].SapVendorNumber,
       currency: rows[0].Currency,
       incoterms: rows[0].Incoterms || null,
+      purchaserName,
       items: buildPoPdfItems(rows, { pricesByPoItem }),
     });
     const poPdfPath = await savePoPdf(rows[0].VendorName, poNumber, pdfBuffer);

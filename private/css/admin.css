@@ -657,6 +657,35 @@ tbody tr.dbx-row-clickable:hover td { background: var(--accent-dim); }
 .dbx-preview-wrap thead th { position: sticky; top: 0; z-index: 1; }
 .dbx-preview-null { color: var(--text-muted); font-style: italic; }
 
+/* ── BAPI Inspector ─────────────────────────────────────────────────────── */
+.bapi-lookup-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 22px;
+}
+.bapi-lookup-row .search-input {
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase;
+}
+/* Reuses .dbx-subsection's card-per-item rhythm for one param per block,
+   with its own tighter heading row (param name + direction/type tags) since
+   .dbx-subsection-title is a plain uppercase label, not a flex row. */
+.bapi-param { margin-bottom: 20px; }
+.bapi-param-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 8px;
+}
+.bapi-param-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 700; color: var(--text);
+}
+.bapi-param-type {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-dim);
+}
+.bapi-param-scalar {
+  font-size: 12px; color: var(--text-muted); font-style: italic;
+}
+
 .dbx-constraint-group { margin-bottom: 16px; }
 .dbx-constraint-group:last-child { margin-bottom: 0; }
 .dbx-constraint-group-title {
