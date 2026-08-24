@@ -420,17 +420,17 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         continue;
       }
 
+      let payload = null;
       try {
-        const fileBuffer = await fsp.readFile(filePath);
         const base64String = fs.readFileSync(filePath, {encoding: 'base64'});
 
-        const payload = {
+        payload = {
           customerID:  KN_CUSTOMER_ID,
           customerKey: KN_CUSTOMER_KEY,
           documentCode,
           documentExtension,
           bookingID,
-          base64EncodedDocument: base64String, //fileBuffer.toString('base64'),
+          base64EncodedDocument: base64String,
         };
 
         const response = await axios.post(`${KN_API_URL}/upload`, payload, {
@@ -450,6 +450,15 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         );
       } catch (err) {
         const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
+        // Full request/response round-trip on failure — dryRun redacts the
+        // base64 body for readability, but a real failure needs the exact
+        // bytes KN actually received so this can be handed to KN's API team
+        // to reproduce, not just a truncated summary.
+        console.error(`[freightbooking] KN document upload FAILED — booking ${bookingID}, file ${fileName} (${category}, code ${documentCode}):`);
+        console.error('  Request sent to KN:', JSON.stringify(payload));
+        console.error('  KN response:', err.response
+          ? JSON.stringify({ status: err.response.status, headers: err.response.headers, data: err.response.data })
+          : `<no response — ${err.message}>`);
         failed.push({ fileName, category, error: detail });
         await writeShipmentEvent(
           pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD_FAILED',
