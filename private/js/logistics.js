@@ -10758,7 +10758,7 @@ async function openShipmentInvoiceModal(shipmentId, shipmentReference) {
     <div class="ps-modal-body">
       <div class="toolbar-hint">Uploaded invoices are filed into the shipment's import folder automatically — no need to save them anywhere manually.</div>
       <div id="osi-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
-      <input type="file" id="osi-file-input" accept="application/pdf,image/jpeg,image/png" style="display:none">
+      <input type="file" id="osi-file-input" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc,.xlsx,.xls,.msg,.eml,.txt,.csv" style="display:none">
     </div>
     <div class="ps-modal-actions">
       <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
@@ -10776,7 +10776,7 @@ async function openShipmentInvoiceModal(shipmentId, shipmentReference) {
     try {
       const res = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/upload`, {
         method: 'POST',
-        headers: { 'Content-Type': file.type || 'application/pdf', 'X-File-Name': encodeURIComponent(file.name) },
+        headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
         body: file,
       });
       const json = await res.json();
@@ -12053,7 +12053,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       <div class="tf-section-label">Documents</div>
       <div class="toolbar-hint">Purchase orders assigned to this shipment are filed here automatically. Upload shipping documents or the supplier invoice too — everything lands in the same folder.</div>
       <div id="isd-documents"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
-      <input type="file" id="isd-doc-file-input" accept="application/pdf,image/jpeg,image/png" style="display:none">
+      <input type="file" id="isd-doc-file-input" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc,.xlsx,.xls,.msg,.eml,.txt,.csv" style="display:none">
       <div class="tf-row" style="margin-top:8px">
         <button type="button" class="btn-secondary" id="isd-doc-upload-btn">Upload Document</button>
       </div>
@@ -12102,7 +12102,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       try {
         const res2 = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/upload`, {
           method: 'POST',
-          headers: { 'Content-Type': file.type || 'application/pdf', 'X-File-Name': encodeURIComponent(file.name) },
+          headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
           body: file,
         });
         const json2 = await res2.json();

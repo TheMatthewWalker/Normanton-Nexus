@@ -4622,32 +4622,44 @@ router.get('/order-suggestions/shipments/:shipmentId/documents/:fileName', requi
   }
 });
 
-// Body is the raw file bytes (Content-Type: application/pdf / image/jpeg /
-// image/png), not multipart — same pattern as routes/shipmentmain.js's
-// operator invoice upload, simplest thing that works from a plain
-// fetch(..., { body: file }) without adding a dependency for a single-file
-// upload. Auto-creates the destination folder (year/month/shipment) if it
-// doesn't exist yet.
+// Extensions accepted by the Inbound Log document upload below. Deliberately
+// keyed off the uploaded file's own name (X-File-Name) rather than its
+// Content-Type — browsers report inconsistent or empty MIME types for some
+// of these (.msg/.eml especially have no reliably-registered type), so
+// trusting the extension the user actually saved the file with is more
+// robust than sniffing Content-Type the way the old PDF/JPG/PNG-only
+// version of this route did.
+const ALLOWED_DOCUMENT_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png', '.docx', '.doc', '.xlsx', '.xls', '.msg', '.eml', '.txt', '.csv'];
+
+// Body is the raw file bytes, not multipart — same pattern as
+// routes/shipmentmain.js's operator invoice upload, simplest thing that
+// works from a plain fetch(..., { body: file }) without adding a dependency
+// for a single-file upload. Auto-creates the destination folder
+// (year/month/shipment) if it doesn't exist yet.
 router.post('/order-suggestions/shipments/:shipmentId/documents/upload',
   requirePermission('LOG_MRP'),
-  express.raw({ type: ['application/pdf', 'image/jpeg', 'image/png'], limit: '20mb' }),
+  express.raw({ type: () => true, limit: '20mb' }),
   async (req, res) => {
     try {
       if (!Buffer.isBuffer(req.body) || !req.body.length) {
-        return res.status(400).json({ success: false, error: { message: 'No file content received. Content-Type must be application/pdf, image/jpeg or image/png.' } });
+        return res.status(400).json({ success: false, error: { message: 'No file content received.' } });
       }
       if (req.body.length > 20 * 1024 * 1024) {
         return res.status(413).json({ success: false, error: { message: 'File is too large (20MB limit).' } });
+      }
+
+      const originalName = String(req.get('X-File-Name') || req.query.fileName || '');
+      const ext = path.extname(originalName).toLowerCase();
+      if (!ALLOWED_DOCUMENT_EXTENSIONS.includes(ext)) {
+        return res.status(400).json({ success: false, error: { message: `Unsupported file type${ext ? ` (${ext})` : ''}. Allowed types: ${ALLOWED_DOCUMENT_EXTENSIONS.join(', ')}.` } });
       }
 
       const shipmentId = Number(req.params.shipmentId);
       const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);
       const folder = await ensureShipmentImportFolder(record, supplierName);
 
-      const contentType = String(req.get('Content-Type') || '').toLowerCase();
-      const ext = contentType.includes('pdf') ? '.pdf' : contentType.includes('png') ? '.png' : '.jpg';
-      const originalName = String(req.get('X-File-Name') || req.query.fileName || 'invoice').replace(/\.(pdf|jpe?g|png)$/i, '');
-      const fileName = `${sanitizeImportFileSegment(originalName)}-${Date.now()}${ext}`;
+      const baseName = originalName.slice(0, originalName.length - ext.length) || 'document';
+      const fileName = `${sanitizeImportFileSegment(baseName)}-${Date.now()}${ext}`;
       const filePath = path.join(folder.shipmentPath, fileName);
       await fsp.writeFile(filePath, req.body);
 
