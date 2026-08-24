@@ -1544,22 +1544,38 @@ const BAPI_DIRECTION_TAG = {
   CHANGING: 'nx-tag--error',
 };
 
+// Last successful lookup, kept in memory so Export/Copy always dump the
+// COMPLETE result regardless of what table-paginate.js is currently hiding
+// on screen (it auto-paginates every <table> at 20 rows — exactly what
+// made a big structure's field list impossible to select/copy in one go).
+// The per-parameter field tables below also opt out of that pagination
+// entirely via data-no-paginate, since the whole point of this tool is
+// seeing a structure's full field list at a glance.
+let lastBapiFunctionName = null;
+let lastBapiParams       = null;
+
 function setupBapiInspector() {
   const input   = document.getElementById('bapi-function-name');
   const lookBtn = document.getElementById('bapi-lookup-btn');
+  const exportBtn = document.getElementById('bapi-export-txt');
+  const copyBtn   = document.getElementById('bapi-copy');
 
   if (input) {
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); runBapiLookup(); }
     });
   }
-  if (lookBtn) lookBtn.addEventListener('click', runBapiLookup);
+  if (lookBtn)   lookBtn.addEventListener('click', runBapiLookup);
+  if (exportBtn) exportBtn.addEventListener('click', exportBapiResults);
+  if (copyBtn)   copyBtn.addEventListener('click', copyBapiResults);
 }
 
 async function runBapiLookup() {
   const input      = document.getElementById('bapi-function-name');
   const lookBtn    = document.getElementById('bapi-lookup-btn');
   const resultsEl  = document.getElementById('bapi-results-body');
+  const exportBtn  = document.getElementById('bapi-export-txt');
+  const copyBtn    = document.getElementById('bapi-copy');
   const functionName = (input?.value || '').trim();
 
   if (!functionName) {
@@ -1568,12 +1584,23 @@ async function runBapiLookup() {
   }
 
   lookBtn.disabled = true;
+  exportBtn.style.display = 'none';
+  copyBtn.style.display   = 'none';
   resultsEl.innerHTML = '<div class="loading-wrap"><div class="spinner"></div>Querying SAP…</div>';
 
   try {
     const data = await api('/api/admin/bapi-inspector/lookup', 'POST', { functionName });
-    renderBapiResults(functionName, data.data || []);
+    const params = data.data || [];
+    lastBapiFunctionName = functionName;
+    lastBapiParams       = params;
+    renderBapiResults(functionName, params);
+    if (params.length) {
+      exportBtn.style.display = '';
+      copyBtn.style.display   = '';
+    }
   } catch (err) {
+    lastBapiFunctionName = null;
+    lastBapiParams       = null;
     resultsEl.innerHTML = `<div class="empty-state error-state">✕ ${esc(err.message)}</div>`;
   } finally {
     lookBtn.disabled = false;
@@ -1592,8 +1619,13 @@ function renderBapiResults(functionName, params) {
     const tagClass = BAPI_DIRECTION_TAG[p.direction] || 'nx-tag';
     const typeHtml = p.paramType ? `<span class="bapi-param-type">${esc(p.paramType)}</span>` : '';
 
+    // data-no-paginate: a structure can easily carry 50-100+ fields, and the
+    // whole point of this tool is seeing them all at once — table-paginate.js's
+    // default 20-rows-per-page (applied globally to every <table> on the page)
+    // would otherwise chop the field list up and make it impossible to select/
+    // copy in one go.
     const fieldsHtml = (p.fields && p.fields.length)
-      ? `<div class="table-wrap"><table>
+      ? `<div class="table-wrap"><table data-no-paginate>
           <thead><tr><th>Field</th><th>Type</th><th>Length</th></tr></thead>
           <tbody>${p.fields.map(f => `<tr>
             <td style="font-family:'JetBrains Mono',monospace">${esc(f.fieldName)}</td>
@@ -1613,6 +1645,61 @@ function renderBapiResults(functionName, params) {
       ${fieldsHtml}
     </div>`;
   }).join('');
+}
+
+// Plain-text rendering of the cached lookup — shared by Export and Copy so
+// both always produce byte-identical output. Column-aligned rather than a
+// raw dump, to stay easy to read/paste as-is (e.g. straight into a chat
+// message) without needing a spreadsheet.
+function formatBapiResultsAsText(functionName, params) {
+  const lines = [`BAPI/RFC: ${functionName}`, `Looked up: ${new Date().toLocaleString('en-GB')}`, ''];
+
+  for (const p of params) {
+    const typeSuffix = p.paramType ? `  ${p.paramType}` : '';
+    lines.push(`${p.paramName}  [${p.direction || '?'}]${typeSuffix}`);
+
+    if (p.fields && p.fields.length) {
+      const nameW = Math.max(5, ...p.fields.map(f => (f.fieldName || '').length));
+      const typeW = Math.max(4, ...p.fields.map(f => (f.fieldType || '').length));
+      for (const f of p.fields) {
+        lines.push(`    ${(f.fieldName || '').padEnd(nameW)}  ${(f.fieldType || '').padEnd(typeW)}  ${f.length || ''}`);
+      }
+    } else if (p.paramType) {
+      lines.push('    (no field info available)');
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+function exportBapiResults() {
+  if (!lastBapiParams) return;
+  const text = formatBapiResultsAsText(lastBapiFunctionName, lastBapiParams);
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = `${lastBapiFunctionName}_${stamp}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function copyBapiResults() {
+  if (!lastBapiParams) return;
+  const copyBtn = document.getElementById('bapi-copy');
+  const text = formatBapiResultsAsText(lastBapiFunctionName, lastBapiParams);
+  try {
+    await navigator.clipboard.writeText(text);
+    const original = copyBtn.textContent;
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => { copyBtn.textContent = original; }, 1500);
+  } catch (err) {
+    showToast(`Copy failed: ${err.message}`, 'error');
+  }
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
