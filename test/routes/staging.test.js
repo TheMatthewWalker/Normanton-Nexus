@@ -257,9 +257,119 @@ describe('POST /requests — validation', () => {
 
   test('creates the request when valid', async () => {
     db.createStagingRequest.mockResolvedValueOnce(123);
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 999 }] } });
     const res = await request(app).post('/requests').send(validBody());
     expect(res.status).toBe(200);
     expect(res.body.data.requestId).toBe(123);
+  });
+});
+
+// Non-SAP requests (H&S equipment etc.) skip the material search/unit/batch
+// machinery entirely — see routes/staging.js's POST /requests.
+describe('POST /requests — non-SAP materials', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-05T12:00:00.000Z')); // a Monday
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  const nonSapBody = () => ({
+    isNonSap: true,
+    materialText: 'Cut-resistant gloves, size L',
+    quantityRequested: 5,
+    location: 'Line 1',
+    dueAtUtc: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+  });
+
+  test('requires a description instead of a material code', async () => {
+    const res = await request(app).post('/requests').send({ ...nonSapBody(), materialText: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/description is required/);
+    expect(db.createStagingRequest).not.toHaveBeenCalled();
+  });
+
+  test('requires a positive quantityRequested', async () => {
+    const res = await request(app).post('/requests').send({ ...nonSapBody(), quantityRequested: 0 });
+    expect(res.status).toBe(400);
+    expect(db.createStagingRequest).not.toHaveBeenCalled();
+  });
+
+  test('does not require a material code', async () => {
+    const res = await request(app).post('/requests').send({ ...nonSapBody(), material: '' });
+    // material would 400 on the SAP path — must not on the non-SAP path
+    expect(res.status).not.toBe(400);
+  });
+
+  test('creates the request with Material null and IsNonSap true, skipping the LQUA stock check', async () => {
+    db.createStagingRequest.mockResolvedValueOnce(300);
+    const res = await request(app).post('/requests').send(nonSapBody());
+
+    expect(res.status).toBe(200);
+    expect(db.createStagingRequest).toHaveBeenCalledWith(expect.objectContaining({
+      material: null, materialText: 'Cut-resistant gloves, size L', quantityRequested: 5, isNonSap: true,
+      requestUnit: null, requestUnitQty: null, requestedBatch: null,
+    }));
+    expect(axiosMock.get).not.toHaveBeenCalled(); // no LQUA lookup for a non-SAP material
+    expect(res.body.data.stockWarning).toBeUndefined();
+  });
+});
+
+// Low-stock check (SAP materials only) — LQUA, Storage Type 'RO', summed
+// across whatever rows come back. Never blocks the request; just warns the
+// requester and notifies PROD_SUPERVISOR/LOG_SUPER.
+describe('POST /requests — low-stock check', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-05T12:00:00.000Z')); // a Monday
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  const validBody = () => ({
+    material: '30005R',
+    quantityRequested: 10,
+    location: 'Line 1',
+    dueAtUtc: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+  });
+
+  function notifiedTargets() {
+    return dbRequest.input.mock.calls.filter(c => c[0] === 'tval').map(c => c[2]);
+  }
+
+  test('filters the LQUA lookup to Storage Type RO', async () => {
+    db.createStagingRequest.mockResolvedValueOnce(400);
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 999 }] } });
+    await request(app).post('/requests').send(validBody());
+    expect(axiosMock.get.mock.calls[0][1].params).toMatchObject({ material: '30005R', storageType: 'RO' });
+  });
+
+  test('no warning when RO stock covers the requested quantity', async () => {
+    db.createStagingRequest.mockResolvedValueOnce(401);
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 6 }, { availableQty: 5 }] } });
+    const res = await request(app).post('/requests').send(validBody());
+    expect(res.body.data.stockWarning).toBeUndefined();
+    expect(notifiedTargets()).not.toContain('PROD_SUPERVISOR');
+    expect(notifiedTargets()).not.toContain('LOG_SUPER');
+  });
+
+  test('warns and notifies PROD_SUPERVISOR and LOG_SUPER when RO stock is short, without blocking the request', async () => {
+    db.createStagingRequest.mockResolvedValueOnce(402);
+    axiosMock.get.mockResolvedValueOnce({ data: { success: true, data: [{ availableQty: 3 }] } });
+
+    const res = await request(app).post('/requests').send(validBody());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.requestId).toBe(402);
+    expect(res.body.data.stockWarning).toEqual({ availableQty: 3, requestedQty: 10 });
+    expect(notifiedTargets()).toEqual(expect.arrayContaining(['PROD_SUPERVISOR', 'LOG_SUPER']));
+    expect(auditedEventTypes()).toEqual(expect.arrayContaining(['STAGING_REQUEST_LOW_STOCK']));
+  });
+
+  test('a failed LQUA lookup does not block request creation', async () => {
+    db.createStagingRequest.mockResolvedValueOnce(403);
+    axiosMock.get.mockRejectedValueOnce(new Error('RFC timeout'));
+    const res = await request(app).post('/requests').send(validBody());
+    expect(res.status).toBe(200);
+    expect(res.body.data.requestId).toBe(403);
   });
 });
 
@@ -376,6 +486,17 @@ describe('GET /requests/:id/stock — bin-restriction isAllowed logic', () => {
     const res = await request(app).get('/requests/1/stock');
 
     expect(res.body.data.stock[0].isAllowed).toBe(true);
+  });
+
+  // Non-SAP requests have no Material at all — nothing to look up in LQUA.
+  test('short-circuits with empty stock for a non-SAP request, without calling SAP', async () => {
+    db.getStagingRequestById.mockResolvedValueOnce({ Material: null, IsNonSap: true, RequestedBatch: null });
+
+    const res = await request(app).get('/requests/1/stock');
+
+    expect(res.body.data).toEqual({ stock: [], hasRestrictions: false, requestedBatch: null });
+    expect(axiosMock.get).not.toHaveBeenCalled();
+    expect(db.getBinRestrictionsForMaterial).not.toHaveBeenCalled();
   });
 });
 
@@ -587,5 +708,43 @@ describe('POST /requests/:id/deliver', () => {
     expect(res.body.error.message).toMatch(/SAP rejected the consignment issue: E M7 021 Deficit of SL stock/);
     expect(auditedEventTypes()).toEqual(['STAGING_DELIVER_SAP_ERROR']);
     expect(db.recordStagingDelivery).not.toHaveBeenCalled();
+  });
+
+  // Non-SAP requests (see POST /requests) have no SAP material to move at
+  // all — Mark Delivered must skip the whole LT01/transfer-order path.
+  describe('non-SAP requests — no SAP movement', () => {
+    const nonSapOpenRequest = { RequestID: 1, Material: null, MaterialText: 'Cut-resistant gloves', IsNonSap: true, RequestedBatch: null, Status: 'Open' };
+
+    test('does not require storage location/bin fields', async () => {
+      db.getStagingRequestById.mockResolvedValueOnce(nonSapOpenRequest);
+      db.recordStagingDelivery.mockResolvedValueOnce({});
+      const res = await request(app).post('/requests/1/deliver').send({ quantity: 5 });
+      expect(res.status).toBe(200);
+    });
+
+    test('never calls SAP and records a delivery with no bin/batch/transfer-order data', async () => {
+      db.getStagingRequestById.mockResolvedValueOnce(nonSapOpenRequest);
+      db.recordStagingDelivery.mockResolvedValueOnce({ deliveryID: 9 });
+      maybeReverseBatchManagedReturnMock.mockResolvedValueOnce(null);
+
+      const res = await request(app).post('/requests/1/deliver').send({ quantity: 5 });
+
+      expect(res.status).toBe(200);
+      expect(axiosMock.post).not.toHaveBeenCalled();
+      expect(maybeReverseBatchManagedReturnMock).not.toHaveBeenCalled();
+      expect(db.recordStagingDelivery).toHaveBeenCalledWith('1', expect.objectContaining({
+        quantityMoved: 5, batch: null, sourceStorageType: null, sourceBin: null,
+        destinationStorageType: null, destinationBin: null, transferOrderNumber: null,
+      }));
+      expect(res.body.data.transferOrderNumber).toBeNull();
+      expect(auditedEventTypes()).toEqual(['STAGING_DELIVERED']);
+    });
+
+    test('still 400s on a zero/negative quantity', async () => {
+      db.getStagingRequestById.mockResolvedValueOnce(nonSapOpenRequest);
+      const res = await request(app).post('/requests/1/deliver').send({ quantity: 0 });
+      expect(res.status).toBe(400);
+      expect(db.recordStagingDelivery).not.toHaveBeenCalled();
+    });
   });
 });

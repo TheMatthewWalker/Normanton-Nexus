@@ -24,7 +24,7 @@ export const WITHIN_TOLERANCE_PCT = 0.10;
 
 const REQUEST_COLUMNS = `
   RequestId, Material, MaterialText, Uom, QuantityRequested, QuantityDelivered,
-  RequestUnit, RequestUnitQty,
+  RequestUnit, RequestUnitQty, IsNonSap,
   Location, RequestedBatch, DueAtUtc, Notes, Status,
   RequestedBy, RequestedAtUtc, CompletedBy, CompletedAtUtc,
   CancelledBy, CancelledAtUtc, UpdatedAtUtc
@@ -132,16 +132,17 @@ export async function listCompletedStagingRequests({ from, to } = {}) {
 
 export async function createStagingRequest({
   material, materialText, uom, quantityRequested, location, requestedBatch,
-  dueAtUtc, notes, requestedBy, requestUnit, requestUnitQty,
+  dueAtUtc, notes, requestedBy, requestUnit, requestUnitQty, isNonSap,
 }) {
   const pool = await getPool();
   const { recordset } = await pool.request()
-    .input('material',          sql.NVarChar(18),  material)
+    .input('material',          sql.NVarChar(18),  material || null)
     .input('materialText',      sql.NVarChar(80),  materialText || null)
     .input('uom',                sql.NVarChar(3),   uom || null)
     .input('quantityRequested',   sql.Decimal(15, 3), quantityRequested)
     .input('requestUnit',          sql.NVarChar(20),  requestUnit || null)
     .input('requestUnitQty',        sql.Decimal(15, 3), requestUnitQty ?? null)
+    .input('isNonSap',               sql.Bit,           !!isNonSap)
     .input('location',             sql.NVarChar(100), location)
     .input('requestedBatch',        sql.NVarChar(10),  requestedBatch || null)
     .input('dueAtUtc',                sql.DateTime,      dueAtUtc)
@@ -149,9 +150,9 @@ export async function createStagingRequest({
     .input('requestedBy',               sql.NVarChar(100), requestedBy)
     .query(`
       INSERT INTO log.StagingRequest
-        (Material, MaterialText, Uom, QuantityRequested, RequestUnit, RequestUnitQty, Location, RequestedBatch, DueAtUtc, Notes, RequestedBy)
+        (Material, MaterialText, Uom, QuantityRequested, RequestUnit, RequestUnitQty, IsNonSap, Location, RequestedBatch, DueAtUtc, Notes, RequestedBy)
       OUTPUT INSERTED.RequestId
-      VALUES (@material, @materialText, @uom, @quantityRequested, @requestUnit, @requestUnitQty, @location, @requestedBatch, @dueAtUtc, @notes, @requestedBy)
+      VALUES (@material, @materialText, @uom, @quantityRequested, @requestUnit, @requestUnitQty, @isNonSap, @location, @requestedBatch, @dueAtUtc, @notes, @requestedBy)
     `);
   return recordset[0].RequestId;
 }

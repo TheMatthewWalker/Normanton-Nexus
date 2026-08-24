@@ -6585,7 +6585,9 @@ function spRenderFulfilList(requests) {
 
   const rows = requests.map(r => `
     <tr class="admin-row sp-fulfil-row" style="cursor:pointer" data-id="${r.RequestId}">
-      <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
+      <td>${r.IsNonSap
+        ? `<strong>${esc(r.MaterialText || '')}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">Non-SAP</div>`
+        : `<strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div>`}</td>
       <td>${Number(r.QuantityRequested).toLocaleString()}${r.QuantityDelivered > 0 ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.QuantityDelivered).toLocaleString()} so far)</span>` : ''} ${esc(r.Uom || '')}</td>
       <td>${esc(r.Location)}</td>
       <td>${r.RequestedBatch ? `<strong>${esc(r.RequestedBatch)}</strong>` : '—'}</td>
@@ -6640,9 +6642,43 @@ async function spRefreshFulfilModal(requestId) {
     ]);
     const request = reqJson.data;
     const titleEl = document.querySelector('#ps-modal-overlay .ps-modal-title');
-    if (titleEl) titleEl.textContent = `${request.Material} — ${request.MaterialText || ''}`;
+    if (titleEl) titleEl.textContent = request.IsNonSap ? (request.MaterialText || '') : `${request.Material} — ${request.MaterialText || ''}`;
 
     const remaining = Number(request.QuantityRequested) - Number(request.QuantityDelivered);
+
+    // Non-SAP requests (H&S equipment etc. — see routes/staging.js's POST
+    // /requests) have no SAP material at all, so there's no stock to look
+    // up and no LT01 transfer order to raise (POST /requests/:id/deliver
+    // skips SAP entirely for these) — just confirm the hand-off happened.
+    if (request.IsNonSap) {
+      body.innerHTML = `
+        <div class="tf-row">
+          <div class="tf-field"><label class="tf-label">Requested</label><div>${Number(request.QuantityRequested).toLocaleString()}</div></div>
+          <div class="tf-field"><label class="tf-label">Delivered so far</label><div>${Number(request.QuantityDelivered).toLocaleString()}</div></div>
+          <div class="tf-field"><label class="tf-label">Remaining</label><div><strong>${remaining.toLocaleString()}</strong></div></div>
+          <div class="tf-field"><label class="tf-label">Location</label><div>${esc(request.Location)}</div></div>
+        </div>
+        ${request.Notes ? `<div class="toolbar-hint" style="margin:2px 0 10px">Note from Production: ${esc(request.Notes)}</div>` : ''}
+        <div class="toolbar-hint" style="margin:2px 0 10px">Non-SAP request — no SAP stock movement is involved. Just confirm the item(s) have been handed over.</div>
+
+        <div class="tf-section-label">Mark Delivered</div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Quantity <span class="tf-req">*</span></label>
+            <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-deliver-qty" value="${remaining > 0 ? remaining : ''}">
+          </div>
+        </div>
+        <div id="sp-deliver-result"></div>
+        <div class="ps-modal-actions" style="padding:0;margin-top:10px">
+          <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+          <button type="button" class="btn-submit" id="sp-deliver-btn">Mark Delivered</button>
+        </div>`;
+
+      spSelectedStockRow = null;
+      document.getElementById('sp-deliver-btn').addEventListener('click', () => spSubmitDelivery(requestId, { isNonSap: true }));
+      return;
+    }
+
     const stock = stockJson.data.stock || [];
     const hasRestrictions = stockJson.data.hasRestrictions;
     const requestedBatch = stockJson.data.requestedBatch;
@@ -6718,31 +6754,37 @@ async function spRefreshFulfilModal(requestId) {
   }
 }
 
-async function spSubmitDelivery(requestId) {
+async function spSubmitDelivery(requestId, { isNonSap = false } = {}) {
   const resultEl = document.getElementById('sp-deliver-result');
-  if (!spSelectedStockRow) {
-    resultEl.innerHTML = '<div class="sap-error">Click a row in the Available Stock table above to pick where to take it from.</div>';
-    return;
+  let body;
+
+  if (isNonSap) {
+    body = { quantity: Number(document.getElementById('sp-deliver-qty').value) };
+  } else {
+    if (!spSelectedStockRow) {
+      resultEl.innerHTML = '<div class="sap-error">Click a row in the Available Stock table above to pick where to take it from.</div>';
+      return;
+    }
+    body = {
+      quantity: Number(document.getElementById('sp-deliver-qty').value),
+      batch: spSelectedStockRow.batch,
+      storageLocation: spSelectedStockRow.storageLocation,
+      sourceStorageType: spSelectedStockRow.sourceStorageType,
+      sourceBin: spSelectedStockRow.sourceBin,
+      destinationStorageType: SP_DESTINATION_TYPE,
+      destinationBin: SP_DESTINATION_BIN,
+      specialStockIndicator: spSelectedStockRow.specialStockIndicator,
+      specialStockNumber: spSelectedStockRow.specialStockNumber,
+    };
+    if (body.specialStockIndicator === 'K' && !body.specialStockNumber) {
+      resultEl.innerHTML = '<div class="sap-error">This is consignment stock but has no vendor (special stock) number from SAP — cannot issue it automatically.</div>';
+      return;
+    }
   }
-  const body = {
-    quantity: Number(document.getElementById('sp-deliver-qty').value),
-    batch: spSelectedStockRow.batch,
-    storageLocation: spSelectedStockRow.storageLocation,
-    sourceStorageType: spSelectedStockRow.sourceStorageType,
-    sourceBin: spSelectedStockRow.sourceBin,
-    destinationStorageType: SP_DESTINATION_TYPE,
-    destinationBin: SP_DESTINATION_BIN,
-    specialStockIndicator: spSelectedStockRow.specialStockIndicator,
-    specialStockNumber: spSelectedStockRow.specialStockNumber,
-  };
   if (!(body.quantity > 0)) { resultEl.innerHTML = '<div class="sap-error">Enter a quantity greater than zero.</div>'; return; }
-  if (body.specialStockIndicator === 'K' && !body.specialStockNumber) {
-    resultEl.innerHTML = '<div class="sap-error">This is consignment stock but has no vendor (special stock) number from SAP — cannot issue it automatically.</div>';
-    return;
-  }
 
   const btn = document.getElementById('sp-deliver-btn');
-  btn.disabled = true; btn.textContent = 'Creating transfer order…';
+  btn.disabled = true; btn.textContent = isNonSap ? 'Marking delivered…' : 'Creating transfer order…';
   try {
     const json = await spApi(`/requests/${requestId}/deliver`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -6762,7 +6804,7 @@ async function spSubmitDelivery(requestId) {
     }
   } catch (err) {
     resultEl.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-    btn.disabled = false; btn.textContent = 'Create Transfer Order & Mark Delivered';
+    btn.disabled = false; btn.textContent = isNonSap ? 'Mark Delivered' : 'Create Transfer Order & Mark Delivered';
   }
 }
 
@@ -6836,7 +6878,9 @@ function spRenderCompleted(kpi, requests, from, to) {
 
   const requestRows = requests.map(r => `
     <tr class="admin-row sp-audit-row" style="cursor:pointer" data-id="${r.RequestId}">
-      <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
+      <td>${r.IsNonSap
+        ? `<strong>${esc(r.MaterialText || '')}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">Non-SAP</div>`
+        : `<strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div>`}</td>
       <td>${Number(r.QuantityRequested).toLocaleString()} / ${Number(r.QuantityDelivered).toLocaleString()} ${esc(r.Uom || '')}</td>
       <td>${esc(r.Location)}</td>
       <td>${r.Status === 'Completed' ? '<span style="color:#059669">Completed</span>' : '<span style="color:var(--text-muted)">Cancelled</span>'}</td>
@@ -6900,7 +6944,7 @@ async function spOpenAuditDetail(requestId) {
   try {
     const json = await spApi(`/requests/${requestId}`);
     const r = json.data;
-    document.querySelector('#ps-modal-overlay .ps-modal-title').textContent = `${r.Material} — Request #${r.RequestId}`;
+    document.querySelector('#ps-modal-overlay .ps-modal-title').textContent = `${r.IsNonSap ? (r.MaterialText || 'Non-SAP') : r.Material} — Request #${r.RequestId}`;
     const deliveryRows = (r.deliveries || []).map(d => `
       <tr class="admin-row">
         <td>${Number(d.QuantityMoved).toLocaleString()}</td>

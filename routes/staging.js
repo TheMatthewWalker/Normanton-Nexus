@@ -304,30 +304,46 @@ router.get('/requests/:id', async (req, res) => {
 
 router.post('/requests', async (req, res) => {
   try {
-    const { material, materialText, uom, location, requestedBatch, dueAtUtc, notes, requestUnit, requestUnitQty } = req.body;
+    const { material, materialText, uom, location, requestedBatch, dueAtUtc, notes, requestUnit, requestUnitQty, isNonSap } = req.body;
     let { quantityRequested } = req.body;
+    const nonSap = !!isNonSap;
 
-    if (!material || !String(material).trim()) {
-      return res.status(400).json({ success: false, error: { message: 'material is required.' } });
-    }
+    // Non-SAP requests (H&S equipment, tooling, consumables — anything with
+    // no SAP material code) skip the material search/unit-conversion/batch
+    // machinery entirely: materialText is the free-text description
+    // Production typed, there's no SAP part number to validate against, and
+    // (see POST /requests/:id/deliver) no LT01 transfer order to raise when
+    // Stores fulfils it either.
+    if (nonSap) {
+      if (!materialText || !String(materialText).trim()) {
+        return res.status(400).json({ success: false, error: { message: 'A description is required for a non-SAP material request.' } });
+      }
+      if (!(Number(quantityRequested) > 0)) {
+        return res.status(400).json({ success: false, error: { message: 'quantityRequested must be greater than zero.' } });
+      }
+    } else {
+      if (!material || !String(material).trim()) {
+        return res.status(400).json({ success: false, error: { message: 'material is required.' } });
+      }
 
-    // Unit-based requests ("1 Spool") are converted to the base KG figure
-    // server-side from log.MaterialRequestUnits — never trust a
-    // client-computed KG number, so a stale/tampered unit dropdown can't
-    // slip Stores/SAP a wrong quantity. Materials with no configured units
-    // fall back to the pre-existing direct-quantity path.
-    if (requestUnit) {
-      if (!(Number(requestUnitQty) > 0)) {
-        return res.status(400).json({ success: false, error: { message: 'requestUnitQty must be greater than zero.' } });
+      // Unit-based requests ("1 Spool") are converted to the base KG figure
+      // server-side from log.MaterialRequestUnits — never trust a
+      // client-computed KG number, so a stale/tampered unit dropdown can't
+      // slip Stores/SAP a wrong quantity. Materials with no configured units
+      // fall back to the pre-existing direct-quantity path.
+      if (requestUnit) {
+        if (!(Number(requestUnitQty) > 0)) {
+          return res.status(400).json({ success: false, error: { message: 'requestUnitQty must be greater than zero.' } });
+        }
+        try {
+          const conversionQty = await getConversionQty(material, requestUnit);
+          quantityRequested = Number(requestUnitQty) * conversionQty;
+        } catch (conversionErr) {
+          return res.status(400).json({ success: false, error: { message: conversionErr.message } });
+        }
+      } else if (!(Number(quantityRequested) > 0)) {
+        return res.status(400).json({ success: false, error: { message: 'quantityRequested must be greater than zero.' } });
       }
-      try {
-        const conversionQty = await getConversionQty(material, requestUnit);
-        quantityRequested = Number(requestUnitQty) * conversionQty;
-      } catch (conversionErr) {
-        return res.status(400).json({ success: false, error: { message: conversionErr.message } });
-      }
-    } else if (!(Number(quantityRequested) > 0)) {
-      return res.status(400).json({ success: false, error: { message: 'quantityRequested must be greater than zero.' } });
     }
 
     if (!location || !String(location).trim()) {
@@ -355,10 +371,15 @@ router.post('/requests', async (req, res) => {
 
     const requestedBy = actor(req);
     const requestId = await db.createStagingRequest({
-      material, materialText, uom, quantityRequested, location, requestedBatch, dueAtUtc: due, notes, requestedBy,
-      requestUnit: requestUnit || null, requestUnitQty: requestUnit ? Number(requestUnitQty) : null,
+      material: nonSap ? null : material,
+      materialText, uom: nonSap ? null : uom, quantityRequested, location,
+      requestedBatch: nonSap ? null : (requestedBatch || null),
+      dueAtUtc: due, notes, requestedBy,
+      requestUnit: nonSap ? null : (requestUnit || null),
+      requestUnitQty: nonSap ? null : (requestUnit ? Number(requestUnitQty) : null),
+      isNonSap: nonSap,
     });
-    await audit('STAGING_REQUEST_CREATED', requestedBy, `Request #${requestId} — ${quantityRequested} of ${material} to ${location}`, req);
+    await audit('STAGING_REQUEST_CREATED', requestedBy, `Request #${requestId} — ${quantityRequested} of ${nonSap ? materialText : material} to ${location}`, req);
 
     // Let the warehouse department know a new request is waiting — best-effort,
     // must never block the response the requester is waiting on.
@@ -370,7 +391,7 @@ router.post('/requests', async (req, res) => {
         // page already renders DueAtUtc through the browser's local
         // toLocaleString, and a UTC-formatted string here would read an
         // hour off that whenever BST is in effect.
-        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, needed by ${formatStoresTime(due)}.`,
+        body: `${requestedBy} requested ${quantityRequested}${uom ? ` ${uom}` : ''} of ${nonSap ? materialText : material} to ${location}, needed by ${formatStoresTime(due)}.`,
         severity: 1,
         category: 'logistics',
         actionLabel: 'Open Staging Post',
@@ -381,9 +402,55 @@ router.post('/requests', async (req, res) => {
       console.error('[staging notify]', notifyErr.message);
     }
 
+    // Live stock check (SAP materials only — a non-SAP request has nothing
+    // in LQUA to check): sums whatever's actually available in Storage Type
+    // 'RO' right now and flags it if that's short of what's being asked
+    // for. Never blocks the request — Production may still need it raised
+    // even if Stores can't fulfil it immediately (a PO might be inbound,
+    // etc.) — this only makes sure the shortfall is visible up front rather
+    // than Stores discovering it cold when they open the request, so it's
+    // both echoed back to the requester and pushed to the people who can
+    // act on a shortage (PROD_SUPERVISOR, LOG_SUPER).
+    let stockWarning = null;
+    if (!nonSap) {
+      try {
+        const stockRows = await fetchLquaStock({ material, storageType: 'RO' });
+        const availableQty = stockRows.reduce((sum, row) => sum + Number(row.availableQty || 0), 0);
+        if (availableQty < Number(quantityRequested)) {
+          stockWarning = { availableQty, requestedQty: Number(quantityRequested) };
+          const detail = `Request #${requestId} — ${requestedBy} asked for ${quantityRequested}${uom ? ` ${uom}` : ''} of ${material} to ${location}, but only ${availableQty} is available in Storage Type RO.`;
+          await audit('STAGING_REQUEST_LOW_STOCK', requestedBy, detail, req);
+          // Each target notified independently — a failure fanning out to
+          // one permission code (e.g. no active PROD_SUPERVISOR users right
+          // now) must never stop the other from being notified.
+          const pool = await getNexusPool();
+          for (const permissionCode of ['PROD_SUPERVISOR', 'LOG_SUPER']) {
+            try {
+              await notify(pool, {
+                title: 'Staging Post Request — Insufficient Stock',
+                body: detail,
+                severity: 2,
+                category: 'logistics',
+                actionLabel: 'Open Staging Post',
+                actionURL: '/private/warehouse.html',
+                target: { type: 'permission', value: permissionCode },
+              });
+            } catch (notifyErr) {
+              console.error('[staging low-stock notify]', notifyErr.message);
+            }
+          }
+        }
+      } catch (stockErr) {
+        // LQUA being unreachable must never block the request itself —
+        // Stores' own stock lookup (GET /requests/:id/stock) is the
+        // authoritative check when they actually come to fulfil it.
+        console.error('[staging low-stock check]', stockErr.message);
+      }
+    }
+
     // dueAtUtc echoed back so the requester can see if their pick got
     // snapped into Stores' working window (e.g. an 8pm pick becoming 17:00).
-    res.json({ success: true, data: { requestId, dueAtUtc: due.toISOString() } });
+    res.json({ success: true, data: { requestId, dueAtUtc: due.toISOString(), ...(stockWarning ? { stockWarning } : {}) } });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
@@ -449,6 +516,13 @@ router.get('/requests/:id/stock', async (req, res) => {
     const request = await db.getStagingRequestById(req.params.id);
     if (!request) return res.status(404).json({ success: false, error: { message: 'Request not found.' } });
 
+    // Non-SAP requests have no Material to look up — there's nothing in
+    // LQUA for them, and no bin restrictions can apply to a code that
+    // doesn't exist.
+    if (request.IsNonSap) {
+      return res.json({ success: true, data: { stock: [], hasRestrictions: false, requestedBatch: null } });
+    }
+
     const [stockRows, restrictions] = await Promise.all([
       fetchLquaStock({ material: request.Material, batch: request.RequestedBatch || undefined }),
       db.getBinRestrictionsForMaterial(request.Material),
@@ -491,7 +565,10 @@ router.post('/requests/:id/deliver', async (req, res) => {
     if (!(Number(quantity) > 0)) {
       return res.status(400).json({ success: false, error: { message: 'quantity must be greater than zero.' } });
     }
-    if (!storageLocation || !sourceStorageType || !sourceBin || !destinationStorageType || !destinationBin) {
+    // Non-SAP requests (see POST /requests) have nowhere in SAP to move
+    // stock from/to at all, so none of the bin/location fields below apply
+    // — Stores just confirms the physical hand-off happened.
+    if (!request.IsNonSap && (!storageLocation || !sourceStorageType || !sourceBin || !destinationStorageType || !destinationBin)) {
       return res.status(400).json({
         success: false,
         error: { message: 'Storage location, source bin/type and destination bin/type are all required.' },
@@ -502,7 +579,7 @@ router.post('/requests/:id/deliver', async (req, res) => {
     // the MB1B + LT01 pair, not a plain transfer order — same rule
     // private/js/warehouse.js's manual Stock Transfer tool already applies
     // (see runStockTransfer's isConsignment check there).
-    const isConsignment = specialStockIndicator === 'K' && destinationStorageType === 'SA';
+    const isConsignment = !request.IsNonSap && specialStockIndicator === 'K' && destinationStorageType === 'SA';
     if (isConsignment && !specialStockNumber) {
       return res.status(400).json({
         success: false,
@@ -511,75 +588,87 @@ router.post('/requests/:id/deliver', async (req, res) => {
     }
 
     let transferOrder;
-    try {
-      if (isConsignment) {
-        const mb1b = await createSapConsignmentMb1b({
-          Material: request.Material,
-          Quantity: Number(quantity),
-          Header: `Staging Post fulfilment — Request #${req.params.id}`,
-          SpecialStockNumber: specialStockNumber,
-          StorageLocation: storageLocation,
-          SourceType: sourceStorageType,
-          SourceBin: sourceBin,
-          DestinationType: destinationStorageType,
-          DestinationBin: destinationBin,
-        });
-        // mb1b.success reflects whether SAP actually accepted all three legs
-        // (MB1B goods issue + both LT01 transfer postings) — previously this
-        // was hardcoded to true with every message force-labelled type 'S',
-        // so a rejected MB1B (deficit stock, etc.) still recorded a
-        // "successful" delivery below even though the stock never left
-        // consignment. See WarehouseHelpers.ParseConsignmentResponse.
-        transferOrder = {
-          success: mb1b.success,
-          transferOrderNumber: null,
-          messages: [mb1b.mb1bMessage, mb1b.toNonConsignMessage, mb1b.toConsignMessage]
-            .filter(Boolean)
-            .map(message => ({ type: message.startsWith('E ') ? 'E' : 'S', message })),
-        };
-      } else {
-        transferOrder = await createSapTransferOrder({
-          StorageLocation: storageLocation,
-          Material: request.Material,
-          Quantity: Number(quantity),
-          SourceType: sourceStorageType,
-          SourceBin: sourceBin,
-          DestinationType: destinationStorageType,
-          DestinationBin: destinationBin,
-          Batch: batch || request.RequestedBatch || undefined,
-          StockCategory: stockCategory || undefined,
-          SpecialStockIndicator: specialStockIndicator || undefined,
-          SpecialStockNumber: specialStockNumber || undefined,
+    if (request.IsNonSap) {
+      // Nothing to post in SAP — no LT01 transfer order, no WHM movement.
+      transferOrder = { success: true, transferOrderNumber: null, messages: [] };
+    } else {
+      try {
+        if (isConsignment) {
+          const mb1b = await createSapConsignmentMb1b({
+            Material: request.Material,
+            Quantity: Number(quantity),
+            Header: `Staging Post fulfilment — Request #${req.params.id}`,
+            SpecialStockNumber: specialStockNumber,
+            StorageLocation: storageLocation,
+            SourceType: sourceStorageType,
+            SourceBin: sourceBin,
+            DestinationType: destinationStorageType,
+            DestinationBin: destinationBin,
+          });
+          // mb1b.success reflects whether SAP actually accepted all three legs
+          // (MB1B goods issue + both LT01 transfer postings) — previously this
+          // was hardcoded to true with every message force-labelled type 'S',
+          // so a rejected MB1B (deficit stock, etc.) still recorded a
+          // "successful" delivery below even though the stock never left
+          // consignment. See WarehouseHelpers.ParseConsignmentResponse.
+          transferOrder = {
+            success: mb1b.success,
+            transferOrderNumber: null,
+            messages: [mb1b.mb1bMessage, mb1b.toNonConsignMessage, mb1b.toConsignMessage]
+              .filter(Boolean)
+              .map(message => ({ type: message.startsWith('E ') ? 'E' : 'S', message })),
+          };
+        } else {
+          transferOrder = await createSapTransferOrder({
+            StorageLocation: storageLocation,
+            Material: request.Material,
+            Quantity: Number(quantity),
+            SourceType: sourceStorageType,
+            SourceBin: sourceBin,
+            DestinationType: destinationStorageType,
+            DestinationBin: destinationBin,
+            Batch: batch || request.RequestedBatch || undefined,
+            StockCategory: stockCategory || undefined,
+            SpecialStockIndicator: specialStockIndicator || undefined,
+            SpecialStockNumber: specialStockNumber || undefined,
+          });
+        }
+      } catch (sapErr) {
+        await audit('STAGING_DELIVER_SAP_ERROR', actor(req), `Request #${req.params.id} — ${sapErr.message}`, req);
+        return res.status(422).json({
+          success: false,
+          error: { message: `SAP rejected the ${isConsignment ? 'consignment issue' : 'transfer order'}: ${sapErr.message}` },
         });
       }
-    } catch (sapErr) {
-      await audit('STAGING_DELIVER_SAP_ERROR', actor(req), `Request #${req.params.id} — ${sapErr.message}`, req);
-      return res.status(422).json({
-        success: false,
-        error: { message: `SAP rejected the ${isConsignment ? 'consignment issue' : 'transfer order'}: ${sapErr.message}` },
-      });
-    }
 
-    if (!transferOrder.success) {
-      const messages = (transferOrder.messages || []).map(m => m.message).join('; ');
-      return res.status(422).json({
-        success: false,
-        error: { message: messages || 'SAP rejected the transfer order.' },
-        data: { messages: transferOrder.messages || [] },
-      });
+      if (!transferOrder.success) {
+        const messages = (transferOrder.messages || []).map(m => m.message).join('; ');
+        return res.status(422).json({
+          success: false,
+          error: { message: messages || 'SAP rejected the transfer order.' },
+          data: { messages: transferOrder.messages || [] },
+        });
+      }
     }
 
     const result = await db.recordStagingDelivery(req.params.id, {
       quantityMoved: Number(quantity),
-      batch: batch || request.RequestedBatch || null,
-      sourceStorageType, sourceBin, destinationStorageType, destinationBin,
+      batch: request.IsNonSap ? null : (batch || request.RequestedBatch || null),
+      sourceStorageType: request.IsNonSap ? null : sourceStorageType,
+      sourceBin: request.IsNonSap ? null : sourceBin,
+      destinationStorageType: request.IsNonSap ? null : destinationStorageType,
+      destinationBin: request.IsNonSap ? null : destinationBin,
       transferOrderNumber: transferOrder.transferOrderNumber,
       deliveredBy: actor(req),
     });
 
-    await audit('STAGING_DELIVERED', actor(req), `Request #${req.params.id} — ${quantity} moved, TO ${transferOrder.transferOrderNumber}`, req);
+    await audit(
+      'STAGING_DELIVERED', actor(req),
+      `Request #${req.params.id} — ${quantity} moved${transferOrder.transferOrderNumber ? `, TO ${transferOrder.transferOrderNumber}` : (request.IsNonSap ? ' (non-SAP, no SAP movement)' : '')}`,
+      req
+    );
 
-    const redrum = await maybeReverseBatchManagedReturn({
+    const redrum = request.IsNonSap ? null : await maybeReverseBatchManagedReturn({
       batch: batch || request.RequestedBatch || null,
       destinationStorageType, destinationBin, storageLocation,
       audit, actorUsername: actor(req), req,

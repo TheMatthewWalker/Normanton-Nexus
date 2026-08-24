@@ -6056,7 +6056,9 @@ function spRenderList(requests) {
     const cancellable = r.Status === 'Open' && Number(r.QuantityDelivered) === 0;
     return `
       <tr class="admin-row">
-        <td><strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div></td>
+        <td>${r.IsNonSap
+          ? `<strong>${esc(r.MaterialText || '')}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">Non-SAP</div>`
+          : `<strong>${esc(r.Material)}</strong><div style="font-size:11px;color:var(--text-secondary,#666)">${esc(r.MaterialText || '')}</div>`}</td>
         <td>${Number(r.QuantityRequested).toLocaleString()}${r.QuantityDelivered > 0 ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.QuantityDelivered).toLocaleString()} delivered)</span>` : ''} ${esc(r.Uom || '')}${r.RequestUnit ? ` <span style="color:var(--text-secondary,#666)">(${Number(r.RequestUnitQty).toLocaleString()} ${esc(r.RequestUnit)})</span>` : ''}</td>
         <td>${esc(r.Location)}</td>
         <td>${r.RequestedBatch ? esc(r.RequestedBatch) : '—'}</td>
@@ -6103,27 +6105,49 @@ function spOpenRequestModal() {
     </div>
     <div class="ps-modal-body">
       <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">Material (Part Number)</label>
-          <input class="tf-input" type="text" id="sp-material-search" placeholder="Search by part number…" autocomplete="off">
-          <input type="hidden" id="sp-material-value">
-          <input type="hidden" id="sp-material-text-value">
-          <input type="hidden" id="sp-material-uom-value">
-          <div id="sp-material-results"></div>
+        <div class="tf-field tf-field--wide" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" id="sp-nonsap-toggle" style="width:auto">
+          <label class="tf-label" for="sp-nonsap-toggle" style="margin:0">This is not a SAP material <span class="tf-optional">(H&amp;S equipment, tooling, consumables, etc.)</span></label>
         </div>
       </div>
-      <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">Search by Description <span class="tf-optional">(optional)</span></label>
-          <input class="tf-input" type="text" id="sp-material-desc-search" placeholder="Not sure of the part number? Search by description here instead…" autocomplete="off">
-          <div id="sp-material-desc-results"></div>
+      <div id="sp-sap-fields">
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Material (Part Number)</label>
+            <input class="tf-input" type="text" id="sp-material-search" placeholder="Search by part number…" autocomplete="off">
+            <input type="hidden" id="sp-material-value">
+            <input type="hidden" id="sp-material-text-value">
+            <input type="hidden" id="sp-material-uom-value">
+            <div id="sp-material-results"></div>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Search by Description <span class="tf-optional">(optional)</span></label>
+            <input class="tf-input" type="text" id="sp-material-desc-search" placeholder="Not sure of the part number? Search by description here instead…" autocomplete="off">
+            <div id="sp-material-desc-results"></div>
+          </div>
+        </div>
+        <div id="sp-batch-row"></div>
+        <div class="tf-row" id="sp-qty-row">
+          <div class="tf-field">
+            <label class="tf-label">Quantity</label>
+            <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-qty">
+          </div>
         </div>
       </div>
-      <div id="sp-batch-row"></div>
-      <div class="tf-row" id="sp-qty-row">
-        <div class="tf-field">
-          <label class="tf-label">Quantity</label>
-          <input class="tf-input" type="number" step="0.001" min="0.001" id="sp-qty">
+      <div id="sp-nonsap-fields" class="hidden">
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">What do you need?</label>
+            <input class="tf-input" type="text" id="sp-nonsap-desc" placeholder="e.g. Cut-resistant gloves, size L">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Quantity</label>
+            <input class="tf-input" type="number" step="1" min="1" id="sp-nonsap-qty">
+          </div>
         </div>
       </div>
       <div class="tf-row">
@@ -6168,6 +6192,33 @@ function spOpenRequestModal() {
 
   document.getElementById('sp-location').addEventListener('change', function () {
     document.getElementById('sp-other-location-row').classList.toggle('hidden', this.value !== '__other__');
+  });
+
+  // Non-SAP toggle — switches the form between the normal SAP material
+  // search/unit/batch fields and a plain free-text description + quantity,
+  // for things like H&S equipment that have no SAP material code at all
+  // (see routes/staging.js's POST /requests, which skips the whole
+  // search/unit-conversion/LQUA-stock-check path for these). Clears
+  // whichever side is being hidden so a value picked before toggling can't
+  // silently ride along into the submitted request.
+  document.getElementById('sp-nonsap-toggle').addEventListener('change', function () {
+    const isNonSap = this.checked;
+    document.getElementById('sp-sap-fields').classList.toggle('hidden', isNonSap);
+    document.getElementById('sp-nonsap-fields').classList.toggle('hidden', !isNonSap);
+    if (isNonSap) {
+      document.getElementById('sp-material-search').value = '';
+      document.getElementById('sp-material-value').value = '';
+      document.getElementById('sp-material-text-value').value = '';
+      document.getElementById('sp-material-uom-value').value = '';
+      document.getElementById('sp-material-desc-search').value = '';
+      document.getElementById('sp-material-results').innerHTML = '';
+      document.getElementById('sp-material-desc-results').innerHTML = '';
+      document.getElementById('sp-batch-row').innerHTML = '';
+      spRenderQtyField([]);
+    } else {
+      document.getElementById('sp-nonsap-desc').value = '';
+      document.getElementById('sp-nonsap-qty').value = '';
+    }
   });
 
   document.querySelectorAll('.sp-due-preset').forEach(btn => {
@@ -6338,12 +6389,9 @@ async function spLoadBatchOptions(material) {
 }
 
 async function spSubmitRequest() {
-  const material = document.getElementById('sp-material-value').value;
   const resultEl = document.getElementById('sp-request-result');
-  if (!material) {
-    resultEl.innerHTML = '<div class="pn-empty">Pick a material from the search results.</div>';
-    return;
-  }
+  const isNonSap = document.getElementById('sp-nonsap-toggle').checked;
+
   const locationSel = document.getElementById('sp-location').value;
   if (!locationSel) {
     resultEl.innerHTML = '<div class="pn-empty">Select a location.</div>';
@@ -6364,38 +6412,59 @@ async function spSubmitRequest() {
   }
 
   const body = {
-    material,
-    materialText: document.getElementById('sp-material-text-value').value || null,
-    uom: document.getElementById('sp-material-uom-value').value || null,
     location,
-    requestedBatch: document.getElementById('sp-batch')?.value || null,
+    isNonSap,
     dueAtUtc: new Date(dueLocal).toISOString(),
     notes: document.getElementById('sp-notes').value.trim() || null,
   };
 
-  // Unit path (material has configured request units — sp-unit exists) vs
-  // the plain-quantity fallback (no units configured for this material) —
-  // see spRenderQtyField. The KG conversion itself always happens
-  // server-side in routes/staging.js, never trusted from this preview.
-  const unitSel = document.getElementById('sp-unit');
-  if (unitSel) {
-    const unit = unitSel.value;
-    const unitQty = Number(document.getElementById('sp-unit-qty').value);
-    if (!unit) {
-      resultEl.innerHTML = '<div class="pn-empty">Pick a unit.</div>';
+  if (isNonSap) {
+    const description = document.getElementById('sp-nonsap-desc').value.trim();
+    if (!description) {
+      resultEl.innerHTML = '<div class="pn-empty">Describe what you need.</div>';
       return;
     }
-    if (!(unitQty > 0)) {
-      resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
-      return;
-    }
-    body.requestUnit = unit;
-    body.requestUnitQty = unitQty;
-  } else {
-    body.quantityRequested = Number(document.getElementById('sp-qty').value);
+    body.materialText = description;
+    body.quantityRequested = Number(document.getElementById('sp-nonsap-qty').value);
     if (!(body.quantityRequested > 0)) {
       resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
       return;
+    }
+  } else {
+    const material = document.getElementById('sp-material-value').value;
+    if (!material) {
+      resultEl.innerHTML = '<div class="pn-empty">Pick a material from the search results.</div>';
+      return;
+    }
+    body.material = material;
+    body.materialText = document.getElementById('sp-material-text-value').value || null;
+    body.uom = document.getElementById('sp-material-uom-value').value || null;
+    body.requestedBatch = document.getElementById('sp-batch')?.value || null;
+
+    // Unit path (material has configured request units — sp-unit exists) vs
+    // the plain-quantity fallback (no units configured for this material) —
+    // see spRenderQtyField. The KG conversion itself always happens
+    // server-side in routes/staging.js, never trusted from this preview.
+    const unitSel = document.getElementById('sp-unit');
+    if (unitSel) {
+      const unit = unitSel.value;
+      const unitQty = Number(document.getElementById('sp-unit-qty').value);
+      if (!unit) {
+        resultEl.innerHTML = '<div class="pn-empty">Pick a unit.</div>';
+        return;
+      }
+      if (!(unitQty > 0)) {
+        resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
+        return;
+      }
+      body.requestUnit = unit;
+      body.requestUnitQty = unitQty;
+    } else {
+      body.quantityRequested = Number(document.getElementById('sp-qty').value);
+      if (!(body.quantityRequested > 0)) {
+        resultEl.innerHTML = '<div class="pn-empty">Enter a quantity greater than zero.</div>';
+        return;
+      }
     }
   }
 
@@ -6410,6 +6479,14 @@ async function spSubmitRequest() {
     // know if that happened, since what's stored may differ from their pick.
     if (json.data?.dueAtUtc && json.data.dueAtUtc !== body.dueAtUtc) {
       alert(`Needed By was outside Stores' working hours, so it's been set to the nearest available time: ${fmt(json.data.dueAtUtc)}.`);
+    }
+    // Live LQUA check (SAP materials only) came back short of what was
+    // asked for — Stores/Production Supervisors have already been notified
+    // server-side (routes/staging.js's POST /requests), this is just so the
+    // requester isn't left wondering why it's taking a while.
+    if (json.data?.stockWarning) {
+      const { availableQty, requestedQty } = json.data.stockWarning;
+      alert(`Heads up: SAP currently shows only ${availableQty.toLocaleString()} of ${requestedQty.toLocaleString()} requested available in Storage Type RO. Your request has still been raised — Production Supervisors and Stores have been notified of the shortfall.`);
     }
   } catch (err) {
     resultEl.innerHTML = `<div class="pn-empty">${esc(err.message)}</div>`;
