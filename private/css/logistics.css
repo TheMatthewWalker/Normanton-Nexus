@@ -749,6 +749,28 @@ body::before {
 
 /* Customs badge */
 .sd-customs-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* Inline Required / Not Required segmented toggle — replaces a badge plus
+   a single "Set Required"/"Set Not Required" button; which side is active
+   is shown by highlighting instead of restating it in a label, and
+   clicking the other side saves instantly. */
+.sd-toggle-group { display: inline-flex; border: 1px solid var(--border2); border-radius: 6px; overflow: hidden; }
+.sd-toggle-btn {
+  font-family: 'Manrope', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border: none;
+  border-left: 1px solid var(--border2);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.sd-toggle-btn:first-child { border-left: none; }
+.sd-toggle-btn:hover:not(:disabled):not(.sd-toggle-btn--active) { color: var(--text); }
+.sd-toggle-btn:disabled { cursor: not-allowed; opacity: .7; }
+.sd-toggle-btn--active { background: var(--accent); color: #fff; }
 .sd-badge {
   display: inline-flex;
   align-items: center;
@@ -758,8 +780,6 @@ body::before {
   font-size: 12px;
   font-weight: 600;
 }
-.sd-badge--none    { background: rgba(141,163,190,0.15); color: var(--text-muted); }
-.sd-badge--required { background: rgba(217,119,6,0.12);  color: #b45309; }
 .sd-badge--complete { background: rgba(5,150,105,0.12);  color: #059669; }
 
 /* Haulier row */

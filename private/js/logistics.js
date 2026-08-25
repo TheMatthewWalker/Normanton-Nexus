@@ -3445,16 +3445,17 @@ function renderShipmentDetailModal(shipment, deliveries) {
 
   const canEdit = hasPlanning();
 
-  let badgeClass, badgeText, toggleHtml;
-  if (customsComplete) {
-    badgeClass = 'sd-badge--complete'; badgeText = 'Complete'; toggleHtml = '';
-  } else if (customsRequired) {
-    badgeClass = 'sd-badge--required'; badgeText = 'Required';
-    toggleHtml = canEdit ? `<button class="btn-secondary" id="sd-customs-toggle" data-target="false">Set Not Required</button>` : '';
-  } else {
-    badgeClass = 'sd-badge--none'; badgeText = 'Not Required';
-    toggleHtml = canEdit ? `<button class="btn-secondary" id="sd-customs-toggle" data-target="true">Set Required</button>` : '';
-  }
+  // Two-button inline toggle instead of a badge + single "Set X" button —
+  // the active state is shown by which button is highlighted, so there's
+  // no redundant label restating what it already is. Locked (disabled)
+  // once customsComplete, same restriction the PATCH endpoint enforces
+  // server-side; a small Complete badge is shown alongside since that's a
+  // genuine third piece of information, not implied by the toggle itself.
+  const customsToggleDisabled = !canEdit || customsComplete;
+  const customsToggleHtml = `<div class="sd-toggle-group">
+    <button type="button" class="sd-toggle-btn${!customsRequired ? ' sd-toggle-btn--active' : ''}" id="sd-customs-notreq-btn" data-target="false" ${customsToggleDisabled ? 'disabled' : ''}>Not Required</button>
+    <button type="button" class="sd-toggle-btn${customsRequired ? ' sd-toggle-btn--active' : ''}" id="sd-customs-req-btn" data-target="true" ${customsToggleDisabled ? 'disabled' : ''}>Required</button>
+  </div>`;
 
   const plannedRaw = shipment.plannedCollection || shipment.plannedDelivery;
   const plannedStr = plannedRaw ? new Date(plannedRaw).toLocaleDateString('en-GB') : '—';
@@ -3483,10 +3484,10 @@ function renderShipmentDetailModal(shipment, deliveries) {
               </div>` : ''}
               <div class="sd-actions-subtitle" style="margin-top:12px">Customs</div>
               <div class="sd-customs-row">
-                <span class="sd-badge ${esc(badgeClass)}">${esc(badgeText)}</span>
-                ${toggleHtml}
-                <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
+                ${customsToggleHtml}
+                ${customsComplete ? `<span class="sd-badge sd-badge--complete">Complete</span>` : ''}
               </div>
+              <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
               ${shipment.customsID ? `<div style="margin-top:6px;font-size:12px;color:var(--text-muted)">Customs ID: ${esc(String(shipment.customsID))}</div>` : ''}
             </div>
             ${canEdit ? `<div class="sd-actions-col">
@@ -3550,13 +3551,16 @@ function renderShipmentDetailModal(shipment, deliveries) {
       forwarders.map(f => `<option value="${esc(String(f.forwarderID))}" ${String(f.forwarderID) === String(shipment.forwarderID) ? 'selected' : ''}>${esc(f.forwarderName || '')}</option>`).join('');
   });
 
-  // Customs toggle
-  const customsToggleBtn = document.getElementById('sd-customs-toggle');
-  if (customsToggleBtn) {
-    customsToggleBtn.addEventListener('click', async () => {
-      const target = customsToggleBtn.dataset.target === 'true';
+  // Customs toggle — either button saves instantly on click (no separate
+  // Save step); clicking the already-active one is a no-op since it's
+  // disabled via sd-toggle-btn--active styling being irrelevant to
+  // clickability, but there's nothing to send anyway if it matches current.
+  document.querySelectorAll('#sd-customs-req-btn, #sd-customs-notreq-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const target = btn.dataset.target === 'true';
+      if (target === customsRequired) return;
       const result = document.getElementById('sd-customs-result');
-      customsToggleBtn.disabled = true;
+      document.querySelectorAll('#sd-customs-req-btn, #sd-customs-notreq-btn').forEach(b => { b.disabled = true; });
       try {
         const res = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/customs-required`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ required: target }),
@@ -3569,10 +3573,10 @@ function renderShipmentDetailModal(shipment, deliveries) {
         if (freshJson.success) renderShipmentDetailModal(freshJson.data.shipment, freshJson.data.deliveries);
       } catch (err) {
         if (result) result.textContent = err.message;
-        customsToggleBtn.disabled = false;
+        document.querySelectorAll('#sd-customs-req-btn, #sd-customs-notreq-btn').forEach(b => { b.disabled = customsToggleDisabled; });
       }
     });
-  }
+  });
 
   // Dates & Status save (canEdit-gated — element doesn't exist for a
   // view-only user, since the fields themselves are already disabled).
