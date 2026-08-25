@@ -1727,6 +1727,168 @@ function bvdRenderFolder(sid, row, data) {
 }
 
 
+// ── Post-booking document upload (Awaiting Collection) ────────────────────
+// Same shipment folder + category picker as openVerifyDocumentsModal above,
+// but this one runs AFTER a shipment is already booked with KN — for a
+// corrected invoice or a customs document that only shows up once the
+// shipment's sitting in Awaiting Collection. Sends straight to KN's
+// document-upload API using the booking's own trackingNumber (== KN's
+// bookingID, see submitBookingModal's comment on that) rather than gating a
+// booking submit, and deliberately keeps its own local category state
+// instead of touching bookingDocumentAssignments — that map backs the
+// pre-booking flow, and re-using it here would leak an ad-hoc post-booking
+// upload's categorisation back into a future re-book of the same shipment.
+function openCollectionKnDocumentUploadModal() {
+  const rows = getSelectedCollectionRows();
+  if (rows.length !== 1) return;
+  const row = rows[0];
+  if (!isKnHaulier(row.forwarderName)) return;
+  const sid = row.shipmentID;
+  const ref = String(sid).padStart(8, '0');
+
+  openModal(`<div class="ps-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Upload Documents to Kuehne &amp; Nagel</div><div class="ps-modal-sub">${esc(ref)} — booking ${esc(row.trackingNumber || '—')}</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="toolbar-hint">This shipment is already booked. Categorise any file below and send it straight to KN — useful for a corrected invoice or a customs document that turned up after booking.</div>
+      <div id="knud-body"><div class="sap-loading"><div class="spinner"></div>Loading...</div></div>
+      <input type="file" id="knud-file-input" accept="application/pdf" style="display:none">
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Close</button>
+      <button type="button" class="btn-secondary" id="knud-upload-file-btn">Upload New File</button>
+      <button type="button" class="btn-submit" id="knud-send-btn" disabled>Send to KN</button>
+    </div>
+  </div>`);
+
+  document.getElementById('knud-upload-file-btn').addEventListener('click', () => document.getElementById('knud-file-input').click());
+  document.getElementById('knud-file-input').addEventListener('change', async () => {
+    const fileInput = document.getElementById('knud-file-input');
+    const file = fileInput.files[0];
+    if (!file) return;
+    const uploadBtn = document.getElementById('knud-upload-file-btn');
+    uploadBtn.disabled = true; uploadBtn.textContent = 'Uploading…';
+    try {
+      const res = await fetch(`/api/shipmentmain/${encodeURIComponent(sid)}/documents/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/pdf', 'X-File-Name': encodeURIComponent(file.name) },
+        body: file,
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Upload failed.');
+      await knudLoadFolder(sid, row);
+    } catch (err) {
+      const body = document.getElementById('knud-body');
+      if (body) body.insertAdjacentHTML('afterbegin', `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`);
+    } finally {
+      uploadBtn.disabled = false; uploadBtn.textContent = 'Upload New File';
+      fileInput.value = '';
+    }
+  });
+
+  knudLoadFolder(sid, row);
+}
+
+async function knudLoadFolder(sid, row) {
+  const body = document.getElementById('knud-body');
+  body.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading...</div>';
+  try {
+    const res = await fetch(`/api/shipmentmain/${encodeURIComponent(sid)}/documents/folder`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load documents.');
+    knudRenderFolder(sid, row, json.data);
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+function knudRenderFolder(sid, row, data) {
+  const body = document.getElementById('knud-body');
+
+  const rowsHtml = data.files.map(f => `<tr class="admin-row">
+      <td>${esc(f.fileName)}</td>
+      <td>${(Number(f.sizeBytes || 0) / 1024).toFixed(1)} KB</td>
+      <td>
+        <select class="tf-input knud-cat-select" data-filename="${esc(f.fileName)}">
+          ${BOOKING_DOC_CATEGORIES.map(c => `<option value="${esc(c.value)}" ${c.value === (f.guessedCategory || '') ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+        </select>
+      </td>
+      <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
+    </tr>`).join('');
+
+  body.innerHTML = `
+    ${!data.files.length
+      ? '<div class="sap-empty">No documents in this shipment’s folder yet — upload one below.</div>'
+      : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table">
+          <thead><tr><th>File</th><th>Size</th><th>Send as</th><th></th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table></div>`}
+    <div id="knud-status" style="margin-top:12px;padding:10px;border-radius:6px;font-size:13px;color:var(--text-muted)">Choose a category for each file you want to send.</div>
+    <div id="knud-result" style="margin-top:8px"></div>
+  `;
+
+  function selectedFiles() {
+    return [...body.querySelectorAll('.knud-cat-select')]
+      .filter(sel => sel.value)
+      .map(sel => ({ fileName: sel.dataset.filename, category: sel.value }));
+  }
+
+  function updateStatus() {
+    const selected = selectedFiles();
+    const statusEl = document.getElementById('knud-status');
+    const sendBtn  = document.getElementById('knud-send-btn');
+    if (!selected.length) {
+      statusEl.style.background = 'transparent';
+      statusEl.style.color = 'var(--text-muted)';
+      statusEl.textContent = 'Choose a category for each file you want to send.';
+    } else {
+      statusEl.style.background = 'rgba(22,163,74,0.1)';
+      statusEl.style.color = 'var(--success,#16A34A)';
+      statusEl.textContent = `${selected.length} file(s) ready to send: ${selected.map(s => s.fileName).join(', ')}.`;
+    }
+    if (sendBtn) sendBtn.disabled = selected.length === 0;
+  }
+
+  body.querySelectorAll('.knud-cat-select').forEach(sel => sel.addEventListener('change', updateStatus));
+  updateStatus();
+
+  document.getElementById('knud-send-btn').onclick = () => submitCollectionKnDocumentUpload(sid, row, selectedFiles());
+}
+
+async function submitCollectionKnDocumentUpload(sid, row, files) {
+  const btn    = document.getElementById('knud-send-btn');
+  const result = document.getElementById('knud-result');
+  if (!files.length) return;
+  if (!row.trackingNumber) {
+    result.innerHTML = `<div class="sap-error tf-inline-error">This shipment has no Kuehne &amp; Nagel booking number on file.</div>`;
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Sending…';
+  result.innerHTML = '';
+  try {
+    const res = await fetch(`/api/freight-booking/${encodeURIComponent(sid)}/documents/upload-to-kn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookingID: row.trackingNumber, files }),
+    });
+    const json = await res.json();
+    const uploaded = json.data?.uploaded || [];
+    const failed    = json.data?.failed    || [];
+    if (!json.success && !uploaded.length) throw new Error(json.error || 'Failed to send documents.');
+    const parts = [];
+    if (uploaded.length) parts.push(`<div style="color:var(--success,#16A34A)">Sent: ${uploaded.map(u => esc(u.fileName)).join(', ')}.</div>`);
+    if (failed.length)   parts.push(`<div class="sap-error">Failed: ${failed.map(f => `${esc(f.fileName)} — ${esc(f.error)}`).join('; ')}</div>`);
+    result.innerHTML = parts.join('');
+  } catch (err) {
+    result.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send to KN';
+  }
+}
+
+
 async function openBookingModal(rows, haulier) {
   currentBookingRows = rows;
   currentBookingHaulier = haulier;
@@ -2958,6 +3120,7 @@ function renderAwaitingCollection() {
       <button class="btn-secondary" id="col-clear-btn" disabled>Clear</button>
       ${hasPlanning() ? `
         <button class="btn-secondary" id="col-date-btn"    disabled>Update Date</button>
+        <button class="btn-secondary" id="col-docs-btn"    disabled title="Select a single Kuehne &amp; Nagel shipment">Upload Documents</button>
         <button class="btn-secondary" id="col-loading-btn" disabled>Loading List</button>
         <button class="btn-secondary" id="col-unbook-btn"  disabled style="color:var(--error,#DC2626)">Unbook</button>
         <button class="btn-submit"    id="col-collect-btn" disabled>Mark Collected</button>
@@ -2974,6 +3137,7 @@ function bindAwaitingCollectionEvents() {
   document.querySelectorAll('.collection-check').forEach(cb => cb.addEventListener('change', onCollectionToggle));
   document.getElementById('col-clear-btn').addEventListener('click',   clearCollectionSelection);
   document.getElementById('col-date-btn').addEventListener('click',    openUpdateCollectionDateModal);
+  document.getElementById('col-docs-btn')?.addEventListener('click',   openCollectionKnDocumentUploadModal);
   document.getElementById('col-loading-btn').addEventListener('click', downloadLoadingList);
   document.getElementById('col-unbook-btn')?.addEventListener('click', unbookSelected);
   document.getElementById('col-collect-btn').addEventListener('click', markCollectedBulk);
@@ -3010,6 +3174,14 @@ function updateCollectionUI() {
     const btn = document.getElementById(id);
     if (btn) btn.disabled = count === 0 || !hasPlanning();
   });
+  // Documents go against one KN booking at a time (upload-to-kn takes a
+  // single bookingID) — only offer it once selection narrows to exactly
+  // one shipment that was actually booked through KN.
+  const docsBtn = document.getElementById('col-docs-btn');
+  if (docsBtn) {
+    const rows = getSelectedCollectionRows();
+    docsBtn.disabled = !hasPlanning() || rows.length !== 1 || !isKnHaulier(rows[0]?.forwarderName);
+  }
 }
 
 function showCollectionMsg(text, isError = true) {
