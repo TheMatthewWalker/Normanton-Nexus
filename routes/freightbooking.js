@@ -147,6 +147,21 @@ function buildBookingPayload(shipment, cargoItems, options = {}) {
 }
 
 
+// Masks customerKey the same way the document-upload endpoint's payload
+// redaction does — requestPayload is echoed back to the browser (so an
+// operator can check the booking that was actually sent) but the raw KN
+// secret must never leave the server to do that.
+function redactBookingPayload(payload) {
+    if (!payload) return payload;
+    return {
+        ...payload,
+        customerKey: payload.customerKey && payload.customerKey.length > 8
+            ? `${payload.customerKey.slice(0, 4)}...${payload.customerKey.slice(-4)}`
+            : payload.customerKey,
+    };
+}
+
+
 function extractTrackingNumber(responseData) {
     if (!responseData || typeof responseData !== 'object') return '';
     return String(
@@ -284,6 +299,27 @@ router.post('/shipment/:shipmentId', async (req, res) => {
             timeout: 30000,
         });
 
+        // KN's BookingResponse schema requires bookingIsSuccessful and
+        // errorMessage alongside a 200/201 status — same in-band failure
+        // shape as the document-upload endpoint below (see its own comment
+        // for why this can't just rely on axios throwing): KN can return an
+        // HTTP success with bookingIsSuccessful: false and an errorMessage
+        // rather than an HTTP error status, and that has to be checked
+        // explicitly or it would be recorded here as a successful booking.
+        if (knResponse.data?.bookingIsSuccessful === false) {
+            const detail = knResponse.data?.errorMessage || 'KN reported the booking as unsuccessful.';
+            console.error(`[freightbooking] KN booking FAILED (bookingIsSuccessful: false) — shipment ${shipmentId}: ${detail}`);
+            console.error('  Request sent to KN:', JSON.stringify(payload));
+            console.error('  KN response:', JSON.stringify(knResponse.data));
+            return res.status(422).json({
+                error: detail,
+                shipmentID: Number(shipmentId),
+                bookingIsSuccessful: false,
+                knResponse: knResponse.data,
+                requestPayload: redactBookingPayload(payload),
+            });
+        }
+
         return res.status(201).json({
             message: 'Booking created successfully',
             shipmentID: Number(shipmentId),
@@ -292,20 +328,23 @@ router.post('/shipment/:shipmentId', async (req, res) => {
             bookingIsSuccessful: knResponse.data?.bookingIsSuccessful ?? null,
             trackingNumber: extractTrackingNumber(knResponse.data),
             data: knResponse.data,
-            requestPayload: payload,
+            requestPayload: redactBookingPayload(payload),
         });
 
     } catch (err) {
         if (err.response) {
             // KN API returned an error response
+            console.error(`[freightbooking] KN booking API error ${err.response.status} — shipment ${shipmentId}:`, JSON.stringify(err.response.data));
+            console.error('  Request sent to KN:', JSON.stringify(payload));
             return res.status(err.response.status).json({
                 error:      'KN API returned an error',
                 knStatus:   err.response.status,
                 knResponse: err.response.data,
+                requestPayload: redactBookingPayload(payload),
             });
         }
         // Network / timeout error
-        return res.status(502).json({ error: `Could not reach KN API: ${err.message}` });
+        return res.status(502).json({ error: `Could not reach KN API: ${err.message}`, requestPayload: redactBookingPayload(payload) });
     }
 });
 

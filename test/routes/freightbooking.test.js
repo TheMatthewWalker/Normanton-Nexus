@@ -121,6 +121,33 @@ describe('POST /shipment/:shipmentId', () => {
     expect(res.body.trackingNumber).toBe('TRACK123');
   });
 
+  // KN's BookingResponse schema requires bookingIsSuccessful and
+  // errorMessage alongside a 200/201 status — axios only throws on a
+  // non-2xx status, so an HTTP 201 with bookingIsSuccessful: false must be
+  // checked explicitly or it would be recorded as a successful booking.
+  test('treats bookingIsSuccessful: false on an HTTP 201 as a failure', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ shipmentID: 1, IsManual: false }] })
+      .mockResolvedValueOnce({ recordset: [{ palletID: 5, palletType: 'Euro', grossWeight: 100 }] });
+
+    axiosMock.post.mockImplementation((url) => {
+      if (String(url).includes('/oauth2/token')) return Promise.resolve({ data: { access_token: 'test-token', expires_in: 3600 } });
+      if (String(url).endsWith('/bookings')) {
+        return Promise.resolve({ status: 201, data: { bookingIsSuccessful: false, errorMessage: 'Invalid postal code', transactionID: 'TX2' } });
+      }
+      return Promise.reject(new Error(`Unexpected axios.post to ${url}`));
+    });
+
+    const res = await request(app).post('/shipment/1').send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('Invalid postal code');
+    expect(res.body.bookingIsSuccessful).toBe(false);
+    // customerKey must never reach the browser unredacted, even in an
+    // echoed-back request payload.
+    expect(res.body.requestPayload.customerKey).not.toBe('test-kn-customer-key');
+  });
+
   test('maps a KN API error response through with its status', async () => {
     dbRequest.query
       .mockResolvedValueOnce({ recordset: [{ shipmentID: 1, IsManual: false }] })
