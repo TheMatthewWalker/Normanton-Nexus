@@ -201,4 +201,44 @@ describe('POST /:shipmentId/documents/upload-to-kn', () => {
     expect(shipmentMainMock.writeShipmentEvent).toHaveBeenCalledWith(
       expect.anything(), 1, 'KN_DOCUMENT_UPLOAD', expect.stringContaining('invoice.pdf'));
   });
+
+  // A real (non-dryRun) KN API failure needs enough in the response for an
+  // operator to check what was actually sent — the exact URL and a redacted
+  // copy of the payload (customerKey masked, base64 body summarized rather
+  // than inlined) — without leaking the full KN secret to the browser or
+  // ballooning the response to the size of the uploaded PDF.
+  test('a real upload failure returns the request URL and a redacted payload/response', async () => {
+    shipmentMainMock.getShipmentContext.mockResolvedValueOnce({ shipment: { shipmentID: 1 } });
+    shipmentMainMock.getShipmentFolderInfo.mockReturnValueOnce({ shipmentPath: 'C:\\exports\\shipment-1' });
+    fsMock.readFileSync.mockReturnValueOnce('ZmFrZS1wZGY=');
+    axiosMock.post.mockImplementation((url) => {
+      if (String(url).includes('/oauth2/token')) return Promise.resolve({ data: { access_token: 'test-token', expires_in: 3600 } });
+      if (String(url).endsWith('/upload')) {
+        const err = new Error('Request failed with status code 422');
+        err.response = { status: 422, headers: {}, data: { title: 'Invalid bookingID' } };
+        return Promise.reject(err);
+      }
+      return Promise.reject(new Error(`Unexpected axios.post to ${url}`));
+    });
+
+    const res = await request(app)
+      .post('/1/documents/upload-to-kn')
+      .send({ bookingID: 'BK123', files: [{ fileName: 'invoice.pdf', category: 'invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.failed).toHaveLength(1);
+    const failure = res.body.data.failed[0];
+    expect(failure.fileName).toBe('invoice.pdf');
+    expect(failure.error).toContain('Invalid bookingID');
+    expect(failure.request.url).toBe('https://kn-test.invalid/api/upload');
+    expect(failure.request.payload).toEqual({
+      customerID: 'TestCustomer',
+      customerKey: 'test...-key',
+      documentCode: '380',
+      documentExtension: 'pdf',
+      bookingID: 'BK123',
+      base64EncodedDocument: '<base64, 12 chars>',
+    });
+    expect(failure.response).toEqual({ status: 422, data: { title: 'Invalid bookingID' } });
+  });
 });

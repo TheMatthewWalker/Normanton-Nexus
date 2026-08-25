@@ -450,16 +450,34 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         );
       } catch (err) {
         const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
-        // Full request/response round-trip on failure — dryRun redacts the
-        // base64 body for readability, but a real failure needs the exact
-        // bytes KN actually received so this can be handed to KN's API team
-        // to reproduce, not just a truncated summary.
+        // Full request/response round-trip on failure — the server console
+        // gets the exact un-redacted bytes KN actually received (so this can
+        // be handed to KN's API team to reproduce), while the API response
+        // below gets a redacted copy (customerKey masked, base64 body
+        // summarized rather than inlined) so the operator can still see and
+        // check the URL/customerID/documentCode/bookingID that were actually
+        // sent — without every failed-upload response ballooning to the size
+        // of the PDF, or leaking the full KN secret to the browser.
         console.error(`[freightbooking] KN document upload FAILED — booking ${bookingID}, file ${fileName} (${category}, code ${documentCode}):`);
         console.error('  Request sent to KN:', JSON.stringify(payload));
         console.error('  KN response:', err.response
           ? JSON.stringify({ status: err.response.status, headers: err.response.headers, data: err.response.data })
           : `<no response — ${err.message}>`);
-        failed.push({ fileName, category, error: detail });
+        const requestUrl = `${KN_API_URL}/upload`;
+        const redactedPayload = payload ? {
+          ...payload,
+          customerKey: payload.customerKey && payload.customerKey.length > 8
+            ? `${payload.customerKey.slice(0, 4)}...${payload.customerKey.slice(-4)}`
+            : payload.customerKey,
+          base64EncodedDocument: payload.base64EncodedDocument
+            ? `<base64, ${payload.base64EncodedDocument.length} chars>`
+            : null,
+        } : null;
+        failed.push({
+          fileName, category, error: detail,
+          request:  { url: requestUrl, payload: redactedPayload },
+          response: err.response ? { status: err.response.status, data: err.response.data } : null,
+        });
         await writeShipmentEvent(
           pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD_FAILED',
           `Failed to upload ${fileName} (${category}) to KN booking ${bookingID}: ${detail}`

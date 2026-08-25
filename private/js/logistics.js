@@ -1857,6 +1857,24 @@ function knudRenderFolder(sid, row, data) {
   document.getElementById('knud-send-btn').onclick = () => submitCollectionKnDocumentUpload(sid, row, selectedFiles());
 }
 
+// Renders the request URL + redacted payload + KN's response JSON that
+// routes/freightbooking.js now returns alongside each failed upload — an
+// operator retrying a failed send needs to be able to check the exact URL
+// and fields that went out (customerID/documentCode/bookingID etc, with the
+// secret customerKey masked and the base64 body summarized) rather than
+// just a one-line error string, so this can be handed to KN's API team or
+// used to catch a misconfigured KN_API_URL locally.
+function renderKnUploadFailureDetail(failed) {
+  return failed.map(f => {
+    const detail = { request: f.request, response: f.response };
+    const hasDetail = f.request || f.response;
+    return `<div class="sap-error" style="margin-top:6px">
+      <div>${esc(f.fileName)} — ${esc(f.error)}</div>
+      ${hasDetail ? `<pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;background:var(--surface2);border-radius:5px;padding:6px 8px;margin-top:4px">${esc(JSON.stringify(detail, null, 2))}</pre>` : ''}
+    </div>`;
+  }).join('');
+}
+
 async function submitCollectionKnDocumentUpload(sid, row, files) {
   const btn    = document.getElementById('knud-send-btn');
   const result = document.getElementById('knud-result');
@@ -1879,7 +1897,7 @@ async function submitCollectionKnDocumentUpload(sid, row, files) {
     if (!json.success && !uploaded.length) throw new Error(json.error || 'Failed to send documents.');
     const parts = [];
     if (uploaded.length) parts.push(`<div style="color:var(--success,#16A34A)">Sent: ${uploaded.map(u => esc(u.fileName)).join(', ')}.</div>`);
-    if (failed.length)   parts.push(`<div class="sap-error">Failed: ${failed.map(f => `${esc(f.fileName)} — ${esc(f.error)}`).join('; ')}</div>`);
+    if (failed.length)   parts.push(renderKnUploadFailureDetail(failed));
     result.innerHTML = parts.join('');
   } catch (err) {
     result.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
@@ -2083,6 +2101,7 @@ async function submitBookingModal() {
     const successfulUpdates = [];
     const failedRefs = [];
     const docWarnings = [];
+    const docFailureDetailsHtml = [];
 
     for (const item of updates) {
       try {
@@ -2132,6 +2151,7 @@ async function submitBookingModal() {
               if (!uploadJson.success || failedFiles.length) {
                 const detail = failedFiles.map(f => `${f.fileName}: ${f.error}`).join('; ') || uploadJson.error || 'unknown error';
                 docWarnings.push(`${item.shipmentRef}: booked (tracking ${item.trackingNumber}), but document upload to KN failed — ${detail}. Upload manually via the KN portal.`);
+                if (failedFiles.length) docFailureDetailsHtml.push(renderKnUploadFailureDetail(failedFiles));
               }
             } catch (uploadErr) {
               docWarnings.push(`${item.shipmentRef}: booked (tracking ${item.trackingNumber}), but document upload to KN failed — ${uploadErr.message}. Upload manually via the KN portal.`);
@@ -2180,7 +2200,7 @@ async function submitBookingModal() {
       const parts = [`Booked ${successfulUpdates.length} shipment(s).`];
       if (failedRefs.length)  parts.push(`Failed: ${failedRefs.join(' | ')}`);
       if (docWarnings.length) parts.push(docWarnings.join(' | '));
-      result.innerHTML = `<div class="sap-error tf-inline-error">${esc(parts.join(' '))}</div>`;
+      result.innerHTML = `<div class="sap-error tf-inline-error">${esc(parts.join(' '))}</div>${docFailureDetailsHtml.join('')}`;
       button.disabled = false;
       button.textContent = 'Book';
       return;
@@ -3844,6 +3864,7 @@ async function submitSingleShipmentBooking(shipment, { isKn, isCC }) {
   result.innerHTML = '';
 
   let docWarning = null;
+  let docFailureDetailHtml = '';
   try {
     let expectedCost = null, elementCode = null, customsCost = null, costCenter = null, skipCost = true;
 
@@ -3879,6 +3900,7 @@ async function submitSingleShipmentBooking(shipment, { isKn, isCC }) {
           if (!uploadJson.success || failedFiles.length) {
             const detail = failedFiles.map(f => `${f.fileName}: ${f.error}`).join('; ') || uploadJson.error || 'unknown error';
             docWarning = `Booked (tracking ${trackingNumber}), but document upload to KN failed — ${detail}. Upload manually via the KN portal.`;
+            if (failedFiles.length) docFailureDetailHtml = renderKnUploadFailureDetail(failedFiles);
           }
         } catch (uploadErr) {
           docWarning = `Booked (tracking ${trackingNumber}), but document upload to KN failed — ${uploadErr.message}. Upload manually via the KN portal.`;
@@ -3922,7 +3944,7 @@ async function submitSingleShipmentBooking(shipment, { isKn, isCC }) {
     if (currentShipmentView === 'awaiting-booking') await runShipmentBooking();
 
     if (docWarning) {
-      result.innerHTML = `<div class="sap-error tf-inline-error">${esc(docWarning)}</div>`;
+      result.innerHTML = `<div class="sap-error tf-inline-error">${esc(docWarning)}</div>${docFailureDetailHtml}`;
       button.disabled = false;
       button.textContent = originalText;
       return;
