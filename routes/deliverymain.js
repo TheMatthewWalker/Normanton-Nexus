@@ -667,7 +667,18 @@ router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP')
             const allocDelivery        = deriveAllocDelivery(b);
             const stagedViaBin         = String(b.storageType || '').trim() === STAGING_STORAGE_TYPE
                                           && !!allocDelivery && norm(b.bin) === allocDelivery;
-            const isOwnOrUnassigned    = !allocDelivery || allocDelivery === norm(deliveryId);
+            // A batch sitting in THIS delivery's own 916 bin didn't get there
+            // by magic — the only thing that ever writes to that bin is this
+            // app's own POST /:deliveryId/stage-batch, called from addPackage()
+            // every time a batch is picked onto one of this delivery's
+            // pallets. So "staged to my own bin" doesn't mean "no conflict,
+            // freely available" — it means "already picked", and needs to
+            // drop out of the available list just like a batch staged to a
+            // DIFFERENT delivery's bin does, or the second (and every later)
+            // pallet on this same picksheet keeps re-offering a batch that's
+            // already sitting on pallet 1.
+            const stagedToThisDelivery = stagedViaBin && allocDelivery === norm(deliveryId);
+            const isOwnOrUnassigned    = !allocDelivery || (allocDelivery === norm(deliveryId) && !stagedToThisDelivery);
             const allocCustomer        = allocDelivery ? customerByDelivery[allocDelivery] : null;
             const sameCustomer         = !allocCustomer || allocCustomer === norm(customerId);
             const allocationAllowed    = isOwnOrUnassigned || sameCustomer;
@@ -675,16 +686,20 @@ router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP')
             const packagingCustomer        = packagingInstructionCustomer(b);
             const packagingMismatch        = packagingCustomer !== null && packagingCustomer !== norm(customerId);
             const packagingCustomerUnknown = packagingCustomer === null;
-            const allowed                  = allocationAllowed && !packagingMismatch;
+            const allowed                  = allocationAllowed && !packagingMismatch && !stagedToThisDelivery;
 
             // Precedence: wrong-customer packaging blocks first (strongest
-            // reason), then existing allocation conflicts, then "we simply
-            // don't know" — anything else is a normal, available batch.
+            // reason), then already-picked-on-this-delivery, then existing
+            // allocation conflicts, then "we simply don't know" — anything
+            // else is a normal, available batch.
             let group = 'available';
             let reason = null;
             if (packagingMismatch) {
                 group = 'wrongCustomer';
                 reason = `Packaged for customer ${packagingCustomer}, not ${norm(customerId) || 'this delivery'}`;
+            } else if (stagedToThisDelivery) {
+                group = 'restricted';
+                reason = 'Already picked to a pallet on this delivery';
             } else if (!allocationAllowed) {
                 group = 'restricted';
                 reason = stagedViaBin
@@ -1021,6 +1036,59 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
     }
 }
 
+// ── Post Goods Issue for a delivery (BAPI_DELIVERYPROCESSING_EXEC) ──
+//
+// Fired automatically right after runZdelflagMaintenance records 'Success'
+// for a delivery (see the .complete handler below) — no manual approval
+// step. Mirrors runZdelflagMaintenance's shape (never throws, always
+// resolves { status, messages }, writes exactly one row to
+// log.DeliveryGoodsIssueRun) but is much simpler: one POST to SapServer, no
+// multi-step SAP lookup chain, since GI only needs the delivery number
+// itself. ranByUserID is always null — this is an automatic run, same as
+// ZDELFLAG's own.
+//
+// SapServer's GoodsIssueHelper/BAPI_DELIVERYPROCESSING_EXEC integration is
+// new and its REQUEST-table field set is a deliberately minimal starting
+// point pending live confirmation (see GoodsIssueModels.cs's header
+// comment on the SapServer side) — Failed runs here are expected during
+// that confirmation phase, which is exactly why this never blocks
+// completion and always gets its own reprocess path below.
+async function runGoodsIssueApproval(pool, deliveryId) {
+    const recordRun = async (status, messages) => {
+        await pool.request()
+            .input('deliveryId', sql.NVarChar(10),  String(deliveryId))
+            .input('status',     sql.NVarChar(10),  status)
+            .input('messages',   sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
+            .query(`INSERT INTO log.DeliveryGoodsIssueRun (deliveryID, status, messages)
+                    VALUES (@deliveryId, @status, @messages)`);
+        return { status, messages: messages || [] };
+    };
+
+    try {
+        const response = await axios.post(
+            `${sapConfig.url}/api/warehouse/goods-issue`,
+            { DeliveryNumber: String(deliveryId) },
+            { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+
+        const result = response.data?.data;
+        const messages = result?.messages || [];
+        if (!result?.success) return await recordRun('Failed', messages);
+        return await recordRun('Success', messages);
+    } catch (err) {
+        // Unlike zdelflag/maintain (which always returns HTTP 200 and signals
+        // failure only via its own status field), SapServer's goods-issue
+        // endpoint returns a real 422 on a business rejection — axios throws
+        // for that, but the rejection still carries the real SAP RETURN
+        // messages in the error body, so pull those out instead of
+        // collapsing to a generic HTTP error string when they're available.
+        const messages = err.response?.data?.data?.messages;
+        if (messages?.length) return await recordRun('Failed', messages);
+        const msg = err.response?.data?.error?.message || err.message;
+        return await recordRun('Failed', [{ type: 'E', message: msg }]);
+    }
+}
+
 // ── Mark delivery as complete — rolls up pallet weights/volume/count ──
 //
 // After the rollup, pushes the same actual gross/net weight and pallet count
@@ -1096,6 +1164,7 @@ router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (
 
         let sapWarning = null;
         let zdelflagWarning = null;
+        let goodsIssueWarning = null;
         let note = null;
 
         if (wasHeldForPackaging) {
@@ -1123,10 +1192,22 @@ router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (
             if (zdelflagResult.status !== 'Success') {
                 zdelflagWarning = zdelflagResult.messages.map(m => m.message).filter(Boolean).join('; ')
                     || `ZDELFLAG/ZDELPACK maintenance did not complete successfully (${zdelflagResult.status}).`;
+            } else {
+                // Goods Issue only fires once ZDELFLAG/ZDELPACK maintenance
+                // itself succeeded — posting GI for a delivery whose
+                // packaging never made it into SAP would be posting against
+                // incomplete data. Same best-effort treatment as ZDEL/
+                // ZDELFLAG above: never blocks completion, surfaced as its
+                // own warning instead.
+                const goodsIssueResult = await runGoodsIssueApproval(pool, req.params.deliveryId);
+                if (goodsIssueResult.status !== 'Success') {
+                    goodsIssueWarning = goodsIssueResult.messages.map(m => m.message).filter(Boolean).join('; ')
+                        || `Goods Issue posting did not complete successfully (${goodsIssueResult.status}).`;
+                }
             }
         }
 
-        res.json({ success: true, data: { ...totals, sapWarning, zdelflagWarning, note, wasHeldForPackaging } });
+        res.json({ success: true, data: { ...totals, sapWarning, zdelflagWarning, goodsIssueWarning, note, wasHeldForPackaging } });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -1207,6 +1288,100 @@ router.post('/:deliveryId/zdelflag/reprocess', async (req, res) => {
         }
 
         const result = await runZdelflagMaintenance(pool, req.params.deliveryId, null);
+        res.json({ success: true, data: result });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Goods Issue warning log — deliveries whose latest posting attempt was
+// Failed, for the warehouse warning-log UI ──
+router.get('/goods-issue/warnings', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .query(`SELECT r.deliveryID, r.status, r.messages, r.ranAtUtc
+                    FROM log.DeliveryGoodsIssueRun r
+                    INNER JOIN (
+                        SELECT deliveryID, MAX(ranAtUtc) AS latestRun
+                        FROM log.DeliveryGoodsIssueRun
+                        GROUP BY deliveryID
+                    ) latest ON latest.deliveryID = r.deliveryID AND latest.latestRun = r.ranAtUtc
+                    WHERE r.status = 'Failed'
+                    ORDER BY r.ranAtUtc DESC`);
+        res.json({
+            success: true,
+            data: result.recordset.map(r => ({
+                deliveryID: r.deliveryID,
+                status: r.status,
+                messages: JSON.parse(r.messages || '[]'),
+                ranAtUtc: r.ranAtUtc,
+            })),
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Latest Goods Issue run status for one delivery ──
+router.get('/:deliveryId/goods-issue/status', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status, messages, ranAtUtc
+                    FROM log.DeliveryGoodsIssueRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        const row = result.recordset[0];
+        res.json({
+            success: true,
+            data: row
+                ? { status: row.status, messages: JSON.parse(row.messages || '[]'), ranAtUtc: row.ranAtUtc }
+                : { status: null, messages: [], ranAtUtc: null },
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Reprocess Goods Issue posting for one delivery ──
+// Only allowed while the latest run is missing or Failed — once Success, it
+// can't be reprocessed without a future reversal feature (not implemented
+// yet), same precedent as ZDELFLAG's reprocess guard above. Also requires
+// the latest ZDELFLAG run to be Success — posting GI for a delivery whose
+// packaging never made it into SAP isn't a retry, it's a different problem.
+router.post('/:deliveryId/goods-issue/reprocess', async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        const zdelflagRes = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status
+                    FROM log.DeliveryZdelflagRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        if (zdelflagRes.recordset[0]?.status !== 'Success') {
+            return res.status(409).json({
+                success: false,
+                error: 'This delivery\'s ZDELFLAG/ZDELPACK maintenance has not succeeded — Goods Issue cannot be posted yet.',
+            });
+        }
+
+        const latestRes = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status
+                    FROM log.DeliveryGoodsIssueRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        if (latestRes.recordset[0]?.status === 'Success') {
+            return res.status(409).json({
+                success: false,
+                error: 'This delivery already has a successful Goods Issue posting and cannot be reprocessed.',
+            });
+        }
+
+        const result = await runGoodsIssueApproval(pool, req.params.deliveryId);
         res.json({ success: true, data: result });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });

@@ -23,6 +23,8 @@ let pendingCSVRecords  = [];
   setInterval(pollStagingOpenCount, 60000);
   pollZdelflagWarnCount();
   setInterval(pollZdelflagWarnCount, 60000);
+  pollGoodsIssueWarnCount();
+  setInterval(pollGoodsIssueWarnCount, 60000);
   pollPackagingHoldingCount();
   setInterval(pollPackagingHoldingCount, 60000);
 })();
@@ -61,6 +63,26 @@ async function pollZdelflagWarnCount() {
     badge.title = count > 0
       ? `${count} delivery/deliveries need ZDELFLAG/ZDELPACK investigation`
       : 'No ZDELFLAG/ZDELPACK warnings';
+  } catch { /* leave the static LIVE badge in place on failure */ }
+}
+
+// Goods Issue Warnings tile badge — count of deliveries whose latest Goods
+// Issue posting (BAPI_DELIVERYPROCESSING_EXEC, fired automatically right
+// after a delivery's ZDELFLAG/ZDELPACK maintenance succeeds) was Failed.
+// Same red "needs attention" styling as the ZDELFLAG Warnings badge above.
+async function pollGoodsIssueWarnCount() {
+  const badge = document.getElementById('goods-issue-warn-badge');
+  if (!badge) return;
+  try {
+    const r = await fetch('/api/deliverymain/goods-issue/warnings');
+    const json = await r.json();
+    const count = (json.data || []).length;
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.classList.toggle('tile-badge--overdue', count > 0);
+    badge.classList.toggle('tile-badge--live', count === 0);
+    badge.title = count > 0
+      ? `${count} delivery/deliveries need Goods Issue investigation`
+      : 'No Goods Issue warnings';
   } catch { /* leave the static LIVE badge in place on failure */ }
 }
 
@@ -115,6 +137,7 @@ function setupTiles() {
       if (fn === 'stagingCompleted') runStagingCompleted();
       if (fn === 'stagingBinRestrictions') runStagingBinRestrictions();
       if (fn === 'zdelflagWarnings') runZdelflagWarnings();
+      if (fn === 'goodsIssueWarnings') runGoodsIssueWarnings();
       if (fn === 'stockInvestigations') runStockInvestigations();
       if (fn === 'stockCountAdmin') runStockCountAdmin();
       if (fn === 'ptfeCycleCount')  runPtfeCycleCount();
@@ -6114,8 +6137,16 @@ async function completeDelivery() {
     closePickModal();
     if (fromHolding) { await runPackagingHolding(); } else { await runOpenPicksheets(); }
     pollPackagingHoldingCount();
-    if (json.data?.sapWarning) {
-      wConfirm({ title: 'Delivery Complete — SAP Not Updated', message: json.data.sapWarning, confirmText: 'OK', variant: '' });
+    // sapWarning (ZDEL weight push) and goodsIssueWarning (automatic Goods
+    // Issue posting, fired right after ZDELFLAG/ZDELPACK maintenance
+    // succeeds) are both best-effort SAP steps that never block completion
+    // itself — combined into one dialog rather than firing two independent
+    // wConfirm calls back-to-back.
+    const warningParts = [];
+    if (json.data?.sapWarning) warningParts.push(json.data.sapWarning);
+    if (json.data?.goodsIssueWarning) warningParts.push(`Goods Issue: ${json.data.goodsIssueWarning}`);
+    if (warningParts.length) {
+      wConfirm({ title: 'Delivery Complete — SAP Not Updated', message: warningParts.join('\n\n'), confirmText: 'OK', variant: '' });
     }
   } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
@@ -7649,6 +7680,83 @@ async function zdReprocess(deliveryId, btn) {
       throw new Error(json.error || 'Reprocess failed');
     }
     runZdelflagWarnings();
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+// ── Goods Issue Warnings ─────────────────────────────────────────────────────
+// Lists deliveries whose latest Goods Issue posting (BAPI_DELIVERYPROCESSING_
+// EXEC, fired automatically in deliverymain.js's runGoodsIssueApproval right
+// after ZDELFLAG/ZDELPACK maintenance succeeds — no manual approval step)
+// came back Failed, with a Reprocess action. A delivery drops off this list
+// the moment a reprocess attempt records Success. Mirrors the ZDELFLAG
+// Warnings panel above exactly.
+async function runGoodsIssueWarnings() {
+  if (!await checkSession()) return;
+  showResultPanel('Goods Issue Warnings', 'Deliveries where automatic Goods Issue posting failed');
+  try {
+    const r = await fetch('/api/deliverymain/goods-issue/warnings');
+    const json = await r.json();
+    if (json.success === false) throw new Error(json.error || 'Failed to load Goods Issue warnings');
+    giRenderWarnings(json.data || []);
+  } catch (err) {
+    document.getElementById('result-body').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+  pollGoodsIssueWarnCount();
+}
+
+function giRenderWarnings(warnings) {
+  const rows = warnings.map(w => {
+    const msgText = (w.messages || []).length
+      ? w.messages.map(m => {
+          const type = esc(String(m.type || '').trim());
+          const text = esc(String(m.message || '').trim());
+          return type
+            ? `<span style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;font-size:10px">[${type}]</span> ${text || '<span style="color:var(--text-muted)">(no message text)</span>'}`
+            : (text || '<span style="color:var(--text-muted)">(no message text)</span>');
+        }).join('<br>')
+      : '<span style="color:var(--text-muted)">—</span>';
+    return `
+    <tr class="admin-row">
+      <td><strong>${esc(String(w.deliveryID))}</strong></td>
+      <td><span class="tile-badge tile-badge--overdue" style="position:static;display:inline-block">${esc(w.status)}</span></td>
+      <td style="max-width:420px">${msgText}</td>
+      <td>${spFormatDate(w.ranAtUtc)}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn-secondary gi-reprocess" data-id="${esc(String(w.deliveryID))}" style="padding:3px 10px;font-size:11px">Reprocess</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('result-body').innerHTML = `
+    ${warnings.length ? `
+      <div style="overflow-x:auto">
+        <table class="pn-batch-table admin-table">
+          <thead><tr><th>Delivery</th><th>Status</th><th>Messages</th><th>Last Run</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : '<div class="sap-empty">No deliveries currently have a failed Goods Issue posting.</div>'}
+  `;
+
+  document.querySelectorAll('.gi-reprocess').forEach(btn => {
+    btn.addEventListener('click', () => giReprocess(btn.dataset.id, btn));
+  });
+}
+
+async function giReprocess(deliveryId, btn) {
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Reprocessing…';
+  try {
+    const r = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/goods-issue/reprocess`, { method: 'POST' });
+    const json = await r.json();
+    if (!r.ok || json.success === false) {
+      throw new Error(json.error || 'Reprocess failed');
+    }
+    runGoodsIssueWarnings();
   } catch (err) {
     alert(err.message);
     btn.disabled = false;

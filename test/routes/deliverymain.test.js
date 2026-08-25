@@ -262,3 +262,89 @@ describe('POST /:deliveryId/stage-batch', () => {
     expect(dbRequest.input).toHaveBeenCalledWith('detail', 'NVarChar(500)', expect.stringContaining('failed'));
   });
 });
+
+describe('POST /:deliveryId/goods-issue/reprocess', () => {
+  test('409s when the latest ZDELFLAG run has not succeeded', async () => {
+    queueResults({ recordset: [{ status: 'Failed' }] }); // ZDELFLAG check only
+    const res = await request(app).post('/1/goods-issue/reprocess');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/ZDELFLAG\/ZDELPACK maintenance has not succeeded/);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('409s when no ZDELFLAG run exists at all', async () => {
+    queueResults({ recordset: [] }); // ZDELFLAG check only
+    const res = await request(app).post('/1/goods-issue/reprocess');
+    expect(res.status).toBe(409);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('409s when Goods Issue already succeeded for this delivery', async () => {
+    queueResults(
+      { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
+      { recordset: [{ status: 'Success' }] }, // GoodsIssueRun check
+    );
+    const res = await request(app).post('/1/goods-issue/reprocess');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already has a successful Goods Issue posting/);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('posts Goods Issue and records Success when both guards pass', async () => {
+    queueResults(
+      { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
+      { recordset: [{ status: 'Failed' }] },  // GoodsIssueRun check — eligible for retry
+      { recordset: [] },                      // the INSERT into DeliveryGoodsIssueRun
+    );
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, messages: [{ type: 'S', message: 'Delivery processed' }] } },
+    });
+
+    const res = await request(app).post('/1/goods-issue/reprocess');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('Success');
+    expect(dbRequest.input).toHaveBeenCalledWith('status', expect.anything(), 'Success');
+  });
+
+  test('records Failed with the real SAP messages when SapServer returns 422', async () => {
+    queueResults(
+      { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
+      { recordset: [] },                      // GoodsIssueRun check — no prior run
+      { recordset: [] },                      // the INSERT into DeliveryGoodsIssueRun
+    );
+    axiosMock.post.mockRejectedValueOnce({
+      response: { data: { success: false, data: { success: false, messages: [{ type: 'E', message: 'Delivery not found' }] } } },
+    });
+
+    const res = await request(app).post('/1/goods-issue/reprocess');
+
+    expect(res.status).toBe(200); // the reprocess endpoint itself succeeds — it just records a Failed run
+    expect(res.body.data.status).toBe('Failed');
+    expect(res.body.data.messages).toEqual([{ type: 'E', message: 'Delivery not found' }]);
+  });
+});
+
+describe('GET /goods-issue/warnings', () => {
+  test('maps Failed DeliveryGoodsIssueRun rows to the warning-log shape', async () => {
+    queueResults({
+      recordset: [{ deliveryID: '80001234', status: 'Failed', messages: '[{"type":"E","message":"Delivery not found"}]', ranAtUtc: '2026-08-25T10:00:00Z' }],
+    });
+    const res = await request(app).get('/goods-issue/warnings');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([{
+      deliveryID: '80001234', status: 'Failed',
+      messages: [{ type: 'E', message: 'Delivery not found' }],
+      ranAtUtc: '2026-08-25T10:00:00Z',
+    }]);
+  });
+});
+
+describe('GET /:deliveryId/goods-issue/status', () => {
+  test('returns null status when no run exists yet', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(app).get('/1/goods-issue/status');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ status: null, messages: [], ranAtUtc: null });
+  });
+});
