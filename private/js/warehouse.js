@@ -4889,12 +4889,25 @@ async function openPalletBuilderOnExisting(palletId) {
     </div>`;
 
   try {
-    const [ptRes, pkRes, palRes, pkgsRes, valRes, stockRes, printerInfo, dmRows] = await Promise.all([
+    // Need the pallet's own type before the validation lookup can be scoped
+    // to it (see below), so fetch that one first rather than in the big
+    // Promise.all with everything else.
+    const palRes        = await fetch(`/api/palletmain/id/${palletId}`).then(r => r.json());
+    const palletRecord  = (palRes.data || palRes)[0];
+    const palletTypeId  = palletRecord?.palletType;
+
+    const [ptRes, pkRes, pkgsRes, valRes, stockRes, printerInfo, dmRows] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
-      fetch(`/api/palletmain/id/${palletId}`).then(r => r.json()),
       fetch(`/api/palletpackages/pallet/${palletId}`).then(r => r.json()),
-      fetch('/api/palletvalidation').then(r => r.json()),
+      // Same pallet-type-scoped, full-PackagingData-joined endpoint
+      // createPallet() uses — GET /api/palletvalidation (no pallet ID) is
+      // the bare palletID/packagingID pair table for EVERY pallet type, so
+      // using it here showed every packaging option instead of just the
+      // ones valid for this pallet's own type.
+      palletTypeId
+        ? fetch(`/api/palletvalidation/pallet/${encodeURIComponent(palletTypeId)}`).then(r => r.json())
+        : Promise.resolve({ data: [] }),
       fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
         .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
       loadPbPrinters().catch(() => ({ printers: [], userDefault: null })),
@@ -4908,7 +4921,6 @@ async function openPalletBuilderOnExisting(palletId) {
     pb.printerId = resolvePbPrinterId(printerInfo.printers, printerInfo.userDefault);
     pb.picksheetComment = dmRows?.[0]?.picksheetComment || '';
 
-    const palletRecord = (palRes.data || palRes)[0];
     if (palletRecord) {
       pb.palletType       = palletRecord.palletType;
       pb.palletTypeData   = pb.allPalletTypes.find(t => t.palletID === pb.palletType);
@@ -4931,7 +4943,8 @@ async function openPalletBuilderOnExisting(palletId) {
       .filter(p => isContainerPackagingId(p.packagingID) && !p.sapBatch)
       .forEach(p => { pb.layerContainers[p.palletLayer] = p.packagingID; });
 
-    // Validation endpoint now returns full PackagingData rows (BIGINT packagingID included)
+    // Already scoped to palletTypeId above and joined to full PackagingData
+    // (BIGINT packagingID included) — see the Promise.all comment.
     pb.allowedPackaging = valRes.data || valRes;
 
     renderBuilderPhase2();
