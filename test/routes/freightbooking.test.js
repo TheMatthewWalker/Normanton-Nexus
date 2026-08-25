@@ -188,7 +188,7 @@ describe('POST /:shipmentId/documents/upload-to-kn', () => {
     fsMock.readFileSync.mockReturnValueOnce('ZmFrZS1wZGY=');
     axiosMock.post.mockImplementation((url) => {
       if (String(url).includes('/oauth2/token')) return Promise.resolve({ data: { access_token: 'test-token', expires_in: 3600 } });
-      if (String(url).endsWith('/upload')) return Promise.resolve({ data: { documentId: 'DOC1' } });
+      if (String(url).endsWith('/documents')) return Promise.resolve({ data: { uploadIsSuccessful: true, uploadConfirmationID: 'DOC1', transactionID: 'TXN1' } });
       return Promise.reject(new Error(`Unexpected axios.post to ${url}`));
     });
 
@@ -202,6 +202,35 @@ describe('POST /:shipmentId/documents/upload-to-kn', () => {
       expect.anything(), 1, 'KN_DOCUMENT_UPLOAD', expect.stringContaining('invoice.pdf'));
   });
 
+  // KN's document-upload response schema is { errorMessage,
+  // uploadConfirmationID, uploadIsSuccessful, transactionID } — axios only
+  // throws on a non-2xx status, so an HTTP 200 with uploadIsSuccessful:
+  // false must be checked explicitly or a KN-side rejection would be
+  // recorded as a success.
+  test('an HTTP 200 with uploadIsSuccessful: false is treated as a failure', async () => {
+    shipmentMainMock.getShipmentContext.mockResolvedValueOnce({ shipment: { shipmentID: 1 } });
+    shipmentMainMock.getShipmentFolderInfo.mockReturnValueOnce({ shipmentPath: 'C:\\exports\\shipment-1' });
+    fsMock.readFileSync.mockReturnValueOnce('ZmFrZS1wZGY=');
+    axiosMock.post.mockImplementation((url) => {
+      if (String(url).includes('/oauth2/token')) return Promise.resolve({ data: { access_token: 'test-token', expires_in: 3600 } });
+      if (String(url).endsWith('/documents')) {
+        return Promise.resolve({ status: 200, data: { uploadIsSuccessful: false, errorMessage: 'Unknown bookingID', transactionID: 'TXN2' } });
+      }
+      return Promise.reject(new Error(`Unexpected axios.post to ${url}`));
+    });
+
+    const res = await request(app)
+      .post('/1/documents/upload-to-kn')
+      .send({ bookingID: 'BK123', files: [{ fileName: 'invoice.pdf', category: 'invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.uploaded).toEqual([]);
+    expect(res.body.data.failed).toHaveLength(1);
+    expect(res.body.data.failed[0].error).toBe('Unknown bookingID');
+    expect(shipmentMainMock.writeShipmentEvent).toHaveBeenCalledWith(
+      expect.anything(), 1, 'KN_DOCUMENT_UPLOAD_FAILED', expect.stringContaining('Unknown bookingID'));
+  });
+
   // A real (non-dryRun) KN API failure needs enough in the response for an
   // operator to check what was actually sent — the exact URL and a redacted
   // copy of the payload (customerKey masked, base64 body summarized rather
@@ -213,7 +242,7 @@ describe('POST /:shipmentId/documents/upload-to-kn', () => {
     fsMock.readFileSync.mockReturnValueOnce('ZmFrZS1wZGY=');
     axiosMock.post.mockImplementation((url) => {
       if (String(url).includes('/oauth2/token')) return Promise.resolve({ data: { access_token: 'test-token', expires_in: 3600 } });
-      if (String(url).endsWith('/upload')) {
+      if (String(url).endsWith('/documents')) {
         const err = new Error('Request failed with status code 422');
         err.response = { status: 422, headers: {}, data: { title: 'Invalid bookingID' } };
         return Promise.reject(err);
@@ -230,9 +259,9 @@ describe('POST /:shipmentId/documents/upload-to-kn', () => {
     const failure = res.body.data.failed[0];
     expect(failure.fileName).toBe('invoice.pdf');
     expect(failure.error).toContain('Invalid bookingID');
-    expect(failure.request.url).toBe('https://kn-test.invalid/api/upload');
+    expect(failure.request.url).toBe('https://kn-test.invalid/api/documents');
     expect(failure.request.payload).toEqual({
-      customerID: 'TestCustomer',
+      customerId: 'TestCustomer',
       customerKey: 'test...-key',
       documentCode: '380',
       documentExtension: 'pdf',

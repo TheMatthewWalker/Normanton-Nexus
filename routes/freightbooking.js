@@ -83,7 +83,7 @@ function buildBookingPayload(shipment, cargoItems, options = {}) {
             highValue:           false,
             oversizedGoods:      false,
             privateConsignee:    false,
-            insurance:           false,
+            insuranceFlag:       false,
         },
 
         bookingOptions: [],
@@ -316,14 +316,23 @@ router.post('/shipment/:shipmentId', async (req, res) => {
 // verified present by the operator in the pre-booking popup, never guessed
 // again here — are pushed to KN against that booking.
 //
-// Per KN's API team, the ShipmentDocumentManagement swagger endpoint this
-// used to call (KN_DOCUMENTS_API_URL, multipart, keyed by tracking number)
-// was the wrong API. The correct one is KN_API_URL + '/upload' — the same
-// base URL/OAuth client as booking creation below — which takes a single
-// JSON document per call, base64-encoded, keyed by bookingID:
-//   { customerID, customerKey, documentCode, documentExtension, bookingID,
+// Per KN's own BookingRoad OpenAPI spec (Document Request tag), the correct
+// endpoint is KN_API_URL + '/documents' — the same base URL/OAuth client as
+// booking creation below — which takes a single JSON document per call,
+// base64-encoded, keyed by bookingID:
+//   { customerId, customerKey, documentCode, documentExtension, bookingID,
 //     base64EncodedDocument }
 // with Accept: application/problem+json (KN's convention for this API).
+// NOTE two things the spec makes explicit that earlier code got wrong:
+// - the field is "customerId" (lowercase d), not "customerID" — same
+//   casing buildBookingPayload above already uses for the booking call.
+// - '/document' (singular) also exists but is marked deprecated in the
+//   spec; '/documents' is the one to use.
+// A 200 response here isn't necessarily a success either — the response
+// schema is { errorMessage, uploadConfirmationID, uploadIsSuccessful,
+// transactionID }, so uploadIsSuccessful must be checked explicitly; KN can
+// (and does) return HTTP 200 with uploadIsSuccessful: false and an
+// errorMessage rather than an HTTP error status.
 //
 // bookingID here is exactly what this app already stores as a shipment's
 // trackingNumber — extractTrackingNumber (above) falls back to
@@ -402,14 +411,14 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         preview.push({
           fileName, category, documentCode, documentExtension,
           filePath, fileSizeBytes, fileError,
-          url: `${KN_API_URL}/upload`,
+          url: `${KN_API_URL}/documents`,
           headers: {
             'Content-Type': 'application/json',
             'Accept':       'application/problem+json',
             'Authorization': accessToken ? 'Bearer <valid, fetched OK>' : `<KN OAuth FAILED: ${authError}>`,
           },
           payload: {
-            customerID:  KN_CUSTOMER_ID,
+            customerId:  KN_CUSTOMER_ID,
             customerKey: KN_CUSTOMER_KEY.length > 8 ? `${KN_CUSTOMER_KEY.slice(0, 4)}...${KN_CUSTOMER_KEY.slice(-4)}` : KN_CUSTOMER_KEY,
             documentCode,
             documentExtension,
@@ -420,50 +429,21 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
         continue;
       }
 
+      const requestUrl = `${KN_API_URL}/documents`;
       let payload = null;
-      try {
-        const base64String = fs.readFileSync(filePath, {encoding: 'base64'});
 
-        payload = {
-          customerID:  KN_CUSTOMER_ID,
-          customerKey: KN_CUSTOMER_KEY,
-          documentCode,
-          documentExtension,
-          bookingID,
-          base64EncodedDocument: base64String,
-        };
-
-        const response = await axios.post(`${KN_API_URL}/upload`, payload, {
-          timeout: 120000,
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept':       'application/problem+json',
-            'Authorization': `Bearer ${accessToken}`,
-          },
-        });
-
-        const documentId = response.data?.documentId || response.data?.transactionID || null;
-        uploaded.push({ fileName, category, documentCode, documentId });
-        await writeShipmentEvent(
-          pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD',
-          `Uploaded ${fileName} (${category}, code ${documentCode}) to KN booking ${bookingID}${documentId ? ` — documentId ${documentId}` : ''}.`
-        );
-      } catch (err) {
-        const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
-        // Full request/response round-trip on failure — the server console
-        // gets the exact un-redacted bytes KN actually received (so this can
-        // be handed to KN's API team to reproduce), while the API response
-        // below gets a redacted copy (customerKey masked, base64 body
-        // summarized rather than inlined) so the operator can still see and
-        // check the URL/customerID/documentCode/bookingID that were actually
-        // sent — without every failed-upload response ballooning to the size
-        // of the PDF, or leaking the full KN secret to the browser.
-        console.error(`[freightbooking] KN document upload FAILED — booking ${bookingID}, file ${fileName} (${category}, code ${documentCode}):`);
+      // Shared by both failure paths below — an in-band KN rejection
+      // (HTTP 200, uploadIsSuccessful: false) and a real HTTP/network error
+      // — so both end up with the same redacted request/response detail for
+      // the operator to check (customerKey masked, base64 body summarized
+      // rather than inlined, so the response doesn't balloon to the size of
+      // the uploaded PDF or leak the full KN secret to the browser). The
+      // server console still gets the exact un-redacted bytes KN actually
+      // received, to hand to KN's API team if needed.
+      const recordFailure = (error, responseInfo) => {
+        console.error(`[freightbooking] KN document upload FAILED — booking ${bookingID}, file ${fileName} (${category}, code ${documentCode}): ${error}`);
         console.error('  Request sent to KN:', JSON.stringify(payload));
-        console.error('  KN response:', err.response
-          ? JSON.stringify({ status: err.response.status, headers: err.response.headers, data: err.response.data })
-          : `<no response — ${err.message}>`);
-        const requestUrl = `${KN_API_URL}/upload`;
+        console.error('  KN response:', responseInfo ? JSON.stringify(responseInfo) : '<no response>');
         const redactedPayload = payload ? {
           ...payload,
           customerKey: payload.customerKey && payload.customerKey.length > 8
@@ -474,14 +454,58 @@ router.post('/:shipmentId/documents/upload-to-kn', requirePermission('LOG_PLANNI
             : null,
         } : null;
         failed.push({
-          fileName, category, error: detail,
+          fileName, category, error,
           request:  { url: requestUrl, payload: redactedPayload },
-          response: err.response ? { status: err.response.status, data: err.response.data } : null,
+          response: responseInfo ? { status: responseInfo.status, data: responseInfo.data } : null,
         });
-        await writeShipmentEvent(
+        return writeShipmentEvent(
           pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD_FAILED',
-          `Failed to upload ${fileName} (${category}) to KN booking ${bookingID}: ${detail}`
+          `Failed to upload ${fileName} (${category}) to KN booking ${bookingID}: ${error}`
         ).catch(() => {});
+      };
+
+      try {
+        const base64String = fs.readFileSync(filePath, {encoding: 'base64'});
+
+        payload = {
+          customerId:  KN_CUSTOMER_ID,
+          customerKey: KN_CUSTOMER_KEY,
+          documentCode,
+          documentExtension,
+          bookingID,
+          base64EncodedDocument: base64String,
+        };
+
+        const response = await axios.post(requestUrl, payload, {
+          timeout: 120000,
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept':       'application/problem+json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+        });
+
+        // KN can return HTTP 200 with uploadIsSuccessful: false and an
+        // errorMessage rather than an HTTP error status — axios only throws
+        // on a non-2xx status, so this has to be checked explicitly or a
+        // KN-side rejection would be silently recorded as a success.
+        if (response.data?.uploadIsSuccessful === false) {
+          await recordFailure(
+            response.data?.errorMessage || 'KN reported the upload as unsuccessful.',
+            { status: response.status, data: response.data }
+          );
+          continue;
+        }
+
+        const uploadConfirmationID = response.data?.uploadConfirmationID ?? response.data?.transactionID ?? null;
+        uploaded.push({ fileName, category, documentCode, documentId: uploadConfirmationID });
+        await writeShipmentEvent(
+          pool, context.shipment.shipmentID, 'KN_DOCUMENT_UPLOAD',
+          `Uploaded ${fileName} (${category}, code ${documentCode}) to KN booking ${bookingID}${uploadConfirmationID ? ` — confirmation ${uploadConfirmationID}` : ''}.`
+        );
+      } catch (err) {
+        const detail = err.response ? `KN API ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
+        await recordFailure(detail, err.response ? { status: err.response.status, data: err.response.data, headers: err.response.headers } : null);
       }
     }
 
