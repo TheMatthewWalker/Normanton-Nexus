@@ -1383,9 +1383,12 @@ function renderOpenDeliveries() {
       const due = r.dispatchDate ? new Date(r.dispatchDate).toLocaleDateString('en-GB') : '-';
       const completed = r.completionDate ? new Date(r.completionDate).toLocaleDateString('en-GB') : '-';
       const flag = b.key === 'priority' ? '<span class="ps-priority-flag"></span>' : '';
-      return `<tr class="ps-row lg-row" data-id="${esc(String(r.deliveryID))}" data-customer="${esc(String(r.customerID))}"><td class="lg-check-cell"><input type="checkbox" class="lg-check" data-id="${esc(String(r.deliveryID))}"></td><td>${flag}${esc(String(r.deliveryID))}</td><td>${esc(r.destinationName || '-')}</td><td>${esc(completed)}</td><td>${esc(due)}</td><td>${esc(r.deliveryService || '')}</td><td>${esc(String(r.palletCount ?? 0))}</td><td>${esc(String(r.grossWeight ?? 0))}</td><td>${esc(String(r.deliveryVolume ?? 0))}</td></tr>`;
+      const commentCell = r.picksheetComment
+        ? `<td class="lg-comment-cell" title="${esc(r.picksheetComment)}">${esc(r.picksheetComment)}</td>`
+        : `<td class="lg-comment-cell">—</td>`;
+      return `<tr class="ps-row lg-row" data-id="${esc(String(r.deliveryID))}" data-customer="${esc(String(r.customerID))}"><td class="lg-check-cell"><input type="checkbox" class="lg-check" data-id="${esc(String(r.deliveryID))}"></td><td>${flag}${esc(String(r.deliveryID))}</td><td>${esc(r.destinationName || '-')}</td><td>${esc(completed)}</td><td>${esc(due)}</td><td>${esc(r.deliveryService || '')}</td><td>${esc(String(r.palletCount ?? 0))}</td><td>${esc(String(r.grossWeight ?? 0))}</td><td>${esc(String(r.deliveryVolume ?? 0))}</td>${commentCell}</tr>`;
     }).join('');
-    return `<div class="ps-section${collapsed}"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--${b.dot}"></span><span class="ps-section-title">${b.label}</span><span class="ps-section-count">${bucketMap[b.key].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Completed</th><th>Due</th><th>Service</th><th>Pallets</th><th>Weight</th><th>Volume</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    return `<div class="ps-section${collapsed}"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--${b.dot}"></span><span class="ps-section-title">${b.label}</span><span class="ps-section-count">${bucketMap[b.key].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Completed</th><th>Due</th><th>Service</th><th>Pallets</th><th>Weight</th><th>Volume</th><th>Comment</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }).join('');
   document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Completed picksheets</div><div class="toolbar-hint" id="lg-selection-hint">Select deliveries for one customer, then create a shipment.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="lg-manual-btn">+ Manual Shipment</button><button type="button" class="btn-secondary" id="lg-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="lg-create-btn" disabled>Create Shipment</button></div><div id="lg-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
   bindOpenDeliveriesEvents();
@@ -4311,17 +4314,18 @@ function renderShipmentDeliveriesPanel(shipmentId, shipment, deliveries, availab
     <td>${Number(d.netWeight      || 0).toFixed(3)}</td>
     <td>${Number(d.deliveryVolume || 0).toFixed(3)}</td>
     <td>${Number(d.palletCount    || 0).toFixed(0)}</td>
+    <td class="lg-comment-cell" title="${esc(d.picksheetComment || '')}">${esc(d.picksheetComment || '—')}</td>
     <td><button class="sd-remove-btn" data-delivery-id="${esc(String(d.deliveryID))}">Remove</button></td>
   </tr>`).join('');
 
   const totalsRow = `<tr class="sd-totals-row">
     <td colspan="2">Total</td>
     <td>${totals.gross.toFixed(3)}</td><td>${totals.net.toFixed(3)}</td>
-    <td>${totals.volume.toFixed(3)}</td><td>${totals.pallets.toFixed(0)}</td><td></td>
+    <td>${totals.volume.toFixed(3)}</td><td>${totals.pallets.toFixed(0)}</td><td></td><td></td>
   </tr>`;
 
   const linkedHtml = deliveries.length
-    ? `<table class="sd-delivery-table"><thead><tr><th>Delivery</th><th>Destination</th><th>Gross kg</th><th>Net kg</th><th>Vol CBM</th><th>Pallets</th><th></th></tr></thead><tbody>${linkedRows}${totalsRow}</tbody></table>`
+    ? `<table class="sd-delivery-table"><thead><tr><th>Delivery</th><th>Destination</th><th>Gross kg</th><th>Net kg</th><th>Vol CBM</th><th>Pallets</th><th>Comment</th><th></th></tr></thead><tbody>${linkedRows}${totalsRow}</tbody></table>`
     : `<div class="sd-picker-empty">No deliveries linked.</div>`;
 
   let availHtml;
@@ -4344,10 +4348,11 @@ function renderShipmentDeliveriesPanel(shipmentId, shipment, deliveries, availab
         <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(effectiveTerm || '—')}</td>
         <td>${Number(d.grossWeight || 0).toFixed(3)}</td>
         <td>${Number(d.palletCount || 0).toFixed(0)}</td>
+        <td class="lg-comment-cell" title="${esc(d.picksheetComment || '')}">${esc(d.picksheetComment || '—')}</td>
       </tr>`;
     }).join('');
     availHtml = `<table class="sd-delivery-table">
-      <thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Incoterms</th><th>Gross kg</th><th>Pallets</th></tr></thead>
+      <thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Incoterms</th><th>Gross kg</th><th>Pallets</th><th>Comment</th></tr></thead>
       <tbody>${availRows}</tbody>
     </table>
     <div class="sd-picker-actions"><button class="btn-submit" id="sd-add-btn">Add Selected</button></div>

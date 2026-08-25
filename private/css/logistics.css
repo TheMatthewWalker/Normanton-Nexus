@@ -676,6 +676,13 @@ body::before {
 }
 
 .lg-check-cell { width: 42px; }
+.lg-comment-cell {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
 .lg-check { width: 16px; height: 16px; accent-color: var(--accent); }
 .lg-row { cursor: pointer; }
 .lg-row--selected { background: rgba(8,145,178,0.08); }

@@ -4325,11 +4325,13 @@ function renderPalletCard(p) {
   const status = p.palletFinish
     ? `<span class="ps-pcard-badge ps-pcard-badge--done">Finished</span>`
     : `<span class="ps-pcard-badge ps-pcard-badge--wip">In Progress</span>`;
-  const actions = p.palletFinish ? '' : `
-    <button class="ps-pcard-btn"
-      onclick="event.stopPropagation();openPalletBuilderOnExisting(${p.palletID})">Continue</button>
-    <button class="ps-pcard-btn ps-pcard-btn--finish"
-      onclick="event.stopPropagation();finishExistingPallet(${p.palletID})">Finish</button>`;
+  const actions = p.palletFinish
+    ? `<button class="ps-pcard-btn" title="Un-mark as finished and continue editing"
+        onclick="event.stopPropagation();reopenPallet(${p.palletID})">Reopen</button>`
+    : `<button class="ps-pcard-btn"
+        onclick="event.stopPropagation();openPalletBuilderOnExisting(${p.palletID})">Continue</button>
+      <button class="ps-pcard-btn ps-pcard-btn--finish"
+        onclick="event.stopPropagation();finishExistingPallet(${p.palletID})">Finish</button>`;
   const deleteBtn = `
     <button class="ps-pcard-btn ps-pcard-btn--delete" title="Delete pallet"
       onclick="event.stopPropagation();deletePallet(${p.palletID})">Delete</button>`;
@@ -4431,6 +4433,23 @@ async function finishExistingPallet(palletId) {
     confirmText: 'Finish',
     variant: 'success',
   })) return;
+
+  // Same job-comment prompt as the full builder's Finish Pallet step (see
+  // finishBuilderPallet) — offered here too since this quick-finish button
+  // is the other place a pallet actually gets marked finished. Comment is
+  // per-delivery (log.DeliveryMain.picksheetComment), not per-pallet — see
+  // that function's own comment for why. wPrompt resolves null on Cancel,
+  // which is treated as "leave it as-is", not "clear it".
+  const { deliveryId } = _palletListCtx || {};
+  let currentComment = '';
+  if (deliveryId) {
+    try {
+      const rows = await fetch(`/api/deliverymain/id/${encodeURIComponent(deliveryId)}`).then(r => r.json());
+      currentComment = rows?.[0]?.picksheetComment || '';
+    } catch { /* best-effort — an empty starting value is fine */ }
+  }
+  const comment = await wPrompt({ title: 'Job Comment', label: 'Comment (optional) — shown on Create Shipment', initialValue: currentComment });
+
   try {
     const res  = await fetch(`/api/palletmain/${palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -4438,7 +4457,45 @@ async function finishExistingPallet(palletId) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
+
+    if (deliveryId && comment !== null && comment !== currentComment) {
+      fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/comment`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ picksheetComment: comment }),
+      }).catch(() => {});
+    }
+
     await refreshPalletList();
+  } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
+}
+
+// Un-marks a finished pallet so it can be edited again, instead of having
+// to delete it (reversing every staged batch's SAP transfer order) and
+// rebuild it from scratch. Pure DB flag flip server-side (routes/palletmain.js's
+// PATCH handler) — finishing a pallet never itself triggers any SAP call,
+// that only happens when the whole delivery is completed — so there's
+// nothing to reverse here. Opens straight into the builder afterward so
+// "reopen" and "continue editing" are one action, not two.
+async function reopenPallet(palletId) {
+  if (!await wConfirm({
+    title: 'Reopen Pallet',
+    message: 'Un-mark this pallet as finished so it can be edited again?',
+    confirmText: 'Reopen',
+    variant: '',
+  })) return;
+  try {
+    const res  = await fetch(`/api/palletmain/${palletId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ palletFinish: 0 }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Update failed');
+    // Refresh the list behind the builder now, not just on the way out —
+    // otherwise cancelling out of the builder without re-finishing leaves
+    // the card underneath still reading "Finished" until something else
+    // happens to trigger a refresh.
+    await refreshPalletList();
+    await openPalletBuilderOnExisting(palletId);
   } catch (err) { wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' }); }
 }
 
@@ -4610,7 +4667,7 @@ async function openPalletBuilder() {
          requiredMaterials: [], stockError: null,
          pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
          pendingPackagingInstruction: null,
-         layerContainers: {}, printers: [], printerId: null };
+         layerContainers: {}, printers: [], printerId: null, picksheetComment: '' };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -4629,18 +4686,20 @@ async function openPalletBuilder() {
     </div>`;
 
   try {
-    const [ptRes, pkRes, stockRes, printerInfo] = await Promise.all([
+    const [ptRes, pkRes, stockRes, printerInfo, dmRows] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
       fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
         .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
       loadPbPrinters().catch(() => ({ printers: [], userDefault: null })),
+      fetch(`/api/deliverymain/id/${encodeURIComponent(deliveryId)}`).then(r => r.json()).catch(() => []),
     ]);
     pb.allPalletTypes = ptRes.data || ptRes;
     pb.allPackaging   = pkRes.data || pkRes;
     applyStockResult(stockRes);
     pb.printers  = printerInfo.printers;
     pb.printerId = resolvePbPrinterId(printerInfo.printers, printerInfo.userDefault);
+    pb.picksheetComment = dmRows?.[0]?.picksheetComment || '';
     renderBuilderPhase1();
   } catch (err) {
     document.getElementById('pb-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
@@ -4674,7 +4733,7 @@ async function openPalletBuilderOnExisting(palletId) {
          requiredMaterials: [], stockError: null,
          pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
          pendingPackagingInstruction: null,
-         layerContainers: {}, printers: [], printerId: null };
+         layerContainers: {}, printers: [], printerId: null, picksheetComment: '' };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -4693,7 +4752,7 @@ async function openPalletBuilderOnExisting(palletId) {
     </div>`;
 
   try {
-    const [ptRes, pkRes, palRes, pkgsRes, valRes, stockRes, printerInfo] = await Promise.all([
+    const [ptRes, pkRes, palRes, pkgsRes, valRes, stockRes, printerInfo, dmRows] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
       fetch(`/api/palletmain/id/${palletId}`).then(r => r.json()),
@@ -4702,6 +4761,7 @@ async function openPalletBuilderOnExisting(palletId) {
       fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
         .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
       loadPbPrinters().catch(() => ({ printers: [], userDefault: null })),
+      fetch(`/api/deliverymain/id/${encodeURIComponent(deliveryId)}`).then(r => r.json()).catch(() => []),
     ]);
 
     pb.allPalletTypes = ptRes.data || ptRes;
@@ -4709,6 +4769,7 @@ async function openPalletBuilderOnExisting(palletId) {
     applyStockResult(stockRes);
     pb.printers  = printerInfo.printers;
     pb.printerId = resolvePbPrinterId(printerInfo.printers, printerInfo.userDefault);
+    pb.picksheetComment = dmRows?.[0]?.picksheetComment || '';
 
     const palletRecord = (palRes.data || palRes)[0];
     if (palletRecord) {
@@ -5071,6 +5132,11 @@ function renderBuilderPhase2() {
           </label>
           <input class="pb-input" id="pb-gross-weight" type="number"
             step="0.01" min="0.01" placeholder="Enter at finish">
+        </div>
+        <div class="pb-running-loc" style="margin-top:8px">
+          <label class="pb-label" style="margin-bottom:4px">Job Comment</label>
+          <input class="pb-input" id="pb-comment" type="text" maxlength="50"
+            value="${esc(pb.picksheetComment || '')}" placeholder="Shown on Create Shipment">
         </div>
         ${pbPrinterSelectHtml()}
         <div class="pb-running-weights">
@@ -5438,11 +5504,26 @@ async function removeBuilderPackage(palletItemId) {
     pb.packagingWeight = Math.max(0, (pb.packagingWeight || 0) - (pkg.packWeight || 0));
     if (isContainerRow) delete pb.layerContainers[pkg.palletLayer];
 
-    if (pkg.sapMaterial && pkg.originalBatchEntry) {
+    // Restoring requiredQty must NOT depend on pkg.originalBatchEntry being
+    // set — that field only exists for a package added earlier in THIS
+    // builder session (see addPackage()); a package loaded by
+    // openPalletBuilderOnExisting() when reopening an existing pallet never
+    // has it. Gating the whole block on originalBatchEntry meant removing
+    // one of those pre-existing packages silently never gave its quantity
+    // back to pb.requiredMaterials — the panel kept showing "still needed"
+    // as if the batch were still staged, so re-adding it (or another batch
+    // of the same material) immediately after tripped the "exceeds
+    // requirement" warning against a required quantity that was wrong, not
+    // actually over. originalBatchEntry is still needed to restore the
+    // removed batch's row into the visible "available batches" list, but
+    // that's now independent of the requiredQty math below.
+    if (pkg.sapMaterial) {
       const mat = pb.requiredMaterials.find(m => m.material === pkg.sapMaterial);
       if (mat) {
-        mat.batches = (mat.batches || []).filter(b => (b.batch || '') !== pkg.originalBatchEntry.batch);
-        mat.batches.push(pkg.originalBatchEntry);
+        if (pkg.originalBatchEntry) {
+          mat.batches = (mat.batches || []).filter(b => (b.batch || '') !== pkg.originalBatchEntry.batch);
+          mat.batches.push(pkg.originalBatchEntry);
+        }
         // Mirror of the decrement in addPackage() — undoing a staged batch
         // means it's no longer covering any of the requirement, so add its
         // quantity back rather than leaving "req." (or a collapsed "done")
@@ -5942,6 +6023,18 @@ async function finishBuilderPallet() {
   const height = calcPalletHeight();
   const volume = calcPalletVolume(height);
 
+  // Job comment — log.DeliveryMain.picksheetComment, not a pallet field
+  // (a delivery/picksheet can have several pallets; the comment is about
+  // the job as a whole, not any one of them), so it's saved via its own
+  // PATCH rather than folded into the pallet's own PATCH below. Only sent
+  // when it actually changed, so finishing a pallet without touching this
+  // field never overwrites a comment set from elsewhere (e.g. the Add
+  // Picksheet form, or another pallet's Finish step) with a stale copy.
+  const commentInput = document.getElementById('pb-comment');
+  const comment       = commentInput ? commentInput.value.trim() : pb.picksheetComment;
+  const commentChanged = comment !== (pb.picksheetComment || '');
+  const deliveryId     = pb.deliveryId;
+
   try {
     const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -5952,6 +6045,13 @@ async function finishBuilderPallet() {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
+
+    if (commentChanged) {
+      fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/comment`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ picksheetComment: comment }),
+      }).catch(() => {});
+    }
 
     // Print the pallet finish manifest — captured before closePalletBuilder()
     // nulls out pb. Fired after the builder closes (finishing the pallet is

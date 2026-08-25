@@ -189,6 +189,41 @@ describe('PATCH /:deliveryId/uncomplete', () => {
   });
 });
 
+describe('PATCH /:deliveryId/comment', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).patch('/1/comment').send({ picksheetComment: 'hello' });
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('404s when the delivery does not exist', async () => {
+    queueResults({ recordset: [], rowsAffected: [0] });
+    const res = await request(appWarehouseOp).patch('/999/comment').send({ picksheetComment: 'hello' });
+    expect(res.status).toBe(404);
+  });
+
+  test('saves the comment', async () => {
+    queueResults({ recordset: [], rowsAffected: [1] });
+    const res = await request(appWarehouseOp).patch('/1/comment').send({ picksheetComment: 'Damaged pallet, see note' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(dbRequest.input).toHaveBeenCalledWith('comment', expect.anything(), 'Damaged pallet, see note');
+  });
+
+  test('truncates to 50 characters', async () => {
+    queueResults({ recordset: [], rowsAffected: [1] });
+    const long = 'x'.repeat(80);
+    await request(appWarehouseOp).patch('/1/comment').send({ picksheetComment: long });
+    expect(dbRequest.input).toHaveBeenCalledWith('comment', expect.anything(), 'x'.repeat(50));
+  });
+
+  test('clears the comment when sent an empty string', async () => {
+    queueResults({ recordset: [], rowsAffected: [1] });
+    await request(appWarehouseOp).patch('/1/comment').send({ picksheetComment: '   ' });
+    expect(dbRequest.input).toHaveBeenCalledWith('comment', expect.anything(), null);
+  });
+});
+
 describe('POST /:deliveryId/stage-batch', () => {
   test('is rejected for a user without WAREHOUSE_OP', async () => {
     const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });

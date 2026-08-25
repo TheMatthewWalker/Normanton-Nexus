@@ -383,6 +383,33 @@ router.patch('/:deliveryId/uncomplete', async (req, res) => {
     }
 });
 
+// ── Update the picksheet comment ──────────────────────────────────────────
+// Editable after creation — from the pallet builder's Finish Pallet step
+// and the Picked Pallets list's quick Finish action (private/js/warehouse.js)
+// — rather than only at picksheet creation time, so an operator who spots
+// something worth flagging while building/finishing a pallet (damage,
+// a part-shipment, anything the office should know) doesn't have to go
+// find a separate place to record it. picksheetComment is already selected
+// by every delivery query the Create Shipment page uses (completed-unshipped,
+// available-for-shipment, shipmentmain.js's own delivery queries) — this is
+// what actually lets an edit here show up there.
+router.patch('/:deliveryId/comment', requirePermission('WAREHOUSE_OP'), async (req, res) => {
+    try {
+        const pool = await getPool();
+        const comment = req.body.picksheetComment != null
+            ? String(req.body.picksheetComment).trim().slice(0, 50) || null
+            : null;
+        const result = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .input('comment', sql.NVarChar(50), comment)
+            .query(`UPDATE log.DeliveryMain SET picksheetComment = @comment WHERE deliveryID = @deliveryId`);
+        if (!result.rowsAffected[0]) return res.status(404).json({ success: false, error: 'Delivery not found' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Cancel a completed-but-unshipped picksheet ────────────────────────────
 // Right-click action from the Create Shipment list, for a delivery whose
 // order was cancelled after it was already picked/completed. Reuses the
@@ -592,12 +619,22 @@ router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP')
         // Subtract what's already in dbo.PalletPackages for this delivery
         // (every pallet, not just whichever one is currently open) so the
         // panel reflects what's actually still left to pick.
+        // Joins PalletMain and excludes removed pallets — deleting a pallet
+        // (routes/palletmain.js's PATCH palletRemoved handler) reverses its
+        // packages' SAP staging but deliberately leaves the PalletPackages
+        // rows themselves in place for history, so without this filter a
+        // deleted pallet's picked quantity stayed subtracted here forever:
+        // the panel would understate what's still required, and re-adding
+        // the same batch elsewhere would look like it exceeded the
+        // (wrongly low) remaining requirement.
         const pickedRes = await pool.request()
             .input('sapDelivery', sql.NVarChar, String(deliveryId))
-            .query(`SELECT sapMaterial, SUM(sapQuantity) AS pickedQty
-                    FROM   log.PalletPackages
-                    WHERE  sapDelivery = @sapDelivery AND sapMaterial IS NOT NULL
-                    GROUP  BY sapMaterial`);
+            .query(`SELECT pp.sapMaterial, SUM(pp.sapQuantity) AS pickedQty
+                    FROM   log.PalletPackages pp
+                    JOIN   log.PalletMain pm ON pm.palletID = pp.palletID
+                    WHERE  pp.sapDelivery = @sapDelivery AND pp.sapMaterial IS NOT NULL
+                      AND  pm.palletRemoved = 0
+                    GROUP  BY pp.sapMaterial`);
         pickedRes.recordset.forEach(row => {
             const mat = String(row.sapMaterial || '').trim();
             if (!mat || !byMaterial[mat]) return;
