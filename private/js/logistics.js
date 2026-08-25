@@ -4039,22 +4039,26 @@ async function renderShipmentAssociatedCosts(shipmentId) {
       sel.innerHTML = outboundElements.map(e =>
         `<option value="${esc(e.elementCode)}">${esc(e.elementCode)} — ${esc(e.elementDescription || '')}</option>`
       ).join('');
-      // Default to Customs Duties (603100) when present — the case this
-      // form was built for — otherwise leave the first option selected.
-      const customsDuties = outboundElements.find(e => e.elementCode === '603100');
-      if (customsDuties) sel.value = '603100';
+      // Default to Outbound Standard Freight (601200) — this form is most
+      // often used to add the General Freight line the Awaiting Booking
+      // modal's Book button now requires before a standard-haulier shipment
+      // can be booked (see openBookSingleShipmentModal) — otherwise leave
+      // the first option selected.
+      const standardFreight = outboundElements.find(e => e.elementCode === '601200');
+      if (standardFreight) sel.value = '601200';
     });
 
     // Cost Type options — Logistics.dbo.CostTypes (1 General Freight, 2
-    // Customs). Defaults to Customs to match the GL Account default above.
+    // Customs). Defaults to General Freight to match the GL Account default
+    // above.
     fetch('/api/costtypes').then(r => r.json()).then(types => {
       const sel = document.getElementById('sd-cost-type');
       if (!sel || !Array.isArray(types)) return;
       sel.innerHTML = types.map(t =>
         `<option value="${esc(String(t.typeID))}">${esc(t.typeDescription || '')}</option>`
       ).join('');
-      const customs = types.find(t => String(t.typeID) === '2');
-      if (customs) sel.value = '2';
+      const generalFreight = types.find(t => String(t.typeID) === '1');
+      if (generalFreight) sel.value = '1';
     }).catch(() => {});
 
     // Cost Centre options — same default (PTFE, 0000002004) as the booking
