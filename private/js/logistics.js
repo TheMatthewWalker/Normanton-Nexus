@@ -3726,6 +3726,7 @@ function renderShipmentContactCard(shipment) {
     <div class="sd-section-title">Customer</div>
     <table class="sd-contact-table">
       <tr><td>Delivery To</td><td>${esc(shipment.destinationName || '—')}</td></tr>
+      <tr><td>Incoterms</td><td>${esc(shipment.incoTerms || '—')}</td></tr>
       <tr><td>Address</td><td>${esc(address)}</td></tr>
       <tr><td>Email</td><td class="sd-contact-email" id="sd-contact-email">Loading…</td></tr>
     </table>
