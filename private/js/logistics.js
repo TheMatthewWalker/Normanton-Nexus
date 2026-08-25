@@ -3470,43 +3470,52 @@ function renderShipmentDetailModal(shipment, deliveries) {
     <div class="ps-modal-body">
       <div class="sd-grid">
         ${renderShipmentContactCard(shipment)}
-        ${renderShipmentPackagingCard(shipment)}
-      </div>
-      <div class="sd-grid sd-grid--3col">
-        <div class="sd-section">
-          <div class="sd-section-title">Haulier</div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
-          ${canEdit ? `<div class="sd-haulier-row">
-            <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
-            <button class="btn-secondary" id="sd-forwarder-save">Save</button>
-            <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
-          </div>` : ''}
-        </div>
         <div class="sd-section">
           <div class="sd-section-title">Actions</div>
-          <div class="sd-customs-row" style="margin-bottom:10px">
-            <span class="sd-badge ${esc(badgeClass)}">${esc(badgeText)}</span>
-            ${toggleHtml}
-            <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
+          <div class="sd-actions-cols">
+            <div class="sd-actions-col">
+              <div class="sd-actions-subtitle">Haulier</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
+              ${canEdit ? `<div class="sd-haulier-row">
+                <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
+                <button class="btn-secondary" id="sd-forwarder-save">Save</button>
+                <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
+              </div>` : ''}
+              <div class="sd-actions-subtitle" style="margin-top:12px">Customs</div>
+              <div class="sd-customs-row">
+                <span class="sd-badge ${esc(badgeClass)}">${esc(badgeText)}</span>
+                ${toggleHtml}
+                <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
+              </div>
+              ${shipment.customsID ? `<div style="margin-top:6px;font-size:12px;color:var(--text-muted)">Customs ID: ${esc(String(shipment.customsID))}</div>` : ''}
+            </div>
+            ${canEdit ? `<div class="sd-actions-col">
+              <div class="sd-actions">
+                <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
+                <div id="sd-packing-list-result" style="font-size:12px;color:var(--text-muted)"></div>
+                ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
+                <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
+              </div>
+            </div>` : ''}
           </div>
-          ${shipment.customsID ? `<div style="margin-bottom:10px;font-size:12px;color:var(--text-muted)">Customs ID: ${esc(String(shipment.customsID))}</div>` : ''}
-          ${canEdit ? `<div class="sd-actions">
-            <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
-            <div id="sd-packing-list-result" style="font-size:12px;color:var(--text-muted)"></div>
-            ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
-            <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
-          </div>` : ''}
         </div>
+      </div>
+      <div class="sd-grid">
+        ${renderShipmentPackagingCard(shipment)}
         <div class="sd-section">
           <div class="sd-section-title">Dates &amp; Status</div>
-          <div class="sd-ds-grid">
-            <label class="sd-ds-check"><input type="checkbox" id="sd-ds-booking" ${dsDisabled} ${shipment.bookingStatus ? 'checked' : ''}> Booked</label>
-            <div class="sd-ds-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="sd-ds-plan-col" ${dsDisabled} value="${esc(fmtDate(shipment.plannedCollection))}"></div>
-            <label class="sd-ds-check"><input type="checkbox" id="sd-ds-col-status" ${dsDisabled} ${shipment.collectionStatus ? 'checked' : ''}> Collected</label>
-            <div class="sd-ds-field"><label class="tf-label">Actual Collection</label><input class="tf-input" type="date" id="sd-ds-act-col" ${dsDisabled} value="${esc(fmtDate(shipment.actualCollection))}"></div>
-            <label class="sd-ds-check"><input type="checkbox" id="sd-ds-del-status" ${dsDisabled} ${shipment.deliveryStatus ? 'checked' : ''}> Delivered</label>
-            <div class="sd-ds-field"><label class="tf-label">Planned Delivery</label><input class="tf-input" type="date" id="sd-ds-plan-del" ${dsDisabled} value="${esc(fmtDate(shipment.plannedDelivery))}"></div>
-            <div class="sd-ds-field"><label class="tf-label">Actual Delivery</label><input class="tf-input" type="date" id="sd-ds-act-del" ${dsDisabled} value="${esc(fmtDate(shipment.actualDelivery))}"></div>
+          <div class="sd-ds-cols">
+            <div class="sd-ds-grid">
+              <label class="sd-ds-check"><input type="checkbox" id="sd-ds-booking" ${dsDisabled} ${shipment.bookingStatus ? 'checked' : ''}> Booked</label>
+              <div class="sd-ds-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="sd-ds-plan-col" ${dsDisabled} value="${esc(fmtDate(shipment.plannedCollection))}"></div>
+              <label class="sd-ds-check"><input type="checkbox" id="sd-ds-col-status" ${dsDisabled} ${shipment.collectionStatus ? 'checked' : ''}> Collected</label>
+              <div class="sd-ds-field"><label class="tf-label">Actual Collection</label><input class="tf-input" type="date" id="sd-ds-act-col" ${dsDisabled} value="${esc(fmtDate(shipment.actualCollection))}"></div>
+            </div>
+            <div class="sd-ds-grid">
+              <label class="sd-ds-check"><input type="checkbox" id="sd-ds-del-status" ${dsDisabled} ${shipment.deliveryStatus ? 'checked' : ''}> Delivered</label>
+              <div class="sd-ds-field"><label class="tf-label">Planned Delivery</label><input class="tf-input" type="date" id="sd-ds-plan-del" ${dsDisabled} value="${esc(fmtDate(shipment.plannedDelivery))}"></div>
+              <div class="sd-ds-field"><label class="tf-label">Actual Delivery</label><input class="tf-input" type="date" id="sd-ds-act-del" ${dsDisabled} value="${esc(fmtDate(shipment.actualDelivery))}"></div>
+            </div>
           </div>
           ${canEdit ? `<button type="button" class="btn-secondary" id="sd-ds-save-btn" style="margin-top:8px;width:100%">Save Corrections</button>` : ''}
           <div id="sd-ds-result" style="margin-top:6px;font-size:12px"></div>
@@ -4074,17 +4083,17 @@ async function renderShipmentAssociatedCosts(shipmentId) {
         </table>
       </div>
       ${canEdit ? `<div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
-        <div class="tf-field">
+        <div class="tf-field" style="min-width:220px">
           <label class="tf-label">GL Account</label>
-          <select class="tf-input" id="sd-cost-element" style="min-width:220px"></select>
+          <select class="tf-input" id="sd-cost-element" style="width:100%"></select>
         </div>
-        <div class="tf-field">
+        <div class="tf-field" style="min-width:140px">
           <label class="tf-label">Cost Type</label>
-          <select class="tf-input" id="sd-cost-type" style="min-width:140px"></select>
+          <select class="tf-input" id="sd-cost-type" style="width:100%"></select>
         </div>
-        <div class="tf-field">
+        <div class="tf-field" style="min-width:180px">
           <label class="tf-label">Cost Centre</label>
-          <select class="tf-input" id="sd-cost-center" style="min-width:180px"></select>
+          <select class="tf-input" id="sd-cost-center" style="width:100%"></select>
         </div>
         <div class="tf-field">
           <label class="tf-label">Amount (£)</label>

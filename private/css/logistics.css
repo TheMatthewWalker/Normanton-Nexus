@@ -717,8 +717,7 @@ body::before {
   gap: 20px;
   margin-bottom: 20px;
 }
-.sd-grid--3col { grid-template-columns: 1fr 1fr 1fr; }
-@media (max-width: 760px) { .sd-grid, .sd-grid--3col { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .sd-grid, .sd-actions-cols, .sd-ds-cols { grid-template-columns: 1fr; } }
 .sd-section {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -734,6 +733,19 @@ body::before {
   margin-bottom: 10px;
 }
 .sd-actions { display: flex; flex-direction: column; gap: 8px; }
+
+/* Actions card — Haulier + Customs in one sub-column, Recreate Packing
+   List / Modify Deliveries in the other, so the card doesn't leave the
+   Haulier card next to it towering half-empty. */
+.sd-actions-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.sd-actions-subtitle {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
 
 /* Customs badge */
 .sd-customs-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -761,8 +773,11 @@ body::before {
 .sd-contact-email { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
 
 /* Dates & Status card — compact inline replacement for the old separate
-   "Edit Dates & Status" screen; stacked single-column since it only gets
-   1/3 of a sd-grid--3col row. */
+   "Edit Dates & Status" screen. Card itself is half the modal width
+   (paired with Packaging in its own sd-grid row); sd-ds-cols splits that
+   in two — Booked/Collected on the left, the delivery fields on the
+   right — each sd-ds-grid is one of those two stacked sub-columns. */
+.sd-ds-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .sd-ds-grid { display: flex; flex-direction: column; gap: 8px; }
 .sd-ds-check { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; color: var(--text); }
 .sd-ds-check input { width: 14px; height: 14px; }
