@@ -749,6 +749,47 @@ body::before {
   background: var(--surface2); flex-shrink: 0;
 }
 
+/* ── Linked picksheets — shared pallet pool ─────────────────────────────── */
+.ps-linked-section {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.ps-linked-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600; color: var(--accent);
+  background: rgba(124,58,237,0.1);
+  padding: 3px 6px 3px 10px; border-radius: 10px;
+}
+.ps-linked-unlink {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-muted); font-size: 11px; line-height: 1;
+  padding: 2px 4px; border-radius: 50%;
+  transition: color 0.15s, background 0.15s;
+}
+.ps-linked-unlink:hover { color: var(--error); background: rgba(220,38,38,0.1); }
+.ps-link-btn { font-size: 11px; padding: 4px 10px; }
+
+.lp-results {
+  max-height: 220px; overflow-y: auto; margin-top: 8px;
+  border: 1px solid var(--border); border-radius: 7px;
+}
+.lp-results:empty { border: none; margin-top: 0; }
+.lp-row {
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.lp-row:last-child { border-bottom: none; }
+.lp-row:hover { background: var(--surface2); }
+.lp-empty {
+  font-size: 12px; color: var(--text-muted);
+  padding: 8px 12px;
+}
+
 .ps-pallet-table { width: 100%; border-collapse: collapse; }
 .ps-pallet-table th {
   font-family: 'JetBrains Mono', monospace;

@@ -1,9 +1,12 @@
-// routes/deliverymain.js (1519 lines, 24 endpoints) — representative sample
-// covering CRUD, the permission-gated create/bulk routes, and the
-// packaging-holding cancel/uncomplete flows that reverse SAP staging via
-// the shared cancelHeldPicksheet() helper. The picksheet-materials/complete/
-// zdelflag routes (SAP-sync-heavy, largest remaining logic) aren't covered
-// here yet — see CLAUDE.md.
+// routes/deliverymain.js — representative sample covering CRUD, the
+// permission-gated create/bulk routes, the packaging-holding cancel/
+// uncomplete flows that reverse SAP staging via the shared
+// cancelHeldPicksheet() helper, and the linked-picksheets (shared pallet
+// pool) routes. The picksheet-materials/complete/zdelflag routes'
+// SAP-sync-heavy happy paths are a known, deliberate gap (see CLAUDE.md) —
+// PATCH /:deliveryId/complete's new "fully picked" precondition and its
+// linked-group resolution are covered, but not the ZDEL/ZDELFLAG/Goods
+// Issue mutation logic itself.
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
@@ -225,6 +228,153 @@ describe('PATCH /:deliveryId/comment', () => {
   });
 });
 
+describe('GET /:deliveryId/pallets', () => {
+  test('returns pallets, widened to include any linked picksheet\'s own pallets', async () => {
+    queueResults({ recordset: [{ palletID: 1, palletType: 'EU', palletFinish: 1 }] });
+    const res = await request(app).get('/1/pallets');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: [{ palletID: 1, palletType: 'EU', palletFinish: 1 }] });
+    // Regression guard: for an unlinked delivery this must stay equivalent
+    // to the old unwidened query (empty IN subquery), which this at least
+    // confirms the widening clause is actually present in the SQL sent.
+    expect(dbRequest.query).toHaveBeenCalledWith(expect.stringContaining('DeliveryPicksheetLink'));
+  });
+});
+
+describe('GET /:deliveryId/linked-picksheets', () => {
+  test('returns currently-linked deliveries', async () => {
+    queueResults({ recordset: [{ deliveryID: 2, customerID: 5000, destinationName: 'Acme', completionStatus: 0, dispatchDate: null }] });
+    const res = await request(app).get('/1/linked-picksheets');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].deliveryID).toBe(2);
+  });
+});
+
+describe('GET /link-search', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).get('/link-search?q=1&excludeDeliveryId=1');
+    expect(res.status).toBe(403);
+  });
+
+  test('400s without excludeDeliveryId', async () => {
+    const res = await request(appWarehouseOp).get('/link-search?q=1');
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('404s when excludeDeliveryId does not exist', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(appWarehouseOp).get('/link-search?q=1&excludeDeliveryId=999');
+    expect(res.status).toBe(404);
+  });
+
+  test('searches, scoped to the same customer', async () => {
+    queueResults(
+      { recordset: [{ customerID: 5000 }] },
+      { recordset: [{ deliveryID: 2, customerID: 5000, destinationName: 'Acme', dispatchDate: null }] },
+    );
+    const res = await request(appWarehouseOp).get('/link-search?q=2&excludeDeliveryId=1');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(dbRequest.input).toHaveBeenCalledWith('customerId', expect.anything(), 5000);
+    expect(dbRequest.input).toHaveBeenCalledWith('q', expect.anything(), '%2%');
+  });
+});
+
+describe('POST /:deliveryId/link/:otherDeliveryId', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).post('/1/link/2');
+    expect(res.status).toBe(403);
+  });
+
+  test('400s when linking a picksheet to itself', async () => {
+    const res = await request(appWarehouseOp).post('/1/link/1');
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('404s when either delivery does not exist', async () => {
+    queueResults({ recordset: [{ deliveryID: 1, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 }] });
+    const res = await request(appWarehouseOp).post('/1/link/999');
+    expect(res.status).toBe(404);
+  });
+
+  test('400s when either delivery is completed or cancelled', async () => {
+    queueResults({
+      recordset: [
+        { deliveryID: 1, customerID: 5000, completionStatus: 1, deliveryCancelled: 0 },
+        { deliveryID: 2, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 },
+      ],
+    });
+    const res = await request(appWarehouseOp).post('/1/link/2');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/must be open/);
+  });
+
+  test('400s when the two picksheets have different customers', async () => {
+    queueResults({
+      recordset: [
+        { deliveryID: 1, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 },
+        { deliveryID: 2, customerID: 6000, completionStatus: 0, deliveryCancelled: 0 },
+      ],
+    });
+    const res = await request(appWarehouseOp).post('/1/link/2');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/same customer/);
+  });
+
+  test('409s when already linked', async () => {
+    queueResults(
+      { recordset: [
+          { deliveryID: 1, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 },
+          { deliveryID: 2, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 },
+      ] },
+      { recordset: [{}] }, // existing link found
+    );
+    const res = await request(appWarehouseOp).post('/1/link/2');
+    expect(res.status).toBe(409);
+  });
+
+  test('links two open, same-customer picksheets', async () => {
+    queueResults(
+      { recordset: [
+          { deliveryID: 1, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 },
+          { deliveryID: 2, customerID: 5000, completionStatus: 0, deliveryCancelled: 0 },
+      ] },
+      { recordset: [] }, // no existing link
+      { recordset: [] }, // the two INSERTs
+    );
+    const res = await request(appWarehouseOp).post('/1/link/2');
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ success: true });
+  });
+});
+
+describe('DELETE /:deliveryId/link/:otherDeliveryId', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).delete('/1/link/2');
+    expect(res.status).toBe(403);
+  });
+
+  test('409s when batches are already cross-staged onto each other\'s pallets', async () => {
+    queueResults({ recordset: [{ cnt: 2 }] });
+    const res = await request(appWarehouseOp).delete('/1/link/2');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/resolve those packages/);
+  });
+
+  test('unlinks when there is nothing cross-staged', async () => {
+    queueResults(
+      { recordset: [{ cnt: 0 }] },
+      { recordset: [] }, // the DELETE
+    );
+    const res = await request(appWarehouseOp).delete('/1/link/2');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+  });
+});
+
 describe('GET /:deliveryId/picksheet-materials', () => {
   // Regression test: a batch already staged into THIS delivery's own 916
   // bin (i.e. already picked onto one of this delivery's pallets via
@@ -257,6 +407,80 @@ describe('GET /:deliveryId/picksheet-materials', () => {
     expect(batch.group).toBe('restricted');
     expect(batch.allowed).toBe(false);
     expect(batch.reason).toMatch(/already picked/i);
+  });
+});
+
+// Only the new "fully picked" precondition — the mutation/ZDEL/ZDELFLAG/
+// Goods Issue happy path below it is the same SAP-sync-heavy logic this
+// file's header comment already documents as an untested gap (would need
+// the full SapServer call chain mocked for disproportionate value versus
+// the routing/validation logic actually being tested).
+describe('PATCH /:deliveryId/complete', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).patch('/1/complete');
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('409s with the outstanding materials when nothing is linked and picking isn\'t finished', async () => {
+    queueResults(
+      { recordset: [] },                                   // linkedRes — no links
+      { recordset: [{ pendingPackagingData: 0 }] },         // heldRes
+      { recordset: [{ customerID: 5000 }] },                // getRemainingRequiredMaterials: dmRes
+      { recordset: [] },                                    // getRemainingRequiredMaterials: pickedRes
+    );
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: [ // LIPS — 10 required
+        { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+      ] } })
+      .mockResolvedValueOnce({ data: { success: true, data: [] } }); // stock — nothing found yet
+    axiosMock.request.mockResolvedValue({ data: { success: false } }); // profit-centre lookup
+
+    const res = await request(appWarehouseOp).patch('/1/complete');
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.outstanding).toEqual([
+      { deliveryId: '1', materials: [{ material: '30005R', requiredQty: 10 }] },
+    ]);
+  });
+
+  test('skips the precondition for a delivery already in packaging holding', async () => {
+    queueResults(
+      { recordset: [] },                             // linkedRes — no links
+      { recordset: [{ pendingPackagingData: 1 }] },   // heldRes — held, so requirement check is skipped
+      { recordset: [] },                              // ownerRes — no owned pallets, doesn't matter for a group of one
+      // completeOneDelivery's own queries follow — held path skips SAP calls
+      { recordset: [{ pendingPackagingData: 1 }] },   // completeOneDelivery: pendingRes
+      { recordset: [] },                              // rollup UPDATE
+      { recordset: [{ palletCount: 0, grossWeight: 0, netWeight: 0 }] }, // rolledUp
+    );
+    const res = await request(appWarehouseOp).patch('/1/complete');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(axiosMock.post).not.toHaveBeenCalled();
+  });
+
+  test('resolves the linked group before checking ownership when everything is fully picked and held', async () => {
+    queueResults(
+      { recordset: [{ linkedDeliveryID: 2 }] },       // linkedRes — linked to #2
+      { recordset: [{ pendingPackagingData: 1 }] },   // heldRes for #1
+      { recordset: [{ pendingPackagingData: 1 }] },   // heldRes for #2
+      // both held, so the precondition loop never calls getRemainingRequiredMaterials —
+      // straight to ownership resolution + completeOneDelivery per group member.
+      { recordset: [{ deliveryID: 1 }] },             // ownerRes — #1 owns a pallet, #2 doesn't
+      { recordset: [{ pendingPackagingData: 1 }] },   // completeOneDelivery(#1): pendingRes
+      { recordset: [] },                               // #1 rollup UPDATE
+      { recordset: [{ palletCount: 1, grossWeight: 5, netWeight: 4 }] }, // #1 rolledUp
+      { recordset: [{ pendingPackagingData: 1 }] },   // completeOneDelivery(#2): pendingRes
+      { recordset: [] },                               // #2 rollup UPDATE
+      { recordset: [{ palletCount: 0, grossWeight: 0, netWeight: 0 }] }, // #2 rolledUp
+    );
+    const res = await request(appWarehouseOp).patch('/1/complete');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.linkedResults).toBeDefined();
+    expect(Object.keys(res.body.data.linkedResults).sort()).toEqual(['1', '2']);
   });
 });
 

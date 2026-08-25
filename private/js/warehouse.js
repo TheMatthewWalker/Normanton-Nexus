@@ -4301,6 +4301,7 @@ async function showPickedPallets(deliveryId, destName, custId, fromHolding) {
         </div>
         <button class="ps-modal-close" onclick="closePickModal()">✕</button>
       </div>
+      <div class="ps-linked-section" id="ps-linked-section"></div>
       <div class="ps-modal-body" id="pallet-list-body" style="padding:0">
         <div class="sap-loading"><div class="spinner"></div>Fetching pallets…</div>
       </div>
@@ -4310,7 +4311,120 @@ async function showPickedPallets(deliveryId, destName, custId, fromHolding) {
       </div>
     </div>`;
 
-  await refreshPalletList();
+  await Promise.all([refreshPalletList(), refreshLinkedPicksheets()]);
+}
+
+// ── Linked picksheets — shared pallet pool ──────────────────────────────────
+// See routes/deliverymain.js's "Linked picksheets" section for the backend
+// half of this — linking two picksheets widens pallet-list visibility
+// between them (GET /:deliveryId/pallets) without changing which delivery
+// actually owns each pallet, and completing either one completes/ZDELFLAG-
+// processes the whole linked group together.
+async function refreshLinkedPicksheets() {
+  const { deliveryId } = _palletListCtx || {};
+  const el = document.getElementById('ps-linked-section');
+  if (!el || !deliveryId) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/linked-picksheets`);
+    const json = await res.json();
+    const linked = json.success ? json.data : [];
+    const chips = linked.map(l => `
+      <span class="ps-linked-chip">
+        Linked to #${esc(String(l.deliveryID))} — ${esc(l.destinationName ?? '—')}
+        <button type="button" class="ps-linked-unlink" title="Unlink" onclick="unlinkPicksheet(${l.deliveryID})">✕</button>
+      </span>`).join('');
+    el.innerHTML = `${chips}<button type="button" class="btn-secondary ps-link-btn" onclick="openLinkPicksheetSearch()">${linked.length ? '+ Link Another Picksheet' : 'Link to another picksheet'}</button>`;
+  } catch {
+    el.innerHTML = '';
+  }
+}
+
+// Small search dialog reusing wPrompt/wConfirm's overlay shell — debounced
+// search-as-you-type against a new dedicated endpoint, mousedown (not
+// click) on a result row so it fires before the input's blur, same pattern
+// as logistics.js's destination combobox (private/js/logistics.js's
+// mo-dest-search — read-only reference, not shared code).
+function openLinkPicksheetSearch() {
+  const { deliveryId } = _palletListCtx || {};
+  if (!deliveryId) return;
+  document.getElementById('w-prompt-modal')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'w-prompt-modal';
+  overlay.className = 'wc-overlay';
+  overlay.innerHTML = `
+    <div class="wc-modal">
+      <div class="wc-title">Link to Another Picksheet</div>
+      <div class="wc-message" style="text-align:left">
+        <input class="pb-input" id="lp-search" type="text" placeholder="Search delivery # or destination…" autocomplete="off" style="width:100%">
+        <div id="lp-results" class="lp-results"></div>
+      </div>
+      <div class="wc-actions"><button type="button" class="wc-btn-cancel">Close</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('.wc-btn-cancel').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  const input   = overlay.querySelector('#lp-search');
+  const results = overlay.querySelector('#lp-results');
+  input.focus();
+
+  let debounce = null;
+  input.addEventListener('input', () => {
+    clearTimeout(debounce);
+    const q = input.value.trim();
+    if (!q) { results.innerHTML = ''; return; }
+    debounce = setTimeout(async () => {
+      try {
+        const res  = await fetch(`/api/deliverymain/link-search?q=${encodeURIComponent(q)}&excludeDeliveryId=${encodeURIComponent(deliveryId)}`);
+        const json = await res.json();
+        const rows = json.success ? json.data : [];
+        results.innerHTML = rows.length
+          ? rows.map(r => `<div class="lp-row" data-id="${esc(String(r.deliveryID))}">#${esc(String(r.deliveryID))} — ${esc(r.destinationName ?? '—')}</div>`).join('')
+          : `<div class="lp-empty">No matches</div>`;
+        results.querySelectorAll('.lp-row').forEach(row => {
+          row.addEventListener('mousedown', async e => {
+            e.preventDefault();
+            overlay.remove();
+            await linkPicksheet(row.dataset.id);
+          });
+        });
+      } catch {
+        results.innerHTML = `<div class="sap-error">Search failed</div>`;
+      }
+    }, 250);
+  });
+}
+
+async function linkPicksheet(otherDeliveryId) {
+  const { deliveryId } = _palletListCtx || {};
+  if (!deliveryId) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/link/${encodeURIComponent(otherDeliveryId)}`, { method: 'POST' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Link failed');
+    await Promise.all([refreshLinkedPicksheets(), refreshPalletList()]);
+  } catch (err) {
+    wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
+}
+
+async function unlinkPicksheet(otherDeliveryId) {
+  const { deliveryId } = _palletListCtx || {};
+  if (!deliveryId) return;
+  if (!await wConfirm({
+    title: 'Unlink Picksheet',
+    message: `Unlink Delivery #${otherDeliveryId}?\nPallets already tied to it will no longer appear on this picksheet (and vice versa).`,
+    confirmText: 'Unlink', variant: 'danger',
+  })) return;
+  try {
+    const res  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/link/${encodeURIComponent(otherDeliveryId)}`, { method: 'DELETE' });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Unlink failed');
+    await Promise.all([refreshLinkedPicksheets(), refreshPalletList()]);
+  } catch (err) {
+    wConfirm({ title: 'Error', message: err.message, confirmText: 'OK', variant: '' });
+  }
 }
 
 async function refreshPalletList() {
@@ -6133,6 +6247,15 @@ async function completeDelivery() {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     });
     const json = await res.json();
+    // Blocked — this picksheet (or, for a linked group, one of its linked
+    // siblings) still has materials outstanding. See routes/deliverymain.js's
+    // PATCH /:deliveryId/complete precondition.
+    if (res.status === 409 && Array.isArray(json.outstanding)) {
+      const detail = json.outstanding.map(o =>
+        `Delivery #${o.deliveryId}: ${o.materials.map(m => `${m.material} (${m.requiredQty} outstanding)`).join(', ')}`
+      ).join('\n');
+      throw new Error(`${json.error}\n\n${detail}`);
+    }
     if (!json.success) throw new Error(json.error || 'Update failed');
     closePickModal();
     if (fromHolding) { await runPackagingHolding(); } else { await runOpenPicksheets(); }
@@ -6145,6 +6268,26 @@ async function completeDelivery() {
     const warningParts = [];
     if (json.data?.sapWarning) warningParts.push(json.data.sapWarning);
     if (json.data?.goodsIssueWarning) warningParts.push(`Goods Issue: ${json.data.goodsIssueWarning}`);
+
+    // linkedResults is only present when this delivery was part of a linked
+    // group — every member got completed in the same request (see the
+    // backend route), so worth calling out since the rest of this dialog
+    // only ever talks about the one delivery the operator clicked. Kept as
+    // its own dialog (not folded into warningParts above) so it doesn't
+    // misleadingly borrow the "SAP Not Updated" title on a run that had no
+    // actual SAP problem.
+    if (json.data?.linkedResults) {
+      const others = Object.keys(json.data.linkedResults).filter(id => String(id) !== String(deliveryId));
+      if (others.length && !warningParts.length) {
+        wConfirm({
+          title: 'Delivery Complete',
+          message: `Also completed ${others.length} linked picksheet${others.length !== 1 ? 's' : ''}: ${others.map(id => `#${id}`).join(', ')}.`,
+          confirmText: 'OK', variant: '',
+        });
+      } else if (others.length) {
+        warningParts.unshift(`Also completed ${others.length} linked picksheet${others.length !== 1 ? 's' : ''}: ${others.map(id => `#${id}`).join(', ')}.`);
+      }
+    }
     if (warningParts.length) {
       wConfirm({ title: 'Delivery Complete — SAP Not Updated', message: warningParts.join('\n\n'), confirmText: 'OK', variant: '' });
     }

@@ -475,11 +475,12 @@ router.patch('/:deliveryId/cancel-picksheet', async (req, res) => {
 // which breaks under some reverse-proxy/TLS setups (observed as a bare
 // "fetch failed" with no further detail after a server restart). Calling
 // SapServer directly removes that extra, fragile hop entirely.
-router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP'), async (req, res) => {
-    try {
-        const deliveryId = req.params.deliveryId;
-        const pool = await getPool();
-
+// Extracted so PATCH /:deliveryId/complete's "fully picked" precondition
+// (see below) can reuse the exact same computation — for a linked group of
+// picksheets, that precondition calls this once per delivery in the group,
+// not just for the one being completed. Returns the same { customerId,
+// materials } shape the route below wraps as its `data`.
+async function getRemainingRequiredMaterials(pool, deliveryId) {
         const dmRes = await pool.request()
             .input('deliveryId', sql.BigInt, deliveryId)
             .query('SELECT customerID FROM log.DeliveryMain WHERE deliveryID = @deliveryId');
@@ -528,7 +529,7 @@ router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP')
 
         const materials = [...new Set(lipsRows.map(r => String(r.materialNumber || '').trim()).filter(Boolean))];
         if (!materials.length) {
-            return res.json({ success: true, data: { customerId, materials: [] } });
+            return { customerId, materials: [] };
         }
 
         // 2. Where is that material physically sitting, and is any of it
@@ -729,9 +730,186 @@ router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP')
             m.usesContainerPacking = m.profitCentre === CONTAINER_PROFIT_CENTRE;
         });
 
-        res.json({ success: true, data: { customerId, materials: Object.values(byMaterial) } });
+        return { customerId, materials: Object.values(byMaterial) };
+}
+
+router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP'), async (req, res) => {
+    try {
+        const pool = await getPool();
+        const data = await getRemainingRequiredMaterials(pool, req.params.deliveryId);
+        res.json({ success: true, data });
     } catch (err) {
         res.status(err.statusCode || 500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Linked picksheets — shared pallet pool ──────────────────────────────────
+// Sometimes stock picked for one picksheet doesn't fill a whole pallet, so
+// batches for a different picksheet get picked onto the same physical
+// pallet. Linking two picksheets shares their pallet POOL only — see
+// GET /:deliveryId/pallets below for the widened visibility query, and
+// runZdelflagMaintenance further down for the owned-vs-borrowed pallet
+// split that keeps each linked picksheet's own SAP ZDELFLAG update correct.
+// log.DeliveryLink (which delivery's builder actually created a given
+// pallet) is never touched by any of this — that's what keeps a shared
+// pallet's weight/count rolling up to exactly one side.
+//
+// log.DeliveryPicksheetLink is populated symmetrically (linking A<->B
+// inserts BOTH (A,B) and (B,A)), so every read below is a plain
+// one-directional WHERE deliveryID = @id.
+
+// ── Currently-linked picksheets, for the "Linked to #X" display ──
+router.get('/:deliveryId/linked-picksheets', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('deliveryId', sql.BigInt, req.params.deliveryId)
+            .query(`SELECT lk.linkedDeliveryID AS deliveryID, dm.customerID, d.destinationName,
+                           dm.completionStatus, dm.dispatchDate
+                    FROM   log.DeliveryPicksheetLink lk
+                    INNER JOIN log.DeliveryMain dm ON dm.deliveryID = lk.linkedDeliveryID
+                    LEFT JOIN  log.Destinations d   ON d.destinationID = dm.customerID
+                    WHERE  lk.deliveryID = @deliveryId
+                    ORDER  BY lk.linkedDeliveryID ASC`);
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Search for a picksheet to link to ──
+// Same open/not-cancelled scoping as /open-picksheets, restricted to the
+// same customer as excludeDeliveryId (a shared pallet is one physical unit
+// for one destination — this is a hard rule, enforced again server-side in
+// POST /link below, not just a search-time nicety) and excluding whatever's
+// already linked to it. Modeled on routes/productionnexus.js's
+// GET /mixing/tubs/search (TOP 50, debounced %q% LIKE).
+router.get('/link-search', requirePermission('WAREHOUSE_OP'), async (req, res) => {
+    try {
+        const excludeDeliveryId = req.query.excludeDeliveryId;
+        if (!excludeDeliveryId) return res.status(400).json({ success: false, error: 'excludeDeliveryId required' });
+
+        const pool = await getPool();
+        const custRes = await pool.request()
+            .input('excludeDeliveryId', sql.BigInt, excludeDeliveryId)
+            .query('SELECT customerID FROM log.DeliveryMain WHERE deliveryID = @excludeDeliveryId');
+        const customerId = custRes.recordset[0]?.customerID;
+        if (customerId == null) return res.status(404).json({ success: false, error: 'Delivery not found' });
+
+        const qRaw = String(req.query.q || '').trim();
+        const result = await pool.request()
+            .input('excludeDeliveryId', sql.BigInt, excludeDeliveryId)
+            .input('customerId', sql.BigInt, customerId)
+            .input('q', sql.NVarChar(60), qRaw ? `%${qRaw}%` : null)
+            .query(`SELECT TOP 50 dm.deliveryID, dm.customerID, d.destinationName, dm.dispatchDate
+                    FROM   log.DeliveryMain dm
+                    LEFT JOIN log.Destinations d ON d.destinationID = dm.customerID
+                    WHERE  dm.completionStatus = 0 AND ISNULL(dm.deliveryCancelled, 0) = 0
+                      AND  dm.customerID = @customerId
+                      AND  dm.deliveryID <> @excludeDeliveryId
+                      AND  NOT EXISTS (
+                          SELECT 1 FROM log.DeliveryPicksheetLink lk
+                          WHERE lk.deliveryID = @excludeDeliveryId AND lk.linkedDeliveryID = dm.deliveryID
+                      )
+                      AND (@q IS NULL OR CAST(dm.deliveryID AS NVARCHAR(20)) LIKE @q OR d.destinationName LIKE @q)
+                    ORDER  BY dm.dispatchDate ASC`);
+        res.json({ success: true, data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Link two picksheets together ──
+router.post('/:deliveryId/link/:otherDeliveryId', requirePermission('WAREHOUSE_OP'), async (req, res) => {
+    try {
+        const { deliveryId, otherDeliveryId } = req.params;
+        if (String(deliveryId) === String(otherDeliveryId)) {
+            return res.status(400).json({ success: false, error: 'Cannot link a picksheet to itself.' });
+        }
+
+        const pool = await getPool();
+        const bothRes = await pool.request()
+            .input('a', sql.BigInt, deliveryId)
+            .input('b', sql.BigInt, otherDeliveryId)
+            .query(`SELECT deliveryID, customerID, completionStatus, ISNULL(deliveryCancelled, 0) AS deliveryCancelled
+                    FROM   log.DeliveryMain
+                    WHERE  deliveryID IN (@a, @b)`);
+        const a = bothRes.recordset.find(r => String(r.deliveryID) === String(deliveryId));
+        const b = bothRes.recordset.find(r => String(r.deliveryID) === String(otherDeliveryId));
+        if (!a || !b) return res.status(404).json({ success: false, error: 'Delivery not found' });
+        if (a.completionStatus || a.deliveryCancelled || b.completionStatus || b.deliveryCancelled) {
+            return res.status(400).json({ success: false, error: 'Both picksheets must be open (not completed or cancelled) to link.' });
+        }
+        // A shared pallet is one physical unit going to one destination —
+        // linking across customers isn't valid regardless of anything else,
+        // so this is enforced here even though /link-search already filters
+        // to the same customer (nothing stops a direct API call bypassing
+        // that search UI).
+        if (String(a.customerID) !== String(b.customerID)) {
+            return res.status(400).json({ success: false, error: 'Picksheets can only be linked when they share the same customer.' });
+        }
+
+        const existingRes = await pool.request()
+            .input('a', sql.BigInt, deliveryId)
+            .input('b', sql.BigInt, otherDeliveryId)
+            .query(`SELECT 1 FROM log.DeliveryPicksheetLink WHERE deliveryID = @a AND linkedDeliveryID = @b`);
+        if (existingRes.recordset.length) {
+            return res.status(409).json({ success: false, error: 'These picksheets are already linked.' });
+        }
+
+        await pool.request()
+            .input('a', sql.BigInt, deliveryId)
+            .input('b', sql.BigInt, otherDeliveryId)
+            .input('userId', sql.Int, req.session?.user?.userID ?? null)
+            .query(`INSERT INTO log.DeliveryPicksheetLink (deliveryID, linkedDeliveryID, linkedByUserID) VALUES (@a, @b, @userId);
+                    INSERT INTO log.DeliveryPicksheetLink (deliveryID, linkedDeliveryID, linkedByUserID) VALUES (@b, @a, @userId);`);
+        res.status(201).json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Unlink two picksheets ──
+// Blocked once real cross-staging has happened — a batch staged under one
+// side's sapDelivery, sitting on a pallet the OTHER side owns via
+// log.DeliveryLink — since unlinking would silently strand that side's
+// already-staged packages with no UI able to see or manage the pallet
+// they're sitting on any more.
+router.delete('/:deliveryId/link/:otherDeliveryId', requirePermission('WAREHOUSE_OP'), async (req, res) => {
+    try {
+        const { deliveryId, otherDeliveryId } = req.params;
+
+        const pool = await getPool();
+        const crossStagedRes = await pool.request()
+            .input('a', sql.BigInt, deliveryId)
+            .input('b', sql.NVarChar, String(otherDeliveryId))
+            .input('bId', sql.BigInt, otherDeliveryId)
+            .input('aStr', sql.NVarChar, String(deliveryId))
+            .query(`SELECT COUNT(*) AS cnt
+                    FROM   log.PalletPackages pp
+                    JOIN   log.PalletMain pm ON pm.palletID = pp.palletID
+                    JOIN   log.DeliveryLink dl ON dl.palletID = pm.palletID
+                    WHERE  pm.palletRemoved = 0
+                      AND  (
+                          (pp.sapDelivery = @aStr AND dl.deliveryID = @bId) OR
+                          (pp.sapDelivery = @b    AND dl.deliveryID = @a)
+                      )`);
+        if (Number(crossStagedRes.recordset[0]?.cnt || 0) > 0) {
+            return res.status(409).json({
+                success: false,
+                error: 'These picksheets have batches staged onto each other\'s pallets — resolve those packages before unlinking.',
+            });
+        }
+
+        await pool.request()
+            .input('a', sql.BigInt, deliveryId)
+            .input('b', sql.BigInt, otherDeliveryId)
+            .query(`DELETE FROM log.DeliveryPicksheetLink
+                    WHERE (deliveryID = @a AND linkedDeliveryID = @b)
+                       OR (deliveryID = @b AND linkedDeliveryID = @a)`);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -792,6 +970,12 @@ router.post('/:deliveryId/stage-batch', requirePermission('WAREHOUSE_OP'), async
 });
 
 // ── Pallets picked for a delivery (includes palletID for builder) ──
+// Widened to also include pallets OWNED (via log.DeliveryLink) by any
+// picksheet linked to this one — see the "Linked picksheets" section above.
+// Ownership itself never changes here; a linked picksheet's own pallets
+// just become visible/pickable from this delivery's builder too. For a
+// delivery with no links, the IN subquery is empty and this is byte-for-
+// byte equivalent to the old unwidened query.
 router.get('/:deliveryId/pallets', async (req, res) => {
     try {
         const pool = await getPool();
@@ -803,7 +987,9 @@ router.get('/:deliveryId/pallets', async (req, res) => {
                            pm.palletLocation, pm.palletCategory, pm.palletCreationDate
                     FROM log.PalletMain pm
                     INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
-                    WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    WHERE pm.palletRemoved = 0
+                      AND (dl.deliveryID = @deliveryId
+                           OR dl.deliveryID IN (SELECT linkedDeliveryID FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId))
                     ORDER BY pm.palletCreationDate ASC`);
         res.json({ success: true, data: result.recordset });
     } catch (err) {
@@ -871,12 +1057,23 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
             .query('SELECT customerID FROM log.DeliveryMain WHERE deliveryID = @deliveryId');
         const customerId = dmRes.recordset[0]?.customerID != null ? String(dmRes.recordset[0].customerID) : '';
 
+        // Widened the same way GET /:deliveryId/pallets is, to also pick up
+        // pallets OWNED by a linked picksheet — isOwned tells the row-
+        // building loop below whether THIS delivery is the one that should
+        // send the pallet's header row (see the comment there). The packages
+        // query right below is untouched — already scoped purely by
+        // sapDelivery, independent of pallet ownership — so a borrowed
+        // pallet still correctly only ever contributes this delivery's own
+        // batches, never a sibling's.
         const palletsRes = await pool.request()
             .input('deliveryId', sql.BigInt, deliveryId)
-            .query(`SELECT pm.palletID, pm.palletType, pm.grossWeight, pm.packagingWeight
+            .query(`SELECT pm.palletID, pm.palletType, pm.grossWeight, pm.packagingWeight,
+                           CASE WHEN dl.deliveryID = @deliveryId THEN 1 ELSE 0 END AS isOwned
                     FROM log.PalletMain pm
                     INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
-                    WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    WHERE pm.palletRemoved = 0
+                      AND (dl.deliveryID = @deliveryId
+                           OR dl.deliveryID IN (SELECT linkedDeliveryID FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId))
                     ORDER BY pm.palletID ASC`);
         const pallets = palletsRes.recordset;
         if (!pallets.length) {
@@ -959,17 +1156,27 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
             const headerPackid = pallet.palletID * 1000;
             const netWeight    = Number(pallet.grossWeight || 0) - Number(pallet.packagingWeight || 0);
 
-            delflagRows.push({
-                vbeln: String(deliveryId), posnr: '', charg: '',
-                kunnr: customerId, empst, werks: '3012',
-                ntgew: netWeight, brgew: Number(pallet.grossWeight || 0),
-                kdmat: '', lfimg: 0, eikto, arktx: '', matnr: '',
-                budat, packid: String(headerPackid), boxes: String(packages.length),
-                pallet: palletFlag, vhart: 'PALL',
-                smbxMatnr: (packages.find(p => p.sapPackagingInstruction)?.sapPackagingInstruction) || '',
-                pallMatnr: 'PALLET', mtart: '', smbxhu: '', done: 'X',
-                printPalletLabel: true, printBoxLabel: false,
-            });
+            // Only the delivery that OWNS this pallet (via log.DeliveryLink)
+            // sends its header row — a pallet borrowed from a linked
+            // picksheet (isOwned: false) still contributes its package rows
+            // below (this delivery's own batches, wherever they happen to
+            // sit), but the pallet's weight/box-count header is the owning
+            // delivery's sibling ZDELFLAG call's responsibility, not this
+            // one's — sending it twice would double-post that pallet's
+            // weight to SAP under two different VBELNs.
+            if (pallet.isOwned) {
+                delflagRows.push({
+                    vbeln: String(deliveryId), posnr: '', charg: '',
+                    kunnr: customerId, empst, werks: '3012',
+                    ntgew: netWeight, brgew: Number(pallet.grossWeight || 0),
+                    kdmat: '', lfimg: 0, eikto, arktx: '', matnr: '',
+                    budat, packid: String(headerPackid), boxes: String(packages.length),
+                    pallet: palletFlag, vhart: 'PALL',
+                    smbxMatnr: (packages.find(p => p.sapPackagingInstruction)?.sapPackagingInstruction) || '',
+                    pallMatnr: 'PALLET', mtart: '', smbxhu: '', done: 'X',
+                    printPalletLabel: true, printBoxLabel: false,
+                });
+            }
 
             packages.forEach((pkg, idx) => {
                 const packid  = String(headerPackid + idx + 1);
@@ -1113,101 +1320,183 @@ async function runGoodsIssueApproval(pool, deliveryId) {
 // both SAP calls are skipped entirely for this path. Completing here just
 // records the real packaging data locally (from whatever pallets were just
 // built) and clears pendingPackagingData, releasing it into Create Shipment.
+// Extracted so a linked group (see below) can complete every member with
+// exactly today's single-delivery logic, unchanged, just called once per
+// delivery instead of once per request. Returns the same data shape the
+// route used to send straight to res.json.
+async function completeOneDelivery(pool, deliveryId) {
+    const pendingRes = await pool.request()
+        .input('deliveryId', sql.BigInt, deliveryId)
+        .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
+                FROM log.DeliveryMain WHERE deliveryID = @deliveryId`);
+    const wasHeldForPackaging = !!pendingRes.recordset[0]?.pendingPackagingData;
+
+    await pool.request()
+        .input('deliveryId', sql.BigInt, deliveryId)
+        .query(`UPDATE log.DeliveryMain
+                SET completionStatus = 1,
+                    completionDate   = GETDATE(),
+                    pendingPackagingData = 0,
+                    palletCount = (
+                        SELECT COUNT(*)
+                        FROM log.PalletMain pm
+                        INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
+                        WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    ),
+                    grossWeight = (
+                        SELECT ISNULL(SUM(pm.grossWeight), 0)
+                        FROM log.PalletMain pm
+                        INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
+                        WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    ),
+                    netWeight = (
+                        SELECT ISNULL(SUM(pm.grossWeight - ISNULL(pm.packagingWeight, 0)), 0)
+                        FROM log.PalletMain pm
+                        INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
+                        WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    ),
+                    deliveryVolume = (
+                        SELECT ISNULL(SUM(pm.palletVolume), 0)
+                        FROM log.PalletMain pm
+                        INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
+                        WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
+                    )
+                WHERE deliveryID = @deliveryId`);
+
+    const rolledUp = await pool.request()
+        .input('deliveryId', sql.BigInt, deliveryId)
+        .query(`SELECT palletCount, grossWeight, netWeight
+                FROM log.DeliveryMain
+                WHERE deliveryID = @deliveryId`);
+    const totals = rolledUp.recordset[0] || {};
+
+    let sapWarning = null;
+    let zdelflagWarning = null;
+    let goodsIssueWarning = null;
+    let note = null;
+
+    if (wasHeldForPackaging) {
+        note = 'This delivery was already completed in SAP outside Nexus — packaging data has been recorded locally and it\'s now available for shipment creation. ZDEL and ZDELFLAG/ZDELPACK were not re-sent to SAP.';
+    } else {
+        try {
+            const response = await axios.post(
+                `${sapConfig.url}/api/warehouse/set-delivery-weight`,
+                {
+                    deliveryNumber: String(deliveryId),
+                    grossWeight: Number(totals.grossWeight || 0),
+                    netWeight:   Number(totals.netWeight || 0),
+                    palletCount: Number(totals.palletCount || 0),
+                },
+                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+            );
+            if (!response.data?.success) {
+                sapWarning = response.data?.error?.message || 'SAP rejected the ZDEL weight update.';
+            }
+        } catch (sapErr) {
+            sapWarning = `Could not update SAP (ZDEL) with the actual weights/pallet count: ${sapErr.message}. Update LIKP manually.`;
+        }
+
+        const zdelflagResult = await runZdelflagMaintenance(pool, deliveryId, null);
+        if (zdelflagResult.status !== 'Success') {
+            zdelflagWarning = zdelflagResult.messages.map(m => m.message).filter(Boolean).join('; ')
+                || `ZDELFLAG/ZDELPACK maintenance did not complete successfully (${zdelflagResult.status}).`;
+        } else {
+            // Goods Issue only fires once ZDELFLAG/ZDELPACK maintenance
+            // itself succeeded — posting GI for a delivery whose
+            // packaging never made it into SAP would be posting against
+            // incomplete data. Same best-effort treatment as ZDEL/
+            // ZDELFLAG above: never blocks completion, surfaced as its
+            // own warning instead.
+            const goodsIssueResult = await runGoodsIssueApproval(pool, deliveryId);
+            if (goodsIssueResult.status !== 'Success') {
+                goodsIssueWarning = goodsIssueResult.messages.map(m => m.message).filter(Boolean).join('; ')
+                    || `Goods Issue posting did not complete successfully (${goodsIssueResult.status}).`;
+            }
+        }
+    }
+
+    return { ...totals, sapWarning, zdelflagWarning, goodsIssueWarning, note, wasHeldForPackaging };
+}
+
 router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
+        const deliveryId = req.params.deliveryId;
 
-        const pendingRes = await pool.request()
-            .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
-                    FROM log.DeliveryMain WHERE deliveryID = @deliveryId`);
-        const wasHeldForPackaging = !!pendingRes.recordset[0]?.pendingPackagingData;
+        // Resolve the linked group (this delivery + everything currently
+        // linked to it, see the "Linked picksheets" section above) —
+        // completing one completes/ZDELFLAG-processes every member
+        // together, in one request, since a shared pallet's header can only
+        // safely be posted once by whichever delivery in the group actually
+        // owns it.
+        const linkedRes = await pool.request()
+            .input('deliveryId', sql.BigInt, deliveryId)
+            .query(`SELECT linkedDeliveryID FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId`);
+        const groupIds = [deliveryId, ...linkedRes.recordset.map(r => String(r.linkedDeliveryID))];
 
-        await pool.request()
-            .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`UPDATE log.DeliveryMain
-                    SET completionStatus = 1,
-                        completionDate   = GETDATE(),
-                        pendingPackagingData = 0,
-                        palletCount = (
-                            SELECT COUNT(*)
-                            FROM log.PalletMain pm
-                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
-                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
-                        ),
-                        grossWeight = (
-                            SELECT ISNULL(SUM(pm.grossWeight), 0)
-                            FROM log.PalletMain pm
-                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
-                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
-                        ),
-                        netWeight = (
-                            SELECT ISNULL(SUM(pm.grossWeight - ISNULL(pm.packagingWeight, 0)), 0)
-                            FROM log.PalletMain pm
-                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
-                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
-                        ),
-                        deliveryVolume = (
-                            SELECT ISNULL(SUM(pm.palletVolume), 0)
-                            FROM log.PalletMain pm
-                            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
-                            WHERE dl.deliveryID = @deliveryId AND pm.palletRemoved = 0
-                        )
-                    WHERE deliveryID = @deliveryId`);
+        // Every picksheet in the group must have all its required materials
+        // fully picked before ANY of them can complete — applies even to a
+        // single, unlinked picksheet (a group of one). Skipped per-delivery
+        // for one already sitting in packaging holding: SAP already closed
+        // it outside Nexus, and LIPS' open quantity isn't reduced by
+        // picking, so a held delivery could show nonzero requiredQty
+        // forever — that's not this check's business.
+        const outstanding = [];
+        for (const id of groupIds) {
+            const heldRes = await pool.request()
+                .input('deliveryId', sql.BigInt, id)
+                .query(`SELECT ISNULL(pendingPackagingData, 0) AS pendingPackagingData
+                        FROM log.DeliveryMain WHERE deliveryID = @deliveryId`);
+            if (heldRes.recordset[0]?.pendingPackagingData) continue;
 
-        const rolledUp = await pool.request()
-            .input('deliveryId', sql.BigInt, req.params.deliveryId)
-            .query(`SELECT palletCount, grossWeight, netWeight
-                    FROM log.DeliveryMain
-                    WHERE deliveryID = @deliveryId`);
-        const totals = rolledUp.recordset[0] || {};
-
-        let sapWarning = null;
-        let zdelflagWarning = null;
-        let goodsIssueWarning = null;
-        let note = null;
-
-        if (wasHeldForPackaging) {
-            note = 'This delivery was already completed in SAP outside Nexus — packaging data has been recorded locally and it\'s now available for shipment creation. ZDEL and ZDELFLAG/ZDELPACK were not re-sent to SAP.';
-        } else {
-            try {
-                const response = await axios.post(
-                    `${sapConfig.url}/api/warehouse/set-delivery-weight`,
-                    {
-                        deliveryNumber: String(req.params.deliveryId),
-                        grossWeight: Number(totals.grossWeight || 0),
-                        netWeight:   Number(totals.netWeight || 0),
-                        palletCount: Number(totals.palletCount || 0),
-                    },
-                    { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
-                );
-                if (!response.data?.success) {
-                    sapWarning = response.data?.error?.message || 'SAP rejected the ZDEL weight update.';
-                }
-            } catch (sapErr) {
-                sapWarning = `Could not update SAP (ZDEL) with the actual weights/pallet count: ${sapErr.message}. Update LIKP manually.`;
-            }
-
-            const zdelflagResult = await runZdelflagMaintenance(pool, req.params.deliveryId, null);
-            if (zdelflagResult.status !== 'Success') {
-                zdelflagWarning = zdelflagResult.messages.map(m => m.message).filter(Boolean).join('; ')
-                    || `ZDELFLAG/ZDELPACK maintenance did not complete successfully (${zdelflagResult.status}).`;
-            } else {
-                // Goods Issue only fires once ZDELFLAG/ZDELPACK maintenance
-                // itself succeeded — posting GI for a delivery whose
-                // packaging never made it into SAP would be posting against
-                // incomplete data. Same best-effort treatment as ZDEL/
-                // ZDELFLAG above: never blocks completion, surfaced as its
-                // own warning instead.
-                const goodsIssueResult = await runGoodsIssueApproval(pool, req.params.deliveryId);
-                if (goodsIssueResult.status !== 'Success') {
-                    goodsIssueWarning = goodsIssueResult.messages.map(m => m.message).filter(Boolean).join('; ')
-                        || `Goods Issue posting did not complete successfully (${goodsIssueResult.status}).`;
-                }
+            const { materials } = await getRemainingRequiredMaterials(pool, id);
+            const remaining = materials.filter(m => Number(m.requiredQty) > 0);
+            if (remaining.length) {
+                outstanding.push({
+                    deliveryId: id,
+                    materials: remaining.map(m => ({ material: m.material, requiredQty: m.requiredQty })),
+                });
             }
         }
+        if (outstanding.length) {
+            return res.status(409).json({
+                success: false,
+                error: groupIds.length > 1
+                    ? 'Cannot complete — one or more linked picksheets still have materials outstanding.'
+                    : 'Cannot complete — this picksheet still has materials outstanding.',
+                outstanding,
+            });
+        }
 
-        res.json({ success: true, data: { ...totals, sapWarning, zdelflagWarning, goodsIssueWarning, note, wasHeldForPackaging } });
+        // Owner-first ordering: for every pallet any group member has,
+        // whichever delivery actually OWNS it (log.DeliveryLink) must run
+        // its ZDELFLAG call before any group member merely borrowing that
+        // pallet runs its own package-only call — see
+        // runZdelflagMaintenance's isOwned comment for why. A group of one
+        // (the common, unlinked case) always owns its own pallets, so this
+        // is a no-op reordering there.
+        const ownerReq = pool.request();
+        groupIds.forEach((id, i) => ownerReq.input(`id${i}`, sql.BigInt, id));
+        const ownerRes = await ownerReq.query(`
+            SELECT DISTINCT dl.deliveryID
+            FROM log.DeliveryLink dl
+            JOIN log.PalletMain pm ON pm.palletID = dl.palletID
+            WHERE pm.palletRemoved = 0 AND dl.deliveryID IN (${groupIds.map((_, i) => `@id${i}`).join(',')})`);
+        const ownerIds = new Set(ownerRes.recordset.map(r => String(r.deliveryID)));
+        const orderedGroupIds = [
+            ...groupIds.filter(id => ownerIds.has(id)),
+            ...groupIds.filter(id => !ownerIds.has(id)),
+        ];
+
+        const results = {};
+        for (const id of orderedGroupIds) {
+            results[id] = await completeOneDelivery(pool, id);
+        }
+
+        res.json({
+            success: true,
+            data: { ...results[deliveryId], linkedResults: groupIds.length > 1 ? results : undefined },
+        });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
