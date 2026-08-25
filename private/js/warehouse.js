@@ -3814,12 +3814,15 @@ async function deleteAllHeldPicksheets() {
 // requireAnyPermission(['LOG_MRP','WAREHOUSE_OP'])). Same bucket format as
 // the planner-facing tile (Late/Today/Upcoming/Completed/Cancelled), but the
 // detail view only exposes what an operator actually needs on the goods-in
-// bay: confirm the quantity that showed up, enter the supplier's paperwork
-// reference if missing, and Mark Arrived — which posts the goods receipt to
-// SAP (order-suggestions/shipments/:id/receive) using those confirmed
-// quantities. No shipment-header editing, cancel, undo-receive, documents or
-// cost lines here — those stay planner-only in Logistics' own Inbound Log.
+// bay: view the supplier paperwork filed against the shipment (to check
+// deliveries against), confirm the quantity that showed up, enter the
+// supplier's paperwork reference if missing, and Mark Arrived — which posts
+// the goods receipt to SAP (order-suggestions/shipments/:id/receive) using
+// those confirmed quantities. No shipment-header editing, cancel,
+// undo-receive, document upload or cost lines here — those stay
+// planner-only in Logistics' own Inbound Log.
 let wdInboundRows = [];
+let wdInboundSearchQuery = '';
 
 // Mirrors logistics.js's osKgToOrderUnit/OS_KG_PER_UNIT — display-only
 // conversion for a vendor whose delivery paperwork uses a unit other than
@@ -3872,9 +3875,47 @@ async function runInboundDeliveriesOp() {
   }
 }
 
+// Same fields as logistics.js's ilMatchesSearch, minus the columns
+// (container/BOL/PO/supplier ref) that view fetches separately and this one
+// doesn't need — just what an operator actually has in hand: the
+// shipment's own reference, tracking number, and supplier/origin.
+function wdInboundMatchesSearch(s, query) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return [s.ShipmentReference, s.TrackingNumber, s.Suppliers, s.OriginName]
+    .some(field => String(field || '').toLowerCase().includes(needle));
+}
+
+function wdApplyInboundSearch() {
+  const input = document.getElementById('wd-inbound-search');
+  wdInboundSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  wdRenderInboundDeliveries();
+  const newInput = document.getElementById('wd-inbound-search');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
+
 function wdRenderInboundDeliveries() {
   if (!wdInboundRows.length) {
     document.getElementById('result-body').innerHTML = '<div class="sap-empty">No inbound shipments right now.</div>';
+    return;
+  }
+
+  const query = wdInboundSearchQuery.trim();
+  const rows = query ? wdInboundRows.filter(s => wdInboundMatchesSearch(s, query)) : wdInboundRows;
+
+  const badge = document.getElementById('result-row-badge');
+  badge.textContent = query ? `${rows.length} of ${wdInboundRows.length} matching` : `${wdInboundRows.length} shipments`;
+  badge.classList.remove('hidden');
+
+  const toolbarHtml = `<div class="lg-actions" style="margin-bottom:10px">
+    <input class="tf-input" id="wd-inbound-search" type="text"
+           placeholder="Search reference, tracking, supplier…"
+           value="${esc(wdInboundSearchQuery)}" oninput="wdApplyInboundSearch()" style="max-width:280px">
+  </div>`;
+
+  if (!rows.length) {
+    document.getElementById('result-body').innerHTML = toolbarHtml + `<div class="sap-empty">No shipments match "${esc(query)}".</div>`;
     return;
   }
 
@@ -3890,7 +3931,7 @@ function wdRenderInboundDeliveries() {
     </tr>`;
 
   const sections = WD_IL_BUCKETS.map(bd => {
-    const bucketRows = wdInboundRows.filter(s => wdIlBucketFor(s) === bd.key)
+    const bucketRows = rows.filter(s => wdIlBucketFor(s) === bd.key)
       .sort((a, b) => {
         if (bd.key === 'cancelled') return new Date(b.CancelledAtUtc).getTime() - new Date(a.CancelledAtUtc).getTime();
         if (bd.key === 'completed') return new Date(b.ReceivedAtUtc).getTime() - new Date(a.ReceivedAtUtc).getTime();
@@ -3899,7 +3940,7 @@ function wdRenderInboundDeliveries() {
         return ta - tb;
       });
     if (!bucketRows.length) return '';
-    const collapsed = (bd.key === 'completed' || bd.key === 'cancelled') ? ' ps-section--collapsed' : '';
+    const collapsed = ((bd.key === 'completed' || bd.key === 'cancelled') && !query) ? ' ps-section--collapsed' : '';
     return `<div class="ps-section${collapsed}" data-group-key="${bd.key}">
       <div class="ps-section-header">
         <span class="ps-section-dot ps-section-dot--${bd.dot}"></span>
@@ -3916,7 +3957,7 @@ function wdRenderInboundDeliveries() {
     </div>`;
   }).join('');
 
-  document.getElementById('result-body').innerHTML = `<div class="ps-sections">${sections}</div>`;
+  document.getElementById('result-body').innerHTML = toolbarHtml + `<div class="ps-sections">${sections}</div>`;
 
   document.querySelectorAll('#result-body .ps-section-header').forEach(h => {
     h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed'));
@@ -4020,13 +4061,56 @@ async function wdRefreshInboundDetail(shipmentId) {
         </table>
       </div>` : '<div class="sap-empty">No order lines on this shipment.</div>'}`;
 
-    actions.innerHTML = canReceive
-      ? '<button type="button" class="btn-submit" id="wd-isd-receive-btn">Mark Arrived — Post to SAP</button>'
-      : '';
+    actions.innerHTML = `
+      <button type="button" class="btn-secondary" id="wd-isd-docs-btn">View Documents</button>
+      ${canReceive ? '<button type="button" class="btn-submit" id="wd-isd-receive-btn">Mark Arrived — Post to SAP</button>' : ''}`;
 
+    document.getElementById('wd-isd-docs-btn').addEventListener('click', () => wdViewInboundDocuments(shipmentId));
     if (canReceive) {
       document.getElementById('wd-isd-receive-btn').addEventListener('click', () => wdMarkInboundReceived(shipmentId, s));
     }
+  } catch (err) {
+    body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+  }
+}
+
+// View-only file list against the shipment's import folder — same
+// GET .../documents/folder endpoint Logistics' Order Suggestions invoice
+// uploader reads (routes/performance.js, now WAREHOUSE_OP-readable
+// alongside LOG_MRP), just without the upload control: this is what an
+// operator checks a delivery against on the goods-in bay, not somewhere
+// they file paperwork from.
+async function wdViewInboundDocuments(shipmentId) {
+  const overlay = document.getElementById('ps-modal-overlay');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:640px;width:94vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Documents</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body" id="wd-docs-body"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" id="wd-docs-back-btn">← Back</button>
+    </div>
+  </div>`;
+  document.getElementById('wd-docs-back-btn').addEventListener('click', () => wdOpenInboundDetail(shipmentId));
+
+  const body = document.getElementById('wd-docs-body');
+  try {
+    const res  = await fetch(`/api/performance/order-suggestions/shipments/${shipmentId}/documents/folder`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error?.message || 'Failed to load documents.');
+    const files = json.data.files || [];
+    body.innerHTML = !files.length
+      ? '<div class="sap-empty">No documents filed against this shipment yet.</div>'
+      : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table">
+          <thead><tr><th>File</th><th>Size</th><th>Uploaded</th><th></th></tr></thead>
+          <tbody>${files.map(f => `<tr class="admin-row">
+            <td>${esc(f.fileName)}</td>
+            <td>${(Number(f.sizeBytes || 0) / 1024).toFixed(1)} KB</td>
+            <td>${wdFormatDate(f.modifiedAtUtc)}</td>
+            <td style="text-align:right"><a href="${esc(f.downloadUrl)}" target="_blank" rel="noopener">View</a></td>
+          </tr>`).join('')}</tbody>
+        </table></div>`;
   } catch (err) {
     body.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
@@ -4098,12 +4182,32 @@ async function wdMarkInboundReceived(shipmentId, shipment) {
 // ── Outbound Deliveries (operator-friendly Awaiting Collection) ───────────────
 // Warehouse-side view of Logistics' Awaiting Collection tile (see
 // routes/shipmentmain.js's GET /queue/awaiting-collection, POST
-// /mark-collected-bulk — gated requireAnyPermission(['LOG_PLANNING',
-// 'WAREHOUSE_OP'])). Same grouped-by-haulier bucket layout, but the only
-// action offered is Mark Collected — no date changes, loading lists or
-// unbooking, which stay planner-only in Logistics.
+// /mark-collected-bulk and POST /loading-list — none of which are
+// LOG_PLANNING-gated beyond requireLogin, so an operator can use them the
+// same as a planner). Same grouped-by-haulier bucket layout, plus a
+// select-all checkbox per haulier bucket and a Loading List button to print
+// what's going out — no date changes or unbooking, which stay
+// planner-only in Logistics.
 let wdCollectionRows = [];
 let wdSelectedCollectionIds = new Set();
+let wdOutboundSearchQuery = '';
+
+function wdOutboundMatchesSearch(row, query) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  const ref = String(row.shipmentID || '').padStart(8, '0');
+  return [row.shipmentID, ref, row.trackingNumber, row.destinationName]
+    .some(field => String(field || '').toLowerCase().includes(needle));
+}
+
+function wdApplyOutboundSearch() {
+  const input = document.getElementById('wd-outbound-search');
+  wdOutboundSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  wdRenderOutboundDeliveries();
+  const newInput = document.getElementById('wd-outbound-search');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
 
 async function runOutboundDeliveriesOp() {
   if (!await checkSession()) return;
@@ -4128,7 +4232,10 @@ async function runOutboundDeliveriesOp() {
 }
 
 function wdRenderOutboundDeliveries() {
-  const grouped = wdCollectionRows.reduce((acc, row) => {
+  const query = wdOutboundSearchQuery.trim();
+  const filtered = query ? wdCollectionRows.filter(row => wdOutboundMatchesSearch(row, query)) : wdCollectionRows;
+
+  const grouped = filtered.reduce((acc, row) => {
     const key = row.forwarderName || 'Unassigned';
     if (!acc[key]) acc[key] = [];
     acc[key].push(row);
@@ -4136,11 +4243,13 @@ function wdRenderOutboundDeliveries() {
   }, {});
 
   const sections = Object.keys(grouped).sort((a, b) => a.localeCompare(b)).map(name => {
-    const rows = grouped[name].slice().sort((a, b) => {
+    const bucketRows = grouped[name].slice().sort((a, b) => {
       const aD = new Date(a.plannedCollection || 0).getTime();
       const bD = new Date(b.plannedCollection || 0).getTime();
       return aD - bD || Number(a.shipmentID || 0) - Number(b.shipmentID || 0);
-    }).map(row => {
+    });
+    const bucketFullySelected = bucketRows.length > 0 && bucketRows.every(r => wdSelectedCollectionIds.has(Number(r.shipmentID)));
+    const rows = bucketRows.map(row => {
       const ref = String(row.shipmentID || '').padStart(8, '0');
       return `<tr class="ps-row wd-collection-row" data-id="${esc(String(row.shipmentID))}">
         <td class="lg-check-cell"><input type="checkbox" class="wd-collection-check" data-id="${esc(String(row.shipmentID))}"></td>
@@ -4151,7 +4260,7 @@ function wdRenderOutboundDeliveries() {
       </tr>`;
     }).join('');
 
-    return `<div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">${esc(name)}</span><span class="ps-section-count">${grouped[name].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Collection</th><th>Tracking</th><th>Destination</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    return `<div class="ps-section" data-group-key="${esc(name)}"><div class="ps-section-header"><input type="checkbox" class="wd-bucket-select-all" data-bucket-key="${esc(name)}" ${bucketFullySelected ? 'checked' : ''} title="Select all in ${esc(name)}" onclick="event.stopPropagation()"><span class="ps-section-dot ps-section-dot--today"></span><span class="ps-section-title">${esc(name)}</span><span class="ps-section-count">${grouped[name].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Collection</th><th>Tracking</th><th>Destination</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }).join('');
 
   document.getElementById('result-body').innerHTML = `
@@ -4159,15 +4268,30 @@ function wdRenderOutboundDeliveries() {
       <div><div class="lg-selection-title">Awaiting Collection</div>
       <div class="toolbar-hint" id="wd-collection-hint">Tick shipments as they're loaded, then Mark Collected.</div></div>
       <div class="toolbar-spacer"></div>
+      <input class="tf-input" id="wd-outbound-search" type="text" placeholder="Search reference, tracking, destination…" value="${esc(wdOutboundSearchQuery)}" oninput="wdApplyOutboundSearch()" style="max-width:240px">
       <button class="btn-secondary" id="wd-col-clear-btn" disabled>Clear</button>
+      <button class="btn-secondary" id="wd-col-loading-btn" disabled>Loading List</button>
       <button class="btn-submit"    id="wd-col-collect-btn" disabled>Mark Collected</button>
     </div>
     <div id="wd-collection-msg" class="lg-selection-msg hidden"></div>
-    <div class="ps-sections">${sections}</div>`;
+    ${filtered.length ? `<div class="ps-sections">${sections}</div>` : `<div class="sap-empty">No shipments match "${esc(query)}".</div>`}`;
 
-  document.querySelectorAll('#result-body .ps-section-header').forEach(h => h.addEventListener('click', () => h.closest('.ps-section').classList.toggle('ps-section--collapsed')));
+  document.querySelectorAll('#result-body .ps-section-header').forEach(h => h.addEventListener('click', (e) => {
+    if (e.target.closest('input')) return;
+    h.closest('.ps-section').classList.toggle('ps-section--collapsed');
+  }));
   document.querySelectorAll('.wd-collection-check').forEach(cb => cb.addEventListener('change', wdOnCollectionToggle));
+  document.querySelectorAll('.wd-bucket-select-all').forEach(cb => cb.addEventListener('change', () => {
+    const section = cb.closest('.ps-section');
+    section.querySelectorAll('.wd-collection-check').forEach(check => {
+      check.checked = cb.checked;
+      const id = Number(check.dataset.id);
+      if (cb.checked) wdSelectedCollectionIds.add(id); else wdSelectedCollectionIds.delete(id);
+    });
+    wdUpdateCollectionUI();
+  }));
   document.getElementById('wd-col-clear-btn').addEventListener('click', wdClearCollectionSelection);
+  document.getElementById('wd-col-loading-btn').addEventListener('click', wdDownloadLoadingList);
   document.getElementById('wd-col-collect-btn').addEventListener('click', wdMarkCollectedBulk);
 }
 
@@ -4179,8 +4303,21 @@ function wdOnCollectionToggle(e) {
 
 function wdClearCollectionSelection() {
   wdSelectedCollectionIds = new Set();
-  document.querySelectorAll('.wd-collection-check').forEach(cb => { cb.checked = false; });
+  document.querySelectorAll('.wd-collection-check, .wd-bucket-select-all').forEach(cb => { cb.checked = false; });
   wdUpdateCollectionUI();
+}
+
+// Keeps each bucket's "select all" checkbox reflecting reality after any
+// selection change — ticking/unticking one row by hand, or the checkbox
+// itself, would otherwise leave a stale checked state behind. Same pattern
+// as logistics.js's osSyncSelectAllCheckboxes.
+function wdSyncBucketCheckboxes() {
+  document.querySelectorAll('.ps-sections > .ps-section[data-group-key]').forEach(section => {
+    const cb = section.querySelector(':scope > .ps-section-header .wd-bucket-select-all');
+    if (!cb) return;
+    const checks = [...section.querySelectorAll('.wd-collection-check')];
+    cb.checked = checks.length > 0 && checks.every(c => c.checked);
+  });
 }
 
 function wdUpdateCollectionUI() {
@@ -4190,7 +4327,32 @@ function wdUpdateCollectionUI() {
   if (hint) hint.textContent = count ? `${count} shipment(s) selected.` : "Tick shipments as they're loaded, then Mark Collected.";
   if (msg && !count) msg.classList.add('hidden');
   document.getElementById('wd-col-clear-btn')?.toggleAttribute('disabled', count === 0);
+  document.getElementById('wd-col-loading-btn')?.toggleAttribute('disabled', count === 0);
   document.getElementById('wd-col-collect-btn')?.toggleAttribute('disabled', count === 0);
+  wdSyncBucketCheckboxes();
+}
+
+async function wdDownloadLoadingList() {
+  const ids = [...wdSelectedCollectionIds];
+  if (!ids.length) return;
+  try {
+    wdShowCollectionMsg('Generating loading list…', false);
+    const res = await fetch('/api/shipmentmain/loading-list', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shipmentIDs: ids }),
+    });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error(json.error || 'Failed to generate loading list');
+    }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `loading-list-${new Date().toISOString().slice(0, 10)}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    wdShowCollectionMsg('Loading list downloaded.', false);
+  } catch (err) { wdShowCollectionMsg(err.message); }
 }
 
 function wdShowCollectionMsg(text, isError = true) {
