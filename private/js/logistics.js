@@ -2503,6 +2503,18 @@ async function submitManualShipmentCreate() {
 
 
 // ── Pallet management ─────────────────────────────────────────────────────────
+
+// cm³ → m³, matching the convention used elsewhere for volume from L/W/H
+// (e.g. shipmentmain.js's ManualCargoItem volume calc, warehouse.js's
+// calcPalletVolume for the pallet builder). log.PalletMain.palletVolume has
+// no trigger/computed column of its own — every write path is responsible
+// for calculating it itself, so this needs calling anywhere palletVolume is
+// sent. Returns 0 rather than NaN when a dimension is missing.
+function calcVolumeFromDims(length, width, height) {
+  const l = Number(length || 0), w = Number(width || 0), h = Number(height || 0);
+  return (l && w && h) ? Number(((l * w * h) / 1000000).toFixed(3)) : 0;
+}
+
 let _lgPalletCtx   = null;
 let _lgPalletTypes = [];
 let _lgSelPType    = null;
@@ -2741,13 +2753,21 @@ async function openLgEditPalletView(palletId) {
     const saveBtn = document.getElementById('lg-edit-pallet-save');
     saveBtn.disabled = false;
     saveBtn.addEventListener('click', async () => {
+      const length = parseInt(document.getElementById('lg-ep-length').value, 10) || undefined;
+      const width  = parseInt(document.getElementById('lg-ep-width').value,  10) || undefined;
+      const height = parseInt(document.getElementById('lg-ep-height').value, 10) || undefined;
       const payload = {
         palletType:     document.getElementById('lg-ep-type').value || undefined,
         palletLocation: document.getElementById('lg-ep-location').value.trim() || null,
         grossWeight:    parseFloat(document.getElementById('lg-ep-weight').value)  || undefined,
-        palletLength:   parseInt(document.getElementById('lg-ep-length').value, 10) || undefined,
-        palletWidth:    parseInt(document.getElementById('lg-ep-width').value,  10) || undefined,
-        palletHeight:   parseInt(document.getElementById('lg-ep-height').value, 10) || undefined,
+        palletLength:   length,
+        palletWidth:    width,
+        palletHeight:   height,
+        // Recalculated every save from whatever L/W/H are currently in the
+        // form (whether just edited or carried over unchanged) — palletVolume
+        // has no trigger/computed-column of its own, so it only ever reflects
+        // dimensions from the last time this ran.
+        palletVolume:   calcVolumeFromDims(length, width, height),
         palletFinish:   document.getElementById('lg-ep-finished').checked ? 1 : 0,
       };
       saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
@@ -2846,7 +2866,8 @@ async function createLgPallet() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         palletType: _lgSelPType, palletFinish: 0,
-        packagingWeight: Number(td?.palletWeight || 0), grossWeight: 0, palletVolume: 0,
+        packagingWeight: Number(td?.palletWeight || 0), grossWeight: 0,
+        palletVolume: calcVolumeFromDims(td?.palletLength, td?.palletWidth, td?.palletHeight),
         palletLength: td?.palletLength ?? null, palletWidth: td?.palletWidth ?? null,
         palletHeight: td?.palletHeight ?? null, palletRemoved: 0, palletCategory: null,
         palletLocation: location, palletCreationDate: new Date().toISOString(), palletFinishDate: null,

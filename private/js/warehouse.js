@@ -4901,7 +4901,10 @@ async function createPallet() {
         palletFinish:      0,
         packagingWeight:   Number(td?.palletWeight || 0),  // seed with pallet's own weight
         grossWeight:       0,
-        palletVolume:      0,
+        // Seeded from the pallet type's own base dimensions — recalculated
+        // properly against the actual stacked height in finishBuilderPallet()
+        // (calcPalletVolume()) once packages have been added.
+        palletVolume:      calcVolumeFromDims(td?.palletLength, td?.palletWidth, td?.palletHeight),
         palletLength:      td?.palletLength ?? null,
         palletWidth:       td?.palletWidth  ?? null,
         palletHeight:      td?.palletHeight ?? null,
@@ -5537,6 +5540,23 @@ function calcPalletHeight() {
   return baseH + Object.values(layerMax).reduce((s, h) => s + h, 0);
 }
 
+// cm³ → m³, matching the convention used elsewhere for volume from L/W/H
+// (e.g. shipmentmain.js's ManualCargoItem volume calc). Returns 0 rather
+// than NaN/null when a dimension is missing, since palletVolume is a
+// required NOT NULL-ish decimal column downstream.
+function calcVolumeFromDims(length, width, height) {
+  const l = Number(length || 0), w = Number(width || 0), h = Number(height || 0);
+  return (l && w && h) ? Number(((l * w * h) / 1000000).toFixed(3)) : 0;
+}
+
+// Pallet footprint (length/width) is fixed from the pallet type at creation
+// and never changes; only the stacked height grows as packages are added —
+// so the pallet's actual volume, unlike its weight, can only be known once
+// finishBuilderPallet() has the final calcPalletHeight() result.
+function calcPalletVolume(height) {
+  return calcVolumeFromDims(pb.palletTypeData?.palletLength, pb.palletTypeData?.palletWidth, height ?? calcPalletHeight());
+}
+
 // Looks a packaging type up first in this pallet type's allowed list, then
 // falls back to the full packaging catalogue — SB/MB/LB/C2 (see
 // CONTAINER_PACKAGING_IDS/INNER_PACKAGING_ID above) need to resolve correctly
@@ -5848,13 +5868,14 @@ async function finishBuilderPallet() {
   }
 
   const height = calcPalletHeight();
+  const volume = calcPalletVolume(height);
 
   try {
     const res  = await fetch(`/api/palletmain/${pb.palletId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         palletFinish: 1, palletLocation: loc,
-        palletHeight: height, grossWeight,
+        palletHeight: height, grossWeight, palletVolume: volume,
       }),
     });
     const json = await res.json();
