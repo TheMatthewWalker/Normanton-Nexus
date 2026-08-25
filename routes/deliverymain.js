@@ -965,14 +965,20 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
         const messages   = maintainRes?.data?.messages || [];
         const hasBlocker = messages.some(m => m.type === 'E' || m.type === 'A');
         if (hasBlocker) return await recordRun('Failed', messages);
-        // SAP's own messages take priority when there's a genuine blocker;
-        // otherwise fold in our own delpackWarnings (SAP itself won't
-        // complain about an empty T_DELPACK, so this is the only way a
-        // silently-empty ZDELPACK gets surfaced instead of recording as a
-        // plain 'Success').
-        const allWarnings = [...messages, ...delpackWarnings.map(message => ({ type: 'W', message }))];
-        if (allWarnings.length) return await recordRun('Warning', allWarnings);
-        return await recordRun('Success', []);
+        // SAP's ZDELFLAG/ZDELPACK maintenance BAPI has no per-message severity
+        // at all (its ET_MESSAGE table is LINE/TEXT only — see ZdelflagHelpers.
+        // ParseMaintainResponse on the SapServer side) — every successful run
+        // echoes back one informational confirmation line (e.g. "SUCCESS: ALL
+        // PALLETs was finished!"), typed 'S' here, not a real problem. So SAP's
+        // own non-blocking messages must NOT push the run into 'Warning' —
+        // only delpackWarnings (our own Node-side data-quality checks; SAP
+        // itself won't complain about an empty T_DELPACK) should do that. SAP's
+        // messages still get recorded either way, purely for visibility/audit.
+        if (delpackWarnings.length) {
+            const allWarnings = [...messages, ...delpackWarnings.map(message => ({ type: 'W', message }))];
+            return await recordRun('Warning', allWarnings);
+        }
+        return await recordRun('Success', messages);
     } catch (err) {
         return await recordRun('Failed', [{ type: 'E', message: err.message }]);
     }
