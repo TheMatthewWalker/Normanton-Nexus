@@ -1,12 +1,14 @@
 // routes/labels.js is dominated by PDF/HTML label-drawing helpers (pdfkit +
 // bwip-js barcodes, ~500 lines of layout code) that aren't exported and
 // carry low business risk (presentation formatting, not data correctness).
-// This suite covers the four actual routes' validation, auth, and
+// This suite covers the actual routes' validation, auth, and
 // printer-selection logic — the network-print/PDF-generation happy path
 // itself isn't covered (would need a realistic fetchLabelData fixture across
 // several joined tables plus mocking pdfkit/bwip-js/node:net all at once for
 // disproportionate value versus the formatting code it would actually be
-// testing) — see CLAUDE.md.
+// testing) — see CLAUDE.md. Same scope applies to the pallet-builder label
+// routes (/pallet/scan, /pallet/finish) below — validation/printer-selection
+// only, not the drawPalletScanLabel/drawPalletFinishLabel PDF output itself.
 
 import { describe, test, expect, beforeAll, beforeEach } from '@jest/globals';
 import { jest } from '@jest/globals';
@@ -116,6 +118,81 @@ describe('POST /process/:processCode/:recordID/print — validation and printer 
   test('400s naming the printer when printers ARE configured but the requested one isn\'t among them', async () => {
     printersConfigMock.push({ id: 'MX', name: 'Mixing', host: '10.0.0.1', port: 9100, paperSize: 'A4' });
     const res = await request(app).post('/process/MX/1/print').send({ printerId: 'not-a-real-printer' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Printer "not-a-real-printer" not found.');
+  });
+});
+
+describe('GET /pallet/scan/:palletItemId — validation', () => {
+  test('400s on a non-numeric pallet item ID', async () => {
+    const res = await request(app).get('/pallet/scan/not-a-number');
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('404s when the pallet package does not exist', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(app).get('/pallet/scan/999');
+    expect(res.status).toBe(404);
+  });
+
+  test('400s when the package has no batch to confirm (e.g. a PC2007 outer-box row)', async () => {
+    queueResults({ recordset: [{ palletItemID: 1, palletID: 2, sapBatch: null, sapMaterial: null }] });
+    const res = await request(app).get('/pallet/scan/1');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/no batch to confirm/);
+  });
+});
+
+describe('POST /pallet/scan/:palletItemId/print — validation and printer selection', () => {
+  test('400s on a non-numeric pallet item ID', async () => {
+    const res = await request(app).post('/pallet/scan/abc/print').send({});
+    expect(res.status).toBe(400);
+  });
+
+  test('400s with a clear message when no printers are configured at all', async () => {
+    const res = await request(app).post('/pallet/scan/1/print').send({ printerId: 'not-a-real-printer' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/No printers configured/);
+  });
+
+  test('400s naming the printer when printers ARE configured but the requested one isn\'t among them', async () => {
+    printersConfigMock.push({ id: 'wh1', name: 'Warehouse', host: '10.0.0.2', port: 9100, paperSize: 'A5' });
+    const res = await request(app).post('/pallet/scan/1/print').send({ printerId: 'not-a-real-printer' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Printer "not-a-real-printer" not found.');
+  });
+});
+
+describe('GET /pallet/finish/:palletId — validation', () => {
+  test('400s on a non-numeric pallet ID', async () => {
+    const res = await request(app).get('/pallet/finish/not-a-number');
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('404s when the pallet does not exist', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(app).get('/pallet/finish/999');
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /pallet/finish/:palletId/print — validation and printer selection', () => {
+  test('400s on a non-numeric pallet ID', async () => {
+    const res = await request(app).post('/pallet/finish/abc/print').send({});
+    expect(res.status).toBe(400);
+  });
+
+  test('400s with a clear message when no printers are configured at all', async () => {
+    const res = await request(app).post('/pallet/finish/1/print').send({ printerId: 'not-a-real-printer' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/No printers configured/);
+  });
+
+  test('400s naming the printer when printers ARE configured but the requested one isn\'t among them', async () => {
+    printersConfigMock.push({ id: 'wh1', name: 'Warehouse', host: '10.0.0.2', port: 9100, paperSize: 'A5' });
+    const res = await request(app).post('/pallet/finish/1/print').send({ printerId: 'not-a-real-printer' });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Printer "not-a-real-printer" not found.');
   });

@@ -29,6 +29,14 @@ const STATUS_BADGE = {
   6: { text: 'BACKFLUSH FAILED', bg: '#dc2626' },
 };
 
+// Warehouse (pallet builder) labels use the same visual language as the
+// production label below — header bar, one big value immediately followed
+// by its barcode, footer rule — but a royal blue rather than the
+// production label's teal, so the two are never confused at a glance from
+// across the floor (the whole point of printing a "batch scanned"/"pallet
+// finished" label is a fast visual check, not reading small text).
+const WH_COLOR = '#1d4ed8';
+
 // ── Shared helpers ────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -264,6 +272,113 @@ async function fetchMixingTicketsData(recordID, tubSeq = null) {
     sapMatDoc:     isComplete && t.SAPSuccess && t.MaterialDocumentSAP ? t.MaterialDocumentSAP : null,
     supplierTubNo: t.SupplierTubNo || null,
   }));
+}
+
+// ── Pallet builder — batch scan confirmation ────────────────────────────────
+// One per log.PalletPackages row that actually carries a SAP batch (not the
+// PC2007 outer-box container rows, which have no batch of their own) —
+// printed the moment a batch is scanned/staged onto a pallet, so the
+// operator gets an immediate, from-a-distance visual that it's already
+// spoken for rather than having to check the app.
+async function fetchPalletScanData(palletItemID) {
+  const pool = await getNexusOperationsPool();
+  const r = await pool.request()
+    .input('id', sql.Int, palletItemID)
+    .query(`SELECT pp.palletItemID, pp.palletID, pp.packagingID, pp.palletLayer,
+                   pp.sapMaterial, pp.sapQuantity, pp.sapBatch, pp.sapDelivery,
+                   pp.scanTime, pkg.packDescription,
+                   pm.palletType, pm.palletLocation,
+                   dest.destinationName
+            FROM   log.PalletPackages pp
+            JOIN   log.PalletMain pm        ON pm.palletID = pp.palletID
+            LEFT JOIN log.PackagingData pkg ON pkg.packID = pp.packagingID
+            LEFT JOIN log.DeliveryMain  dm  ON dm.deliveryID = TRY_CONVERT(bigint, pp.sapDelivery)
+            LEFT JOIN log.Destinations  dest ON dest.destinationID = dm.customerID
+            WHERE  pp.palletItemID = @id`);
+  const rec = r.recordset[0];
+  if (!rec) throw Object.assign(new Error('Pallet package not found.'), { statusCode: 404 });
+  if (!rec.sapBatch) throw Object.assign(new Error('This package has no batch to confirm — nothing to print.'), { statusCode: 400 });
+
+  return {
+    palletItemID:    rec.palletItemID,
+    palletID:        rec.palletID,
+    batch:           rec.sapBatch,
+    material:        rec.sapMaterial || '—',
+    quantity:        rec.sapQuantity,
+    packagingID:     rec.packagingID || null,
+    packDescription: rec.packDescription || null,
+    palletLayer:     rec.palletLayer,
+    deliveryId:      rec.sapDelivery || null,
+    customerName:    rec.destinationName || null,
+    palletType:      rec.palletType || null,
+    palletLocation:  rec.palletLocation || null,
+    scanTime:        rec.scanTime,
+  };
+}
+
+// ── Pallet builder — pallet finish manifest ─────────────────────────────────
+// Printed once a pallet is marked finished — lists every material on it
+// (one summary row per material, quantity summed and batches concatenated,
+// rather than one row per PalletPackages record — a material picked across
+// several batches would otherwise repeat), plus the customer/delivery it's
+// destined for. A pallet can only ever be on one delivery in practice (the
+// builder is opened from a single picksheet's pallet list), but
+// log.DeliveryLink's PK is (deliveryID, palletID) rather than a pallet-owns
+// FK, so this takes the lowest deliveryID rather than assuming there's
+// exactly one row.
+async function fetchPalletFinishData(palletID) {
+  const pool = await getNexusOperationsPool();
+
+  const palR = await pool.request()
+    .input('id', sql.Int, palletID)
+    .query(`SELECT pm.palletID, pm.palletType, pm.palletLocation, pm.grossWeight,
+                   pm.palletFinishDate, ptd.palletDescription
+            FROM   log.PalletMain pm
+            LEFT JOIN log.PalletData ptd ON ptd.palletID = pm.palletType
+            WHERE  pm.palletID = @id`);
+  const pal = palR.recordset[0];
+  if (!pal) throw Object.assign(new Error('Pallet not found.'), { statusCode: 404 });
+
+  const delR = await pool.request()
+    .input('id', sql.Int, palletID)
+    .query(`SELECT TOP 1 dl.deliveryID, dest.destinationName
+            FROM   log.DeliveryLink dl
+            JOIN   log.DeliveryMain dm      ON dm.deliveryID = dl.deliveryID
+            LEFT JOIN log.Destinations dest ON dest.destinationID = dm.customerID
+            WHERE  dl.palletID = @id
+            ORDER  BY dl.deliveryID`);
+  const del = delR.recordset[0] || {};
+
+  const itemsR = await pool.request()
+    .input('id', sql.Int, palletID)
+    .query(`SELECT pp.sapMaterial, pp.sapBatch, pp.sapQuantity, pp.packagingID
+            FROM   log.PalletPackages pp
+            WHERE  pp.palletID = @id AND pp.sapMaterial IS NOT NULL
+            ORDER  BY pp.palletLayer, pp.palletItemID`);
+
+  const byMaterial = new Map();
+  for (const row of itemsR.recordset) {
+    if (!byMaterial.has(row.sapMaterial)) {
+      byMaterial.set(row.sapMaterial, {
+        material: row.sapMaterial, packagingID: row.packagingID, qty: 0, batches: [],
+      });
+    }
+    const entry = byMaterial.get(row.sapMaterial);
+    entry.qty += Number(row.sapQuantity || 0);
+    if (row.sapBatch) entry.batches.push(row.sapBatch);
+  }
+
+  return {
+    palletID:          pal.palletID,
+    palletType:        pal.palletType || null,
+    palletDescription: pal.palletDescription || null,
+    palletLocation:    pal.palletLocation || null,
+    grossWeight:       pal.grossWeight,
+    finishedAt:        pal.palletFinishDate,
+    deliveryId:        del.deliveryID || null,
+    customerName:      del.destinationName || null,
+    items:             [...byMaterial.values()],
+  };
 }
 
 // ── PDF builder (used for server-side printing) ───────────────────────────────
@@ -546,6 +661,232 @@ async function buildLabelsPDF(dataArray, paperSize = 'A5') {
   });
 }
 
+// One-page PDF for a single warehouse label (batch-scan or pallet-finish),
+// mirroring buildLabelsPDF's page-size/paperSize handling above but taking
+// the draw function as a parameter since these two label kinds don't share
+// drawLabelPage's production-record shape.
+async function buildSingleLabelPDF(drawFn, data, paperSize = 'A5') {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const isA4 = String(paperSize).toUpperCase() === 'A4';
+      const pageOpts = { size: isA4 ? 'A4' : 'A5', layout: isA4 ? 'portrait' : 'landscape', margin: 0 };
+      const doc = new PDFDocument({ ...pageOpts, info: { Author: 'Kongsberg Automotive' } });
+      const chunks = [];
+      doc.on('data',  c  => chunks.push(c));
+      doc.on('end',   () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      await drawFn(doc, data, isA4);
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// Batch scan confirmation — single value (the batch) big and barcoded, same
+// as the production label's Batch Reference, plus where it's now spoken
+// for (pallet/pickheet/customer) so it reads at a glance from a distance.
+async function drawPalletScanLabel(doc, data, isA4) {
+  const TOP_SAFE_MARGIN = 16; // see drawLabelPage's header comment above
+  if (isA4) doc.translate(0, TOP_SAFE_MARGIN);
+
+  const W    = doc.page.width;
+  const H    = 420;
+  const M    = 12;
+  const CW   = W - 2 * M;
+  const HALF = CW / 2;
+  const xR   = M + HALF + 8;
+  const colW = HALF - 10;
+  const BW   = Math.min(colW, 250);
+
+  const HDR = 38;
+  doc.rect(0, 0, W, HDR).fill(WH_COLOR);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('#ffffff')
+     .text('KONGSBERG AUTOMOTIVE', M, 8, { lineBreak: false });
+  doc.font('Helvetica').fontSize(8).fillColor('rgba(255,255,255,0.75)')
+     .text('WAREHOUSE — BATCH SCAN CONFIRMATION', M, 24, { lineBreak: false });
+
+  doc.font('Helvetica-Bold').fontSize(7);
+  const badgeText = 'ON PICKSHEET';
+  const bdgTW = doc.widthOfString(badgeText);
+  const bdgW  = bdgTW + 16, bdgH = 18, bdgX = W - M - bdgTW - 16, bdgY = 10;
+  doc.roundedRect(bdgX, bdgY, bdgW, bdgH, 3).fill('#ffffff');
+  doc.fillColor(WH_COLOR).text(badgeText, bdgX, bdgY + 5, { width: bdgW, align: 'center', lineBreak: false });
+
+  let yL = HDR + 10;
+  let yR = HDR + 10;
+
+  // LEFT: Batch
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('BATCH', M, yL, { lineBreak: false });
+  yL += 9;
+  doc.font('Helvetica-Bold').fontSize(32).fillColor('#111827').text(data.batch, M, yL, { width: colW, lineBreak: false });
+  yL += 42;
+  const bcBatch = await barcodeBuffer(data.batch);
+  if (bcBatch) { doc.image(bcBatch, M, yL, { width: BW }); yL += renderedH(bcBatch, BW) + 4; }
+  doc.moveTo(M, yL).lineTo(M + HALF - 8, yL).strokeColor('#d1d5db').lineWidth(0.5).stroke();
+  yL += 8;
+
+  // LEFT: Material
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('MATERIAL', M, yL, { lineBreak: false });
+  yL += 9;
+  const matFS = data.material.length < 10 ? 30 : data.material.length < 13 ? 24 : 18;
+  doc.font('Helvetica-Bold').fontSize(matFS).fillColor('#111827').text(data.material, M, yL, { width: colW, lineBreak: false });
+  yL += matFS + 4;
+  if (data.packDescription) {
+    doc.font('Helvetica').fontSize(8).fillColor('#4b5563').text(data.packDescription, M, yL, { width: colW, lineBreak: false });
+    yL += 12;
+  }
+
+  // RIGHT: Pallet / pickheet / customer / location
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('PALLET', xR, yR, { lineBreak: false });
+  yR += 9;
+  doc.font('Helvetica-Bold').fontSize(22).fillColor(WH_COLOR).text(`#${data.palletID}`, xR, yR, { width: colW, lineBreak: false });
+  yR += 26;
+
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('PICKSHEET / DELIVERY', xR, yR, { lineBreak: false });
+  yR += 9;
+  doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(data.deliveryId || '—', xR, yR, { width: colW, lineBreak: false });
+  yR += 24;
+
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('CUSTOMER', xR, yR, { lineBreak: false });
+  yR += 9;
+  doc.font('Helvetica').fontSize(14).fillColor('#111827').text(data.customerName || '—', xR, yR, { width: colW, lineBreak: false });
+  yR += 20;
+
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('LOCATION', xR, yR, { lineBreak: false });
+  yR += 9;
+  doc.font('Helvetica').fontSize(14).fillColor('#111827').text(data.palletLocation || '—', xR, yR, { width: colW, lineBreak: false });
+  yR += 18;
+
+  // Below both columns: quantity staged + layer/packaging
+  let y = Math.max(yL, yR);
+  doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#d1d5db').lineWidth(0.5).stroke();
+  y += 8;
+
+  const qtyLabel = data.quantity != null ? Number(data.quantity).toFixed(3) : '—';
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('QUANTITY STAGED', M, y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('LAYER', xR, y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('PACKAGING', xR + colW / 2, y, { lineBreak: false });
+  y += 9;
+  doc.font('Helvetica-Bold').fontSize(26).fillColor(WH_COLOR).text(qtyLabel, M, y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(16).fillColor('#111827').text(String(data.palletLayer ?? '—'), xR, y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(16).fillColor('#111827').text(data.packagingID || '—', xR + colW / 2, y, { lineBreak: false });
+
+  doc.moveTo(0, H - 14).lineTo(W, H - 14).strokeColor(WH_COLOR).lineWidth(2).stroke();
+  doc.font('Helvetica').fontSize(6).fillColor('#9ca3af')
+     .text(`Printed ${fmtLabel(new Date())}  ·  Scanned ${fmtLabel(data.scanTime)}  ·  ${data.batch}`, M, H - 10, { width: CW, lineBreak: false });
+}
+
+// Pallet finish manifest — every material on the pallet (see
+// fetchPalletFinishData's one-row-per-material grouping) in a small table,
+// since unlike every other label here the thing being confirmed isn't a
+// single value but a variable-length list. Row height/font shrink as the
+// item count grows (same "trim to fit, don't overflow the footer" approach
+// as drawLabelPage's Notes section above), with an overflow line rather
+// than ever running text under the footer rule.
+async function drawPalletFinishLabel(doc, data, isA4) {
+  const TOP_SAFE_MARGIN = 16;
+  if (isA4) doc.translate(0, TOP_SAFE_MARGIN);
+
+  const W  = doc.page.width;
+  const H  = 420;
+  const M  = 12;
+  const CW = W - 2 * M;
+
+  const HDR = 38;
+  doc.rect(0, 0, W, HDR).fill(WH_COLOR);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('#ffffff')
+     .text('KONGSBERG AUTOMOTIVE', M, 8, { lineBreak: false });
+  doc.font('Helvetica').fontSize(8).fillColor('rgba(255,255,255,0.75)')
+     .text('WAREHOUSE — PALLET FINISH MANIFEST', M, 24, { lineBreak: false });
+
+  doc.font('Helvetica-Bold').fontSize(7);
+  const badgeText = 'COMPLETE';
+  const bdgTW = doc.widthOfString(badgeText);
+  const bdgW  = bdgTW + 16, bdgH = 18, bdgX = W - M - bdgTW - 16, bdgY = 10;
+  doc.roundedRect(bdgX, bdgY, bdgW, bdgH, 3).fill('#15803d');
+  doc.fillColor('#ffffff').text(badgeText, bdgX, bdgY + 5, { width: bdgW, align: 'center', lineBreak: false });
+
+  const HALF = CW / 2;
+  const xR   = M + HALF + 8;
+  const colW = HALF - 10;
+  const BW   = Math.min(colW, 200);
+
+  let y = HDR + 10;
+
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('PALLET', M, y, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('CUSTOMER', xR, y, { lineBreak: false });
+  y += 9;
+  const palletRef = `#${data.palletID}`;
+  doc.font('Helvetica-Bold').fontSize(24).fillColor('#111827').text(palletRef, M, y, { width: colW, lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(16).fillColor('#111827').text(data.customerName || '—', xR, y, { width: colW, lineBreak: false });
+  y += 28;
+
+  const bcPallet = await barcodeBuffer(palletRef);
+  let yLeftEnd = y;
+  if (bcPallet) { doc.image(bcPallet, M, y, { width: BW }); yLeftEnd = y + renderedH(bcPallet, BW); }
+
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('PICKSHEET / DELIVERY', xR, y, { lineBreak: false });
+  y += 9;
+  doc.font('Helvetica-Bold').fontSize(14).fillColor('#111827').text(data.deliveryId || '—', xR, y, { width: colW, lineBreak: false });
+  y += 16;
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280').text('LOCATION', xR, y, { lineBreak: false });
+  y += 9;
+  doc.font('Helvetica').fontSize(12).fillColor('#111827').text(data.palletLocation || '—', xR, y, { width: colW, lineBreak: false });
+  y += 14;
+
+  y = Math.max(yLeftEnd, y) + 6;
+  doc.moveTo(M, y).lineTo(W - M, y).strokeColor(WH_COLOR).lineWidth(1).stroke();
+  y += 8;
+
+  // ── Contents table ─────────────────────────────────────────────────────
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
+     .text('MATERIAL',   M,               y, { lineBreak: false, width: CW * 0.4 })
+     .text('BATCH(ES)',  M + CW * 0.4,    y, { lineBreak: false, width: CW * 0.4 })
+     .text('QTY',        M + CW * 0.82,   y, { lineBreak: false, width: CW * 0.18, align: 'right' });
+  y += 10;
+  doc.moveTo(M, y).lineTo(W - M, y).strokeColor('#e5e7eb').lineWidth(0.5).stroke();
+  y += 3;
+
+  const footerY = H - 48; // reserves the bottom stat strip (34pt) + footer rule/text (14pt)
+  const avail   = footerY - y;
+  const items   = data.items || [];
+  let rowH = 14, fontSize = 8;
+  if (items.length > 10) { rowH = 11; fontSize = 6.5; }
+  if (items.length > 16) { rowH = 9;  fontSize = 6;   }
+  const maxRows  = Math.max(1, Math.floor(avail / rowH));
+  const shown    = items.slice(0, maxRows);
+  const overflow = items.length - shown.length;
+
+  doc.font('Helvetica').fontSize(fontSize).fillColor('#111827');
+  for (const item of shown) {
+    doc.text(item.material,                    M,             y, { lineBreak: false, width: CW * 0.4 })
+       .text(item.batches.join(', ') || '—',   M + CW * 0.4,  y, { lineBreak: false, width: CW * 0.4 })
+       .text(Number(item.qty).toFixed(0),      M + CW * 0.82, y, { lineBreak: false, width: CW * 0.18, align: 'right' });
+    y += rowH;
+  }
+  if (overflow > 0) {
+    doc.font('Helvetica-Oblique').fontSize(fontSize).fillColor('#6b7280')
+       .text(`+ ${overflow} more item${overflow !== 1 ? 's' : ''}…`, M, y, { lineBreak: false });
+  }
+
+  // ── Bottom stat strip ────────────────────────────────────────────────────
+  doc.moveTo(M, footerY).lineTo(W - M, footerY).strokeColor('#d1d5db').lineWidth(0.5).stroke();
+  const statY = footerY + 5;
+  doc.font('Helvetica-Bold').fontSize(6).fillColor('#6b7280')
+     .text('GROSS WEIGHT', M,             statY, { lineBreak: false })
+     .text('PALLET TYPE',  M + CW * 0.35, statY, { lineBreak: false })
+     .text('FINISHED',     M + CW * 0.65, statY, { lineBreak: false });
+  doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
+     .text(data.grossWeight != null ? `${Number(data.grossWeight).toFixed(1)} kg` : '—', M, statY + 9, { lineBreak: false })
+     .text(`${data.palletType || '—'}${data.palletDescription ? ' · ' + data.palletDescription : ''}`, M + CW * 0.35, statY + 9, { lineBreak: false, width: CW * 0.28 })
+     .text(fmtLabel(data.finishedAt), M + CW * 0.65, statY + 9, { lineBreak: false });
+
+  doc.moveTo(0, H - 14).lineTo(W, H - 14).strokeColor(WH_COLOR).lineWidth(2).stroke();
+  doc.font('Helvetica').fontSize(6).fillColor('#9ca3af')
+     .text(`Printed ${fmtLabel(new Date())}  ·  Pallet #${data.palletID}`, M, H - 10, { width: CW, lineBreak: false });
+}
+
 // ── HTML preview builder (used for browser preview tab) ───────────────────────
 function bcImg(src, heightMm) {
   if (!src) return '';
@@ -728,6 +1069,167 @@ ${divs}
 </html>`;
 }
 
+// Shared page shell for the two warehouse label previews below — same
+// @page size / print-on-load behaviour as buildLabelsHTML's wrapper, kept
+// separate rather than reused since neither warehouse label fits that
+// function's two-column production-record class names (.mix-id/.mat-id
+// etc.), and a .wh-table rule is needed for the finish manifest's contents
+// list that production labels have no equivalent of.
+function wrapLabelPage(title, bodyHtml) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>${esc(title)}</title>
+<style>
+  @page { size: 210mm 148mm; margin: 0; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 210mm; overflow: visible;
+    font-family: Helvetica Neue, Helvetica, Arial, sans-serif;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .label { width: 210mm; height: 148mm; display: flex; flex-direction: column; overflow: hidden; }
+  .header { color: #fff; padding: 6px 12px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .co-name { font-size: 11pt; font-weight: 700; letter-spacing: 0.02em; }
+  .co-proc { font-size: 7.5pt; opacity: 0.75; margin-top: 2px; }
+  .badge   { font-size: 7pt; font-weight: 700; color: #fff; padding: 3px 9px; border-radius: 4px; white-space: nowrap; }
+  .body    { flex: 1; overflow: hidden; padding: 6px 12px 2px; display: flex; flex-direction: column; gap: 4px; }
+  .lbl     { font-size: 5.5pt; font-weight: 700; color: #6b7280; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 2px; }
+  .divider { border: none; border-top: 0.5px solid #d1d5db; margin: 2px 0; flex-shrink: 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .col     { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .mix-id  { font-size: 30pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; overflow: hidden; }
+  .mat-id  { font-size: 24pt; font-weight: 800; letter-spacing: 0.02em; line-height: 1.05; white-space: nowrap; overflow: hidden; margin-top: 2px; }
+  .mach-val { font-size: 10pt; font-weight: 700; }
+  .op-val   { font-size: 9pt; }
+  .qty      { font-size: 28pt; font-weight: 700; margin-top: 1px; }
+  .footer   { border-top: 2px solid #000; padding: 2px 12px; font-size: 6pt; color: #9ca3af; flex-shrink: 0; }
+  .wh-table { width: 100%; border-collapse: collapse; font-size: 7.5pt; }
+  .wh-table th { text-align: left; font-size: 5.5pt; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; border-bottom: 1px solid #d1d5db; padding: 2px 4px; }
+  .wh-table td { padding: 2px 4px; border-bottom: 0.5px solid #e5e7eb; }
+  @media screen {
+    html, body { display: flex; flex-direction: column; align-items: center; background: #e5e7eb; }
+    .label { margin: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+  }
+</style>
+</head>
+<body>
+${bodyHtml}
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 300));</script>
+</body>
+</html>`;
+}
+
+async function buildPalletScanHTML(data) {
+  const bcBatch = await barcodeBuffer(data.batch);
+  const b64     = buf => buf ? `data:image/png;base64,${buf.toString('base64')}` : null;
+  const qtyLabel = data.quantity != null ? Number(data.quantity).toFixed(3) : '—';
+
+  const body = `
+<div class="label">
+  <div class="header" style="background:${WH_COLOR}">
+    <div>
+      <div class="co-name">KONGSBERG AUTOMOTIVE</div>
+      <div class="co-proc">WAREHOUSE — BATCH SCAN CONFIRMATION</div>
+    </div>
+    <div class="badge" style="background:#ffffff;color:${WH_COLOR}">ON PICKSHEET</div>
+  </div>
+  <div class="body">
+    <div class="two-col">
+      <div class="col">
+        <div class="lbl">BATCH</div>
+        <div class="mix-id">${esc(data.batch)}</div>
+        ${bcImg(b64(bcBatch), 13)}
+        <div class="divider"></div>
+        <div class="lbl">MATERIAL</div>
+        <div class="mat-id">${esc(data.material)}</div>
+        ${data.packDescription ? `<div class="op-val">${esc(data.packDescription)}</div>` : ''}
+      </div>
+      <div class="col">
+        <div class="lbl">PALLET</div>
+        <div class="mix-id" style="font-size:22pt;color:${WH_COLOR}">#${esc(String(data.palletID))}</div>
+        <div class="lbl">PICKSHEET / DELIVERY</div>
+        <div class="mach-val">${esc(data.deliveryId || '—')}</div>
+        <div class="lbl">CUSTOMER</div>
+        <div class="op-val">${esc(data.customerName || '—')}</div>
+        <div class="lbl">LOCATION</div>
+        <div class="op-val">${esc(data.palletLocation || '—')}</div>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="two-col">
+      <div>
+        <div class="lbl">QUANTITY STAGED</div>
+        <div class="qty" style="color:${WH_COLOR}">${qtyLabel}</div>
+      </div>
+      <div>
+        <div class="lbl">LAYER ${esc(String(data.palletLayer ?? '—'))} &nbsp;·&nbsp; PACKAGING ${esc(data.packagingID || '—')}</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer" style="border-top:2px solid ${WH_COLOR}">Printed ${esc(fmtLabel(new Date()))} &nbsp;·&nbsp; Scanned ${esc(fmtLabel(data.scanTime))} &nbsp;·&nbsp; ${esc(data.batch)}</div>
+</div>`;
+
+  return wrapLabelPage(`${data.batch} — Batch Scan Confirmation`, body);
+}
+
+async function buildPalletFinishHTML(data) {
+  const bcPallet = await barcodeBuffer(`#${data.palletID}`);
+  const b64      = buf => buf ? `data:image/png;base64,${buf.toString('base64')}` : null;
+  const items    = data.items || [];
+  const rows = items.map(it => `
+    <tr>
+      <td>${esc(it.material)}</td>
+      <td>${esc(it.batches.join(', ') || '—')}</td>
+      <td style="text-align:right">${Number(it.qty).toFixed(0)}</td>
+    </tr>`).join('');
+
+  const body = `
+<div class="label">
+  <div class="header" style="background:${WH_COLOR}">
+    <div>
+      <div class="co-name">KONGSBERG AUTOMOTIVE</div>
+      <div class="co-proc">WAREHOUSE — PALLET FINISH MANIFEST</div>
+    </div>
+    <div class="badge" style="background:#15803d">COMPLETE</div>
+  </div>
+  <div class="body">
+    <div class="two-col">
+      <div class="col">
+        <div class="lbl">PALLET</div>
+        <div class="mix-id">#${esc(String(data.palletID))}</div>
+        ${bcImg(b64(bcPallet), 11)}
+      </div>
+      <div class="col">
+        <div class="lbl">CUSTOMER</div>
+        <div class="mach-val">${esc(data.customerName || '—')}</div>
+        <div class="lbl">PICKSHEET / DELIVERY</div>
+        <div class="op-val">${esc(data.deliveryId || '—')}</div>
+        <div class="lbl">LOCATION</div>
+        <div class="op-val">${esc(data.palletLocation || '—')}</div>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="lbl">CONTENTS (${items.length} material${items.length !== 1 ? 's' : ''})</div>
+    <table class="wh-table">
+      <thead><tr><th>Material</th><th>Batch(es)</th><th style="text-align:right">Qty</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3">No items</td></tr>'}</tbody>
+    </table>
+    <div class="divider"></div>
+    <div class="two-col">
+      <div><div class="lbl">GROSS WEIGHT</div><div class="mach-val">${data.grossWeight != null ? esc(Number(data.grossWeight).toFixed(1)) + ' kg' : '—'}</div></div>
+      <div><div class="lbl">PALLET TYPE</div><div class="mach-val">${esc(data.palletType || '—')}${data.palletDescription ? ' · ' + esc(data.palletDescription) : ''}</div></div>
+    </div>
+  </div>
+  <div class="footer" style="border-top:2px solid ${WH_COLOR}">Printed ${esc(fmtLabel(new Date()))} &nbsp;·&nbsp; Finished ${esc(fmtLabel(data.finishedAt))} &nbsp;·&nbsp; Pallet #${data.palletID}</div>
+</div>`;
+
+  return wrapLabelPage(`Pallet #${data.palletID} — Finish Manifest`, body);
+}
+
 // ── TCP direct print (RAW port 9100) ──────────────────────────────────────────
 function tcpPrint(buffer, host, port = 9100) {
   return new Promise((resolve, reject) => {
@@ -835,6 +1337,83 @@ router.post('/process/:processCode/:recordID/print', async (req, res) => {
     const pdf = code === 'MX'
       ? await buildLabelsPDF(await fetchMixingTicketsData(recordID, tubSeq), printer.paperSize)
       : await buildPDF(await fetchLabelData(code, recordID), printer.paperSize);
+    await tcpPrint(pdf, printer.host, printer.port ?? 9100);
+    res.json({ success: true, message: `Sent to ${printer.name || printer.host}` });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Pallet builder labels ───────────────────────────────────────────────────
+// Browser preview — batch scan confirmation
+router.get('/pallet/scan/:palletItemId', async (req, res) => {
+  const id = Number(req.params.palletItemId);
+  if (!id) return res.status(400).json({ error: 'Invalid pallet item ID.' });
+  try {
+    const html = await buildPalletScanHTML(await fetchPalletScanData(id));
+    res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.send(html);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Server-side print — batch scan confirmation
+router.post('/pallet/scan/:palletItemId/print', async (req, res) => {
+  const id = Number(req.params.palletItemId);
+  if (!id) return res.status(400).json({ error: 'Invalid pallet item ID.' });
+
+  const { printerId } = req.body;
+  const printer = printerId
+    ? printersConfig.find(p => p.id === printerId)
+    : printersConfig[0];
+
+  if (!printer)
+    return res.status(400).json({ error: printersConfig.length === 0
+      ? 'No printers configured. Add a "printers" array to config.json.'
+      : `Printer "${printerId}" not found.` });
+
+  try {
+    const data = await fetchPalletScanData(id);
+    const pdf  = await buildSingleLabelPDF(drawPalletScanLabel, data, printer.paperSize);
+    await tcpPrint(pdf, printer.host, printer.port ?? 9100);
+    res.json({ success: true, message: `Sent to ${printer.name || printer.host}` });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// Browser preview — pallet finish manifest
+router.get('/pallet/finish/:palletId', async (req, res) => {
+  const id = Number(req.params.palletId);
+  if (!id) return res.status(400).json({ error: 'Invalid pallet ID.' });
+  try {
+    const html = await buildPalletFinishHTML(await fetchPalletFinishData(id));
+    res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.send(html);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+// Server-side print — pallet finish manifest
+router.post('/pallet/finish/:palletId/print', async (req, res) => {
+  const id = Number(req.params.palletId);
+  if (!id) return res.status(400).json({ error: 'Invalid pallet ID.' });
+
+  const { printerId } = req.body;
+  const printer = printerId
+    ? printersConfig.find(p => p.id === printerId)
+    : printersConfig[0];
+
+  if (!printer)
+    return res.status(400).json({ error: printersConfig.length === 0
+      ? 'No printers configured. Add a "printers" array to config.json.'
+      : `Printer "${printerId}" not found.` });
+
+  try {
+    const data = await fetchPalletFinishData(id);
+    const pdf  = await buildSingleLabelPDF(drawPalletFinishLabel, data, printer.paperSize);
     await tcpPrint(pdf, printer.host, printer.port ?? 9100);
     res.json({ success: true, message: `Sent to ${printer.name || printer.host}` });
   } catch (err) {

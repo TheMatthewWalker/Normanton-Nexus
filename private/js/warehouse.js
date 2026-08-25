@@ -4479,6 +4479,62 @@ function closePickModal() {
 // ── Pallet Builder ────────────────────────────────────────────────────────────
 let pb = null; // active builder state
 
+// ── Pallet builder label printing ────────────────────────────────────────────
+// Two label kinds print automatically rather than through a button (see
+// routes/labels.js's /pallet/scan and /pallet/finish endpoints, and the
+// design rationale in that file's WH_COLOR comment): a batch-scan
+// confirmation the moment a batch is staged/added onto the pallet, and a
+// finish manifest once the pallet itself is marked finished. A batch is
+// scanned every few seconds during a build, so a printer picker on every
+// single scan would be worse than useless — instead the printer is resolved
+// once when the builder opens (same user-default-then-first priority as
+// production-nexus.js's labelPrint()) and can be changed via the dropdown in
+// the running panel; every print after that reuses pb.printerId silently.
+let _pbPrinterCache = null; // { printers: [...], userDefault: string|null }
+
+async function loadPbPrinters() {
+  if (!_pbPrinterCache) {
+    const r = await fetch('/api/labels/printers').then(r => r.json());
+    _pbPrinterCache = { printers: r.data || [], userDefault: r.userDefault || null };
+  }
+  return _pbPrinterCache;
+}
+
+function resolvePbPrinterId(printers, userDefault) {
+  if (!printers.length) return null;
+  return (userDefault && printers.find(p => p.id === userDefault)) ? userDefault : printers[0].id;
+}
+
+async function sendLabelPrint(path, printerId) {
+  if (!printerId) throw new Error('No label printer configured');
+  const res = await fetch(`/api/labels${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ printerId }),
+  }).then(r => r.json());
+  if (!res.success) throw new Error(res.error || 'Print failed');
+}
+
+// Fire-and-forget — a failed scan-confirmation print shouldn't interrupt the
+// scan-and-add flow (the batch is already staged/added either way); a
+// failure just shows up as a message in the builder rather than blocking
+// anything.
+function printBatchScanLabel(palletItemId) {
+  if (!pb?.printerId) return;
+  sendLabelPrint(`/pallet/scan/${palletItemId}/print`, pb.printerId)
+    .catch(err => showPbMsg(`✕ Label not printed: ${err.message}`, 'error'));
+}
+
+function pbPrinterSelectHtml() {
+  if (!pb.printers?.length) return '';
+  const opts = pb.printers
+    .map(p => `<option value="${esc(p.id)}"${p.id === pb.printerId ? ' selected' : ''}>${esc(p.name)}</option>`)
+    .join('');
+  return `<div class="pb-running-loc" style="margin-top:8px">
+    <label class="pb-label" style="margin-bottom:4px">Label Printer</label>
+    <select class="pb-input" id="pb-printer-select" onchange="pb.printerId=this.value">${opts}</select>
+  </div>`;
+}
+
 // Profit centre 2007 materials are packed differently from everything else:
 // each batch sits inside its own C2 box, and the pallet itself is a single
 // outer box — SB (small), MB (medium), or LB (large), same process just
@@ -4554,7 +4610,7 @@ async function openPalletBuilder() {
          requiredMaterials: [], stockError: null,
          pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
          pendingPackagingInstruction: null,
-         layerContainers: {} };
+         layerContainers: {}, printers: [], printerId: null };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -4573,15 +4629,18 @@ async function openPalletBuilder() {
     </div>`;
 
   try {
-    const [ptRes, pkRes, stockRes] = await Promise.all([
+    const [ptRes, pkRes, stockRes, printerInfo] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
       fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
         .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
+      loadPbPrinters().catch(() => ({ printers: [], userDefault: null })),
     ]);
     pb.allPalletTypes = ptRes.data || ptRes;
     pb.allPackaging   = pkRes.data || pkRes;
     applyStockResult(stockRes);
+    pb.printers  = printerInfo.printers;
+    pb.printerId = resolvePbPrinterId(printerInfo.printers, printerInfo.userDefault);
     renderBuilderPhase1();
   } catch (err) {
     document.getElementById('pb-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
@@ -4615,7 +4674,7 @@ async function openPalletBuilderOnExisting(palletId) {
          requiredMaterials: [], stockError: null,
          pendingSapMaterial: null, pendingSapDeliveryItem: null, pendingSapQuantity: null,
          pendingPackagingInstruction: null,
-         layerContainers: {} };
+         layerContainers: {}, printers: [], printerId: null };
 
   const overlay = getPbOverlay();
   overlay.classList.remove('hidden');
@@ -4634,7 +4693,7 @@ async function openPalletBuilderOnExisting(palletId) {
     </div>`;
 
   try {
-    const [ptRes, pkRes, palRes, pkgsRes, valRes, stockRes] = await Promise.all([
+    const [ptRes, pkRes, palRes, pkgsRes, valRes, stockRes, printerInfo] = await Promise.all([
       fetch('/api/palletdata').then(r => r.json()),
       fetch('/api/packagingdata').then(r => r.json()),
       fetch(`/api/palletmain/id/${palletId}`).then(r => r.json()),
@@ -4642,11 +4701,14 @@ async function openPalletBuilderOnExisting(palletId) {
       fetch('/api/palletvalidation').then(r => r.json()),
       fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/picksheet-materials`)
         .then(r => r.json()).catch(err => ({ success: false, error: err.message })),
+      loadPbPrinters().catch(() => ({ printers: [], userDefault: null })),
     ]);
 
     pb.allPalletTypes = ptRes.data || ptRes;
     pb.allPackaging   = pkRes.data || pkRes;
     applyStockResult(stockRes);
+    pb.printers  = printerInfo.printers;
+    pb.printerId = resolvePbPrinterId(printerInfo.printers, printerInfo.userDefault);
 
     const palletRecord = (palRes.data || palRes)[0];
     if (palletRecord) {
@@ -5010,6 +5072,7 @@ function renderBuilderPhase2() {
           <input class="pb-input" id="pb-gross-weight" type="number"
             step="0.01" min="0.01" placeholder="Enter at finish">
         </div>
+        ${pbPrinterSelectHtml()}
         <div class="pb-running-weights">
           <span>Pkg weight</span>
           <span id="pb-pkg-weight-display">${Number(pb.packagingWeight).toFixed(2)} kg</span>
@@ -5791,6 +5854,15 @@ async function addPackage() {
       packHeight,
       packWeight,
     });
+    // Print the batch-scan confirmation label — only once the batch has
+    // actually been staged/TO'd in SAP (transferOrderNumber set above), not
+    // for a manually-typed batch that never matched a found SAP batch —
+    // there's nothing to visually confirm as "assigned to this picksheet"
+    // if nothing was actually assigned. Fire-and-forget: see
+    // printBatchScanLabel's own comment for why a failed print here must
+    // never interrupt the scan-and-add flow.
+    if (transferOrderNumber) printBatchScanLabel(json.palletItemID);
+
     // Container-packing layers (SB/MB/LB outer box + a run of C2 batches)
     // are meant to keep collecting batches into the SAME layer until the
     // operator explicitly types a new layer number — auto-incrementing
@@ -5880,7 +5952,24 @@ async function finishBuilderPallet() {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Update failed');
+
+    // Print the pallet finish manifest — captured before closePalletBuilder()
+    // nulls out pb. Fired after the builder closes (finishing the pallet is
+    // the state change that matters; a printer being offline shouldn't trap
+    // the operator in the builder) but still surfaced if it fails, via a
+    // dismissible dialog rather than silently.
+    const finishedPalletId = pb.palletId;
+    const printerId        = pb.printerId;
     closePalletBuilder();
+    if (printerId) {
+      sendLabelPrint(`/pallet/finish/${finishedPalletId}/print`, printerId).catch(err => {
+        wConfirm({
+          title: 'Pallet Finished — Label Not Printed',
+          message: `The pallet was finished, but its finish label failed to print:\n${err.message}`,
+          confirmText: 'OK', variant: '',
+        });
+      });
+    }
     await refreshPalletList();
   } catch (err) { showPbMsg('✕ ' + err.message, 'error'); }
 }
