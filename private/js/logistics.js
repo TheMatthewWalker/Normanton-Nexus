@@ -24,6 +24,16 @@ let selectedTrackedIds = new Set();
 let trackedSearchQuery = '';
 let inboundShipmentRows = [];
 let inboundLogSearchQuery = '';
+// Search boxes for the shipment queue views (Create Outbound Shipment,
+// Awaiting Booking, Awaiting Collection, In Transit, Customs Documents) —
+// same "search everything relevant in one box, live client-side filter over
+// data already in memory" shape as trackedSearchQuery/inboundLogSearchQuery
+// above, just one query var per view since each has its own row set.
+let openDeliveriesSearchQuery = '';
+let bookingSearchQuery = '';
+let collectionSearchQuery = '';
+let inTransitSearchQuery = '';
+let customsSearchQuery = '';
 let latestShipment = null;
 let currentShipmentView = null;
 let approvedForwarders = null;
@@ -80,6 +90,25 @@ const SHIPMENT_VIEWS = {
     locationField: 'destinationName',
   },
 };
+
+// Shared "search by reference, tracking or destination" matcher for the
+// shipment-queue-shaped views (Create Outbound Shipment, Awaiting Booking,
+// Awaiting Collection, In Transit, Customs Documents) — reference is
+// checked both as the raw id and the zero-padded #00001234 form shown on
+// screen, since a user searching typically has one or the other in hand,
+// not necessarily the exact 8-digit form. extraFields lets a specific view
+// widen the match to a field only it has (e.g. Customs' customsID).
+function shipmentQueueMatchesSearch(row, query, extraFields = []) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  const id = row.shipmentID ?? row.deliveryID;
+  const fields = [
+    id, String(id ?? '').padStart(8, '0'),
+    row.trackingNumber, row.destinationName, row.originName,
+    ...extraFields,
+  ];
+  return fields.some(f => String(f ?? '').toLowerCase().includes(needle));
+}
 
 
 (async () => {
@@ -787,14 +816,25 @@ function itIsOverdue(row) {
   return planned.getTime() < today.getTime();
 }
 
+function applyInTransitSearch() {
+  const input = document.getElementById('it-search-input');
+  inTransitSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  renderInTransitQueue();
+  const newInput = document.getElementById('it-search-input');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
+
 function renderInTransitQueue() {
   const view = SHIPMENT_VIEWS['in-transit'];
+  const query = inTransitSearchQuery.trim();
+  const filtered = query ? shipmentRows.filter(row => shipmentQueueMatchesSearch(row, query)) : shipmentRows;
 
-  const overdueRows = shipmentRows.filter(itIsOverdue)
+  const overdueRows = filtered.filter(itIsOverdue)
     .slice()
     .sort((a, b) => new Date(getShipmentPlannedDate(a, 'in-transit')).getTime() - new Date(getShipmentPlannedDate(b, 'in-transit')).getTime());
 
-  const haulierGroups = shipmentRows.filter(row => !itIsOverdue(row)).reduce((acc, row) => {
+  const haulierGroups = filtered.filter(row => !itIsOverdue(row)).reduce((acc, row) => {
     const key = hasAssignedHaulier(row) ? row.forwarderName : 'Unassigned Haulier';
     if (!acc[key]) acc[key] = [];
     acc[key].push(row);
@@ -847,10 +887,11 @@ function renderInTransitQueue() {
     <div class="lg-actions">
       <div><div class="lg-selection-title">${esc(view.title)}</div><div class="toolbar-hint" id="it-selection-hint">${esc(view.hint)}</div></div>
       <div class="toolbar-spacer"></div>
+      <input class="tf-input" id="it-search-input" type="text" placeholder="Search reference, tracking, destination…" value="${esc(inTransitSearchQuery)}" oninput="applyInTransitSearch()" style="max-width:240px">
       ${writeBtns}
     </div>
     <div id="it-selection-msg" class="lg-selection-msg hidden"></div>
-    <div class="ps-sections">${sections}</div>`;
+    ${filtered.length ? `<div class="ps-sections">${sections}</div>` : `<div class="sap-empty">No shipments match "${esc(query)}".</div>`}`;
 
   bindInTransitEvents();
 }
@@ -952,8 +993,20 @@ function openBulkMarkDeliveredModal() {
 }
 
 
+function applyBookingSearch() {
+  const input = document.getElementById('booking-search-input');
+  bookingSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  renderShipmentBooking();
+  const newInput = document.getElementById('booking-search-input');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
+
 function renderShipmentBooking() {
-  const grouped = shipmentRows.reduce((acc, row) => {
+  const query = bookingSearchQuery.trim();
+  const filtered = query ? shipmentRows.filter(row => shipmentQueueMatchesSearch(row, query)) : shipmentRows;
+
+  const grouped = filtered.reduce((acc, row) => {
     const key = hasAssignedHaulier(row) ? row.forwarderName : 'Unassigned Haulier';
     if (!acc[key]) acc[key] = [];
     acc[key].push(row);
@@ -980,14 +1033,26 @@ function renderShipmentBooking() {
   const bookingWriteBtns = hasPlanning()
     ? `<button type="button" class="btn-secondary" id="booking-cancel-btn" disabled>Cancel Shipment</button><button type="button" class="btn-submit" id="booking-confirm-btn" disabled>Book</button>`
     : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`;
-  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Awaiting Booking</div><div class="toolbar-hint" id="booking-selection-hint">Select one or more shipments for the same haulier, then book them.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="booking-clear-btn" disabled>Clear Selection</button>${bookingWriteBtns}</div><div id="booking-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
+  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Awaiting Booking</div><div class="toolbar-hint" id="booking-selection-hint">Select one or more shipments for the same haulier, then book them.</div></div><div class="toolbar-spacer"></div><input class="tf-input" id="booking-search-input" type="text" placeholder="Search reference, tracking, destination…" value="${esc(bookingSearchQuery)}" oninput="applyBookingSearch()" style="max-width:240px"><button type="button" class="btn-secondary" id="booking-clear-btn" disabled>Clear Selection</button>${bookingWriteBtns}</div><div id="booking-selection-msg" class="lg-selection-msg hidden"></div>${filtered.length ? `<div class="ps-sections">${sections}</div>` : `<div class="sap-empty">No shipments match "${esc(query)}".</div>`}`;
   bindShipmentBookingEvents();
   updateShipmentBookingUI();
 }
 
 
+function applyCustomsSearch() {
+  const input = document.getElementById('customs-search-input');
+  customsSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  renderCustomsDocuments();
+  const newInput = document.getElementById('customs-search-input');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
+
 function renderCustomsDocuments() {
-  const rows = shipmentRows
+  const query = customsSearchQuery.trim();
+  const filtered = query ? shipmentRows.filter(row => shipmentQueueMatchesSearch(row, query, [row.customsID])) : shipmentRows;
+
+  const rows = filtered
     .slice()
     .sort((a, b) => {
       const aDate = new Date(getShipmentPlannedDate(a, 'in-transit') || 0).getTime();
@@ -1008,7 +1073,10 @@ function renderCustomsDocuments() {
   const customsWriteBtn = hasPlanning()
     ? `<button type="button" class="btn-secondary" id="customs-not-required-btn" disabled style="color:var(--error,#DC2626)">Mark Not Required</button><button type="button" class="btn-submit" id="customs-create-btn" disabled>Create Customs Entry</button>`
     : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`;
-  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Customs Documents</div><div class="toolbar-hint" id="customs-selection-hint">Select one or more shipments, then create the customs entries in ClearPort.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="customs-clear-btn" disabled>Clear Selection</button>${customsWriteBtn}</div>${noticeHtml}<div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--week"></span><span class="ps-section-title">Awaiting Customs</span><span class="ps-section-count">${shipmentRows.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Movement</th><th>Forwarder</th><th>Destination</th><th>Customs ID</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`;
+  const customsSections = filtered.length
+    ? `<div class="ps-sections"><div class="ps-section"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--week"></span><span class="ps-section-title">Awaiting Customs</span><span class="ps-section-count">${filtered.length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Shipment</th><th>Planned Movement</th><th>Forwarder</th><th>Destination</th><th>Customs ID</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`
+    : `<div class="sap-empty">No shipments match "${esc(query)}".</div>`;
+  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Customs Documents</div><div class="toolbar-hint" id="customs-selection-hint">Select one or more shipments, then create the customs entries in ClearPort.</div></div><div class="toolbar-spacer"></div><input class="tf-input" id="customs-search-input" type="text" placeholder="Search reference, tracking, destination…" value="${esc(customsSearchQuery)}" oninput="applyCustomsSearch()" style="max-width:240px"><button type="button" class="btn-secondary" id="customs-clear-btn" disabled>Clear Selection</button>${customsWriteBtn}</div>${noticeHtml}${customsSections}`;
   bindCustomsDocumentsEvents();
   updateCustomsDocumentsUI();
 }
@@ -1386,9 +1454,21 @@ async function runOpenDeliveries() {
 }
 
 
+function applyOpenDeliveriesSearch() {
+  const input = document.getElementById('lg-search-input');
+  openDeliveriesSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  renderOpenDeliveries();
+  const newInput = document.getElementById('lg-search-input');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
+
 function renderOpenDeliveries() {
+  const query = openDeliveriesSearchQuery.trim();
+  const filtered = query ? deliveryRows.filter(row => shipmentQueueMatchesSearch(row, query)) : deliveryRows;
+
   const bucketMap = {}; BUCKETS.forEach(b => { bucketMap[b.key] = []; });
-  deliveryRows.forEach(r => { const key = r.deliveryPriority === 1 ? 'priority' : getDateBucket(r.dispatchDate); bucketMap[key].push(r); });
+  filtered.forEach(r => { const key = r.deliveryPriority === 1 ? 'priority' : getDateBucket(r.dispatchDate); bucketMap[key].push(r); });
   const sections = BUCKETS.filter(b => bucketMap[b.key].length).map(b => {
     const collapsed = b.defaultOpen ? '' : ' ps-section--collapsed';
     const rows = bucketMap[b.key].map(r => {
@@ -1402,7 +1482,7 @@ function renderOpenDeliveries() {
     }).join('');
     return `<div class="ps-section${collapsed}"><div class="ps-section-header"><span class="ps-section-dot ps-section-dot--${b.dot}"></span><span class="ps-section-title">${b.label}</span><span class="ps-section-count">${bucketMap[b.key].length}</span><span class="ps-chevron">v</span></div><div class="ps-section-body"><table class="ps-table"><thead><tr><th></th><th>Delivery</th><th>Destination</th><th>Completed</th><th>Due</th><th>Service</th><th>Pallets</th><th>Weight</th><th>Volume</th><th>Comment</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }).join('');
-  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Completed picksheets</div><div class="toolbar-hint" id="lg-selection-hint">Select deliveries for one customer, then create a shipment.</div></div><div class="toolbar-spacer"></div><button type="button" class="btn-secondary" id="lg-manual-btn">+ Manual Shipment</button><button type="button" class="btn-secondary" id="lg-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="lg-create-btn" disabled>Create Shipment</button></div><div id="lg-selection-msg" class="lg-selection-msg hidden"></div><div class="ps-sections">${sections}</div>`;
+  document.getElementById('result-body').innerHTML = `<div class="lg-actions"><div><div class="lg-selection-title">Completed picksheets</div><div class="toolbar-hint" id="lg-selection-hint">Select deliveries for one customer, then create a shipment.</div></div><div class="toolbar-spacer"></div><input class="tf-input" id="lg-search-input" type="text" placeholder="Search reference, destination…" value="${esc(openDeliveriesSearchQuery)}" oninput="applyOpenDeliveriesSearch()" style="max-width:240px"><button type="button" class="btn-secondary" id="lg-manual-btn">+ Manual Shipment</button><button type="button" class="btn-secondary" id="lg-clear-btn" disabled>Clear Selection</button><button type="button" class="btn-submit" id="lg-create-btn" disabled>Create Shipment</button></div><div id="lg-selection-msg" class="lg-selection-msg hidden"></div>${filtered.length ? `<div class="ps-sections">${sections}</div>` : `<div class="sap-empty">No deliveries match "${esc(query)}".</div>`}`;
   bindOpenDeliveriesEvents();
   updateSelectionUI();
 }
@@ -3132,8 +3212,22 @@ function wConfirmLg({ title, message, confirmText = 'Confirm', variant = '' }) {
 
 // ── Awaiting Collection — grouped/sorted renderer ─────────────────────────────
 
+// Mirrors Tracked Orders'/Inbound Log's osApplySearch/ilApplySearch — live
+// client-side filter with focus/caret preserved across the re-render.
+function applyCollectionSearch() {
+  const input = document.getElementById('collection-search-input');
+  collectionSearchQuery = input ? input.value : '';
+  const caret = input ? input.selectionStart : null;
+  renderAwaitingCollection();
+  const newInput = document.getElementById('collection-search-input');
+  if (newInput) { newInput.focus(); if (caret != null) newInput.setSelectionRange(caret, caret); }
+}
+
 function renderAwaitingCollection() {
-  const grouped = shipmentRows.reduce((acc, row) => {
+  const query = collectionSearchQuery.trim();
+  const filtered = query ? shipmentRows.filter(row => shipmentQueueMatchesSearch(row, query)) : shipmentRows;
+
+  const grouped = filtered.reduce((acc, row) => {
     const key = row.forwarderName || 'Unassigned';
     if (!acc[key]) acc[key] = [];
     acc[key].push(row);
@@ -3168,6 +3262,7 @@ function renderAwaitingCollection() {
       <div><div class="lg-selection-title">Awaiting Collection</div>
       <div class="toolbar-hint" id="collection-hint">Select shipments, then use the actions below.</div></div>
       <div class="toolbar-spacer"></div>
+      <input class="tf-input" id="collection-search-input" type="text" placeholder="Search reference, tracking, destination…" value="${esc(collectionSearchQuery)}" oninput="applyCollectionSearch()" style="max-width:240px">
       <button class="btn-secondary" id="col-clear-btn" disabled>Clear</button>
       ${hasPlanning() ? `
         <button class="btn-secondary" id="col-date-btn"    disabled>Update Date</button>
@@ -3178,7 +3273,7 @@ function renderAwaitingCollection() {
       ` : `<span style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted)" title="Requires LOG_PLANNING permission">View only</span>`}
     </div>
     <div id="collection-msg" class="lg-selection-msg hidden"></div>
-    <div class="ps-sections">${sections}</div>`;
+    ${filtered.length ? `<div class="ps-sections">${sections}</div>` : `<div class="sap-empty">No shipments match "${esc(query)}".</div>`}`;
 
   bindAwaitingCollectionEvents();
 }
@@ -7421,7 +7516,7 @@ async function runTurnsValClassTable() {
 
 // ── Tile 2: aggregate KPIs + breakdown charts ────────────────────────────────
 async function runTurnsValClassSummary() {
-  showResultPanel('Stock Value Overview', 'Aggregate stock & book value by turnover category, valuation class and material type');
+  showResultPanel('Stock Value Overview', 'Aggregate stock & book value by turnover category, profit centre and material type, plus value over time');
   // Viewing this tile no longer requires LOG_MRP (see
   // sql/migrate_log_reports_permission.sql — it's LOG_ADMIN/LOG_MRP/
   // LOG_REPORTS now), but the manual-refresh action underneath it still
@@ -7442,12 +7537,18 @@ async function loadTurnsValClassSummaryBody() {
   loadTurnsValClassRefreshSummary();
 
   try {
-    const resp = await fetch('/api/performance/turns-valclass/aggregates');
+    const [resp, historyResp] = await Promise.all([
+      fetch('/api/performance/turns-valclass/aggregates'),
+      fetch('/api/performance/turns-valclass/value-history'),
+    ]);
     const json = await resp.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load');
+    const historyJson = await historyResp.json();
+    if (!historyJson.success) throw new Error(historyJson.error?.message || 'Failed to load value history');
 
     const d = json.data;
     const t = d.totals || {};
+    const historyRows = historyJson.data || [];
 
     const CHART_COLOURS = ['#0891B2', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#F97316', '#84CC16', '#EC4899', '#6366F1', '#06B6D4'];
 
@@ -7467,19 +7568,20 @@ async function loadTurnsValClassSummaryBody() {
           </div>`).join('')}
       </div>`;
 
-    const card = (title, canvasId) => `
+    const card = (title, canvasId, maxHeight = 260) => `
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px">
         <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px">${title}</div>
-        <canvas id="${canvasId}" style="max-height:260px"></canvas>
+        <canvas id="${canvasId}" style="max-height:${maxHeight}px"></canvas>
       </div>`;
 
     body.innerHTML = `
       ${kpiHtml}
-      <div style="margin-bottom:14px">${card('Stock Value by Turnover Category', 'chart-tvc-category')}</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-        ${card('Stock Value by Valuation Class', 'chart-tvc-valclass')}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        ${card('Stock Value by Profit Centre', 'chart-tvc-profitcentre')}
         ${card('Stock Value by Material Type', 'chart-tvc-mattype')}
-      </div>`;
+      </div>
+      <div style="margin-bottom:14px">${card('Stock Value by Turnover Category', 'chart-tvc-category')}</div>
+      <div>${card('Stock Value Over Time by Material Type', 'chart-tvc-value-history', 320)}</div>`;
 
     const TICK = '#8DA3BE';
     const GRID = 'rgba(0,0,0,0.06)';
@@ -7505,12 +7607,12 @@ async function loadTurnsValClassSummaryBody() {
       }));
     }
 
-    if (d.byValuationClass?.length) {
-      turnsCharts.push(new Chart(document.getElementById('chart-tvc-valclass'), {
+    if (d.byProfitCentre?.length) {
+      turnsCharts.push(new Chart(document.getElementById('chart-tvc-profitcentre'), {
         type: 'doughnut',
         data: {
-          labels: d.byValuationClass.map(r => r.valuationClass || 'Unassigned'),
-          datasets: [{ data: d.byValuationClass.map(r => Number(r.stockValue) || 0), backgroundColor: CHART_COLOURS, borderWidth: 2, borderColor: '#fff' }],
+          labels: d.byProfitCentre.map(r => r.profitCentre || 'Unassigned'),
+          datasets: [{ data: d.byProfitCentre.map(r => Number(r.stockValue) || 0), backgroundColor: CHART_COLOURS, borderWidth: 2, borderColor: '#fff' }],
         },
         options: {
           plugins: {
@@ -7529,6 +7631,44 @@ async function loadTurnsValClassSummaryBody() {
           datasets: [{ data: d.byMaterialType.map(r => Number(r.stockValue) || 0), backgroundColor: '#8B5CF6', borderRadius: 4 }],
         },
         options: barDefaults,
+      }));
+    }
+
+    if (historyRows.length) {
+      const dates = [...new Set(historyRows.map(r => r.snapshotDate))].sort();
+      const materialTypes = [...new Set(historyRows.map(r => r.materialType || 'Unassigned'))].sort();
+      const dateIdx = new Map(dates.map((dt, i) => [dt, i]));
+
+      const seriesByType = new Map(materialTypes.map(mt => [mt, new Array(dates.length).fill(null)]));
+      historyRows.forEach(r => {
+        const mt = r.materialType || 'Unassigned';
+        seriesByType.get(mt)[dateIdx.get(r.snapshotDate)] = Number(r.stockValue) || 0;
+      });
+
+      turnsCharts.push(new Chart(document.getElementById('chart-tvc-value-history'), {
+        type: 'line',
+        data: {
+          labels: dates.map(formatDisplayDate),
+          datasets: materialTypes.map((mt, i) => ({
+            label: mt,
+            data: seriesByType.get(mt),
+            borderColor: CHART_COLOURS[i % CHART_COLOURS.length],
+            backgroundColor: CHART_COLOURS[i % CHART_COLOURS.length],
+            spanGaps: true,
+            tension: 0.2,
+            pointRadius: 2,
+          })),
+        },
+        options: {
+          plugins: {
+            legend: { position: 'bottom', labels: { color: '#4D6380', font: { size: 11 }, padding: 10 } },
+            tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${gbpTip(ctx)}` } },
+          },
+          scales: {
+            x: { ticks: { color: TICK, font: { size: 10 } }, grid: { color: GRID } },
+            y: { ticks: { color: TICK, font: { size: 10 }, callback: gbpY }, grid: { color: GRID } },
+          },
+        },
       }));
     }
 

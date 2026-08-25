@@ -2454,10 +2454,10 @@ router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG
       END
     `);
 
-    const byValuationClass = await pool.request().query(`
-      SELECT ValuationClass AS valuationClass, COUNT(*) AS materialCount, SUM(StockValue) AS stockValue, SUM(BookValue) AS bookValue
+    const byProfitCentre = await pool.request().query(`
+      SELECT ProfitCentre AS profitCentre, COUNT(*) AS materialCount, SUM(StockValue) AS stockValue, SUM(BookValue) AS bookValue
       FROM log.TurnsValClassSnapshot
-      GROUP BY ValuationClass
+      GROUP BY ProfitCentre
       ORDER BY stockValue DESC
     `);
 
@@ -2473,10 +2473,33 @@ router.get('/turns-valclass/aggregates', requireAnyPermission(['LOG_ADMIN', 'LOG
       data: {
         totals: totals.recordset[0],
         byTurnoverCategory: byTurnoverCategory.recordset,
-        byValuationClass: byValuationClass.recordset,
+        byProfitCentre: byProfitCentre.recordset,
         byMaterialType: byMaterialType.recordset
       }
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// ── Stock value over time, by material type ─────────────────────────────────
+// Backs the "Stock Value Over Time" chart on the Stock Value Overview tile —
+// one line per material type, plotted from the daily append-only history in
+// log.StockValuationHistory (see sql/create_performance_turnsvalclass_database.sql's
+// comment #6). Unlike every other query on this tile, this one is NOT reading
+// log.TurnsValClassSnapshot — that table only ever holds the latest pull
+// (TRUNCATE + reinsert daily), so it has no time dimension at all.
+router.get('/turns-valclass/value-history', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPORTS']), async (req, res) => {
+  try {
+    const pool = await getPool();
+    const { recordset } = await pool.request().query(`
+      SELECT SnapshotDate AS snapshotDate, MaterialType AS materialType, SUM(StockValue) AS stockValue
+      FROM log.StockValuationHistory
+      GROUP BY SnapshotDate, MaterialType
+      ORDER BY SnapshotDate
+    `);
+
+    res.json({ success: true, data: recordset });
   } catch (err) {
     res.status(500).json({ success: false, error: { message: err.message } });
   }
@@ -4609,7 +4632,7 @@ router.post('/order-suggestions/shipments/:shipmentId/cancel', requirePermission
 // route-ordering caution as routes/shipmentmain.js's equivalent pair: if
 // the fileName route came first, a request for /documents/folder would be
 // caught by it with fileName="folder" instead.
-router.get('/order-suggestions/shipments/:shipmentId/documents/folder', requirePermission('LOG_MRP'), async (req, res) => {
+router.get('/order-suggestions/shipments/:shipmentId/documents/folder', requireAnyPermission(['LOG_MRP', 'WAREHOUSE_OP']), async (req, res) => {
   try {
     const shipmentId = Number(req.params.shipmentId);
     const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);
@@ -4641,7 +4664,7 @@ router.get('/order-suggestions/shipments/:shipmentId/documents/folder', requireP
   }
 });
 
-router.get('/order-suggestions/shipments/:shipmentId/documents/:fileName', requirePermission('LOG_MRP'), async (req, res) => {
+router.get('/order-suggestions/shipments/:shipmentId/documents/:fileName', requireAnyPermission(['LOG_MRP', 'WAREHOUSE_OP']), async (req, res) => {
   try {
     const shipmentId = Number(req.params.shipmentId);
     const { record, supplierName } = await loadShipmentForImportDocs(shipmentId);

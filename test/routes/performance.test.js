@@ -188,3 +188,48 @@ describe('GET /turns-valclass/refresh-status', () => {
     expect(res.body.data.datasets).toHaveLength(2);
   });
 });
+
+describe('GET /turns-valclass/aggregates', () => {
+  test('is rejected for a user with none of LOG_ADMIN/LOG_MRP/LOG_REPORTS', async () => {
+    const res = await request(app).get('/turns-valclass/aggregates');
+    expect(res.status).toBe(403);
+  });
+
+  test('returns totals grouped by turnover category, profit centre and material type', async () => {
+    dbRequest.query
+      .mockResolvedValueOnce({ recordset: [{ materialCount: 2, totalStockValue: 100, totalBookValue: 90, warningCount: 0, avgStockTurns: 1, avgDaysInStock: 30 }] })
+      .mockResolvedValueOnce({ recordset: [{ category: '<10 days', materialCount: 1, stockValue: 40 }] })
+      .mockResolvedValueOnce({ recordset: [{ profitCentre: '2012', materialCount: 2, stockValue: 100, bookValue: 90 }] })
+      .mockResolvedValueOnce({ recordset: [{ materialType: 'FERT', materialCount: 2, stockValue: 100 }] });
+
+    const res = await request(appMrp).get('/turns-valclass/aggregates');
+    expect(res.status).toBe(200);
+    expect(res.body.data.byProfitCentre).toEqual([{ profitCentre: '2012', materialCount: 2, stockValue: 100, bookValue: 90 }]);
+    expect(res.body.data.byValuationClass).toBeUndefined();
+
+    const profitCentreSql = dbRequest.query.mock.calls[2][0];
+    expect(profitCentreSql).toContain('GROUP BY ProfitCentre');
+  });
+});
+
+describe('GET /turns-valclass/value-history', () => {
+  test('is rejected for a user with none of LOG_ADMIN/LOG_MRP/LOG_REPORTS', async () => {
+    const res = await request(app).get('/turns-valclass/value-history');
+    expect(res.status).toBe(403);
+  });
+
+  test('returns daily stock value per material type from the append-only history table', async () => {
+    dbRequest.query.mockResolvedValueOnce({
+      recordset: [
+        { snapshotDate: '2026-01-01T00:00:00.000Z', materialType: 'FERT', stockValue: 100 },
+        { snapshotDate: '2026-01-02T00:00:00.000Z', materialType: 'FERT', stockValue: 110 },
+      ],
+    });
+    const res = await request(appMrp).get('/turns-valclass/value-history');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    const sql = dbRequest.query.mock.calls[0][0];
+    expect(sql).toContain('log.StockValuationHistory');
+    expect(sql).toContain('GROUP BY SnapshotDate, MaterialType');
+  });
+});
