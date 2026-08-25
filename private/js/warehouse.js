@@ -7627,6 +7627,7 @@ async function runZdelflagWarnings() {
 }
 
 function zdRenderWarnings(warnings) {
+  const canResolve = sessionRole === 'superadmin' || sessionPermissions.includes('LOG_SUPER');
   const rows = warnings.map(w => {
     // Always show the SAP message TYPE alongside the text, and fall back to
     // an explicit "(no message text)" note per line rather than dropping it
@@ -7650,6 +7651,7 @@ function zdRenderWarnings(warnings) {
       <td>${spFormatDate(w.ranAtUtc)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn-secondary zd-reprocess" data-id="${esc(String(w.deliveryID))}" style="padding:3px 10px;font-size:11px">Reprocess</button>
+        ${canResolve ? `<button class="btn-secondary zd-resolve" data-id="${esc(String(w.deliveryID))}" style="padding:3px 10px;font-size:11px;margin-left:6px">Mark Resolved</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -7667,6 +7669,9 @@ function zdRenderWarnings(warnings) {
   document.querySelectorAll('.zd-reprocess').forEach(btn => {
     btn.addEventListener('click', () => zdReprocess(btn.dataset.id, btn));
   });
+  document.querySelectorAll('.zd-resolve').forEach(btn => {
+    btn.addEventListener('click', () => zdResolve(btn.dataset.id, btn));
+  });
 }
 
 async function zdReprocess(deliveryId, btn) {
@@ -7678,6 +7683,30 @@ async function zdReprocess(deliveryId, btn) {
     const json = await r.json();
     if (!r.ok || json.success === false) {
       throw new Error(json.error || 'Reprocess failed');
+    }
+    runZdelflagWarnings();
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function zdResolve(deliveryId, btn) {
+  if (!await wConfirm({
+    title: 'Mark as Resolved',
+    message: `Mark Delivery #${deliveryId}'s ZDELFLAG/ZDELPACK warning as manually resolved?\nThis removes it from the warnings list without re-attempting the SAP call — only do this if the issue was already fixed directly in SAP.`,
+    confirmText: 'Mark Resolved',
+    variant: 'success',
+  })) return;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Resolving…';
+  try {
+    const r = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/zdelflag/resolve`, { method: 'POST' });
+    const json = await r.json();
+    if (!r.ok || json.success === false) {
+      throw new Error(json.error || 'Resolve failed');
     }
     runZdelflagWarnings();
   } catch (err) {
@@ -7709,6 +7738,7 @@ async function runGoodsIssueWarnings() {
 }
 
 function giRenderWarnings(warnings) {
+  const canResolve = sessionRole === 'superadmin' || sessionPermissions.includes('LOG_SUPER');
   const rows = warnings.map(w => {
     const msgText = (w.messages || []).length
       ? w.messages.map(m => {
@@ -7727,6 +7757,7 @@ function giRenderWarnings(warnings) {
       <td>${spFormatDate(w.ranAtUtc)}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn-secondary gi-reprocess" data-id="${esc(String(w.deliveryID))}" style="padding:3px 10px;font-size:11px">Reprocess</button>
+        ${canResolve ? `<button class="btn-secondary gi-resolve" data-id="${esc(String(w.deliveryID))}" style="padding:3px 10px;font-size:11px;margin-left:6px">Mark Resolved</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -7744,6 +7775,9 @@ function giRenderWarnings(warnings) {
   document.querySelectorAll('.gi-reprocess').forEach(btn => {
     btn.addEventListener('click', () => giReprocess(btn.dataset.id, btn));
   });
+  document.querySelectorAll('.gi-resolve').forEach(btn => {
+    btn.addEventListener('click', () => giResolve(btn.dataset.id, btn));
+  });
 }
 
 async function giReprocess(deliveryId, btn) {
@@ -7755,6 +7789,30 @@ async function giReprocess(deliveryId, btn) {
     const json = await r.json();
     if (!r.ok || json.success === false) {
       throw new Error(json.error || 'Reprocess failed');
+    }
+    runGoodsIssueWarnings();
+  } catch (err) {
+    alert(err.message);
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function giResolve(deliveryId, btn) {
+  if (!await wConfirm({
+    title: 'Mark as Resolved',
+    message: `Mark Delivery #${deliveryId}'s Goods Issue warning as manually resolved?\nThis removes it from the warnings list without re-attempting the SAP call — only do this if Goods Issue was already posted directly in SAP.`,
+    confirmText: 'Mark Resolved',
+    variant: 'success',
+  })) return;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Resolving…';
+  try {
+    const r = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/goods-issue/resolve`, { method: 'POST' });
+    const json = await r.json();
+    if (!r.ok || json.success === false) {
+      throw new Error(json.error || 'Resolve failed');
     }
     runGoodsIssueWarnings();
   } catch (err) {

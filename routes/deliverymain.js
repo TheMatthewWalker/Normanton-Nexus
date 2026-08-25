@@ -1294,6 +1294,51 @@ router.post('/:deliveryId/zdelflag/reprocess', async (req, res) => {
     }
 });
 
+// ── Mark a ZDELFLAG/ZDELPACK warning as manually resolved (no reprocess) ──
+// For when the underlying SAP issue was already fixed directly in SAP (or
+// otherwise no longer applies) and the delivery just needs clearing off the
+// warnings list — records a terminal 'Resolved' run with no SAP call at
+// all, same INSERT-a-new-run mechanism recordRun already uses, so it drops
+// off GET /zdelflag/warnings (which only matches Failed/Warning) the same
+// way a successful reprocess would. Only allowed while there's an actual
+// open warning (Failed/Warning) — same "no going back once terminal"
+// precedent as reprocess's Success guard. LOG_SUPER-gated: this is a
+// supervisory override that suppresses an automated integrity check, not
+// an ordinary warehouse action.
+router.post('/:deliveryId/zdelflag/resolve', requirePermission('LOG_SUPER'), async (req, res) => {
+    try {
+        const pool = await getPool();
+        const latestRes = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status
+                    FROM log.DeliveryZdelflagRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        const latestStatus = latestRes.recordset[0]?.status;
+        if (!['Failed', 'Warning'].includes(latestStatus)) {
+            return res.status(409).json({
+                success: false,
+                error: 'This delivery has no outstanding ZDELFLAG/ZDELPACK warning to resolve.',
+            });
+        }
+
+        const note = String(req.body?.note || '').trim();
+        const messages = [{ type: 'I', message: note || `Manually marked resolved by ${req.session.user.username}.` }];
+
+        await pool.request()
+            .input('deliveryId',  sql.NVarChar(10),  String(req.params.deliveryId))
+            .input('status',      sql.NVarChar(10),  'Resolved')
+            .input('messages',    sql.NVarChar(sql.MAX), JSON.stringify(messages))
+            .input('ranByUserID', sql.Int,           req.session.user.userID)
+            .query(`INSERT INTO log.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
+                    VALUES (@deliveryId, @status, @messages, @ranByUserID)`);
+
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Goods Issue warning log — deliveries whose latest posting attempt was
 // Failed, for the warehouse warning-log UI ──
 router.get('/goods-issue/warnings', async (req, res) => {
@@ -1383,6 +1428,44 @@ router.post('/:deliveryId/goods-issue/reprocess', async (req, res) => {
 
         const result = await runGoodsIssueApproval(pool, req.params.deliveryId);
         res.json({ success: true, data: result });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Mark a Goods Issue warning as manually resolved (no reprocess) ──
+// Same rationale/mechanism as the ZDELFLAG resolve endpoint above — for
+// when GI was posted directly in SAP outside the automatic pipeline (or
+// otherwise no longer needs retrying). Only allowed while the latest run is
+// actually Failed. LOG_SUPER-gated, same as ZDELFLAG's resolve endpoint.
+router.post('/:deliveryId/goods-issue/resolve', requirePermission('LOG_SUPER'), async (req, res) => {
+    try {
+        const pool = await getPool();
+        const latestRes = await pool.request()
+            .input('deliveryId', sql.NVarChar(10), String(req.params.deliveryId))
+            .query(`SELECT TOP 1 status
+                    FROM log.DeliveryGoodsIssueRun
+                    WHERE deliveryID = @deliveryId
+                    ORDER BY ranAtUtc DESC`);
+        if (latestRes.recordset[0]?.status !== 'Failed') {
+            return res.status(409).json({
+                success: false,
+                error: 'This delivery has no outstanding Goods Issue warning to resolve.',
+            });
+        }
+
+        const note = String(req.body?.note || '').trim();
+        const messages = [{ type: 'I', message: note || `Manually marked resolved by ${req.session.user.username}.` }];
+
+        await pool.request()
+            .input('deliveryId',  sql.NVarChar(10),  String(req.params.deliveryId))
+            .input('status',      sql.NVarChar(10),  'Resolved')
+            .input('messages',    sql.NVarChar(sql.MAX), JSON.stringify(messages))
+            .input('ranByUserID', sql.Int,           req.session.user.userID)
+            .query(`INSERT INTO log.DeliveryGoodsIssueRun (deliveryID, status, messages, ranByUserID)
+                    VALUES (@deliveryId, @status, @messages, @ranByUserID)`);
+
+        res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

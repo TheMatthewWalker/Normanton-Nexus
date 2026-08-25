@@ -16,11 +16,16 @@
        - a "reprocess" action, but ONLY while status is
          Failed/Warning — once Success, a VBELN cannot be run again
          without a future reversal feature (not implemented yet)
-     Status: 'Success' | 'Failed' | 'Warning'.
+       - a "resolve" action (LOG_SUPER-gated) for when the issue was
+         fixed directly in SAP outside the automatic flow — inserts a
+         terminal 'Resolved' run with no SAP call, clearing the
+         delivery off the warnings list without reprocessing
+     Status: 'Success' | 'Failed' | 'Warning' | 'Resolved'.
      Warning = the RFC call itself succeeded but returned one or
      more non-error return-table messages worth flagging (e.g. type
      'W'); Failed = the RFC call errored, was rejected, or a
-     precondition (e.g. missing batch) blocked it before the call.
+     precondition (e.g. missing batch) blocked it before the call;
+     Resolved = manually dismissed by a supervisor, ranByUserID set.
 
    Run connected to the Logistics database.
    ============================================================ */

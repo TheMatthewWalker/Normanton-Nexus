@@ -12,10 +12,14 @@
          run exists yet) — once Success, a VBELN cannot be run again
          without a future reversal feature (not implemented yet),
          same precedent as dbo.DeliveryZdelflagRun's reprocess guard
-     Status: 'Success' | 'Failed'. No 'Warning' bucket — SAP's RETURN
-     table here is a standard BAPIRET2 (real per-message severity), so
-     there's no synthetic third status needed the way ZDELFLAG's flat
-     ET_MESSAGE table required.
+       - a "resolve" action (LOG_SUPER-gated), same as
+         dbo.DeliveryZdelflagRun's — for when GI was posted directly
+         in SAP outside the automatic flow, inserts a terminal
+         'Resolved' run with no SAP call
+     Status: 'Success' | 'Failed' | 'Resolved'. No 'Warning' bucket —
+     SAP's RETURN table here is a standard BAPIRET2 (real per-message
+     severity), so there's no synthetic third status needed the way
+     ZDELFLAG's flat ET_MESSAGE table required.
 
    Run connected to the Logistics database.
    Compatibility: SQL Server 2005+ (no GO, no MERGE).

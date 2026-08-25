@@ -15,7 +15,7 @@ import { operatorUser } from '../helpers/fixtures/users.js';
 const { sqlModule, pool, request: dbRequest, connect } = createMockSql();
 jest.unstable_mockModule('mssql', () => ({ default: sqlModule }));
 
-const axiosMock = { get: jest.fn(), post: jest.fn() };
+const axiosMock = { get: jest.fn(), post: jest.fn(), request: jest.fn() };
 jest.unstable_mockModule('axios', () => ({ default: axiosMock }));
 
 jest.unstable_mockModule('../../routes/sap.js', () => ({
@@ -48,6 +48,7 @@ beforeEach(() => {
   reverseStagedPackageMock.mockReset();
   axiosMock.get.mockReset();
   axiosMock.post.mockReset();
+  axiosMock.request.mockReset();
 });
 
 function queueResults(...results) {
@@ -224,6 +225,41 @@ describe('PATCH /:deliveryId/comment', () => {
   });
 });
 
+describe('GET /:deliveryId/picksheet-materials', () => {
+  // Regression test: a batch already staged into THIS delivery's own 916
+  // bin (i.e. already picked onto one of this delivery's pallets via
+  // POST /:deliveryId/stage-batch) must not come back in the 'available'
+  // group, or the pallet builder keeps offering it on every later pallet
+  // even though it's already sitting on an earlier one.
+  test('excludes a batch already staged to this delivery\'s own bin from "available"', async () => {
+    queueResults(
+      { recordset: [{ customerID: 363660 }] },       // DeliveryMain customerID lookup
+      { recordset: [] },                              // already-picked-quantity rollup
+    );
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: [ // LIPS materials
+        { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+      ] } })
+      .mockResolvedValueOnce({ data: { success: true, data: [ // LQUA/ZPRODBATCH stock
+        {
+          material: '30005R', batch: 'B1',
+          storageType: '916', bin: '0000000500', // = this delivery, zero-padded
+          totalQty: '5,000', availableQty: '5,000',
+          stockCategory: '', packagingMaterial: 'IB_363660_MD',
+        },
+      ] } });
+    axiosMock.request.mockResolvedValue({ data: { success: false } }); // profit-centre lookup
+
+    const res = await request(appWarehouseOp).get('/500/picksheet-materials');
+
+    expect(res.status).toBe(200);
+    const batch = res.body.data.materials[0].batches[0];
+    expect(batch.group).toBe('restricted');
+    expect(batch.allowed).toBe(false);
+    expect(batch.reason).toMatch(/already picked/i);
+  });
+});
+
 describe('POST /:deliveryId/stage-batch', () => {
   test('is rejected for a user without WAREHOUSE_OP', async () => {
     const res = await request(app).post('/1/stage-batch').send({ material: '30005R', batch: 'B1' });
@@ -346,5 +382,78 @@ describe('GET /:deliveryId/goods-issue/status', () => {
     const res = await request(app).get('/1/goods-issue/status');
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({ status: null, messages: [], ranAtUtc: null });
+  });
+});
+
+describe('POST /:deliveryId/zdelflag/resolve', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/1/zdelflag/resolve');
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('409s when there is no outstanding warning (e.g. latest run is Success)', async () => {
+    queueResults({ recordset: [{ status: 'Success' }] });
+    const res = await request(appLogSuper).post('/1/zdelflag/resolve');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/no outstanding ZDELFLAG\/ZDELPACK warning/);
+  });
+
+  test('409s when no run exists at all', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(appLogSuper).post('/1/zdelflag/resolve');
+    expect(res.status).toBe(409);
+  });
+
+  test('records a Resolved run with a default note when the latest run is Failed', async () => {
+    queueResults(
+      { recordset: [{ status: 'Failed' }] }, // latest-run check
+      { recordset: [] },                     // the INSERT
+    );
+    const res = await request(appLogSuper).post('/1/zdelflag/resolve');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(dbRequest.input).toHaveBeenCalledWith('status', expect.anything(), 'Resolved');
+    expect(dbRequest.input).toHaveBeenCalledWith('messages', expect.anything(),
+      expect.stringContaining('Manually marked resolved by'));
+  });
+
+  test('records a Resolved run with a custom note when the latest run is Warning', async () => {
+    queueResults(
+      { recordset: [{ status: 'Warning' }] },
+      { recordset: [] },
+    );
+    const res = await request(appLogSuper).post('/1/zdelflag/resolve').send({ note: 'Fixed manually in ZPIL9' });
+    expect(res.status).toBe(200);
+    expect(dbRequest.input).toHaveBeenCalledWith('messages', expect.anything(),
+      expect.stringContaining('Fixed manually in ZPIL9'));
+  });
+});
+
+describe('POST /:deliveryId/goods-issue/resolve', () => {
+  test('is rejected for a user without LOG_SUPER', async () => {
+    const res = await request(app).post('/1/goods-issue/resolve');
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('409s when the latest run is not Failed', async () => {
+    queueResults({ recordset: [] }); // no run at all
+    const res = await request(appLogSuper).post('/1/goods-issue/resolve');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/no outstanding Goods Issue warning/);
+  });
+
+  test('records a Resolved run when the latest run is Failed', async () => {
+    queueResults(
+      { recordset: [{ status: 'Failed' }] },
+      { recordset: [] },
+    );
+    const res = await request(appLogSuper).post('/1/goods-issue/resolve').send({ note: 'Posted manually in VL06O' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(dbRequest.input).toHaveBeenCalledWith('status', expect.anything(), 'Resolved');
+    expect(dbRequest.input).toHaveBeenCalledWith('messages', expect.anything(),
+      expect.stringContaining('Posted manually in VL06O'));
   });
 });
