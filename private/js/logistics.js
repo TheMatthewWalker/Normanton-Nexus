@@ -27,6 +27,7 @@ let inboundLogSearchQuery = '';
 let latestShipment = null;
 let currentShipmentView = null;
 let approvedForwarders = null;
+let approvedForwardersRaw = null;
 let allForwarders = null;
 let customsBatchNotice = null;
 let userPermissions = [];
@@ -290,11 +291,22 @@ function isExWorksIncoterms(value) {
 }
 
 
-async function loadApprovedForwarders() {
-  if (approvedForwarders) return approvedForwarders;
+// Raw (undeduped) approved-forwarders list — one row per haulier name+mode
+// combination, e.g. separate rows for "Kuehne & Nagel" Road/Air/Groupage.
+// Needed by the shipment detail modal's haulier picker to offer a mode
+// choice; loadApprovedForwarders() below dedupes this down to one row per
+// name for the plain name-only dropdowns elsewhere.
+async function loadApprovedForwardersRaw() {
+  if (approvedForwardersRaw) return approvedForwardersRaw;
   const res = await fetch('/api/forwarders/approved');
   const json = await res.json();
-  const raw = Array.isArray(json) ? json : [];
+  approvedForwardersRaw = Array.isArray(json) ? json : [];
+  return approvedForwardersRaw;
+}
+
+async function loadApprovedForwarders() {
+  if (approvedForwarders) return approvedForwarders;
+  const raw = await loadApprovedForwardersRaw();
   approvedForwarders = dedupeForwardersByName(raw);
   return approvedForwarders;
 }
@@ -3479,12 +3491,13 @@ function renderShipmentDetailModal(shipment, deliveries) {
           <div class="sd-actions-cols">
             <div class="sd-actions-col">
               <div class="sd-actions-subtitle">Haulier</div>
-              <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}</strong></div>
+              <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Current: <strong>${esc(shipment.forwarderName || 'Unassigned')}${shipment.forwarderMode ? ` (${esc(shipment.forwarderMode)})` : ''}</strong></div>
               ${canEdit ? `<div class="sd-haulier-row">
                 <select class="tf-input" id="sd-forwarder-select"><option value="">Loading…</option></select>
+                <select class="tf-input" id="sd-forwarder-mode-select" disabled><option value="">—</option></select>
                 <button class="btn-secondary" id="sd-forwarder-save">Save</button>
-                <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
-              </div>` : ''}
+              </div>
+              <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>` : ''}
               <div class="sd-actions-subtitle" style="margin-top:12px">Customs</div>
               <div class="sd-customs-row">
                 ${customsToggleHtml}
@@ -3546,12 +3559,32 @@ function renderShipmentDetailModal(shipment, deliveries) {
   const bookBtn = document.getElementById('sd-book-btn');
   if (bookBtn) bookBtn.addEventListener('click', () => openBookSingleShipmentModal(shipment));
 
-  // Load hauliers (edit UI only — canEdit gates the select/save row's existence)
-  if (canEdit) loadApprovedForwarders().then(forwarders => {
-    const sel = document.getElementById('sd-forwarder-select');
-    if (!sel) return;
-    sel.innerHTML = `<option value="">Select haulier…</option>` +
-      forwarders.map(f => `<option value="${esc(String(f.forwarderID))}" ${String(f.forwarderID) === String(shipment.forwarderID) ? 'selected' : ''}>${esc(f.forwarderName || '')}</option>`).join('');
+  // Load hauliers + transport mode (edit UI only — canEdit gates the
+  // select/save row's existence). Name select picks by forwarderName (a
+  // haulier can have several Forwarders rows, one per mode — see
+  // dedupeForwardersByName); Mode select is repopulated from the raw,
+  // undeduped list whenever the name changes, and its OWN value is the
+  // actual forwarderID that gets saved — the name select is just a filter,
+  // never sent to the server directly.
+  if (canEdit) loadApprovedForwardersRaw().then(raw => {
+    const nameSel = document.getElementById('sd-forwarder-select');
+    const modeSel = document.getElementById('sd-forwarder-mode-select');
+    if (!nameSel || !modeSel) return;
+
+    const names = dedupeForwardersByName(raw);
+    nameSel.innerHTML = `<option value="">Select haulier…</option>` +
+      names.map(f => `<option value="${esc(f.forwarderName || '')}" ${f.forwarderName === shipment.forwarderName ? 'selected' : ''}>${esc(f.forwarderName || '')}</option>`).join('');
+
+    const populateModes = (name, selectedForwarderID) => {
+      const rows = raw.filter(f => (f.forwarderName || '') === name);
+      modeSel.disabled = !rows.length;
+      modeSel.innerHTML = rows.length
+        ? rows.map(f => `<option value="${esc(String(f.forwarderID))}" ${String(f.forwarderID) === String(selectedForwarderID) ? 'selected' : ''}>${esc(f.forwarderMode || 'Standard')}</option>`).join('')
+        : `<option value="">—</option>`;
+    };
+
+    populateModes(nameSel.value, shipment.forwarderID);
+    nameSel.addEventListener('change', () => populateModes(nameSel.value, null));
   });
 
   // Customs toggle — either button saves instantly on click (no separate
@@ -3619,15 +3652,18 @@ function renderShipmentDetailModal(shipment, deliveries) {
     }
   });
 
-  // Haulier save (canEdit-gated — element doesn't exist for a view-only user)
+  // Haulier save (canEdit-gated — element doesn't exist for a view-only
+  // user). Sends the Mode select's value — the specific forwarderID for
+  // the chosen name+mode combination — not the Name select's, which only
+  // ever holds a forwarderName string used to filter the Mode options.
   const forwarderSaveBtn = document.getElementById('sd-forwarder-save');
   if (forwarderSaveBtn) forwarderSaveBtn.addEventListener('click', async () => {
-    const sel = document.getElementById('sd-forwarder-select');
+    const modeSel = document.getElementById('sd-forwarder-mode-select');
     const result = document.getElementById('sd-forwarder-result');
     result.textContent = 'Saving…';
     try {
       const res = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/forwarder`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ forwarderID: sel.value || null }),
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ forwarderID: modeSel.value || null }),
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Failed');
@@ -4988,6 +5024,7 @@ async function runUpdateForwarders() {
           // refetches directly) but invisible in every haulier dropdown
           // until a hard page refresh.
           approvedForwarders = null;
+          approvedForwardersRaw = null;
           allForwarders = null;
           runUpdateForwarders();
         }

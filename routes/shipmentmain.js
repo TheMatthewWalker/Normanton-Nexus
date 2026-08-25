@@ -2781,10 +2781,10 @@ router.get('/:shipmentId/details', async (req, res) => {
           CAST(ISNULL(sm.customsRequired,  0) AS bit) AS customsRequired,
           CAST(ISNULL(sm.customsComplete,  0) AS bit) AS customsComplete,
           CAST(ISNULL(sm.shipmentCancelled,0) AS bit) AS shipmentCancelled,
-          fa.forwarderName
+          fa.forwarderName, fa.forwarderMode
         FROM log.ShipmentMain sm
         OUTER APPLY (
-          SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = sm.forwarderID
+          SELECT TOP 1 f.forwarderName, f.forwarderMode FROM log.Forwarders f WHERE f.forwarderID = sm.forwarderID
         ) fa
         WHERE sm.shipmentID = @shipmentId`);
 

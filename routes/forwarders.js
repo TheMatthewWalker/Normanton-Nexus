@@ -32,11 +32,16 @@ router.get('/id/:forwarderId', async (req, res) => {
 });
 
 // ── Get approved forwarders only ──
+// forwarderMode included (not just id/name) so callers that need to offer a
+// choice of transport mode per haulier — the same haulier name can have
+// several Forwarders rows, one per mode (Road/Groupage/Air/etc) — can group
+// by name and still tell the rows apart. Existing callers that only ever
+// used forwarderID/forwarderName are unaffected by the extra field.
 router.get('/approved', async (req, res) => {
     try {
         const pool = await getPool();
         const result = await pool.request()
-            .query('SELECT forwarderID, forwarderName FROM log.Forwarders WHERE forwarderApproval = 1 ORDER BY forwarderName');
+            .query('SELECT forwarderID, forwarderName, forwarderMode FROM log.Forwarders WHERE forwarderApproval = 1 ORDER BY forwarderName, forwarderMode');
         res.json(result.recordset);
     } catch (err) {
         res.status(500).json({ error: err.message });
