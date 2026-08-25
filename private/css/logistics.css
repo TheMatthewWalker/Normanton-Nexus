@@ -760,6 +760,16 @@ body::before {
 .sd-contact-table td:first-child { color: var(--text-muted); width: 70px; white-space: nowrap; }
 .sd-contact-email { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
 
+/* Dates & Status card — compact inline replacement for the old separate
+   "Edit Dates & Status" screen; stacked single-column since it only gets
+   1/3 of a sd-grid--3col row. */
+.sd-ds-grid { display: flex; flex-direction: column; gap: 8px; }
+.sd-ds-check { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; color: var(--text); }
+.sd-ds-check input { width: 14px; height: 14px; }
+.sd-ds-check input:disabled { cursor: not-allowed; }
+.sd-ds-field label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 2px; }
+.sd-ds-field input { width: 100%; }
+
 /* Packaging card */
 .sd-pkg-totals {
   display: flex;

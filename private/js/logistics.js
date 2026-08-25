@@ -329,6 +329,22 @@ async function loadAllForwarders() {
 }
 
 
+// Re-runs whatever shipment queue list is currently behind the open
+// Shipment Details modal, so an edit made inside the modal (dates/status,
+// haulier, customs) is reflected immediately in that list's grouping/
+// filtering/overdue flags — without this, a shipment corrected via the
+// modal stayed visually stale (e.g. still shown Overdue in In Transit)
+// until the operator manually left and re-opened the whole queue. A no-op
+// when the modal was reached some other way (search results, etc.), where
+// currentShipmentView is null and there's no list to refresh.
+function refreshCurrentShipmentQueueView() {
+  if (currentShipmentView === 'awaiting-booking') return runShipmentBooking();
+  if (currentShipmentView === 'customs-docs')     return runCustomsDocuments();
+  if (SHIPMENT_VIEWS[currentShipmentView])        return runShipmentQueue(currentShipmentView);
+  return Promise.resolve();
+}
+
+
 async function runShipmentQueue(mode) {
   const view = SHIPMENT_VIEWS[mode];
   if (!view) return;
@@ -3443,6 +3459,8 @@ function renderShipmentDetailModal(shipment, deliveries) {
   const plannedRaw = shipment.plannedCollection || shipment.plannedDelivery;
   const plannedStr = plannedRaw ? new Date(plannedRaw).toLocaleDateString('en-GB') : '—';
   const canBook = canEdit && !shipment.bookingStatus && !shipment.shipmentCancelled;
+  const fmtDate = d => d ? new Date(d).toISOString().slice(0, 10) : '';
+  const dsDisabled = canEdit ? '' : 'disabled';
 
   document.querySelector('#ps-modal-overlay').innerHTML = `<div class="ps-modal">
     <div class="ps-modal-header">
@@ -3464,23 +3482,34 @@ function renderShipmentDetailModal(shipment, deliveries) {
             <span id="sd-forwarder-result" style="font-size:12px;color:var(--text-muted)"></span>
           </div>` : ''}
         </div>
-        ${canEdit ? `<div class="sd-section">
-          <div class="sd-section-title">Actions</div>
-          <div class="sd-actions">
-            <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
-            <div id="sd-packing-list-result" style="font-size:12px;color:var(--text-muted)"></div>
-            ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
-            <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
-          </div>
-        </div>` : '<div class="sd-section"></div>'}
         <div class="sd-section">
-          <div class="sd-section-title">Customs</div>
-          <div class="sd-customs-row">
+          <div class="sd-section-title">Actions</div>
+          <div class="sd-customs-row" style="margin-bottom:10px">
             <span class="sd-badge ${esc(badgeClass)}">${esc(badgeText)}</span>
             ${toggleHtml}
             <span id="sd-customs-result" style="font-size:12px;color:var(--error)"></span>
           </div>
-          ${shipment.customsID ? `<div style="margin-top:8px;font-size:12px;color:var(--text-muted)">ID: ${esc(String(shipment.customsID))}</div>` : ''}
+          ${shipment.customsID ? `<div style="margin-bottom:10px;font-size:12px;color:var(--text-muted)">Customs ID: ${esc(String(shipment.customsID))}</div>` : ''}
+          ${canEdit ? `<div class="sd-actions">
+            <button class="btn-secondary" id="sd-packing-list-btn">Recreate Packing List</button>
+            <div id="sd-packing-list-result" style="font-size:12px;color:var(--text-muted)"></div>
+            ${isExWorks ? `<button class="btn-secondary" id="sd-email-btn">Resend Collection Email</button><div id="sd-email-result" style="font-size:12px;color:var(--text-muted)"></div>` : ''}
+            <button class="btn-submit" id="sd-deliveries-btn">Modify Deliveries →</button>
+          </div>` : ''}
+        </div>
+        <div class="sd-section">
+          <div class="sd-section-title">Dates &amp; Status</div>
+          <div class="sd-ds-grid">
+            <label class="sd-ds-check"><input type="checkbox" id="sd-ds-booking" ${dsDisabled} ${shipment.bookingStatus ? 'checked' : ''}> Booked</label>
+            <div class="sd-ds-field"><label class="tf-label">Planned Collection</label><input class="tf-input" type="date" id="sd-ds-plan-col" ${dsDisabled} value="${esc(fmtDate(shipment.plannedCollection))}"></div>
+            <label class="sd-ds-check"><input type="checkbox" id="sd-ds-col-status" ${dsDisabled} ${shipment.collectionStatus ? 'checked' : ''}> Collected</label>
+            <div class="sd-ds-field"><label class="tf-label">Actual Collection</label><input class="tf-input" type="date" id="sd-ds-act-col" ${dsDisabled} value="${esc(fmtDate(shipment.actualCollection))}"></div>
+            <label class="sd-ds-check"><input type="checkbox" id="sd-ds-del-status" ${dsDisabled} ${shipment.deliveryStatus ? 'checked' : ''}> Delivered</label>
+            <div class="sd-ds-field"><label class="tf-label">Planned Delivery</label><input class="tf-input" type="date" id="sd-ds-plan-del" ${dsDisabled} value="${esc(fmtDate(shipment.plannedDelivery))}"></div>
+            <div class="sd-ds-field"><label class="tf-label">Actual Delivery</label><input class="tf-input" type="date" id="sd-ds-act-del" ${dsDisabled} value="${esc(fmtDate(shipment.actualDelivery))}"></div>
+          </div>
+          ${canEdit ? `<button type="button" class="btn-secondary" id="sd-ds-save-btn" style="margin-top:8px;width:100%">Save Corrections</button>` : ''}
+          <div id="sd-ds-result" style="margin-top:6px;font-size:12px"></div>
         </div>
       </div>
       <div class="sd-section" style="margin-bottom:16px">
@@ -3492,7 +3521,6 @@ function renderShipmentDetailModal(shipment, deliveries) {
     </div>
     <div class="ps-modal-actions">
       <button class="btn-secondary" onclick="openShipmentEventLog(${shipment.shipmentID}, '${esc(shipmentRef)}')">Event Log</button>
-      ${canEdit ? `<button class="btn-secondary" onclick="openShipmentStatusEdit(${shipment.shipmentID}, '${esc(shipmentRef)}')">Edit Dates &amp; Status</button>` : ''}
       ${canBook ? `<button class="btn-submit" id="sd-book-btn">Book</button>` : ''}
       <button class="btn-secondary" onclick="closePickModal()">Close</button>
     </div>
@@ -3526,6 +3554,7 @@ function renderShipmentDetailModal(shipment, deliveries) {
         });
         const json = await res.json();
         if (!json.success) throw new Error(json.error || 'Failed');
+        await refreshCurrentShipmentQueueView();
         const fresh = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/details`);
         const freshJson = await fresh.json();
         if (freshJson.success) renderShipmentDetailModal(freshJson.data.shipment, freshJson.data.deliveries);
@@ -3535,6 +3564,44 @@ function renderShipmentDetailModal(shipment, deliveries) {
       }
     });
   }
+
+  // Dates & Status save (canEdit-gated — element doesn't exist for a
+  // view-only user, since the fields themselves are already disabled).
+  // Replaces the old separate "Edit Dates & Status" screen — corrections
+  // now happen inline in this card, in the space the Customs card used to
+  // occupy (Customs itself moved up into Actions, above).
+  const dsSaveBtn = document.getElementById('sd-ds-save-btn');
+  if (dsSaveBtn) dsSaveBtn.addEventListener('click', async () => {
+    const dsResult = document.getElementById('sd-ds-result');
+    const val = id => document.getElementById(id)?.value || null;
+    const chk = id => document.getElementById(id)?.checked ? 1 : 0;
+    dsSaveBtn.disabled = true; dsSaveBtn.textContent = 'Saving…';
+    dsResult.textContent = '';
+    try {
+      const res = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/status-dates`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookingStatus:     chk('sd-ds-booking'),
+          plannedCollection: val('sd-ds-plan-col'),
+          collectionStatus:  chk('sd-ds-col-status'),
+          actualCollection:  val('sd-ds-act-col'),
+          plannedDelivery:   val('sd-ds-plan-del'),
+          deliveryStatus:    chk('sd-ds-del-status'),
+          actualDelivery:    val('sd-ds-act-del'),
+        }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Save failed');
+      await refreshCurrentShipmentQueueView();
+      const fresh = await fetch(`/api/shipmentmain/${encodeURIComponent(shipment.shipmentID)}/details`);
+      const freshJson = await fresh.json();
+      if (freshJson.success) renderShipmentDetailModal(freshJson.data.shipment, freshJson.data.deliveries);
+    } catch (err) {
+      dsResult.style.color = 'var(--error,#DC2626)';
+      dsResult.textContent = err.message;
+      dsSaveBtn.disabled = false; dsSaveBtn.textContent = 'Save Corrections';
+    }
+  });
 
   // Haulier save (canEdit-gated — element doesn't exist for a view-only user)
   const forwarderSaveBtn = document.getElementById('sd-forwarder-save');
@@ -3549,7 +3616,10 @@ function renderShipmentDetailModal(shipment, deliveries) {
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Failed');
       result.textContent = 'Saved.';
-      runShipmentBooking();
+      // Was hardcoded to runShipmentBooking() regardless of which queue the
+      // modal was actually opened from (e.g. In Transit) — refreshes
+      // whichever one is actually behind the modal instead.
+      refreshCurrentShipmentQueueView();
     } catch (err) { result.textContent = err.message; }
   });
 
@@ -5997,137 +6067,6 @@ async function openShipmentEventLog(shipmentId, shipmentRef) {
     body.innerHTML = `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
   }
 }
-
-// ── Edit Dates & Status ───────────────────────────────────────────────────────
-async function openShipmentStatusEdit(shipmentId, shipmentRef) {
-  openModal(`<div class="ps-modal" style="max-width:600px;width:92vw">
-    <div class="ps-modal-header">
-      <div>
-        <div class="ps-modal-title">Edit Dates &amp; Status</div>
-        <div class="ps-modal-sub">Shipment ${esc(String(shipmentRef))}</div>
-      </div>
-      <button class="ps-modal-close" onclick="closePickModal()">×</button>
-    </div>
-    <div class="ps-modal-body" id="sse-body">
-      <div class="sap-loading"><div class="spinner"></div>Loading…</div>
-    </div>
-    <div class="ps-modal-actions">
-      <button class="btn-secondary" onclick="openShipmentDetailModal(${Number(shipmentId)})">&larr; Back</button>
-      <button class="btn-submit" id="sse-save" disabled>Save Corrections</button>
-    </div>
-  </div>`);
-
-  try {
-    const res  = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/details`);
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error || 'Shipment not found');
-    const s = json.data.shipment;
-
-    const fmt = d => d ? new Date(d).toISOString().slice(0, 10) : '';
-
-    document.getElementById('sse-body').innerHTML = `
-      <form class="transfer-form" style="padding:0">
-        <div class="tf-section-label">Booking</div>
-        <div class="tf-row">
-          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
-            <label class="tf-label">Booking Status</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
-              <input type="checkbox" id="sse-booking" style="width:16px;height:16px" ${s.bookingStatus ? 'checked' : ''}>
-              Booked
-            </label>
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Planned Collection</label>
-            <input class="tf-input" id="sse-plan-col" type="date" value="${fmt(s.plannedCollection)}">
-          </div>
-        </div>
-
-        <div class="tf-section-label">Collection</div>
-        <div class="tf-row">
-          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
-            <label class="tf-label">Collection Status</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
-              <input type="checkbox" id="sse-col-status" style="width:16px;height:16px" ${s.collectionStatus ? 'checked' : ''}>
-              Collected
-            </label>
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Actual Collection Date</label>
-            <input class="tf-input" id="sse-act-col" type="date" value="${fmt(s.actualCollection)}">
-          </div>
-        </div>
-
-        <div class="tf-section-label">Delivery</div>
-        <div class="tf-row">
-          <div class="tf-field" style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px">
-            <label class="tf-label">Delivery Status</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;color:var(--text)">
-              <input type="checkbox" id="sse-del-status" style="width:16px;height:16px" ${s.deliveryStatus ? 'checked' : ''}>
-              Delivered
-            </label>
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Planned Delivery</label>
-            <input class="tf-input" id="sse-plan-del" type="date" value="${fmt(s.plannedDelivery)}">
-          </div>
-          <div class="tf-field">
-            <label class="tf-label">Actual Delivery Date</label>
-            <input class="tf-input" id="sse-act-del" type="date" value="${fmt(s.actualDelivery)}">
-          </div>
-        </div>
-
-        <div id="sse-result" style="margin-top:10px;font-size:13px"></div>
-      </form>`;
-
-    // Auto-fill actual dates when status checkboxes are ticked and date is empty
-    document.getElementById('sse-col-status').addEventListener('change', function () {
-      const actCol = document.getElementById('sse-act-col');
-      if (this.checked && !actCol.value) actCol.value = new Date().toISOString().slice(0, 10);
-    });
-    document.getElementById('sse-del-status').addEventListener('change', function () {
-      const actDel = document.getElementById('sse-act-del');
-      if (this.checked && !actDel.value) actDel.value = new Date().toISOString().slice(0, 10);
-    });
-
-    const saveBtn = document.getElementById('sse-save');
-    saveBtn.disabled = false;
-    saveBtn.addEventListener('click', async () => {
-      saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
-      const resultEl = document.getElementById('sse-result');
-      const val = id => document.getElementById(id)?.value || null;
-      const chk = id => document.getElementById(id)?.checked ? 1 : 0;
-
-      try {
-        const res2 = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/status-dates`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            bookingStatus:     chk('sse-booking'),
-            plannedCollection: val('sse-plan-col'),
-            collectionStatus:  chk('sse-col-status'),
-            actualCollection:  val('sse-act-col'),
-            plannedDelivery:   val('sse-plan-del'),
-            deliveryStatus:    chk('sse-del-status'),
-            actualDelivery:    val('sse-act-del'),
-          }),
-        });
-        const json2 = await res2.json();
-        if (!json2.success) throw new Error(json2.error || 'Save failed');
-        resultEl.style.color = 'var(--success,#059669)';
-        resultEl.textContent  = 'Saved. Returning to detail…';
-        setTimeout(() => openShipmentDetailModal(shipmentId), 800);
-      } catch (err) {
-        resultEl.style.color = 'var(--error,#DC2626)';
-        resultEl.textContent  = `✕ ${err.message}`;
-        saveBtn.disabled = false; saveBtn.textContent = 'Save Corrections';
-      }
-    });
-  } catch (err) {
-    document.getElementById('sse-body').innerHTML =
-      `<div class="sap-error" style="padding:24px">✕ ${esc(err.message)}</div>`;
-  }
-}
-
 
 function shipmentEventCategoryStyle(category) {
   const c = String(category || '').toUpperCase();
