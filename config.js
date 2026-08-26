@@ -49,7 +49,11 @@ export const sapConfig = {
   user: config.sapConfig.user,
   password: config.sapConfig.password,
   lang: config.sapConfig.lang,
-  url: config.sapConfig.url
+  // SAP_SERVER_URL overrides config.json's real address for local testing
+  // against a SapServer instance running on this same machine (see the
+  // "server-test" npm script) - without it, every ${sapConfig.url}/api/...
+  // call throughout routes/ would still hit production SAP.
+  url: process.env.SAP_SERVER_URL || config.sapConfig.url
 };
 
 

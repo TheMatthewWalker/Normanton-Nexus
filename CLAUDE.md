@@ -16,6 +16,14 @@
 
 ```bash
 node server.js                    # dev/foreground run — binds 443 + 80 directly
+npm run server-test                # same server.js, but SAP_SERVER_URL overrides config.json's
+                                    # address to point at a SapServer instance running on this
+                                    # same machine instead of production SAP - see config.js's
+                                    # sapConfig.url. Defaults to http://localhost:7200 (SapServer's
+                                    # plain-HTTP IIS binding - see that repo's scripts/install.ps1),
+                                    # which sidesteps needing a trusted cert for a local SapServer's
+                                    # self-signed HTTPS binding, since routes/sap.js's sapAgent
+                                    # (a pinned CA cert) only applies to https:// URLs.
 ```
 
 Production runs as a Windows Service instead:

@@ -5,6 +5,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "server-test": "cross-env SAP_SERVER_URL=http://localhost:7200 node server.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "migrate:nexus": "knex migrate:latest --env nexus --knexfile knexfile.cjs",
     "migrate:nexus_operations": "knex migrate:latest --env nexus_operations --knexfile knexfile.cjs",
@@ -52,6 +53,7 @@
     "resend": "^6.4.2"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "jest": "^30.4.2",
     "knex": "^3.3.0",
     "supertest": "^7.2.2",
