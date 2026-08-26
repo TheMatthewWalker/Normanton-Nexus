@@ -411,6 +411,21 @@ router.get('/declarations/:declarationId/pdf', requirePermission('LOG_MRP'), asy
     if (!declaration) return res.status(404).json({ success: false, error: { message: 'Declaration not found.' } });
 
     const vendor = await db.getConsignmentVendor(declaration.VendorId);
+
+    // Per-material Starting Stock / Deliveries, since this material's
+    // previous Confirmed declaration — see getConsignmentDeclarationStockSummary.
+    // Consumption/Ending Stock are derived here from the declaration's own
+    // lines rather than re-queried, since we already have QtyAllocated.
+    const materials = [...new Set(declaration.lines.map(l => l.Material))];
+    const stockSummary = await db.getConsignmentDeclarationStockSummary(declaration.VendorId, declaration.DeclarationId, materials);
+    const materialSummaries = materials.map(material => {
+      const consumption = declaration.lines
+        .filter(l => l.Material === material)
+        .reduce((s, l) => s + Number(l.QtyAllocated), 0);
+      const { startingStock = 0, deliveries = 0 } = stockSummary[material] || {};
+      return { material, startingStock, deliveries, consumption, endingStock: startingStock - consumption };
+    });
+
     const pdf = await buildConsignmentDeclarationPdf({
       declarationId: declaration.DeclarationId,
       vendorName: declaration.VendorName,
@@ -420,6 +435,7 @@ router.get('/declarations/:declarationId/pdf', requirePermission('LOG_MRP'), asy
       totalQty: declaration.TotalQty,
       createdAtUtc: declaration.CreatedAtUtc,
       settlementDocumentNumber: declaration.SettlementDocumentNumber,
+      materialSummaries,
       lines: declaration.lines.map(l => ({
         material: l.Material,
         invoiceNumber: l.InvoiceNumber,

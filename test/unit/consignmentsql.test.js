@@ -305,6 +305,27 @@ describe('cancelDeclaration', () => {
   });
 });
 
+describe('getConsignmentDeclarationStockSummary', () => {
+  test('computes startingStock as DeliveredTotal minus Declared(Confirmed, excluding this declaration), one query per material', async () => {
+    queueResults(
+      { recordset: [{ DeliveredTotal: 500, DeliveredSinceLastDecl: 120, DeclaredConfirmedExcludingThis: 100 }] },
+      { recordset: [{ DeliveredTotal: 200, DeliveredSinceLastDecl: 0, DeclaredConfirmedExcludingThis: 0 }] },
+    );
+    const result = await db.getConsignmentDeclarationStockSummary(5, 1, ['MAT-A', 'MAT-B']);
+    expect(result).toEqual({
+      'MAT-A': { startingStock: 400, deliveries: 120 },
+      'MAT-B': { startingStock: 200, deliveries: 0 },
+    });
+    expect(dbRequest.query).toHaveBeenCalledTimes(2);
+  });
+
+  test('defaults to zero on an unexpected empty recordset', async () => {
+    queueResults({ recordset: [] });
+    const result = await db.getConsignmentDeclarationStockSummary(5, 1, ['MAT-A']);
+    expect(result).toEqual({ 'MAT-A': { startingStock: 0, deliveries: 0 } });
+  });
+});
+
 describe('getVendorDeliveredAndDeclaredTotals / listDeclarations', () => {
   test('getVendorDeliveredAndDeclaredTotals returns the per-material recordset', async () => {
     queueResults({ recordset: [{ Material: 'M1', Delivered: 100, Declared: 40 }] });

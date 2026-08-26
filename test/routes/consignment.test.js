@@ -26,6 +26,7 @@ const db = {
   getConsignmentStockSnapshot: jest.fn(),
   getConsignmentStockSnapshotMeta: jest.fn(),
   getVendorDeliveredAndDeclaredTotals: jest.fn(),
+  getConsignmentDeclarationStockSummary: jest.fn(),
   createDeclaration: jest.fn(),
   setDeclarationLines: jest.fn(),
   getDeclaration: jest.fn(),
@@ -47,11 +48,13 @@ const mrpUser    = { userID: 1, username: 'mrp.user', role: 'operator', departme
 const noPermUser = { userID: 2, username: 'no.perm', role: 'operator', departments: ['logistics'], permissions: [] };
 
 let consignmentRouter;
+let buildConsignmentDeclarationPdf;
 let app;
 let appNoPerm;
 
 beforeAll(async () => {
   ({ default: consignmentRouter } = await import('../../routes/consignment.js'));
+  ({ buildConsignmentDeclarationPdf } = await import('../../lib/consignmentDeclarationPdf.js'));
   app       = buildTestApp(consignmentRouter, { sessionUser: mrpUser });
   appNoPerm = buildTestApp(consignmentRouter, { sessionUser: noPermUser });
 });
@@ -60,6 +63,8 @@ beforeEach(() => {
   resetMockSql({ pool, request: dbRequest, connect });
   Object.values(db).forEach(fn => fn.mockReset());
   axiosMock.get.mockReset();
+  buildConsignmentDeclarationPdf.mockClear();
+  buildConsignmentDeclarationPdf.mockResolvedValue(Buffer.from('fake-pdf'));
 });
 
 describe('permission gating', () => {
@@ -197,5 +202,45 @@ describe('POST /declarations/:declarationId/confirm', () => {
 
     expect(res.status).toBe(200);
     expect(db.confirmDeclaration).toHaveBeenCalledWith('1', '1700003535', 100, 'mrp.user');
+  });
+});
+
+describe('GET /declarations/:declarationId/pdf', () => {
+  test('builds per-material stock summaries from the declaration lines and DB balance', async () => {
+    db.getDeclaration.mockResolvedValueOnce({
+      DeclarationId: 1, VendorId: 5, VendorName: 'Raaj', Status: 'Draft',
+      AllocationMethod: 'FEFO', TotalQty: 150, CreatedAtUtc: '2026-08-20T00:00:00Z',
+      SettlementDocumentNumber: null,
+      lines: [
+        { Material: 'MAT-A', InvoiceNumber: 'INV-1', MaterialDocument: 'GR1', ExpiryDate: '2026-12-01', QtyAllocated: 100, Uom: 'KG' },
+        { Material: 'MAT-B', InvoiceNumber: 'INV-2', MaterialDocument: 'GR2', ExpiryDate: '2026-11-01', QtyAllocated: 50, Uom: 'KG' },
+      ],
+    });
+    db.getConsignmentVendor.mockResolvedValueOnce({ VendorId: 5, VendorName: 'Raaj', SapVendorNumber: '100200' });
+    db.getConsignmentDeclarationStockSummary.mockResolvedValueOnce({
+      'MAT-A': { startingStock: 500, deliveries: 120 },
+      'MAT-B': { startingStock: 200, deliveries: 0 },
+    });
+
+    const res = await request(app).get('/declarations/1/pdf');
+
+    expect(res.status).toBe(200);
+    expect(db.getConsignmentDeclarationStockSummary).toHaveBeenCalledWith(5, 1, ['MAT-A', 'MAT-B']);
+    expect(buildConsignmentDeclarationPdf).toHaveBeenCalledWith(expect.objectContaining({
+      materialSummaries: [
+        { material: 'MAT-A', startingStock: 500, deliveries: 120, consumption: 100, endingStock: 400 },
+        { material: 'MAT-B', startingStock: 200, deliveries: 0, consumption: 50, endingStock: 150 },
+      ],
+    }));
+  });
+
+  test('returns 404 when the declaration does not exist', async () => {
+    db.getDeclaration.mockResolvedValueOnce(null);
+
+    const res = await request(app).get('/declarations/999/pdf');
+
+    expect(res.status).toBe(404);
+    expect(db.getConsignmentDeclarationStockSummary).not.toHaveBeenCalled();
+    expect(buildConsignmentDeclarationPdf).not.toHaveBeenCalled();
   });
 });

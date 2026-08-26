@@ -332,6 +332,58 @@ export async function getVendorDeliveredAndDeclaredTotals(vendorId) {
   return recordset;
 }
 
+// Per-material Starting Stock / Deliveries / Ending Stock for ONE declaration's
+// printable header — see lib/consignmentDeclarationPdf.js. Deliberately scoped
+// "since the material's previous Confirmed declaration" (not all-time, and not
+// the live SAP snapshot) so the figures read like a period statement — Opening
+// + Deliveries − Consumption = Closing, the same shape as the old per-vendor
+// workbooks (see migrate_consignment_tracker.sql's header) — without depending
+// on daily stock-snapshot sync timing the way the dashboard's "Current Stock"
+// column does.
+//
+// Starting Stock = Delivered(all-time) − Declared(Confirmed, all-time,
+// excluding this declaration) — i.e. the book balance immediately before this
+// declaration's own consumption. Ending Stock is computed by the caller as
+// Starting Stock − this declaration's own qtyAllocated for that material
+// (already known from the declaration's lines, so not re-derived here).
+export async function getConsignmentDeclarationStockSummary(vendorId, declarationId, materials) {
+  const pool = await getPool();
+  const out = {};
+  for (const material of materials) {
+    const { recordset } = await pool.request()
+      .input('vendorId', sql.Int, vendorId)
+      .input('declarationId', sql.Int, declarationId)
+      .input('material', sql.NVarChar(18), material)
+      .query(`
+        DECLARE @prevDeclDate DATETIME = (
+          SELECT TOP 1 dec.CreatedAtUtc
+          FROM log.ConsignmentDeclaration dec
+          JOIN log.ConsignmentDeclarationLine dl ON dl.DeclarationId = dec.DeclarationId
+          WHERE dec.VendorId = @vendorId AND dl.Material = @material
+            AND dec.Status = 'Confirmed' AND dec.DeclarationId <> @declarationId
+          ORDER BY dec.CreatedAtUtc DESC
+        );
+
+        SELECT
+          ISNULL(SUM(d.Quantity), 0) AS DeliveredTotal,
+          ISNULL(SUM(CASE WHEN @prevDeclDate IS NULL
+                             OR ISNULL(d.PostingDate, ISNULL(d.DocumentDate, d.CreatedAtUtc)) > @prevDeclDate
+                           THEN d.Quantity ELSE 0 END), 0) AS DeliveredSinceLastDecl,
+          (SELECT ISNULL(SUM(dl2.QtyAllocated), 0)
+           FROM log.ConsignmentDeclarationLine dl2
+           JOIN log.ConsignmentDeclaration dec2 ON dec2.DeclarationId = dl2.DeclarationId
+           WHERE dec2.Status = 'Confirmed' AND dl2.Material = @material AND dec2.VendorId = @vendorId
+             AND dec2.DeclarationId <> @declarationId) AS DeclaredConfirmedExcludingThis
+        FROM log.ConsignmentDelivery d
+        WHERE d.VendorId = @vendorId AND d.Material = @material
+      `);
+    const row = recordset[0] || { DeliveredTotal: 0, DeliveredSinceLastDecl: 0, DeclaredConfirmedExcludingThis: 0 };
+    const startingStock = Number(row.DeliveredTotal) - Number(row.DeclaredConfirmedExcludingThis);
+    out[material] = { startingStock, deliveries: Number(row.DeliveredSinceLastDecl) };
+  }
+  return out;
+}
+
 // ── Declarations ──────────────────────────────────────────────────────────────
 
 export async function createDeclaration(vendorId, allocationMethod, lines, username) {
