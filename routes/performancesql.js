@@ -2781,7 +2781,7 @@ export async function markShipmentReceived(shipmentId, { receivedBy, receivedAt,
       .input('receivedQty',          sql.Decimal(15, 3), order.ReceivedQty)
       .input('supplierReference',    sql.NVarChar(50),  order.SupplierReference)
       .input('sapMaterialDocument',  sql.NVarChar(20),  sapResult.documentNumber || null)
-      .input('sapGrError',           sql.NVarChar(500), sapResult.success === false ? (sapResult.error || 'Goods receipt failed.') : null)
+      .input('sapGrError',           sql.NVarChar(500), sapResult.success === false ? ((typeof sapResult.error === 'string' ? sapResult.error : sapResult.error?.message) || 'Goods receipt failed.') : null)
       .input('sapGrSkipped',         sql.Bit, sapResult.skipped ? 1 : 0)
       .query(`
         UPDATE log.PurchaseOrderSuggestion SET
@@ -2861,7 +2861,7 @@ export async function undoShipmentReceived(shipmentId, { skipSap, reverseGoodsRe
       stillPostedCount++;
       await pool.request()
         .input('suggestionId', sql.Int, order.SuggestionId)
-        .input('sapGrError',   sql.NVarChar(500), reverseResult.error || 'Goods receipt reversal failed.')
+        .input('sapGrError',   sql.NVarChar(500), (typeof reverseResult.error === 'string' ? reverseResult.error : reverseResult.error?.message) || 'Goods receipt reversal failed.')
         .query(`UPDATE log.PurchaseOrderSuggestion SET SapGrError = @sapGrError, UpdatedAtUtc = GETUTCDATE() WHERE SuggestionId = @suggestionId`);
       continue;
     }

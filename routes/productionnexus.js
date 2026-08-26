@@ -189,7 +189,7 @@ async function backflushBraidedComponents(pool, uid, material, totalLength, pare
         Customer:  '',
       });
     } catch (err) {
-      const msg = err.response?.data?.error || err.message;
+      const msg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
       throw new Error(`Braid consumption backflush failed for ${braidMaterial} (batch ${braid.BraidRef}, ${qty.toFixed(3)} M): ${msg}`);
     }
 
@@ -691,7 +691,7 @@ router.post('/process/:processCode/entry', async (req, res) => {
       .input('rid', sql.Int, recordID)
       .query(`UPDATE ${cfg.table} SET Status=6 WHERE ${cfg.pk}=@rid`);
 
-    const errMsg = sapErr.response?.data?.error || sapErr.message;
+    const errMsg = sapErr.response?.data?.error?.message || sapErr.response?.data?.error || sapErr.message;
     audit('SAP_ERROR', req.session?.user?.username, `'${batchRef}' FAILED - Message = "${errMsg}"`, req);
 
     await pool.request()
@@ -1135,7 +1135,7 @@ router.post('/process/:processCode/complete/:recordID', async (req, res) => {
       });
 
     } catch (sapErr) {
-      const errMsg = sapErr.response?.data?.error || sapErr.message;
+      const errMsg = sapErr.response?.data?.error?.message || sapErr.response?.data?.error || sapErr.message;
       await markSapFailed(res, req, pool, code, cfg, recordID, batchRef, length, errMsg, uid);
     }
   } catch (err) {
@@ -2309,7 +2309,7 @@ router.post('/reversal/execute', requirePermission('PROD_SUPERVISOR'), async (re
     return res.status(502).json({ success: false, error: errMsg });
 
   } catch (err) {
-    const errMsg = err.response?.data?.error || err.message;
+    const errMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
     audit('SAP_ERROR', req.session?.user?.username, `'${materialDocument}' REVERSAL FAILED - Message = "${errMsg}"`, req);
     res.status(502).json({ success: false, error: errMsg });
   }
@@ -2749,7 +2749,7 @@ router.post('/mixing/entry', async (req, res) => {
       anyFailed = true;
       const d = sapErr.response?.data;
       const errMsg = (typeof d === 'string' ? d : null)
-        || d?.error || d?.message || d?.title
+        || (typeof d?.error === 'string' ? d.error : d?.error?.message) || d?.message || d?.title
         || (d?.errors ? JSON.stringify(d.errors) : null)
         || sapErr.message;
 
@@ -2821,7 +2821,7 @@ router.get('/process/:processCode/bom-preview', async (req, res) => {
     const bomRows = await fetchBom(material);
     res.json({ success: true, data: bomRows });
   } catch (err) {
-    const msg = err.response?.data?.error || err.message;
+    const msg = err.response?.data?.error?.message || err.response?.data?.error || err.message;
     res.status(502).json({ success: false, error: `BOM lookup failed: ${msg}` });
   }
 });
@@ -3243,7 +3243,7 @@ router.post('/drumming/entry', async (req, res) => {
       .input('rid', sql.Int, drummingID)
       .query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
 
-    const errMsg = sapErr.response?.data?.error || sapErr.message;
+    const errMsg = sapErr.response?.data?.error?.message || sapErr.response?.data?.error || sapErr.message;
     audit('SAP_ERROR', req.session?.user?.username, `'${drumRef}' FAILED - Message = "${errMsg}"`, req);
 
     await pool.request()
@@ -3591,7 +3591,7 @@ async function submitDrumming(req, res, entryType) {
       .input('rid', sql.Int, drummingID)
       .query(`UPDATE prod.Drumming SET Status=6 WHERE DrummingID=@rid`);
 
-    const errMsg = sapErr.response?.data?.error || sapErr.message;
+    const errMsg = sapErr.response?.data?.error?.message || sapErr.response?.data?.error || sapErr.message;
     audit('SAP_ERROR', req.session?.user?.username, `'${drumRef}' FAILED - Message = "${errMsg}"`, req);
 
     await pool.request()
@@ -4342,7 +4342,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
           results.push({ tubID: tub.TubID, success: true, materialDocument: sapMatDoc });
         } catch (sapErr) {
           anyFailed = true;
-          const errMsg = sapErr.response?.data?.error || sapErr.message;
+          const errMsg = sapErr.response?.data?.error?.message || sapErr.response?.data?.error || sapErr.message;
           audit('SAP_ERROR', req.session?.user?.username, `'${mixRef}' FAILED - Message = "${errMsg}"`, req);
           await pool.request()
             .input('tid',sql.Int,tub.TubID).input('err',sql.NVarChar(sql.MAX),errMsg)
@@ -4609,7 +4609,7 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
 
   } catch (sapErr) {
     const pool2 = await getNexusOperationsPool();
-    const errMsg = sapErr.response?.data?.error || sapErr.message;
+    const errMsg = sapErr.response?.data?.error?.message || sapErr.response?.data?.error || sapErr.message;
     audit('SAP_ERROR', req.session?.user?.username, `'${code}${String(id).padStart(8,'0')}' FAILED - Message = "${errMsg}"`, req);
     const cfg = PROCESS[code];
     if (cfg) {
@@ -5083,7 +5083,7 @@ async function reverseScrapDocumentItem({ scrapDocumentID, materialDocument }, u
     return { status: 200, success: true, data: { reversalDocument: reversalDoc } };
   } catch (err) {
     const d = err.response?.data;
-    const errMsg = (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title || err.message;
+    const errMsg = (typeof d === 'string' ? d : null) || (typeof d?.error === 'string' ? d.error : d?.error?.message) || d?.message || d?.title || err.message;
     audit('SAP_ERROR', req.session?.user?.username,
       `'${materialDocument}' SCRAP REVERSAL FAILED - Message = "${errMsg}"`, req);
     return { status: 502, success: false, error: errMsg };
@@ -5301,7 +5301,7 @@ router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, 
         const raw = await sapPost('/api/production/reverse-backflush', { MaterialDocument: String(matDoc) }, 120000);
 
         if (raw?.success === false) {
-          const errMsg = raw.error || 'SAP server error';
+          const errMsg = (typeof raw.error === 'string' ? raw.error : raw.error?.message) || 'SAP server error';
           audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "${errMsg}"`, req);
           send({ type: 'progress', done: ++done, total, materialDocument: matDoc, success: false, error: errMsg });
           return;
@@ -5339,7 +5339,7 @@ router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, 
 
       } catch (err) {
         const d = err.response?.data;
-        const errMsg = (typeof d === 'string' ? d : null) || d?.error || d?.message || d?.title || err.message;
+        const errMsg = (typeof d === 'string' ? d : null) || (typeof d?.error === 'string' ? d.error : d?.error?.message) || d?.message || d?.title || err.message;
         audit('SAP_ERROR', req.session?.user?.username, `'${matDoc}' REVERSAL FAILED - Message = "${errMsg}"`, req);
         send({ type: 'progress', done: ++done, total, materialDocument: matDoc, success: false, error: errMsg });
       }
