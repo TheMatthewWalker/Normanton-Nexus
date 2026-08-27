@@ -150,6 +150,17 @@ export async function listConsignmentDeliveries(vendorId, material) {
 // this codebase (performancesql.js's insertDeliveryOrderLinksIfMissing) so a
 // re-run of the daily sync never creates duplicates or disturbs an existing
 // row's RemainingQty (which may have already been partly declared).
+//
+// Also backfills InvoiceNumber/ReversalOfMaterialDocument/
+// ReversalOfMaterialDocItem onto an ALREADY-EXISTING row whenever the fresh
+// SAP pull has a value the stored row is still missing (COALESCE-guarded —
+// never overwrites a non-blank stored value, only fills a gap). Both the
+// daily cron and the manual /sync route always re-pull FULL vendor history
+// (no sinceDate floor — see fetchSapVendorGr's call sites), so this is what
+// lets a field that used to come back blank from SapServer (invoice number
+// before the 2026-07-31 XBLNR_MKPF fix; SMBLN/SMBLP before this reversal-
+// tracking change) get filled in retroactively on the next ordinary sync,
+// without a separate one-off backfill script.
 export async function upsertConsignmentDeliveriesFromSap(vendorId, rows) {
   if (!rows.length) return { inserted: 0 };
   const pool = await getPool();
@@ -179,20 +190,36 @@ export async function upsertConsignmentDeliveriesFromSap(vendorId, rows) {
           .input('uom', sql.NVarChar(3), r.uom || null)
           .input('invoiceNumber', sql.NVarChar(30), r.invoiceNumber || null)
           .input('documentDate', sql.DateTime, r.documentDate || null)
-          .input('postingDate', sql.DateTime, r.postingDate || null);
+          .input('postingDate', sql.DateTime, r.postingDate || null)
+          .input('reversalOfMaterialDocument', sql.NVarChar(10), r.reversalOfMaterialDocument || null)
+          .input('reversalOfMaterialDocItem', sql.NVarChar(4), r.reversalOfMaterialDocItem || null);
 
         const result = await req.query(`
           INSERT INTO log.ConsignmentDelivery
             (VendorId, Material, MaterialDocument, MaterialDocItem, Quantity, Uom,
-             InvoiceNumber, DocumentDate, PostingDate, RemainingQty, Source)
+             InvoiceNumber, DocumentDate, PostingDate, RemainingQty, Source,
+             ReversalOfMaterialDocument, ReversalOfMaterialDocItem)
           SELECT @vendorId, @material, @materialDocument, @materialDocItem, @quantity, @uom,
-                 @invoiceNumber, @documentDate, @postingDate, @quantity, 'SAP'
+                 @invoiceNumber, @documentDate, @postingDate, @quantity, 'SAP',
+                 @reversalOfMaterialDocument, @reversalOfMaterialDocItem
           WHERE NOT EXISTS (
             SELECT 1 FROM log.ConsignmentDelivery
             WHERE MaterialDocument = @materialDocument AND MaterialDocItem = @materialDocItem
           )
         `);
         inserted += result.rowsAffected[0] || 0;
+
+        await req.query(`
+          UPDATE log.ConsignmentDelivery SET
+            InvoiceNumber = COALESCE(NULLIF(InvoiceNumber, ''), @invoiceNumber),
+            ReversalOfMaterialDocument = COALESCE(ReversalOfMaterialDocument, @reversalOfMaterialDocument),
+            ReversalOfMaterialDocItem = COALESCE(ReversalOfMaterialDocItem, @reversalOfMaterialDocItem)
+          WHERE MaterialDocument = @materialDocument AND MaterialDocItem = @materialDocItem
+            AND (
+              (InvoiceNumber IS NULL OR InvoiceNumber = '') AND @invoiceNumber IS NOT NULL
+              OR (ReversalOfMaterialDocument IS NULL AND @reversalOfMaterialDocument IS NOT NULL)
+            )
+        `);
       }
       await tx.commit();
     } catch (err) {
@@ -201,6 +228,138 @@ export async function upsertConsignmentDeliveriesFromSap(vendorId, rows) {
     }
   }
   return { inserted };
+}
+
+// ── Reversal-chain cancellation ──────────────────────────────────────────────
+//
+// A goods receipt line cancelled in SAP (transaction MBST) doesn't disappear
+// — it gets a second MSEG line (same BWART=101 family, opposite SHKZG sign
+// via a 102, or — confirmed for real against this plant's Raaj Ratna data —
+// sometimes a further "cancel-of-a-cancel" back to BWART=101/positive) whose
+// SMBLN/SMBLP point back at the document+item it reverses. The aggregate
+// Delivered/Undeclared balance (getVendorDeliveredAndDeclaredTotals) already
+// nets these correctly since it just sums signed Quantity — but RemainingQty
+// is tracked per delivery LINE, and nothing ever zeroed it out for a
+// cancelled line (only a Nexus-confirmed declaration decrements it). A
+// cancelled line's full original quantity therefore sat there forever,
+// eventually aging past ExpiryDays and firing a false "overdue" warning for
+// material that was never physically outstanding — confirmed for real: Raaj
+// Ratna doc 5005206623 (cancelled same-day by 5005206624/MBST) and the chain
+// 5005174284 → 5005203102 (cancels it) → 5005203103 (cancels THAT
+// cancellation, MBST) were both showing as overdue.
+//
+// computeReversalCancellations is the pure parity-walk: build each
+// cancellation chain via ReversalOfMaterialDocument/Item (root = a row
+// nothing else's SMBLN can walk past, i.e. its own reversal target is blank
+// or not present in this row set), walk forward from the root assigning
+// alternating live/cancelled state (root starts live), and the chain's FINAL
+// state at its last link determines whether the ROOT ends up live or
+// cancelled — an even total chain length (root + odd number of reversals)
+// cancels the root; odd length (root + even number of reversals) restores
+// it. Every non-root row in a chain is always cancelled regardless of parity
+// — it only ever existed as a paperwork correction, never independent stock
+// (and forcing the ROOT, not whichever row is chain-final, to carry the
+// live RemainingQty keeps ExpiryDate calculations anchored to the true
+// original PostingDate, not a later correction's date).
+//
+// A row is only ever actually zeroed if RemainingQty still exactly equals
+// its own Quantity (i.e. nothing has genuinely declared against it yet) —
+// a row a real Nexus declaration already touched is left alone and reported
+// in needsReview instead of silently overwritten, since that declaration is
+// a real settlement event this function has no business contradicting.
+export function computeReversalCancellations(rows) {
+  const byKey = new Map();
+  for (const r of rows) byKey.set(`${r.MaterialDocument}|${r.MaterialDocItem}`, r);
+
+  // reverseLookup: target key -> the row(s) whose SMBLN/SMBLP point at it.
+  const reverseLookup = new Map();
+  for (const r of rows) {
+    if (!r.ReversalOfMaterialDocument) continue;
+    const targetKey = `${r.ReversalOfMaterialDocument}|${r.ReversalOfMaterialDocItem}`;
+    if (!byKey.has(targetKey)) continue; // reverses something outside this row set — can't chain past it
+    if (!reverseLookup.has(targetKey)) reverseLookup.set(targetKey, []);
+    reverseLookup.get(targetKey).push(r);
+  }
+
+  const toZero = [];
+  const needsReview = [];
+  const visited = new Set();
+
+  const isRoot = (r) => {
+    if (!r.ReversalOfMaterialDocument) return true;
+    return !byKey.has(`${r.ReversalOfMaterialDocument}|${r.ReversalOfMaterialDocItem}`);
+  };
+
+  for (const root of rows) {
+    const rootKey = `${root.MaterialDocument}|${root.MaterialDocItem}`;
+    if (visited.has(rootKey) || !isRoot(root)) continue;
+
+    // Walk forward from the root. Anomaly guard: if more than one row
+    // reverses the same document, only the first (deterministic input
+    // order) is followed — the rest are reported, not silently dropped.
+    const chain = [root];
+    visited.add(rootKey);
+    let current = root;
+    for (let hops = 0; hops < rows.length; hops++) {
+      const key = `${current.MaterialDocument}|${current.MaterialDocItem}`;
+      const reversers = reverseLookup.get(key) || [];
+      if (!reversers.length) break;
+      const [next, ...extra] = reversers;
+      for (const e of extra) needsReview.push({ row: e, reason: 'multiple documents reverse the same target' });
+      const nextKey = `${next.MaterialDocument}|${next.MaterialDocItem}`;
+      if (visited.has(nextKey)) break; // cycle guard — shouldn't happen with real SAP data
+      visited.add(nextKey);
+      chain.push(next);
+      current = next;
+    }
+
+    if (chain.length === 1) continue; // standalone row, nothing to cancel
+
+    const rootLive = chain.length % 2 === 1;
+    for (let i = 0; i < chain.length; i++) {
+      const isLiveRow = i === 0 && rootLive;
+      if (isLiveRow) continue;
+      const row = chain[i];
+      const untouched = Math.abs(Number(row.RemainingQty) - Number(row.Quantity)) < 0.001;
+      if (untouched) toZero.push(row);
+      else needsReview.push({ row, reason: 'reversal-chain says cancelled, but RemainingQty already differs from Quantity (a declaration was made against it)' });
+    }
+  }
+
+  return { toZero, needsReview };
+}
+
+// Applies computeReversalCancellations for one vendor's current delivery
+// rows, zeroing RemainingQty for every row it says is safe to zero. Safe to
+// re-run any time (idempotent — an already-zeroed row's RemainingQty simply
+// equals its target already, and setDeclarationLines'/confirmDeclaration's
+// direct decrements are untouched). Called after every sync (see
+// routes/consignment.js) and available to run standalone for a retroactive
+// correction over already-synced history.
+export async function applyReversalCancellations(vendorId) {
+  const pool = await getPool();
+  const { recordset } = await pool.request().input('vendorId', sql.Int, vendorId).query(`
+    SELECT DeliveryId, Material, MaterialDocument, MaterialDocItem, Quantity, RemainingQty,
+           ReversalOfMaterialDocument, ReversalOfMaterialDocItem
+    FROM log.ConsignmentDelivery WHERE VendorId = @vendorId
+  `);
+
+  const { toZero, needsReview } = computeReversalCancellations(recordset);
+
+  for (const row of toZero) {
+    await pool.request()
+      .input('deliveryId', sql.Int, row.DeliveryId)
+      .query('UPDATE log.ConsignmentDelivery SET RemainingQty = 0 WHERE DeliveryId = @deliveryId');
+  }
+
+  return {
+    zeroed: toZero.map(r => ({ deliveryId: r.DeliveryId, material: r.Material, materialDocument: r.MaterialDocument, materialDocItem: r.MaterialDocItem, quantity: Number(r.Quantity) })),
+    needsReview: needsReview.map(n => ({
+      deliveryId: n.row.DeliveryId, material: n.row.Material, materialDocument: n.row.MaterialDocument,
+      materialDocItem: n.row.MaterialDocItem, quantity: Number(n.row.Quantity), remainingQty: Number(n.row.RemainingQty),
+      reason: n.reason,
+    })),
+  };
 }
 
 export async function addManualConsignmentDelivery(vendorId, body, username) {

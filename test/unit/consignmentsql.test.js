@@ -142,13 +142,26 @@ describe('upsertConsignmentDeliveriesFromSap', () => {
   });
 
   test('dedupes rows sharing the same (MaterialDocument, MaterialDocItem) before inserting', async () => {
-    queueResults({ rowsAffected: [1] }); // only one INSERT should run
+    queueResults({ rowsAffected: [1] }, { rowsAffected: [0] }); // one INSERT + its backfill UPDATE
     const result = await db.upsertConsignmentDeliveriesFromSap(1, [
       { material: 'M1', materialDocument: 'DOC1', materialDocItem: '0001', quantity: 10 },
       { material: 'M1', materialDocument: 'DOC1', materialDocItem: '0001', quantity: 10 }, // exact duplicate key
     ]);
-    expect(dbRequest.query).toHaveBeenCalledTimes(1);
+    expect(dbRequest.query).toHaveBeenCalledTimes(2);
+    expect(dbRequest.query.mock.calls[0][0]).toContain('INSERT INTO log.ConsignmentDelivery');
+    expect(dbRequest.query.mock.calls[1][0]).toContain('UPDATE log.ConsignmentDelivery');
     expect(result).toEqual({ inserted: 1 });
+  });
+
+  test('backfills InvoiceNumber/ReversalOfMaterialDocument on an already-existing row that is still missing them', async () => {
+    queueResults({ rowsAffected: [0] }, { rowsAffected: [1] }); // INSERT is a no-op (row exists), UPDATE backfills
+    await db.upsertConsignmentDeliveriesFromSap(1, [
+      { material: 'M1', materialDocument: 'DOC1', materialDocItem: '0001', quantity: 10, invoiceNumber: 'E0269', reversalOfMaterialDocument: 'DOC0', reversalOfMaterialDocItem: '0001' },
+    ]);
+    expect(dbRequest.input).toHaveBeenCalledWith('invoiceNumber', expect.anything(), 'E0269');
+    expect(dbRequest.input).toHaveBeenCalledWith('reversalOfMaterialDocument', expect.anything(), 'DOC0');
+    const updateCall = dbRequest.query.mock.calls[1][0];
+    expect(updateCall).toContain('COALESCE(NULLIF(InvoiceNumber');
   });
 
   test('commits the transaction after a successful batch', async () => {
@@ -172,6 +185,95 @@ describe('upsertConsignmentDeliveriesFromSap', () => {
     queueResults({ rowsAffected: [0] }); // simulates the row already existing in the real table
     const result = await db.upsertConsignmentDeliveriesFromSap(1, [{ material: 'M1', materialDocument: 'DOC1', materialDocItem: '0001', quantity: 10 }]);
     expect(result).toEqual({ inserted: 0 });
+  });
+});
+
+describe('computeReversalCancellations (pure, no DB)', () => {
+  test('leaves a standalone row (no reversal chain) untouched', () => {
+    const rows = [{ DeliveryId: 1, MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 100 }];
+    const { toZero, needsReview } = db.computeReversalCancellations(rows);
+    expect(toZero).toEqual([]);
+    expect(needsReview).toEqual([]);
+  });
+
+  test('a simple reversal pair (root cancelled once) zeroes both rows', () => {
+    // B reverses A — chain length 2 (even) — root ends up cancelled.
+    const rows = [
+      { DeliveryId: 1, MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 100, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null },
+      { DeliveryId: 2, MaterialDocument: 'B', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'A', ReversalOfMaterialDocItem: '0001' },
+    ];
+    const { toZero, needsReview } = db.computeReversalCancellations(rows);
+    expect(toZero.map(r => r.DeliveryId).sort()).toEqual([1, 2]);
+    expect(needsReview).toEqual([]);
+  });
+
+  test('a cancel-of-a-cancel chain (root restored) keeps the ROOT live and zeroes the two corrections', () => {
+    // Confirmed for real: Raaj Ratna 5005174284 (root, GR) -> 5005203102
+    // (MBST, cancels root) -> 5005203103 (MBST, cancels THAT cancellation).
+    // Chain length 3 (odd) — root ends up live again.
+    const rows = [
+      { DeliveryId: 1, MaterialDocument: 'ROOT', MaterialDocItem: '0002', Quantity: 1110.8, RemainingQty: 1110.8, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null },
+      { DeliveryId: 2, MaterialDocument: 'MID', MaterialDocItem: '0001', Quantity: -1110.8, RemainingQty: -1110.8, ReversalOfMaterialDocument: 'ROOT', ReversalOfMaterialDocItem: '0002' },
+      { DeliveryId: 3, MaterialDocument: 'LAST', MaterialDocItem: '0001', Quantity: 1110.8, RemainingQty: 1110.8, ReversalOfMaterialDocument: 'MID', ReversalOfMaterialDocItem: '0001' },
+    ];
+    const { toZero, needsReview } = db.computeReversalCancellations(rows);
+    expect(toZero.map(r => r.DeliveryId).sort()).toEqual([2, 3]); // ROOT (1) stays live
+    expect(needsReview).toEqual([]);
+  });
+
+  test('reports (does not silently zero) a chain member whose RemainingQty already differs from Quantity', () => {
+    const rows = [
+      { DeliveryId: 1, MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 100, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null },
+      // B reverses A, but B's RemainingQty has already been reduced — a real declaration touched it.
+      { DeliveryId: 2, MaterialDocument: 'B', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'A', ReversalOfMaterialDocItem: '0001' },
+      { DeliveryId: 3, MaterialDocument: 'C', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 40, ReversalOfMaterialDocument: 'B', ReversalOfMaterialDocItem: '0001' },
+    ];
+    const { toZero, needsReview } = db.computeReversalCancellations(rows);
+    // Chain length 3 -> root (A) live, B and C are the non-root members.
+    // B is untouched (safe to zero); C's RemainingQty (40) already differs
+    // from its Quantity (100), so it's flagged instead of overwritten.
+    expect(toZero.map(r => r.DeliveryId)).toEqual([2]);
+    expect(needsReview).toHaveLength(1);
+    expect(needsReview[0].row.DeliveryId).toBe(3);
+  });
+
+  test('flags an anomaly when more than one document reverses the same target', () => {
+    const rows = [
+      { DeliveryId: 1, MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 100, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null },
+      { DeliveryId: 2, MaterialDocument: 'B', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'A', ReversalOfMaterialDocItem: '0001' },
+      { DeliveryId: 3, MaterialDocument: 'C', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'A', ReversalOfMaterialDocItem: '0001' },
+    ];
+    const { needsReview } = db.computeReversalCancellations(rows);
+    expect(needsReview.some(n => n.row.DeliveryId === 3 && n.reason.includes('multiple documents'))).toBe(true);
+  });
+
+  test('a reversal whose target is outside the given row set is treated as its own chain root', () => {
+    // ReversalOfMaterialDocument points at something not in `rows` at all —
+    // can't walk further back, so this row is its own root and, alone,
+    // has nothing reversing it — left untouched.
+    const rows = [
+      { DeliveryId: 1, MaterialDocument: 'B', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'OUTSIDE', ReversalOfMaterialDocItem: '0001' },
+    ];
+    const { toZero, needsReview } = db.computeReversalCancellations(rows);
+    expect(toZero).toEqual([]);
+    expect(needsReview).toEqual([]);
+  });
+});
+
+describe('applyReversalCancellations', () => {
+  test('zeroes RemainingQty only for rows computeReversalCancellations says are safe to zero', async () => {
+    queueResults(
+      { recordset: [
+        { DeliveryId: 1, Material: 'M1', MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 100, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null },
+        { DeliveryId: 2, Material: 'M1', MaterialDocument: 'B', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'A', ReversalOfMaterialDocItem: '0001' },
+      ] },
+      { rowsAffected: [1] }, // UPDATE for DeliveryId 1
+      { rowsAffected: [1] }, // UPDATE for DeliveryId 2
+    );
+    const result = await db.applyReversalCancellations(1);
+    expect(result.zeroed.map(z => z.deliveryId).sort()).toEqual([1, 2]);
+    expect(result.needsReview).toEqual([]);
+    expect(dbRequest.query.mock.calls[1][0]).toContain('SET RemainingQty = 0');
   });
 });
 

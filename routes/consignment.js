@@ -135,6 +135,24 @@ function parseSapDate(raw) {
   return new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1])));
 }
 
+// Shared by the manual /sync route and the daily cron (runConsignmentSync)
+// — see db.upsertConsignmentDeliveriesFromSap's header comment for why
+// reversalOfMaterialDocument/Item (SAP MSEG-SMBLN/SMBLP) matter here.
+function mapGrRows(grRows) {
+  return grRows.map(r => ({
+    material:                   r.material,
+    materialDocument:           r.materialDocument,
+    materialDocItem:            r.materialDocItem,
+    quantity:                   r.quantity,
+    uom:                        r.uom,
+    invoiceNumber:              r.invoiceNumber,
+    documentDate:               parseSapDate(r.documentDate),
+    postingDate:                parseSapDate(r.postingDate),
+    reversalOfMaterialDocument: r.reversalOfMaterialDocument,
+    reversalOfMaterialDocItem:  r.reversalOfMaterialDocItem,
+  }));
+}
+
 // ── Vendors + config ──────────────────────────────────────────────────────────
 
 router.get('/vendors', requirePermission('LOG_MRP'), async (req, res) => {
@@ -286,20 +304,13 @@ router.post('/vendors/:vendorId/sync', requirePermission('LOG_MRP'), async (req,
     }
 
     const grRows = await fetchSapVendorGr(vendor.SapVendorNumber);
-    const mapped = grRows.map(r => ({
-      material:         r.material,
-      materialDocument: r.materialDocument,
-      materialDocItem:  r.materialDocItem,
-      quantity:         r.quantity,
-      uom:              r.uom,
-      invoiceNumber:    r.invoiceNumber,
-      documentDate:     parseSapDate(r.documentDate),
-      postingDate:      parseSapDate(r.postingDate),
-    }));
+    const mapped = mapGrRows(grRows);
 
     const { inserted } = await db.upsertConsignmentDeliveriesFromSap(req.params.vendorId, mapped);
-    await audit('SAP_OK', actor(req), `Consignment GR sync for ${vendor.VendorName}: ${inserted} new deliveries`, req);
-    res.json({ success: true, data: { pulled: grRows.length, inserted } });
+    const { zeroed, needsReview } = await db.applyReversalCancellations(req.params.vendorId);
+    await audit('SAP_OK', actor(req),
+      `Consignment GR sync for ${vendor.VendorName}: ${inserted} new deliveries, ${zeroed.length} cancelled-reversal line(s) zeroed${needsReview.length ? `, ${needsReview.length} needing review` : ''}`, req);
+    res.json({ success: true, data: { pulled: grRows.length, inserted, cancellationsZeroed: zeroed.length, needsReview } });
   } catch (err) {
     await audit('SAP_ERROR', actor(req), `Consignment GR sync failed for vendor ${req.params.vendorId}`, req);
     fail(res, err);
@@ -485,18 +496,10 @@ export async function runConsignmentSync() {
     }
     try {
       const grRows = await fetchSapVendorGr(vendor.SapVendorNumber);
-      const mapped = grRows.map(r => ({
-        material:         r.material,
-        materialDocument: r.materialDocument,
-        materialDocItem:  r.materialDocItem,
-        quantity:         r.quantity,
-        uom:              r.uom,
-        invoiceNumber:    r.invoiceNumber,
-        documentDate:     parseSapDate(r.documentDate),
-        postingDate:      parseSapDate(r.postingDate),
-      }));
+      const mapped = mapGrRows(grRows);
       const { inserted } = await db.upsertConsignmentDeliveriesFromSap(vendor.VendorId, mapped);
-      results.push({ vendor: vendor.VendorName, pulled: grRows.length, inserted });
+      const { zeroed, needsReview } = await db.applyReversalCancellations(vendor.VendorId);
+      results.push({ vendor: vendor.VendorName, pulled: grRows.length, inserted, cancellationsZeroed: zeroed.length, needsReview: needsReview.length });
     } catch (err) {
       console.error(`[consignment cron] GR sync failed for ${vendor.VendorName}:`, err.message);
       results.push({ vendor: vendor.VendorName, error: err.message });

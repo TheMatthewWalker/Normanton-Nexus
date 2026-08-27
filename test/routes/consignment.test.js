@@ -20,6 +20,7 @@ const db = {
   listVendorMaterials: jest.fn(),
   listConsignmentDeliveries: jest.fn(),
   upsertConsignmentDeliveriesFromSap: jest.fn(),
+  applyReversalCancellations: jest.fn(),
   addManualConsignmentDelivery: jest.fn(),
   updateConsignmentDelivery: jest.fn(),
   replaceConsignmentStockSnapshot: jest.fn(),
@@ -62,6 +63,7 @@ beforeAll(async () => {
 beforeEach(() => {
   resetMockSql({ pool, request: dbRequest, connect });
   Object.values(db).forEach(fn => fn.mockReset());
+  db.applyReversalCancellations.mockResolvedValue({ zeroed: [], needsReview: [] });
   axiosMock.get.mockReset();
   buildConsignmentDeclarationPdf.mockClear();
   buildConsignmentDeclarationPdf.mockResolvedValue(Buffer.from('fake-pdf'));
@@ -142,25 +144,30 @@ describe('POST /vendors/:vendorId/sync', () => {
     expect(res.body.error.message).toMatch(/no SAP vendor number set/);
   });
 
-  test('pulls GR rows from SapServer via axios and upserts them on success', async () => {
+  test('pulls GR rows from SapServer via axios, upserts them, and applies reversal cancellations', async () => {
     db.getConsignmentVendor.mockResolvedValueOnce({ VendorId: 1, VendorName: 'Raaj Ratna', SapVendorNumber: '100123' });
     axiosMock.get.mockResolvedValueOnce({
       data: {
         success: true,
         data: [
-          { material: '30005R', materialDocument: '5001', materialDocItem: '1', quantity: 10, uom: 'KG', invoiceNumber: 'INV1', documentDate: '01.02.2026', postingDate: '02.02.2026' },
+          { material: '30005R', materialDocument: '5001', materialDocItem: '1', quantity: 10, uom: 'KG', invoiceNumber: 'INV1', documentDate: '01.02.2026', postingDate: '02.02.2026', reversalOfMaterialDocument: '', reversalOfMaterialDocItem: '' },
         ],
       },
     });
     db.upsertConsignmentDeliveriesFromSap.mockResolvedValueOnce({ inserted: 1 });
+    db.applyReversalCancellations.mockResolvedValueOnce({
+      zeroed: [{ deliveryId: 7, material: '30005R', materialDocument: '5000', materialDocItem: '1', quantity: 10 }],
+      needsReview: [],
+    });
 
     const res = await request(app).post('/vendors/1/sync').send({});
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ pulled: 1, inserted: 1 });
+    expect(res.body.data).toEqual({ pulled: 1, inserted: 1, cancellationsZeroed: 1, needsReview: [] });
     expect(db.upsertConsignmentDeliveriesFromSap).toHaveBeenCalledWith('1', [
-      expect.objectContaining({ material: '30005R', quantity: 10 }),
+      expect.objectContaining({ material: '30005R', quantity: 10, reversalOfMaterialDocument: '', reversalOfMaterialDocItem: '' }),
     ]);
+    expect(db.applyReversalCancellations).toHaveBeenCalledWith('1');
   });
 
   test('surfaces a SapServer error response as a failure, not a crash', async () => {
