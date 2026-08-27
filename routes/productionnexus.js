@@ -2277,7 +2277,7 @@ router.post('/reversal/execute', requirePermission('PROD_SUPERVISOR'), async (re
     const raw = await sapPost('/api/production/reverse-backflush', { MaterialDocument: materialDocument });
 
     if (raw?.success === false)
-      return res.status(502).json({ success: false, error: raw.error || raw.message || 'SAP server error' });
+      return res.status(502).json({ success: false, error: (typeof raw.error === 'string' ? raw.error : raw.error?.message) || raw.message || 'SAP server error' });
 
     const { type, messageClass, messageNumber, documentNumber, message } = raw?.data ?? raw ?? {};
 
@@ -2321,7 +2321,7 @@ router.post('/reversal/execute', requirePermission('PROD_SUPERVISOR'), async (re
 // Validates every BdcResponse: type=S, messageClass=M7, messageNumber=060.
 // Returns the responses array or throws with the first failure message.
 function parseBomScrapResponse(sapRaw) {
-  if (sapRaw?.success === false) throw new Error(sapRaw.error || 'SAP scrap server error');
+  if (sapRaw?.success === false) throw new Error((typeof sapRaw.error === 'string' ? sapRaw.error : sapRaw.error?.message) || 'SAP scrap server error');
   const responses = sapRaw?.data?.responses;
   if (!Array.isArray(responses) || !responses.length)
     throw new Error('SAP returned no posting responses');
@@ -5068,7 +5068,7 @@ async function reverseScrapDocumentItem({ scrapDocumentID, materialDocument }, u
 
     // Explicit failure from SapServer wrapper (not M7/067)
     if (raw?.success === false) {
-      throw new Error(raw.error || raw.message || 'SAP server error');
+      throw new Error((typeof raw.error === 'string' ? raw.error : raw.error?.message) || raw.message || 'SAP server error');
     }
 
     const responses = raw?.data?.responses;
@@ -5358,9 +5358,12 @@ router.post('/reversal/bulk', requirePermission('PROD_SUPERVISOR'), async (req, 
 // Returns { documentNumber, messageNumber, message } on success.
 // Throws a user-readable error on anything else.
 function parseSapBackflush(result) {
-  // SapServer wraps all responses: { success: bool, data: <ZF40N result>, error: string|null }
+  // SapServer wraps all responses: { success: bool, data: <ZF40N result>, error: { code, message } | null }
+  // — .error is an object, not a plain string (see SapServer's CLAUDE.md
+  // "Error Handling"); this file got bitten by that exact assumption once
+  // already (see 7410e6f), so unwrap .message before falling back to it.
   if (result?.success === false) {
-    throw new Error(result.error || result.message || 'SAP server error');
+    throw new Error((typeof result.error === 'string' ? result.error : result.error?.message) || result.message || 'SAP server error');
   }
 
   // Unwrap the ZF40N result — fall back to result itself if already unwrapped
@@ -5383,7 +5386,7 @@ function parseSapBackflush(result) {
 // StockAdjustmentResponse on the SapServer side.
 function parseGoodsMovement(result) {
   if (result?.success === false) {
-    throw new Error(result.error || result.message || 'SAP server error');
+    throw new Error((typeof result.error === 'string' ? result.error : result.error?.message) || result.message || 'SAP server error');
   }
   const data = result?.data ?? result;
   if (!data?.success || !data?.materialDocument) {
@@ -5402,7 +5405,7 @@ function parseGoodsMovement(result) {
 // (rcBatch/rcPack) and the BOM-vs-traceability check.
 function parseDrumBackflush(result) {
   if (result?.success === false) {
-    throw new Error(result.error || result.message || 'SAP server error');
+    throw new Error((typeof result.error === 'string' ? result.error : result.error?.message) || result.message || 'SAP server error');
   }
 
   const data = result?.data ?? result;

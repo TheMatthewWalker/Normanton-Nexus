@@ -909,12 +909,12 @@ async function fetchSapCustomsData(deliveries, req) {
   ]);
 
   if (lipsBody?.success === false) {
-    const err = new Error(`SAP LIPS query failed: ${lipsBody.error || 'unknown error'}`);
+    const err = new Error(`SAP LIPS query failed: ${(typeof lipsBody.error === 'string' ? lipsBody.error : lipsBody.error?.message) || 'unknown error'}`);
     err.statusCode = 502;
     throw err;
   }
   if (likpBody?.success === false) {
-    const err = new Error(`SAP LIKP query failed: ${likpBody.error || 'unknown error'}`);
+    const err = new Error(`SAP LIKP query failed: ${(typeof likpBody.error === 'string' ? likpBody.error : likpBody.error?.message) || 'unknown error'}`);
     err.statusCode = 502;
     throw err;
   }
@@ -955,7 +955,7 @@ async function fetchSapCustomsData(deliveries, req) {
   console.groupEnd();
 
   if (vbfaBody?.success === false) {
-    const err = new Error(`SAP VBFA query failed: ${vbfaBody.error || 'unknown error'}`);
+    const err = new Error(`SAP VBFA query failed: ${(typeof vbfaBody.error === 'string' ? vbfaBody.error : vbfaBody.error?.message) || 'unknown error'}`);
     err.statusCode = 502;
     throw err;
   }

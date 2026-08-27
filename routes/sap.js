@@ -167,7 +167,7 @@ router.post("/cost-sheet", async (req, res) => {
 
         const body = response.data;
         if (!body.success)
-            throw new Error(body.error ?? 'SapServer returned success=false');
+            throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         const rows = body.data;
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Cost sheet succeeded (${items.length} items)`), req);
@@ -175,7 +175,7 @@ router.post("/cost-sheet", async (req, res) => {
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Cost sheet failed', message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -203,7 +203,7 @@ router.post('/costing/period-balance', async (req, res) => {
         );
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req),
             buildAuditDetail(req, `Period balance: ${GlAccounts.length} GL account(s), ${FiscalYear} P${PeriodFrom}–P${PeriodTo}`), req);
@@ -211,7 +211,7 @@ router.post('/costing/period-balance', async (req, res) => {
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Period balance failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -237,7 +237,7 @@ router.post('/costing/profit-center', async (req, res) => {
         );
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req),
             buildAuditDetail(req, `Profit center: ${GlAccounts.length} GL account(s), ${DateFrom}–${DateTo}`), req);
@@ -245,7 +245,7 @@ router.post('/costing/profit-center', async (req, res) => {
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Profit center query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -308,7 +308,7 @@ router.get('/sales-sparkline', async (req, res) => {
         );
 
         const body = sapRes.data;
-        if (!body.success) throw new Error(body.error ?? 'SAP error');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SAP error');
         const rows = body.data || [];
 
         // 4. Parse SAP dates (DD.MM.YYYY) and partition rows
@@ -374,7 +374,7 @@ router.post("/warehouse/consignment-mb1b", async (req, res) => {
 
         const body = response.data;
         if (!body.success)
-            throw new Error(body.error ?? 'SapServer returned success=false');
+            throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         const rows = body.data;
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Consignment MB1B succeeded for material ${params.Material || ''}`), req);
@@ -414,7 +414,7 @@ router.post("/warehouse/transfer-order", async (req, res) => {
 
         const body = response.data;
         if (!body.success)
-            throw new Error(body.error ?? 'SapServer returned success=false');
+            throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         const rows = body.data;
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Transfer order succeeded for material ${params.Material || ''}`, rows?.transferOrderNumber ? `TR ${rows.transferOrderNumber}` : null), req);
@@ -435,7 +435,7 @@ router.post("/warehouse/transfer-order", async (req, res) => {
             return res.status(409).json({ success: false, error: err.message });
         }
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Transfer order failed for material ${params.Material || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -479,7 +479,7 @@ async function executeTransferItem({ kind, payload }, req) {
                 timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
             });
             const body = response.data;
-            if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+            if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
             await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Consignment MB1B succeeded for material ${payload?.Material || ''}`), req);
             return { success: true, data: body.data };
         } catch (err) {
@@ -499,7 +499,7 @@ async function executeTransferItem({ kind, payload }, req) {
             timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` }
         });
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         const rows = body.data;
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Transfer order succeeded for material ${payload?.Material || ''}`, rows?.transferOrderNumber ? `TR ${rows.transferOrderNumber}` : null), req);
@@ -519,7 +519,7 @@ async function executeTransferItem({ kind, payload }, req) {
             return { success: false, error: err.message };
         }
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Transfer order failed for material ${payload?.Material || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -581,7 +581,7 @@ async function executeBatchCleanupItem({ kind, payload }, req) {
         });
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         const trNumber = kind === 'transfer' ? body.data?.transferOrderNumber : null;
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Batch clean-up ${kind} succeeded for material ${payload?.Material || ''}, batch ${payload?.Batch || ''}`, trNumber ? `TR ${trNumber}` : null), req);
@@ -688,14 +688,14 @@ async function executeStockAdjustmentItem(params, dryRun, req) {
         );
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Stock adjustment (${params.MovementType || ''}) succeeded for material ${params.Material || ''}`), req);
         return { status: 200, success: true, data: body.data };
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Stock adjustment (${params.MovementType || ''}) failed for material ${params.Material || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -764,14 +764,14 @@ async function executeDeleteTrItem(params, req) {
         );
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Delete TR ${params.TrNumber || ''} succeeded`), req);
         return { status: 200, success: true, data: body.data };
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `Delete TR ${params.TrNumber || ''} failed`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -837,14 +837,14 @@ router.get('/warehouse/stock', async (req, res) => {
         });
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'Warehouse stock query'), req);
         res.json({ success: true, data: body.data });
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Warehouse stock query failed', message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -878,14 +878,14 @@ router.get('/warehouse/open-transfer-requirements', async (req, res) => {
         });
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'Open transfer requirements query'), req);
         res.json({ success: true, data: body.data });
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Open transfer requirements query failed', message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -920,13 +920,13 @@ router.get('/warehouse/bin-storage-types', async (req, res) => {
         });
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         res.json({ success: true, data: body.data });
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
         res.status(status).json({ success: false, error: message });
@@ -951,14 +951,14 @@ router.get('/warehouse/tr-cleanup-candidates', async (req, res) => {
         });
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, 'TR cleanup candidates query'), req);
         res.json({ success: true, data: body.data });
 
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'TR cleanup candidates query failed', message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -1001,7 +1001,7 @@ async function executeCreateLt04Item(rawParams, req) {
         );
 
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
 
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `LT04 succeeded for TR ${params.TrNumber || ''}`), req);
         return { status: 200, success: true, data: body.data };
@@ -1012,7 +1012,7 @@ async function executeCreateLt04Item(rawParams, req) {
             return { status: 409, success: false, error: err.message };
         }
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, `LT04 failed for TR ${params.TrNumber || ''}`, message), req);
         console.error('Error:', status, message);
         if (err.response?.data) console.error('Response body:', JSON.stringify(err.response.data, null, 2));
@@ -1070,12 +1070,12 @@ router.post('/lips', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `LIPS query (${deliveries.length} deliveries)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'LIPS query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1097,12 +1097,12 @@ router.post('/likp', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `LIKP query (${deliveries.length} deliveries)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'LIKP query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1125,12 +1125,12 @@ router.post('/vbfa', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `VBFA query (${lines.length} lines)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'VBFA query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1152,12 +1152,12 @@ router.post('/marc', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `MARC query (${materials.length} materials)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'MARC query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1179,12 +1179,12 @@ router.post('/kna1', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `KNA1 query (${customers.length} customers)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'KNA1 query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1207,12 +1207,12 @@ router.post('/vbrk', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `VBRK query (${invoices.length} invoices)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'VBRK query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1237,12 +1237,12 @@ router.post('/consignment-price', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Consignment price query (${lines.length} lines)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Consignment price query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }
@@ -1267,12 +1267,12 @@ router.post('/picksheet-stock', async (req, res) => {
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
         const body = response.data;
-        if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+        if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
         await audit('SAP_OK', getActorUsername(req), buildAuditDetail(req, `Picksheet stock query (${materials.length} materials)`), req);
         res.json({ success: true, data: body.data });
     } catch (err) {
         const status  = err.response?.status  ?? 500;
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         await audit('SAP_ERROR', getActorUsername(req), buildAuditDetail(req, 'Picksheet stock query failed', message), req);
         res.status(status).json({ success: false, error: message });
     }

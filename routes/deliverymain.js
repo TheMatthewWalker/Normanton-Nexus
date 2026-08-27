@@ -524,7 +524,7 @@ async function getRemainingRequiredMaterials(pool, deliveryId) {
         //    KCMENG) since this delivery hasn't been picked/confirmed yet —
         //    see PicksheetHelpers.LipsColumns in SapServer for why.
         const lipsBody = await sapPost('/api/warehouse/picksheet-materials', { deliveries: [String(deliveryId)] });
-        if (lipsBody?.success === false) throw new Error(lipsBody.error || 'SAP LIPS query failed');
+        if (lipsBody?.success === false) throw new Error((typeof lipsBody.error === 'string' ? lipsBody.error : lipsBody.error?.message) || 'SAP LIPS query failed');
         const lipsRows = unwrap(lipsBody);
 
         const materials = [...new Set(lipsRows.map(r => String(r.materialNumber || '').trim()).filter(Boolean))];
@@ -535,7 +535,7 @@ async function getRemainingRequiredMaterials(pool, deliveryId) {
         // 2. Where is that material physically sitting, and is any of it
         //    already tagged against another delivery (ZPRODBATCH~VBELN)?
         const stockBody = await sapPost('/api/warehouse/picksheet-stock', { materials });
-        if (stockBody?.success === false) throw new Error(stockBody.error || 'SAP stock query failed');
+        if (stockBody?.success === false) throw new Error((typeof stockBody.error === 'string' ? stockBody.error : stockBody.error?.message) || 'SAP stock query failed');
         const batchRows = unwrap(stockBody);
 
         // 2b. Profit centre per material (MARC~PRCTR), via SapServer's
@@ -1907,7 +1907,7 @@ async function runSapSync() {
                     { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
                 );
                 const kna1Body = kna1Res.data;
-                if (kna1Body?.success === false) kna1Error = kna1Body.error || 'SapServer returned success=false';
+                if (kna1Body?.success === false) kna1Error = (typeof kna1Body.error === 'string' ? kna1Body.error : kna1Body.error?.message) || 'SapServer returned success=false';
                 const kna1Rows = kna1Body?.success === false ? [] : (kna1Body?.data ?? []);
 
                 for (const row of kna1Rows) {
@@ -1971,7 +1971,7 @@ async function runSapSync() {
                 // one of these customers just falls through to `missing` in the loop below,
                 // same as pre-auto-create behaviour, but now the reason is visible instead
                 // of being silently swallowed.
-                kna1Error = err.response?.data?.error ?? err.message;
+                kna1Error = err.response?.data?.error?.message || err.response?.data?.error || err.message;
                 console.error('[sap-sync] KNA1 auto-create lookup failed:', kna1Error);
             }
         }
@@ -2068,7 +2068,7 @@ async function runSapSync() {
             return { success: false, status: 503, error: `SAP server unreachable: ${syncUrl}` };
         }
         if (err.response) {
-            return { success: false, status: 502, error: `SAP server error ${err.response.status}: ${err.response.data?.error ?? err.message}` };
+            return { success: false, status: 502, error: `SAP server error ${err.response.status}: ${err.response.data?.error?.message || err.response.data?.error || err.message}` };
         }
         return { success: false, status: 500, error: err.message };
     }

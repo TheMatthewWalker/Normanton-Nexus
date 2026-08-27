@@ -92,7 +92,7 @@ async function fetchSapVendorGr(sapVendorNumber, sinceDate) {
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
-  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
   return body.data;
 }
 
@@ -110,7 +110,7 @@ export async function fetchSapConsignmentStock() {
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
-  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
   return body.data; // { [material]: qty }
 }
 

@@ -1030,7 +1030,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
 
         res.json({ success: true, results, blockedCostIDs });
     } catch (err) {
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         res.status(500).json({ success: false, error: message });
     }
 });
@@ -1062,7 +1062,7 @@ router.post('/:costId/reverse', requirePermission('LOG_PLANNING'), async (req, r
         );
 
         const sapBody = sapResp.data;
-        if (!sapBody.success) throw new Error(sapBody.error ?? 'SapServer returned success=false');
+        if (!sapBody.success) throw new Error((typeof sapBody.error === 'string' ? sapBody.error : sapBody.error?.message) ?? 'SapServer returned success=false');
 
         const bdc = sapBody.data || {};
         const reversed = bdc.type === 'S';
@@ -1077,7 +1077,7 @@ router.post('/:costId/reverse', requirePermission('LOG_PLANNING'), async (req, r
 
         res.json({ success: reversed, message: bdc.message || bdc.rawMessage || '', raw: bdc });
     } catch (err) {
-        const message = err.response?.data?.error ?? err.message;
+        const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
         res.status(500).json({ success: false, error: message });
     }
 });

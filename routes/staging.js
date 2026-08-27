@@ -72,7 +72,7 @@ async function fetchLquaStock({ material, batch, storageType, bin }) {
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
-  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
   // The SAP field-name header row is skipped server-side in
   // WarehouseHelpers.ParseStockRows (SapDelimitedParser.ParseRows with
   // skipHeader: true), same as every other table-read helper there.
@@ -94,7 +94,7 @@ async function createSapTransferOrder(body) {
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const responseBody = response.data;
-  if (!responseBody.success) throw new Error(responseBody.error ?? 'SapServer returned success=false');
+  if (!responseBody.success) throw new Error((typeof responseBody.error === 'string' ? responseBody.error : responseBody.error?.message) ?? 'SapServer returned success=false');
   return responseBody.data;
 }
 
@@ -113,7 +113,7 @@ async function createSapConsignmentMb1b(body) {
       headers: { Authorization: `Bearer ${makeSapToken()}` },
     });
     const responseBody = response.data;
-    if (!responseBody.success) throw new Error(responseBody.error ?? 'SapServer returned success=false');
+    if (!responseBody.success) throw new Error((typeof responseBody.error === 'string' ? responseBody.error : responseBody.error?.message) ?? 'SapServer returned success=false');
     return responseBody.data;
   } catch (err) {
     // A rejected MB1B/LT01 leg comes back as an HTTP 422 (deficit stock,

@@ -90,7 +90,7 @@ async function binHasStorageType(bin, storageType) {
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
-  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
   return (body.data || []).includes(storageType);
 }
 
@@ -129,7 +129,7 @@ async function fetchSapStock({ material, storageType, bin, storageLocation, excl
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
-  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
   return body.data || [];
 }
 
@@ -145,7 +145,7 @@ async function fetchSapImStock({ material, storageLocation }) {
     headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const body = response.data;
-  if (!body.success) throw new Error(body.error ?? 'SapServer returned success=false');
+  if (!body.success) throw new Error((typeof body.error === 'string' ? body.error : body.error?.message) ?? 'SapServer returned success=false');
   return body.data || [];
 }
 
@@ -600,10 +600,10 @@ router.post('/counts/:id/approve', requirePermission('FIN_STOCK_APPROVE'), async
           timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` },
         });
         const respBody = response.data;
-        if (!respBody.success) throw new Error(respBody.error ?? 'SapServer returned success=false');
+        if (!respBody.success) throw new Error((typeof respBody.error === 'string' ? respBody.error : respBody.error?.message) ?? 'SapServer returned success=false');
         return { lineId: line.LineId, material: line.Material, movementType, success: true };
       } catch (err) {
-        return { lineId: line.LineId, material: line.Material, movementType, success: false, error: err.response?.data?.error ?? err.message };
+        return { lineId: line.LineId, material: line.Material, movementType, success: false, error: err.response?.data?.error?.message || err.response?.data?.error || err.message };
       }
     }));
 
@@ -864,7 +864,7 @@ async function createSapTransferOrderDirect(body) {
     timeout: 60000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` },
   });
   const respBody = response.data;
-  if (!respBody.success) throw new Error(respBody.error ?? 'SapServer returned success=false');
+  if (!respBody.success) throw new Error((typeof respBody.error === 'string' ? respBody.error : respBody.error?.message) ?? 'SapServer returned success=false');
   return respBody.data;
 }
 
