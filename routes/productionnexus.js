@@ -2735,14 +2735,6 @@ router.post('/mixing/entry', async (req, res) => {
       await writeEvent(pool, 'MX', mixingID, 'SAP_POST',
         `Tub ${i+1} posted — MatDoc: ${sapMatDoc} — ${tubWeightKG} KG${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
 
-      try {
-        await sapPost('/api/production/label', {
-          processCode: 'MX', recordID: mixingID, tubID, tubSeq: i + 1,
-          materialDocument: sapMatDoc, material: mixCode,
-          quantity: tubWeightKG, unitOfMeasure: 'KG', supplierTubNo: supplierTub,
-        });
-      } catch (_) {}
-
       tubResults.push({ tubID, tubSeq: i + 1, supplierTubNo: supplierTub, weightKG: tubWeightKG, materialDocument: sapMatDoc, success: true });
 
     } catch (sapErr) {
@@ -3220,16 +3212,6 @@ router.post('/drumming/entry', async (req, res) => {
     await writeEvent(pool, 'DR', drummingID, 'SAP_POST',
       `Backflush posted — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
 
-    // Print label
-    try {
-      await sapPost('/api/production/label', {
-        processCode: 'DR', recordID: drummingID,
-        materialDocument: sapMatDoc, material,
-        quantity: totalLength, unitOfMeasure: 'M',
-        coilLengths, packagingType, salesOrderSAP, customerID,
-      });
-    } catch (_) {}
-
     res.status(201).json({
       success: true,
       data: {
@@ -3535,15 +3517,6 @@ async function submitDrumming(req, res, entryType) {
         target:      { type: 'permission', value: 'PROD_SUPERVISOR' },
       })).catch(() => {});
     }
-
-    try {
-      await sapPost('/api/production/label', {
-        processCode: 'DR', recordID: drummingID,
-        materialDocument: sapMatDoc, material,
-        quantity: totalLength, unitOfMeasure: 'M',
-        coilLengths, packagingType: packagingID, customerID: customerNumber,
-      });
-    } catch (_) {}
 
     // Locally patch the AgreementSnapshot row's dock-stock figure so the
     // Required quantity operators see on Order Lookup / the Production
@@ -4331,14 +4304,6 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
 
           await writeEvent(pool,'MX',id,'SAP_POST',`Tub ${tub.TubSeq} retry succeeded — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`,0,uid);
 
-          try {
-            await sapPost('/api/production/label',{
-              processCode:'MX',recordID:id,tubID:tub.TubID,tubSeq:tub.TubSeq,
-              materialDocument:sapMatDoc,material:m.MixCode,
-              quantity:tub.TubWeightKG,unitOfMeasure:'KG',supplierTubNo:tub.SupplierTubNo,
-            });
-          } catch(_){}
-
           results.push({ tubID: tub.TubID, success: true, materialDocument: sapMatDoc });
         } catch (sapErr) {
           anyFailed = true;
@@ -4462,14 +4427,6 @@ router.patch('/failed-backflush/:processCode/:recordId/retry', requirePermission
 
       await writeEvent(pool, 'DR', id, 'SAP_POST',
         `Retry succeeded${concessionApplied ? ' via concession goods movement' : ''} — MatDoc: ${sapMatDoc}${messageNumber === '190' ? ' (190: no components consumed)' : ''}`, 0, uid);
-
-      try {
-        await sapPost('/api/production/label', {
-          processCode: 'DR', recordID: id, materialDocument: sapMatDoc,
-          material: d.Material, quantity: d.LengthMetres, unitOfMeasure: 'M',
-          packagingType: d.PackagingType, customerID: d.CustomerID,
-        });
-      } catch (_) {}
 
       return res.json({
         success: true,

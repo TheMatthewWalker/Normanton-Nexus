@@ -2,7 +2,7 @@
 // one of the highest-remaining-risk uncovered endpoints (per-tub SAP
 // backflush posting, partial-failure handling). Separate test file from
 // productionnexus.test.js since this endpoint needs axios mocked too (the
-// profit-centre check and per-tub SAP backflush/label calls), which that
+// profit-centre check and per-tub SAP backflush calls), which that
 // file doesn't set up. lib/notify.js is left unmocked — its fire-and-forget
 // failure-notification insert runs for real against the same mocked mssql
 // pool, harmlessly, since asserting on an unawaited call would be racy.
@@ -81,8 +81,7 @@ describe('POST /mixing/entry — validation', () => {
       { recordset: [] },                    // writeEvent SAP_POST
     );
     axiosMock.post
-      .mockResolvedValueOnce({ data: { success: true, data: { type: 'S', messageClass: 'RM', messageNumber: '191', documentNumber: 'MD1', message: 'ok' } } })
-      .mockResolvedValueOnce({ data: { success: true } }); // label print
+      .mockResolvedValueOnce({ data: { success: true, data: { type: 'S', messageClass: 'RM', messageNumber: '191', documentNumber: 'MD1', message: 'ok' } } });
     const res = await request(app).post('/mixing/entry').send({ ...validBody, tubs: [{ weightKG: 38 }] });
     expect(res.status).toBe(201);
   });
