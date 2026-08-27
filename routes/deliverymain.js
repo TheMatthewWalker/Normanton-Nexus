@@ -1040,13 +1040,26 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
     };
 
     const recordRun = async (status, messages) => {
-        await pool.request()
-            .input('deliveryId',   sql.NVarChar(10),  String(deliveryId))
-            .input('status',       sql.NVarChar(10),  status)
-            .input('messages',     sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
-            .input('ranByUserID',  sql.Int,           userId ?? null)
-            .query(`INSERT INTO log.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
-                    VALUES (@deliveryId, @status, @messages, @ranByUserID)`);
+        // Writing the history row must never crash the caller — same
+        // fire-and-forget convention this codebase already applies to
+        // config.auditQuery/stampDbChange (see CLAUDE.md's Key Patterns).
+        // Without this guard, any failure here (e.g. the table not existing
+        // yet, a transient DB error) propagates straight out of
+        // runZdelflagMaintenance and fails the whole PATCH /:deliveryId/
+        // complete request with a 500 — even though the pallets were
+        // already successfully rolled up by that point. Losing one history
+        // row is far better than that.
+        try {
+            await pool.request()
+                .input('deliveryId',   sql.NVarChar(10),  String(deliveryId))
+                .input('status',       sql.NVarChar(10),  status)
+                .input('messages',     sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
+                .input('ranByUserID',  sql.Int,           userId ?? null)
+                .query(`INSERT INTO log.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
+                        VALUES (@deliveryId, @status, @messages, @ranByUserID)`);
+        } catch (err) {
+            console.error(`Failed to record DeliveryZdelflagRun for delivery ${deliveryId}:`, err.message);
+        }
         return { status, messages: messages || [] };
     };
 
@@ -1262,12 +1275,23 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
 // completion and always gets its own reprocess path below.
 async function runGoodsIssueApproval(pool, deliveryId) {
     const recordRun = async (status, messages) => {
-        await pool.request()
-            .input('deliveryId', sql.NVarChar(10),  String(deliveryId))
-            .input('status',     sql.NVarChar(10),  status)
-            .input('messages',   sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
-            .query(`INSERT INTO log.DeliveryGoodsIssueRun (deliveryID, status, messages)
-                    VALUES (@deliveryId, @status, @messages)`);
+        // Same fire-and-forget guard as runZdelflagMaintenance's recordRun
+        // above — writing the history row must never crash the caller (and
+        // this is exactly what surfaced the gap for real: the very first
+        // live delivery to reach this point failed the whole completion
+        // with "Invalid object name 'log.DeliveryGoodsIssueRun'" because the
+        // migration hadn't been run yet — a DB problem, not a reason to
+        // fail pallets that already successfully rolled up).
+        try {
+            await pool.request()
+                .input('deliveryId', sql.NVarChar(10),  String(deliveryId))
+                .input('status',     sql.NVarChar(10),  status)
+                .input('messages',   sql.NVarChar(sql.MAX), JSON.stringify(messages || []))
+                .query(`INSERT INTO log.DeliveryGoodsIssueRun (deliveryID, status, messages)
+                        VALUES (@deliveryId, @status, @messages)`);
+        } catch (err) {
+            console.error(`Failed to record DeliveryGoodsIssueRun for delivery ${deliveryId}:`, err.message);
+        }
         return { status, messages: messages || [] };
     };
 

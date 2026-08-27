@@ -567,6 +567,30 @@ describe('POST /:deliveryId/goods-issue/reprocess', () => {
     expect(dbRequest.input).toHaveBeenCalledWith('status', expect.anything(), 'Success');
   });
 
+  // Regression test: a real live delivery hit this exact scenario — the
+  // DeliveryGoodsIssueRun table didn't exist yet ("Invalid object name
+  // 'log.DeliveryGoodsIssueRun'"), and because recordRun's INSERT wasn't
+  // guarded, that DB error propagated straight out of runGoodsIssueApproval
+  // and crashed the whole request with a 500, even though SAP itself
+  // reported success. recordRun must swallow a write failure and still
+  // resolve normally.
+  test('still resolves normally when the history-row INSERT itself fails', async () => {
+    queueResults(
+      { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
+      { recordset: [{ status: 'Failed' }] },  // GoodsIssueRun check — eligible for retry
+    );
+    dbRequest.query.mockRejectedValueOnce(new Error("Invalid object name 'log.DeliveryGoodsIssueRun'."));
+    axiosMock.post.mockResolvedValueOnce({
+      data: { success: true, data: { success: true, messages: [{ type: 'S', message: 'Delivery processed' }] } },
+    });
+
+    const res = await request(app).post('/1/goods-issue/reprocess');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.status).toBe('Success');
+  });
+
   test('records Failed with the real SAP messages when SapServer returns 422', async () => {
     queueResults(
       { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
