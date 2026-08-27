@@ -130,8 +130,7 @@ describe('POST /drumming/entry — happy path', () => {
       { recordset: [] },                   // writeEvent SAP_POST
     );
     axiosMock.post
-      .mockResolvedValueOnce({ data: { success: true, data: { type: 'S', messageClass: 'RM', messageNumber: '191', documentNumber: 'MD200', message: 'ok' } } })
-      .mockResolvedValueOnce({ data: { success: true } }); // label print
+      .mockResolvedValueOnce({ data: { success: true, data: { type: 'S', messageClass: 'RM', messageNumber: '191', documentNumber: 'MD200', message: 'ok' } } });
 
     const res = await request(app).post('/drumming/entry').send(validBody);
 
