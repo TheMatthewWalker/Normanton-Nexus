@@ -277,6 +277,129 @@ describe('applyReversalCancellations', () => {
   });
 });
 
+describe('computeReassignmentPlan (pure, no DB)', () => {
+  test('reassigns entirely to a single open FEFO line when it fully covers the quantity', () => {
+    const cancelledLines = [{ declarationLineId: 1, declarationId: 1, cancelledDeliveryId: 99, material: 'M1', qtyAllocated: 50 }];
+    const openRows = [
+      { DeliveryId: 10, Material: 'M1', RemainingQty: 200, ExpiryDate: '2026-06-01', DocumentDate: '2026-01-01' },
+      { DeliveryId: 11, Material: 'M1', RemainingQty: 200, ExpiryDate: '2026-07-01', DocumentDate: '2026-01-02' },
+    ];
+    const plan = db.computeReassignmentPlan(cancelledLines, openRows);
+    expect(plan).toEqual([
+      expect.objectContaining({ declarationLineId: 1, totalQty: 50, shortfall: 0, splits: [{ deliveryId: 10, qty: 50 }] }),
+    ]);
+  });
+
+  test('splits across multiple FEFO lines when the earliest one alone is not enough', () => {
+    const cancelledLines = [{ declarationLineId: 1, declarationId: 1, cancelledDeliveryId: 99, material: 'M1', qtyAllocated: 150 }];
+    const openRows = [
+      { DeliveryId: 10, Material: 'M1', RemainingQty: 100, ExpiryDate: '2026-06-01', DocumentDate: '2026-01-01' },
+      { DeliveryId: 11, Material: 'M1', RemainingQty: 100, ExpiryDate: '2026-07-01', DocumentDate: '2026-01-02' },
+    ];
+    const plan = db.computeReassignmentPlan(cancelledLines, openRows);
+    expect(plan[0].splits).toEqual([{ deliveryId: 10, qty: 100 }, { deliveryId: 11, qty: 50 }]);
+    expect(plan[0].shortfall).toBe(0);
+  });
+
+  test('reports a shortfall (does not over-allocate) when open stock runs out', () => {
+    const cancelledLines = [{ declarationLineId: 1, declarationId: 1, cancelledDeliveryId: 99, material: 'M1', qtyAllocated: 150 }];
+    const openRows = [{ DeliveryId: 10, Material: 'M1', RemainingQty: 40, ExpiryDate: '2026-06-01', DocumentDate: '2026-01-01' }];
+    const plan = db.computeReassignmentPlan(cancelledLines, openRows);
+    expect(plan[0].splits).toEqual([{ deliveryId: 10, qty: 40 }]);
+    expect(plan[0].shortfall).toBe(110);
+  });
+
+  test('shares one mutable pool across multiple cancelled lines for the same material, in (declarationId, declarationLineId) order', () => {
+    const cancelledLines = [
+      { declarationLineId: 5, declarationId: 2, cancelledDeliveryId: 98, material: 'M1', qtyAllocated: 60 },
+      { declarationLineId: 1, declarationId: 1, cancelledDeliveryId: 99, material: 'M1', qtyAllocated: 60 },
+    ];
+    const openRows = [{ DeliveryId: 10, Material: 'M1', RemainingQty: 100, ExpiryDate: '2026-06-01', DocumentDate: '2026-01-01' }];
+    const plan = db.computeReassignmentPlan(cancelledLines, openRows);
+    // declarationId 1 (line 1) is processed first despite appearing second in the input.
+    expect(plan[0]).toEqual(expect.objectContaining({ declarationLineId: 1, splits: [{ deliveryId: 10, qty: 60 }], shortfall: 0 }));
+    // declarationId 2 (line 5) only sees the 40 left over after line 1 already claimed 60.
+    expect(plan[1]).toEqual(expect.objectContaining({ declarationLineId: 5, splits: [{ deliveryId: 10, qty: 40 }], shortfall: 20 }));
+  });
+
+  test('never touches open rows for a different material', () => {
+    const cancelledLines = [{ declarationLineId: 1, declarationId: 1, cancelledDeliveryId: 99, material: 'M1', qtyAllocated: 10 }];
+    const openRows = [{ DeliveryId: 10, Material: 'M2', RemainingQty: 100, ExpiryDate: '2026-06-01', DocumentDate: '2026-01-01' }];
+    const plan = db.computeReassignmentPlan(cancelledLines, openRows);
+    expect(plan[0].splits).toEqual([]);
+    expect(plan[0].shortfall).toBe(10);
+  });
+});
+
+describe('buildReassignmentPlanForVendor', () => {
+  test('returns [] when nothing needs reassigning', async () => {
+    queueResults({ recordset: [{ DeliveryId: 1, Material: 'M1', MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 100, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null }] });
+    const plan = await db.buildReassignmentPlanForVendor(1);
+    expect(plan).toEqual([]);
+  });
+
+  test('builds a plan from declaration lines pointing at a cancelled delivery', async () => {
+    queueResults(
+      { recordset: [
+        { DeliveryId: 1, Material: 'M1', MaterialDocument: 'A', MaterialDocItem: '0001', Quantity: 100, RemainingQty: 0, ReversalOfMaterialDocument: null, ReversalOfMaterialDocItem: null },
+        { DeliveryId: 2, Material: 'M1', MaterialDocument: 'B', MaterialDocItem: '0001', Quantity: -100, RemainingQty: -100, ReversalOfMaterialDocument: 'A', ReversalOfMaterialDocItem: '0001' },
+      ] },
+      { recordset: [{ DeclarationLineId: 7, DeclarationId: 3, CancelledDeliveryId: 1, Material: 'M1', QtyAllocated: 100 }] },
+      { recordset: [{ DeliveryId: 20, Material: 'M1', RemainingQty: 150, ExpiryDate: '2026-06-01', DocumentDate: '2026-01-01' }] },
+    );
+    const plan = await db.buildReassignmentPlanForVendor(1);
+    expect(plan).toEqual([
+      expect.objectContaining({ declarationLineId: 7, declarationId: 3, cancelledDeliveryId: 1, totalQty: 100, splits: [{ deliveryId: 20, qty: 100 }], shortfall: 0 }),
+    ]);
+  });
+});
+
+describe('applyReassignmentPlan', () => {
+  test('re-points DeliveryId in place for a single-split item and decrements the target', async () => {
+    queueResults(
+      { rowsAffected: [1] }, // UPDATE ConsignmentDeclarationLine.DeliveryId
+      { rowsAffected: [1] }, // UPDATE target RemainingQty
+    );
+    const plan = [{ declarationLineId: 7, declarationId: 3, material: 'M1', cancelledDeliveryId: 1, totalQty: 100, splits: [{ deliveryId: 20, qty: 100 }], shortfall: 0 }];
+    const result = await db.applyReassignmentPlan(plan);
+    expect(result.applied).toHaveLength(1);
+    expect(result.skipped).toEqual([]);
+    expect(dbRequest.query.mock.calls[0][0]).toContain('UPDATE log.ConsignmentDeclarationLine SET DeliveryId');
+    expect(dbRequest.query.mock.calls[1][0]).toContain('UPDATE log.ConsignmentDelivery SET RemainingQty = RemainingQty - @qty');
+  });
+
+  test('replaces the line with one row per split for a multi-split item', async () => {
+    queueResults(
+      { rowsAffected: [1] }, // DELETE original line
+      { rowsAffected: [1] }, // INSERT split 1
+      { rowsAffected: [1] }, // INSERT split 2
+      { rowsAffected: [1] }, // UPDATE target 1 RemainingQty
+      { rowsAffected: [1] }, // UPDATE target 2 RemainingQty
+    );
+    const plan = [{ declarationLineId: 7, declarationId: 3, material: 'M1', cancelledDeliveryId: 1, totalQty: 100, splits: [{ deliveryId: 20, qty: 60 }, { deliveryId: 21, qty: 40 }], shortfall: 0 }];
+    const result = await db.applyReassignmentPlan(plan);
+    expect(result.applied).toHaveLength(1);
+    expect(dbRequest.query.mock.calls[0][0]).toContain('DELETE FROM log.ConsignmentDeclarationLine');
+    expect(dbRequest.query.mock.calls[1][0]).toContain('INSERT INTO log.ConsignmentDeclarationLine');
+    expect(dbRequest.query.mock.calls[2][0]).toContain('INSERT INTO log.ConsignmentDeclarationLine');
+  });
+
+  test('skips (does not write) an item with a shortfall', async () => {
+    const plan = [{ declarationLineId: 7, declarationId: 3, material: 'M1', cancelledDeliveryId: 1, totalQty: 100, splits: [{ deliveryId: 20, qty: 40 }], shortfall: 60 }];
+    const result = await db.applyReassignmentPlan(plan);
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual(plan);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rolls back and rethrows if a write fails mid-item', async () => {
+    dbRequest.query.mockRejectedValueOnce(new Error('constraint violation'));
+    const plan = [{ declarationLineId: 7, declarationId: 3, material: 'M1', cancelledDeliveryId: 1, totalQty: 100, splits: [{ deliveryId: 20, qty: 100 }], shortfall: 0 }];
+    await expect(db.applyReassignmentPlan(plan)).rejects.toThrow('constraint violation');
+    expect(transaction.rollback).toHaveBeenCalled();
+  });
+});
+
 describe('replaceConsignmentStockSnapshot', () => {
   test('truncates first, then inserts a UNION ALL batch, and reports the material count', async () => {
     queueResults(

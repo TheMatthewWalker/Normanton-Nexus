@@ -774,3 +774,169 @@ export function buildAllocationProposal(deliveryRows, qtyToDeclare) {
 
   return { lines, unallocatedQty: Math.round(remaining * 1000) / 1000 };
 }
+
+// ── Reassigning declarations off cancelled stock ────────────────────────────
+//
+// computeReversalCancellations only zeroes RemainingQty for a cancelled
+// delivery line nobody has drawn against yet — a line a real (or, as
+// discovered against this data, seed) declaration already fully declared
+// against is left alone (see its own header comment) since silently
+// zeroing it would contradict that declaration's own QtyAllocated. This is
+// the follow-up correction for exactly those lines: find how much was
+// declared against a now-known-cancelled delivery, and re-point that
+// declaration line at the next real, still-open FEFO batch(es) instead —
+// the aggregate Delivered/Undeclared balance is unaffected either way (it
+// sums QtyAllocated per material, not per delivery line), but per-batch
+// RemainingQty/expiry tracking is only accurate once the declared quantity
+// is attributed to real stock instead of a document that turned out to have
+// been reversed in SAP.
+//
+// Pure — reuses buildAllocationProposal's exact greedy walk per cancelled
+// line, but (unlike a single proposal) has to share ONE mutable pool of
+// open delivery rows across every cancelled line being reassigned in the
+// same pass, so two cancelled lines for the same material don't both
+// propose drawing from the same batch. cancelledLines are processed in
+// (declarationId, declarationLineId) order for determinism.
+export function computeReassignmentPlan(cancelledLines, openDeliveryRows) {
+  const byMaterial = new Map();
+  for (const row of openDeliveryRows) {
+    const list = byMaterial.get(row.Material) || [];
+    list.push({ ...row, RemainingQty: Number(row.RemainingQty) }); // local mutable copy
+    byMaterial.set(row.Material, list);
+  }
+  for (const rows of byMaterial.values()) {
+    rows.sort((a, b) => {
+      const ea = a.ExpiryDate ? new Date(a.ExpiryDate).getTime() : Infinity;
+      const eb = b.ExpiryDate ? new Date(b.ExpiryDate).getTime() : Infinity;
+      if (ea !== eb) return ea - eb;
+      const da = a.DocumentDate ? new Date(a.DocumentDate).getTime() : Infinity;
+      const db = b.DocumentDate ? new Date(b.DocumentDate).getTime() : Infinity;
+      return da - db;
+    });
+  }
+
+  const ordered = [...cancelledLines].sort((a, b) =>
+    a.declarationId - b.declarationId || a.declarationLineId - b.declarationLineId);
+
+  return ordered.map(line => {
+    const pool = byMaterial.get(line.material) || [];
+    const { lines: splits, unallocatedQty } = buildAllocationProposal(pool, line.qtyAllocated);
+    for (const s of splits) {
+      const row = pool.find(r => r.DeliveryId === s.deliveryId);
+      if (row) row.RemainingQty -= s.qtyAllocated;
+    }
+    return {
+      declarationLineId: line.declarationLineId,
+      declarationId: line.declarationId,
+      material: line.material,
+      cancelledDeliveryId: line.cancelledDeliveryId,
+      totalQty: Math.round(Number(line.qtyAllocated) * 1000) / 1000,
+      splits: splits.map(s => ({ deliveryId: s.deliveryId, qty: s.qtyAllocated })),
+      shortfall: unallocatedQty,
+    };
+  });
+}
+
+// DB read half — gathers every declaration line currently pointing at a
+// cancelled delivery for this vendor (via computeReversalCancellations'
+// needsReview set, filtered to the positive-quantity side since a negative
+// reversal row is never FEFO/FIFO-selectable in the first place) plus every
+// currently-open real delivery line, and returns the resulting plan.
+// Read-only — nothing is written until applyReassignmentPlan runs it.
+export async function buildReassignmentPlanForVendor(vendorId) {
+  const pool = await getPool();
+  const { recordset: allRows } = await pool.request().input('vendorId', sql.Int, vendorId).query(`
+    SELECT DeliveryId, Material, MaterialDocument, MaterialDocItem, Quantity, RemainingQty,
+           ReversalOfMaterialDocument, ReversalOfMaterialDocItem
+    FROM log.ConsignmentDelivery WHERE VendorId = @vendorId
+  `);
+  const { needsReview } = computeReversalCancellations(allRows);
+  const cancelledDeliveryIds = needsReview.map(n => n.row).filter(r => Number(r.Quantity) > 0).map(r => r.DeliveryId);
+  if (!cancelledDeliveryIds.length) return [];
+
+  const req1 = pool.request();
+  cancelledDeliveryIds.forEach((id, i) => req1.input(`id${i}`, sql.Int, id));
+  const { recordset: lines } = await req1.query(`
+    SELECT dl.DeclarationLineId, dl.DeclarationId, dl.DeliveryId AS CancelledDeliveryId, dl.Material, dl.QtyAllocated
+    FROM log.ConsignmentDeclarationLine dl
+    WHERE dl.DeliveryId IN (${cancelledDeliveryIds.map((_, i) => `@id${i}`).join(',')})
+  `);
+  if (!lines.length) return [];
+
+  const cancelledLines = lines.map(l => ({
+    declarationLineId: l.DeclarationLineId, declarationId: l.DeclarationId,
+    cancelledDeliveryId: l.CancelledDeliveryId, material: l.Material, qtyAllocated: Number(l.QtyAllocated),
+  }));
+
+  // Same ExpiryDate fallback expression as listConsignmentDeliveries, so
+  // FEFO ordering here matches what a real declaration proposal would use.
+  const { recordset: openRows } = await pool.request().input('vendorId', sql.Int, vendorId).query(`
+    SELECT d.DeliveryId, d.Material, d.RemainingQty,
+           ISNULL(d.ExpiryDate,
+                  CASE WHEN cvc.ExpiryDays IS NOT NULL AND d.PostingDate IS NOT NULL
+                       THEN DATEADD(day, cvc.ExpiryDays, d.PostingDate) END) AS ExpiryDate,
+           d.DocumentDate
+    FROM log.ConsignmentDelivery d
+    LEFT JOIN log.ConsignmentVendorConfig cvc ON cvc.VendorId = d.VendorId
+    WHERE d.VendorId = @vendorId AND d.RemainingQty > 0
+  `);
+
+  return computeReassignmentPlan(cancelledLines, openRows);
+}
+
+// Applies an already-computed plan (from buildReassignmentPlanForVendor).
+// Skips (does not write) any item with a shortfall — real open stock ran
+// out before the declared quantity was fully covered — rather than
+// partially reassigning it. A single-split item just re-points the
+// existing ConsignmentDeclarationLine's DeliveryId; a multi-split item
+// replaces it with one line per target so QtyAllocated still matches what
+// each real batch actually absorbed. Every target delivery line's
+// RemainingQty is decremented by what it absorbed, exactly as
+// confirmDeclaration would have done had it been declared there originally.
+export async function applyReassignmentPlan(plan) {
+  const pool = await getPool();
+  const applied = [];
+  const skipped = [];
+
+  for (const item of plan) {
+    if (item.shortfall > 0.001) { skipped.push(item); continue; }
+
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+    try {
+      if (item.splits.length === 1) {
+        await tx.request()
+          .input('declarationLineId', sql.Int, item.declarationLineId)
+          .input('deliveryId', sql.Int, item.splits[0].deliveryId)
+          .query('UPDATE log.ConsignmentDeclarationLine SET DeliveryId = @deliveryId WHERE DeclarationLineId = @declarationLineId');
+      } else {
+        await tx.request().input('declarationLineId', sql.Int, item.declarationLineId)
+          .query('DELETE FROM log.ConsignmentDeclarationLine WHERE DeclarationLineId = @declarationLineId');
+        for (const split of item.splits) {
+          await tx.request()
+            .input('declarationId', sql.Int, item.declarationId)
+            .input('deliveryId', sql.Int, split.deliveryId)
+            .input('material', sql.NVarChar(18), item.material)
+            .input('qtyAllocated', sql.Decimal(15, 3), split.qty)
+            .query(`
+              INSERT INTO log.ConsignmentDeclarationLine (DeclarationId, DeliveryId, Material, QtyAllocated)
+              VALUES (@declarationId, @deliveryId, @material, @qtyAllocated)
+            `);
+        }
+      }
+      for (const split of item.splits) {
+        await tx.request()
+          .input('deliveryId', sql.Int, split.deliveryId)
+          .input('qty', sql.Decimal(15, 3), split.qty)
+          .query('UPDATE log.ConsignmentDelivery SET RemainingQty = RemainingQty - @qty WHERE DeliveryId = @deliveryId');
+      }
+      await tx.commit();
+      applied.push(item);
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  }
+
+  return { applied, skipped };
+}
