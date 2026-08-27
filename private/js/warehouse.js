@@ -6423,13 +6423,41 @@ async function completeDelivery() {
     });
     const json = await res.json();
     // Blocked — this picksheet (or, for a linked group, one of its linked
-    // siblings) still has materials outstanding. See routes/deliverymain.js's
-    // PATCH /:deliveryId/complete precondition.
-    if (res.status === 409 && Array.isArray(json.outstanding)) {
+    // siblings) has an item more than 10% off the SAP delivery quantity.
+    // See routes/deliverymain.js's PATCH /:deliveryId/complete precondition.
+    if (res.status === 409 && json.mismatchType === 'exceeds-tolerance' && Array.isArray(json.outstanding)) {
       const detail = json.outstanding.map(o =>
-        `Delivery #${o.deliveryId}: ${o.materials.map(m => `${m.material} (${m.requiredQty} outstanding)`).join(', ')}`
+        `Delivery #${o.deliveryId}: ${o.items.map(i => `${i.material} (picked ${i.pickedQty} of ${i.requiredQty})`).join(', ')}`
       ).join('\n');
       throw new Error(`${json.error}\n\n${detail}`);
+    }
+    // Close but not exact — every item is within 10% of SAP's delivery
+    // quantity. Offer to auto-correct SAP's own delivery quantities
+    // (BAPI_OUTB_DELIVERY_CHANGE) to match what was actually picked, then
+    // retry completion. Decline -> nothing happens, picksheet stays open,
+    // per the user's explicit instruction.
+    if (res.status === 409 && json.mismatchType === 'within-tolerance' && Array.isArray(json.outstanding)) {
+      const detail = json.outstanding.map(o =>
+        `Delivery #${o.deliveryId}: ${o.items.map(i =>
+          `${i.material} — picked ${i.pickedQty} of ${i.requiredQty} (${(i.pctDiff * 100).toFixed(1)}% ${i.diffQty < 0 ? 'under' : 'over'})`
+        ).join('\n')}`
+      ).join('\n');
+      const proceed = await wConfirm({
+        title: 'Quantities Close But Not Exact',
+        message: `${json.error}\n\n${detail}`,
+        confirmText: 'Update SAP Quantities',
+        variant: 'success',
+      });
+      if (!proceed) return; // decline -> nothing happens, matches the spec exactly
+
+      const syncRes  = await fetch(`/api/deliverymain/${encodeURIComponent(deliveryId)}/sync-delivery-quantities`, { method: 'POST' });
+      const syncJson = await syncRes.json();
+      if (!syncJson.success) throw new Error(syncJson.error || 'Could not update SAP quantities.');
+
+      // SAP's own delivery quantities now match what was picked, so the
+      // check passes cleanly on retry — one retry always resolves it, no
+      // loop risk (re-reads _palletListCtx fresh, same as the first call).
+      return completeDelivery();
     }
     if (!json.success) throw new Error(json.error || 'Update failed');
     closePickModal();

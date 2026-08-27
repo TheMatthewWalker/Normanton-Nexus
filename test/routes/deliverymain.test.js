@@ -422,27 +422,44 @@ describe('PATCH /:deliveryId/complete', () => {
     expect(dbRequest.query).not.toHaveBeenCalled();
   });
 
-  test('409s with the outstanding materials when nothing is linked and picking isn\'t finished', async () => {
+  test('409s (exceeds-tolerance) with the outstanding items when nothing is linked and nothing was picked', async () => {
     queueResults(
       { recordset: [] },                                   // linkedRes — no links
       { recordset: [{ pendingPackagingData: 0 }] },         // heldRes
-      { recordset: [{ customerID: 5000 }] },                // getRemainingRequiredMaterials: dmRes
-      { recordset: [] },                                    // getRemainingRequiredMaterials: pickedRes
+      { recordset: [] },                                    // getDeliveryQuantityMatch: pickedRes — nothing picked
     );
-    axiosMock.post
-      .mockResolvedValueOnce({ data: { success: true, data: [ // LIPS — 10 required
-        { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
-      ] } })
-      .mockResolvedValueOnce({ data: { success: true, data: [] } }); // stock — nothing found yet
-    axiosMock.request.mockResolvedValue({ data: { success: false } }); // profit-centre lookup
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: [ // LIPS — 10 required
+      { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+    ] } });
 
     const res = await request(appWarehouseOp).patch('/1/complete');
 
     expect(res.status).toBe(409);
     expect(res.body.success).toBe(false);
+    expect(res.body.mismatchType).toBe('exceeds-tolerance');
     expect(res.body.outstanding).toEqual([
-      { deliveryId: '1', materials: [{ material: '30005R', requiredQty: 10 }] },
+      { deliveryId: '1', items: [{
+        itemNumber: '000010', material: '30005R', requiredQty: 10, pickedQty: 0, diffQty: -10, pctDiff: 1, status: 'exceeds-tolerance',
+      }] },
     ]);
+  });
+
+  test('409s (within-tolerance) offering an auto-correct when picked is close but not exact', async () => {
+    queueResults(
+      { recordset: [] },                                   // linkedRes — no links
+      { recordset: [{ pendingPackagingData: 0 }] },         // heldRes
+      { recordset: [{ itemNumber: '000010', pickedQty: 9.5 }] }, // getDeliveryQuantityMatch: pickedRes — 9.5 of 10, 5% under
+    );
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: [
+      { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+    ] } });
+
+    const res = await request(appWarehouseOp).patch('/1/complete');
+
+    expect(res.status).toBe(409);
+    expect(res.body.success).toBe(false);
+    expect(res.body.mismatchType).toBe('within-tolerance');
+    expect(res.body.outstanding[0].items[0].status).toBe('within-tolerance');
   });
 
   test('skips the precondition for a delivery already in packaging holding', async () => {
@@ -481,6 +498,88 @@ describe('PATCH /:deliveryId/complete', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.linkedResults).toBeDefined();
     expect(Object.keys(res.body.data.linkedResults).sort()).toEqual(['1', '2']);
+  });
+});
+
+describe('POST /:deliveryId/sync-delivery-quantities', () => {
+  test('is rejected for a user without WAREHOUSE_OP', async () => {
+    const res = await request(app).post('/1/sync-delivery-quantities');
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('409s when nothing needs correcting (already exact)', async () => {
+    queueResults(
+      { recordset: [] },                                          // linkedRes — no links
+      { recordset: [{ itemNumber: '000010', pickedQty: 10 }] },    // getDeliveryQuantityMatch: pickedRes — matches exactly
+    );
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: [
+      { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+    ] } });
+
+    const res = await request(appWarehouseOp).post('/1/sync-delivery-quantities');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already match SAP exactly/);
+  });
+
+  test('409s when an item now exceeds 10% (stale discrepancy list)', async () => {
+    queueResults(
+      { recordset: [] },     // linkedRes — no links
+      { recordset: [] },     // getDeliveryQuantityMatch: pickedRes — nothing picked at all now
+    );
+    axiosMock.post.mockResolvedValueOnce({ data: { success: true, data: [
+      { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+    ] } });
+
+    const res = await request(appWarehouseOp).post('/1/sync-delivery-quantities');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/more than 10% off/);
+  });
+
+  test('applies the correction and audits success when within-tolerance items exist', async () => {
+    queueResults(
+      { recordset: [] },                                            // linkedRes — no links
+      { recordset: [{ itemNumber: '000010', pickedQty: 9.5 }] },    // getDeliveryQuantityMatch: pickedRes — 5% under
+      { recordset: [] },                                            // the audit insert
+    );
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: [ // LIPS
+        { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+      ] } })
+      .mockResolvedValueOnce({ data: { success: true, data: { success: true, messages: [] } } }); // SapServer delivery-change
+
+    const res = await request(appWarehouseOp).post('/1/sync-delivery-quantities');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining('/api/warehouse/delivery-change'),
+      expect.objectContaining({
+        DeliveryNumber: '1',
+        Items: [{ ItemNumber: '000010', Material: '30005R', Quantity: 9.5 }],
+      }),
+      expect.anything(),
+    );
+  });
+
+  test('422s and audits failure when SapServer rejects the correction', async () => {
+    queueResults(
+      { recordset: [] },                                            // linkedRes — no links
+      { recordset: [{ itemNumber: '000010', pickedQty: 9.5 }] },    // getDeliveryQuantityMatch: pickedRes
+      { recordset: [] },                                            // the audit insert
+    );
+    axiosMock.post
+      .mockResolvedValueOnce({ data: { success: true, data: [
+        { materialNumber: '30005R', quantity: '10,000', itemNumber: '000010' },
+      ] } })
+      .mockResolvedValueOnce({ data: { success: true, data: { success: false, messages: [{ type: 'E', message: 'Item locked' }] } } });
+
+    const res = await request(appWarehouseOp).post('/1/sync-delivery-quantities');
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/Item locked/);
   });
 });
 

@@ -733,6 +733,84 @@ async function getRemainingRequiredMaterials(pool, deliveryId) {
         return { customerId, materials: Object.values(byMaterial) };
 }
 
+// ── Per-item (POSNR) picked-vs-SAP-delivery-quantity comparison ──
+//
+// A different question from getRemainingRequiredMaterials above (which
+// answers "what's still needed, aggregated per material" for the picking
+// screen — left untouched, still used there). Goods Issue needs picked
+// quantities to match SAP's own delivery quantity (LIPS-LFIMG) EXACTLY, per
+// delivery ITEM (not material — a material spanning multiple items gets an
+// independent check per item, matching what SAP's delivery and
+// BAPI_OUTB_DELIVERY_CHANGE both actually operate on). Used only by PATCH
+// /:deliveryId/complete's completion gate and by POST /:deliveryId/
+// sync-delivery-quantities, which re-runs this server-side as a guard
+// rather than trusting the frontend's cached discrepancy list.
+async function getDeliveryQuantityMatch(pool, deliveryId) {
+    const sapPost = async (path, body) => {
+        const response = await axios.post(
+            `${sapConfig.url}${path}`,
+            body,
+            { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+        );
+        return response.data;
+    };
+    const unwrap = body => Array.isArray(body) ? body : (body?.success && Array.isArray(body.data) ? body.data : []);
+    // Same SAP European-number handling as getRemainingRequiredMaterials's
+    // own parseSapNum (duplicated, not shared — see that function's comment
+    // on why LFIMG needs this).
+    const parseSapNum = v => {
+        const str = String(v ?? '').trim();
+        if (!str) return 0;
+        const normalized = str.includes(',')
+            ? str.replace(/\./g, '').replace(',', '.')
+            : str.replace(/\./g, '');
+        const num = Number(normalized);
+        return Number.isFinite(num) ? num : 0;
+    };
+
+    const lipsBody = await sapPost('/api/warehouse/picksheet-materials', { deliveries: [String(deliveryId)] });
+    if (lipsBody?.success === false) throw new Error((typeof lipsBody.error === 'string' ? lipsBody.error : lipsBody.error?.message) || 'SAP LIPS query failed');
+    const lipsRows = unwrap(lipsBody);
+
+    const pickedRes = await pool.request()
+        .input('sapDelivery', sql.NVarChar, String(deliveryId))
+        .query(`SELECT pp.sapDeliveryItem AS itemNumber, SUM(pp.sapQuantity) AS pickedQty
+                FROM   log.PalletPackages pp
+                JOIN   log.PalletMain pm ON pm.palletID = pp.palletID
+                WHERE  pp.sapDelivery = @sapDelivery AND pp.sapMaterial IS NOT NULL
+                  AND  pm.palletRemoved = 0
+                GROUP  BY pp.sapDeliveryItem`);
+    const pickedByItem = {};
+    pickedRes.recordset.forEach(row => {
+        const item = String(row.itemNumber || '').trim();
+        if (item) pickedByItem[item] = Number(row.pickedQty || 0);
+    });
+
+    const EPSILON   = 0.001; // absorbs float rounding noise -> counts as an exact match
+    const TOLERANCE = 0.10;  // 10% either way, per the user's explicit instruction
+
+    const items = lipsRows.map(r => {
+        const itemNumber  = String(r.itemNumber || '').trim();
+        const material     = String(r.materialNumber || '').trim();
+        const requiredQty  = parseSapNum(r.quantity);
+        const pickedQty    = pickedByItem[itemNumber] || 0;
+        const diffQty       = pickedQty - requiredQty;
+        // required=0 with something picked has no meaningful percentage —
+        // treat as maximally over tolerance rather than dividing by zero.
+        const pctDiff = requiredQty > 0 ? Math.abs(diffQty) / requiredQty : (pickedQty > 0 ? Infinity : 0);
+        const status = Math.abs(diffQty) < EPSILON ? 'exact'
+            : pctDiff <= TOLERANCE ? 'within-tolerance'
+            : 'exceeds-tolerance';
+        return { itemNumber, material, requiredQty, pickedQty, diffQty, pctDiff, status };
+    });
+
+    return {
+        items,
+        allExact: items.every(i => i.status === 'exact'),
+        anyExceedsTolerance: items.some(i => i.status === 'exceeds-tolerance'),
+    };
+}
+
 router.get('/:deliveryId/picksheet-materials', requirePermission('WAREHOUSE_OP'), async (req, res) => {
     try {
         const pool = await getPool();
@@ -1458,14 +1536,26 @@ router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (
             .query(`SELECT linkedDeliveryID FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId`);
         const groupIds = [deliveryId, ...linkedRes.recordset.map(r => String(r.linkedDeliveryID))];
 
-        // Every picksheet in the group must have all its required materials
-        // fully picked before ANY of them can complete — applies even to a
-        // single, unlinked picksheet (a group of one). Skipped per-delivery
-        // for one already sitting in packaging holding: SAP already closed
-        // it outside Nexus, and LIPS' open quantity isn't reduced by
-        // picking, so a held delivery could show nonzero requiredQty
-        // forever — that's not this check's business.
-        const outstanding = [];
+        // Every picksheet in the group must have its picked quantities match
+        // SAP's own delivery quantities EXACTLY, per item, before ANY of
+        // them can complete — Goods Issue requires an exact match, not just
+        // "fully picked" (which also never used to catch over-picking).
+        // Skipped per-delivery for one already sitting in packaging
+        // holding: SAP already closed it outside Nexus, and LIPS' open
+        // quantity isn't reduced by picking, so a held delivery could show
+        // a mismatch forever — that's not this check's business.
+        //
+        // Three outcomes, checked across every member of the group:
+        //   - any item beyond 10% either way -> hard block, same as the old
+        //     all-or-nothing behaviour (now also catching over-picking).
+        //   - no item beyond 10%, but not every item exact -> a WARNING, not
+        //     a block: the frontend can offer to auto-correct SAP's own
+        //     delivery quantities (POST .../sync-delivery-quantities) and
+        //     retry, per the user's explicit instruction.
+        //   - every item on every group member exact -> fall through,
+        //     proceed exactly as before.
+        const exceeding = [];
+        const withinTol = [];
         for (const id of groupIds) {
             const heldRes = await pool.request()
                 .input('deliveryId', sql.BigInt, id)
@@ -1473,22 +1563,28 @@ router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (
                         FROM log.DeliveryMain WHERE deliveryID = @deliveryId`);
             if (heldRes.recordset[0]?.pendingPackagingData) continue;
 
-            const { materials } = await getRemainingRequiredMaterials(pool, id);
-            const remaining = materials.filter(m => Number(m.requiredQty) > 0);
-            if (remaining.length) {
-                outstanding.push({
-                    deliveryId: id,
-                    materials: remaining.map(m => ({ material: m.material, requiredQty: m.requiredQty })),
-                });
-            }
+            const { items } = await getDeliveryQuantityMatch(pool, id);
+            const bad  = items.filter(i => i.status === 'exceeds-tolerance');
+            const soft = items.filter(i => i.status === 'within-tolerance');
+            if (bad.length)  exceeding.push({ deliveryId: id, items: bad });
+            if (soft.length) withinTol.push({ deliveryId: id, items: soft });
         }
-        if (outstanding.length) {
+        if (exceeding.length) {
             return res.status(409).json({
                 success: false,
+                mismatchType: 'exceeds-tolerance',
                 error: groupIds.length > 1
-                    ? 'Cannot complete — one or more linked picksheets still have materials outstanding.'
-                    : 'Cannot complete — this picksheet still has materials outstanding.',
-                outstanding,
+                    ? 'Cannot complete — one or more linked picksheets have items more than 10% off the SAP delivery quantity.'
+                    : 'Cannot complete — one or more items are more than 10% off the SAP delivery quantity.',
+                outstanding: exceeding,
+            });
+        }
+        if (withinTol.length) {
+            return res.status(409).json({
+                success: false,
+                mismatchType: 'within-tolerance',
+                error: 'Picked quantities don\'t exactly match SAP\'s delivery quantities, but are within 10% — update SAP automatically?',
+                outstanding: withinTol,
             });
         }
 
@@ -1522,6 +1618,89 @@ router.patch('/:deliveryId/complete', requirePermission('WAREHOUSE_OP'), async (
             data: { ...results[deliveryId], linkedResults: groupIds.length > 1 ? results : undefined },
         });
     } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ── Apply an automatic SAP delivery-quantity correction (BAPI_OUTB_DELIVERY_CHANGE) ──
+//
+// Called after the operator approves the "within 10%" warning from PATCH
+// /:deliveryId/complete. Re-derives the linked group itself the same way
+// .complete does (never trusts a client-supplied list) and re-runs
+// getDeliveryQuantityMatch server-side per member — defense in depth, since
+// the frontend's discrepancy list could be stale by the time this runs
+// (e.g. someone kept picking in between). Corrects every within-tolerance
+// item across every group member, one SAP call per delivery. On success the
+// frontend re-calls .complete, which should now see an exact match and
+// proceed normally — this endpoint deliberately does NOT call
+// completeOneDelivery itself, keeping that logic in exactly one place. No
+// persistent tracking row: this is a synchronous, user-initiated one-shot
+// action, not a background/automatic step like ZDELFLAG/Goods Issue.
+router.post('/:deliveryId/sync-delivery-quantities', requirePermission('WAREHOUSE_OP'), async (req, res) => {
+    try {
+        const pool = await getPool();
+        const deliveryId = req.params.deliveryId;
+
+        const linkedRes = await pool.request()
+            .input('deliveryId', sql.BigInt, deliveryId)
+            .query(`SELECT linkedDeliveryID FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId`);
+        const groupIds = [deliveryId, ...linkedRes.recordset.map(r => String(r.linkedDeliveryID))];
+
+        const corrections = []; // [{ deliveryId, items: [...within-tolerance items] }]
+        for (const id of groupIds) {
+            const { items, anyExceedsTolerance } = await getDeliveryQuantityMatch(pool, id);
+            if (anyExceedsTolerance) {
+                return res.status(409).json({
+                    success: false,
+                    error: `Delivery #${id} now has an item more than 10% off the SAP delivery quantity — check picking before retrying.`,
+                });
+            }
+            const soft = items.filter(i => i.status === 'within-tolerance');
+            if (soft.length) corrections.push({ deliveryId: id, items: soft });
+        }
+
+        if (!corrections.length) {
+            return res.status(409).json({
+                success: false,
+                error: 'Nothing needs correcting — picked quantities already match SAP exactly.',
+            });
+        }
+
+        for (const { deliveryId: id, items } of corrections) {
+            const response = await axios.post(
+                `${sapConfig.url}/api/warehouse/delivery-change`,
+                {
+                    DeliveryNumber: String(id),
+                    Items: items.map(i => ({ ItemNumber: i.itemNumber, Material: i.material, Quantity: i.pickedQty })),
+                },
+                { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
+            ).catch(err => {
+                // SapServer returns 422 (with a normal ApiResponse body) for
+                // business-level rejections — surface that body rather than
+                // treating it as a transport error, same convention as
+                // /:deliveryId/stage-batch above.
+                if (err.response?.data) return { data: err.response.data };
+                throw err;
+            });
+
+            const body = response.data;
+            const messages = body?.data?.messages;
+            if (!body?.success || !body?.data?.success) {
+                const message = (messages || []).map(m => m.message).filter(Boolean).join('; ')
+                    || body?.error?.message || 'SAP rejected the delivery quantity change.';
+                await auditQuery('SAP_ERROR', req.session?.user?.username,
+                    `Delivery #${id} sync-delivery-quantities failed - ${message}`, req);
+                return res.status(422).json({ success: false, error: `Delivery #${id}: ${message}` });
+            }
+
+            await auditQuery('SAP_OK', req.session?.user?.username,
+                `Delivery #${id} sync-delivery-quantities succeeded (${items.length} item(s))`, req);
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        await auditQuery('SAP_ERROR', req.session?.user?.username,
+            `Delivery #${req.params.deliveryId} sync-delivery-quantities failed - ${err.message}`, req);
         res.status(500).json({ success: false, error: err.message });
     }
 });
