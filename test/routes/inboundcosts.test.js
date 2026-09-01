@@ -63,9 +63,15 @@ describe('POST / — validation', () => {
     expect(res.body.error.message).toMatch(/amount/);
   });
 
+  test('400s without costType', async () => {
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, amount: 10 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/costType/);
+  });
+
   test('404s when the shipment does not exist', async () => {
     queueResults({ recordset: [] });
-    const res = await request(appMrp).post('/').send({ poShipmentID: 999, amount: 10 });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 999, amount: 10, costType: 'ITLG01A' });
     expect(res.status).toBe(404);
   });
 });
@@ -78,7 +84,7 @@ describe('POST / — creating a cost line', () => {
       { recordset: [{ ModeOfTransport: 'Road' }] },                        // modeOfTransport fallback lookup
       { recordset: [{ costID: 55 }] },                                     // the INSERT
     );
-    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 100 });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 100, costType: 'ITLG01A' });
     expect(res.status).toBe(201);
     expect(res.body.data).toEqual({ costID: 55, elementCode: '602200', forwarderSet: false });
   });
@@ -90,7 +96,7 @@ describe('POST / — creating a cost line', () => {
       { recordset: [{ ModeOfTransport: 'Air' }] },
       { recordset: [{ costID: 56 }] },
     );
-    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'premium', amount: 250 });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'premium', amount: 250, costType: 'ITLG02A' });
     expect(res.body.data.elementCode).toBe('602100');
     expect(res.body.data.forwarderSet).toBe(true);
     expect(dbRequest.input).toHaveBeenCalledWith('tier', expect.anything(), 'premium');
@@ -102,7 +108,7 @@ describe('POST / — creating a cost line', () => {
       { recordset: [{ elementCode: '602200' }] },
       { recordset: [{ costID: 57 }] }, // no ModeOfTransport lookup query in between
     );
-    const res = await request(appMrp).post('/').send({ poShipmentID: 1, amount: 10, modeOfTransport: 'Sea' });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, amount: 10, modeOfTransport: 'Sea', costType: 'ITLG01C' });
     expect(res.status).toBe(201);
     expect(dbRequest.query).toHaveBeenCalledTimes(3);
     expect(dbRequest.input).toHaveBeenCalledWith('modeOfTransport', 'NVarChar(20)', 'Sea');
@@ -115,7 +121,7 @@ describe('POST / — creating a cost line', () => {
       { recordset: [{ ModeOfTransport: 'Road' }] },
       { recordset: [{ costID: 58 }] },
     );
-    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costCenter: '900-36GBNO' });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costType: 'ITLG01A', costCenter: '900-36GBNO' });
     expect(res.status).toBe(201);
     expect(dbRequest.input).toHaveBeenCalledWith('costCenter', expect.anything(), '900-36GBNO');
   });
@@ -127,7 +133,7 @@ describe('POST / — creating a cost line', () => {
       { recordset: [{ ModeOfTransport: 'Road' }] },
       { recordset: [{ costID: 59 }] },
     );
-    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costCenter: '900-36GBNO' });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costType: 'ITLG01A', costCenter: '900-36GBNO' });
     expect(res.status).toBe(201);
     expect(dbRequest.input).toHaveBeenCalledWith('costCenter', expect.anything(), '0000002012');
   });
@@ -137,7 +143,7 @@ describe('POST / — creating a cost line', () => {
       { recordset: [{ ShipmentId: 1, ForwarderID: null }] },
       { recordset: [] }, // lookupElementCode finds nothing
     );
-    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10 });
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costType: 'ITLG01A' });
     expect(res.status).toBe(422);
     // Note: the lookup itself correctly normalizes tier to 'standard'/'premium'
     // before querying, but the thrown error message interpolates the raw
@@ -162,23 +168,31 @@ describe('PATCH /:costId — editing a cost line', () => {
     expect(dbRequest.query).not.toHaveBeenCalled();
   });
 
+  test('400s without costType', async () => {
+    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 100 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/costType/);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
   test('400s when the line does not exist or is already posted to SAP', async () => {
     queueResults({ recordset: [] });
-    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 100 });
+    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 100, costType: 'ITLG01A' });
     expect(res.status).toBe(400);
     expect(res.body.error.message).toMatch(/already posted/);
   });
 
-  test('updates tier/amount for a tracked (non-manual) shipment, ignoring any supplied costCenter', async () => {
+  test('updates tier/amount/costType for a tracked (non-manual) shipment, ignoring any supplied costCenter', async () => {
     queueResults(
       { recordset: [{ costID: 1, IsManual: false }] },
       { recordset: [{ elementCode: '602100' }] }, // lookupCostElement (premium)
       { recordset: [{ costID: 1 }] },              // UPDATE
     );
-    const res = await request(appMrp).patch('/1').send({ tier: 'premium', amount: 250, costCenter: '900-36GBNO' });
+    const res = await request(appMrp).patch('/1').send({ tier: 'premium', amount: 250, costType: 'ITLG02A', costCenter: '900-36GBNO' });
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({ costID: 1, elementCode: '602100' });
     const sqlText = dbRequest.query.mock.calls[2][0];
+    expect(sqlText).toMatch(/costType = @costType/);
     expect(sqlText).not.toMatch(/costCenter/);
   });
 
@@ -188,7 +202,7 @@ describe('PATCH /:costId — editing a cost line', () => {
       { recordset: [{ elementCode: '602200' }] },
       { recordset: [{ costID: 2 }] },
     );
-    const res = await request(appMrp).patch('/2').send({ tier: 'standard', amount: 10, costCenter: '900-36GBNO' });
+    const res = await request(appMrp).patch('/2').send({ tier: 'standard', amount: 10, costType: 'ITLG01A', costCenter: '900-36GBNO' });
     expect(res.status).toBe(200);
     const sqlText = dbRequest.query.mock.calls[2][0];
     expect(sqlText).toMatch(/costCenter = @costCenter/);
@@ -200,7 +214,7 @@ describe('PATCH /:costId — editing a cost line', () => {
       { recordset: [{ costID: 1, IsManual: false }] },
       { recordset: [] }, // lookupCostElement finds nothing
     );
-    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 10 });
+    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 10, costType: 'ITLG01A' });
     expect(res.status).toBe(422);
   });
 });

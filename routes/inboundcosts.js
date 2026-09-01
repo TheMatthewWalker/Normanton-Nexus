@@ -32,10 +32,22 @@
 // gated on the shipment's own IsManual flag, not left to the caller.
 //
 // modeOfTransport is captured per line (defaulted from the shipment's own
-// ModeOfTransport at insert time) — per the user, this will drive the
-// material group of the PO the freight cost eventually needs (Road/Sea/Air
-// use different material groups). That PO-creation step isn't built yet;
-// see migrate_inbound_costs_forwarders.sql's comment on the column.
+// ModeOfTransport at insert time) — originally captured to eventually drive
+// the material group of the PO the freight cost needs (Road/Sea/Air use
+// different material groups); superseded once Cost Type started carrying
+// the real SAP Material Group code directly (see routes/shipmentcost.js's
+// resolveMaterialGroup) — modeOfTransport is kept for its own display/
+// reporting value, just no longer needed for that purpose.
+//
+// costType is that Material Group code (e.g. 'ITLG01A' for Road Freight) —
+// required on every cost line added via POST / or PATCH /:costId below
+// (the deliberate, full-context "Add/Edit Cost" entry points), but left
+// optional on insertInboundCostLine itself since a Manual Inbound
+// Shipment's own auto-created cost line (performance.js's
+// createManualOrderShipment, when a Price is supplied at creation) doesn't
+// currently collect one — that line can still have its Cost Type filled in
+// afterward via PATCH /:costId, and posting is blocked with a clear error
+// (routes/shipmentcost.js's resolveMaterialGroup) until it is.
 
 import express from 'express';
 import sql     from 'mssql';
@@ -54,7 +66,7 @@ const INBOUND_COST_CENTER = '0000002012';
 // creation (which auto-creates one line from its Price field) — see
 // performancesql.js's createManualOrderShipment comment. modeOfTransport
 // defaults from the shipment's own value when not supplied explicitly.
-export async function insertInboundCostLine(pool, { poShipmentID, costCenter, tier, amount, information, modeOfTransport }) {
+export async function insertInboundCostLine(pool, { poShipmentID, costCenter, costType, tier, amount, information, modeOfTransport }) {
   const elementCode = await lookupCostElement(pool, 'inbound', tier === 'premium' ? 'premium' : 'standard');
   if (!elementCode) {
     const err = new Error(`No inbound ${tier} cost element configured in log.CostElements.`);
@@ -72,7 +84,7 @@ export async function insertInboundCostLine(pool, { poShipmentID, costCenter, ti
 
   const result = await pool.request()
     .input('poShipmentID',    sql.Int,            poShipmentID)
-    .input('costType',        sql.NVarChar,       '1') // 'General Freight' — same CostTypes row the outbound flow uses
+    .input('costType',        sql.NVarChar(10),   costType || null)
     .input('costElement',     sql.NVarChar,       elementCode)
     .input('costCenter',      sql.NVarChar,       costCenter || INBOUND_COST_CENTER)
     .input('expectedCost',    sql.Decimal(18, 2), amount)
@@ -92,7 +104,7 @@ router.get('/shipment/:poShipmentId', canView, async (req, res) => {
     const { recordset } = await pool.request()
       .input('poShipmentId', sql.Int, req.params.poShipmentId)
       .query(`
-        SELECT sc.costID, sc.poShipmentID, sc.costElement, sc.costCenter,
+        SELECT sc.costID, sc.poShipmentID, sc.costElement, sc.costCenter, sc.costType,
                sc.expectedCost, sc.actualCost, sc.migoStatus, sc.materialDocument, sc.modeOfTransport,
                ce.elementDescription, ce.tier
         FROM log.ShipmentCost sc
@@ -107,7 +119,7 @@ router.get('/shipment/:poShipmentId', canView, async (req, res) => {
 });
 
 // ── Add a cost line ─────────────────────────────────────────────────────────
-// Body: { poShipmentID, tier: 'standard'|'premium', amount, information?, modeOfTransport?, costCenter? }
+// Body: { poShipmentID, tier: 'standard'|'premium', amount, costType, information?, modeOfTransport?, costCenter? }
 // Cost centre stays the fixed inbound default (2012) for a tracked Inbound
 // Log shipment, per the original spec. A Manual Inbound Shipment isn't
 // always PTFE raw material though — those can be against any cost centre,
@@ -115,13 +127,17 @@ router.get('/shipment/:poShipmentId', canView, async (req, res) => {
 // everywhere else, via GET /api/costcenters) — honored only when the
 // shipment IsManual, silently ignored otherwise so a tracked shipment can't
 // be pointed at a cost centre it shouldn't.
+// costType (the SAP Material Group post-migo sends directly — see
+// routes/shipmentcost.js's resolveMaterialGroup) is required here, this
+// being the deliberate "Add Cost" entry point.
 // Posting to SAP happens from the Unprocessed Costs admin tile, not here —
 // see routes/shipmentcost.js.
 router.post('/', canView, async (req, res) => {
   try {
-    const { poShipmentID, tier, amount, information, modeOfTransport, costCenter } = req.body;
+    const { poShipmentID, tier, amount, costType, information, modeOfTransport, costCenter } = req.body;
     if (!poShipmentID) return res.status(400).json({ success: false, error: { message: 'poShipmentID is required.' } });
     if (!amount || Number(amount) <= 0) return res.status(400).json({ success: false, error: { message: 'amount must be greater than 0.' } });
+    if (!costType || !String(costType).trim()) return res.status(400).json({ success: false, error: { message: 'costType is required.' } });
 
     const pool = await getPool();
 
@@ -134,7 +150,7 @@ router.post('/', canView, async (req, res) => {
     if (!shipRows.length) return res.status(404).json({ success: false, error: { message: 'Shipment not found.' } });
 
     const data = await insertInboundCostLine(pool, {
-      poShipmentID, tier, amount: Number(amount), information, modeOfTransport,
+      poShipmentID, tier, amount: Number(amount), costType: String(costType).trim(), information, modeOfTransport,
       costCenter: shipRows[0].IsManual ? (costCenter || null) : null,
     });
     res.status(201).json({ success: true, data: { ...data, forwarderSet: !!shipRows[0].ForwarderID } });
@@ -144,15 +160,18 @@ router.post('/', canView, async (req, res) => {
 });
 
 // ── Edit an unprocessed cost line ───────────────────────────────────────────
-// Body: { tier: 'standard'|'premium', amount, costCenter? } — mirrors POST /
-// above: tier drives the GL account via the same lookupCostElement call,
-// costCenter is only honored when the line's own shipment IsManual (same
-// gate POST / applies at creation), silently ignored otherwise. Blocked
-// once migoStatus=1, same guard DELETE /:costId uses below (reverse via
-// routes/shipmentcost.js's POST /:costId/reverse first — that drops it back
-// into Unprocessed Costs and clears this guard). A wrong tier/amount/cost
-// centre previously had no way to be corrected once added besides deleting
-// and re-adding, per the user.
+// Body: { tier: 'standard'|'premium', amount, costType, costCenter? } —
+// mirrors POST / above: tier drives the GL account via the same
+// lookupCostElement call, costType is required (the SAP Material Group
+// post-migo sends directly — see routes/shipmentcost.js's
+// resolveMaterialGroup), costCenter is only honored when the line's own
+// shipment IsManual (same gate POST / applies at creation), silently
+// ignored otherwise. Blocked once migoStatus=1, same guard DELETE
+// /:costId uses below (reverse via routes/shipmentcost.js's POST
+// /:costId/reverse first — that drops it back into Unprocessed Costs and
+// clears this guard). A wrong tier/amount/cost type/cost centre previously
+// had no way to be corrected once added besides deleting and re-adding,
+// per the user.
 //
 // The JOIN to PurchaseOrderShipment (needed for IsManual) doubles as scope
 // protection — costID is unique across the whole log.ShipmentCost table, so
@@ -161,10 +180,13 @@ router.post('/', canView, async (req, res) => {
 // NULL for each).
 router.patch('/:costId', canView, async (req, res) => {
   try {
-    const { tier, amount, costCenter } = req.body;
+    const { tier, amount, costType, costCenter } = req.body;
     const amountNum = Number(amount);
     if (!Number.isFinite(amountNum) || amountNum <= 0) {
       return res.status(400).json({ success: false, error: { message: 'amount must be greater than 0.' } });
+    }
+    if (!costType || !String(costType).trim()) {
+      return res.status(400).json({ success: false, error: { message: 'costType is required.' } });
     }
 
     const pool = await getPool();
@@ -185,9 +207,10 @@ router.patch('/:costId', canView, async (req, res) => {
     const dbRequest = pool.request()
       .input('costId',       sql.BigInt,         req.params.costId)
       .input('costElement',  sql.NVarChar,       elementCode)
+      .input('costType',     sql.NVarChar(10),   String(costType).trim())
       .input('expectedCost', sql.Decimal(18, 2), amountNum);
 
-    let setSql = 'costElement = @costElement, expectedCost = @expectedCost, actualCost = @expectedCost';
+    let setSql = 'costElement = @costElement, costType = @costType, expectedCost = @expectedCost, actualCost = @expectedCost';
     if (rows[0].IsManual && costCenter) {
       dbRequest.input('costCenter', sql.NVarChar, costCenter);
       setSql += ', costCenter = @costCenter';

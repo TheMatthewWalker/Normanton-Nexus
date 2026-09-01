@@ -152,7 +152,6 @@ function setupTiles() {
       if (fn === 'updatePackagingData') runUpdatePackagingData();
       if (fn === 'updateDestinations')  runUpdateDestinations();
       if (fn === 'updateForwarders')    runUpdateForwarders();
-      if (fn === 'materialGroupMapping')runMaterialGroupMapping();
       if (fn === 'costCentres')         runCostCentres();
       if (fn === 'glAccounts')          runGlAccounts();
       if (fn === 'forwarderModeMapping')runForwarderModeMapping();
@@ -4204,6 +4203,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
     const rows = lines.map(l => `
       <tr class="admin-row">
         <td>${esc(l.elementDescription || l.costElement || '—')}</td>
+        <td class="pn-batch-mono">${esc(l.costType || '—')}</td>
         <td>£${Number(l.expectedCost).toFixed(2)}</td>
         <td>${l.migoStatus
           ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>`
@@ -4217,8 +4217,8 @@ async function renderShipmentAssociatedCosts(shipmentId) {
     container.innerHTML = `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>GL Element</th><th>Amount</th><th>Status</th><th></th></tr></thead>
-          <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
+          <thead><tr><th>GL Element</th><th>Cost Type</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows : '<tr><td colspan="5" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
         </table>
       </div>
       ${canEdit ? `<div class="tf-row" style="margin-top:10px;align-items:flex-end;flex-wrap:wrap;gap:8px">
@@ -4247,9 +4247,9 @@ async function renderShipmentAssociatedCosts(shipmentId) {
     if (!canEdit) return;
 
     // GL Account options — outbound CostElements only, same restriction the
-    // display join above already applies. Reuses Material Group Mapping's
-    // cached loader (mgmLoadCostElements) rather than a separate fetch —
-    // that list already covers every direction, just filtered here.
+    // display join above already applies. Reuses the shared GL Accounts
+    // cache (mgmLoadCostElements) rather than a separate fetch — that list
+    // already covers every direction, just filtered here.
     mgmLoadCostElements().then(elements => {
       const sel = document.getElementById('sd-cost-element');
       if (!sel) return;
@@ -4266,17 +4266,17 @@ async function renderShipmentAssociatedCosts(shipmentId) {
       if (standardFreight) sel.value = '601200';
     });
 
-    // Cost Type options — Logistics.dbo.CostTypes (1 General Freight, 2
-    // Customs). Defaults to General Freight to match the GL Account default
-    // above.
+    // Cost Type options — log.CostTypes, which IS the SAP Material Group
+    // code post-migo sends directly (see routes/shipmentcost.js's
+    // resolveMaterialGroup) — no default selected, since guessing wrong
+    // here means a failed SAP post, not just a wrong label. Requires an
+    // explicit pick, validated below.
     fetch('/api/costtypes').then(r => r.json()).then(types => {
       const sel = document.getElementById('sd-cost-type');
       if (!sel || !Array.isArray(types)) return;
-      sel.innerHTML = types.map(t =>
-        `<option value="${esc(String(t.typeID))}">${esc(t.typeDescription || '')}</option>`
-      ).join('');
-      const generalFreight = types.find(t => String(t.typeID) === '1');
-      if (generalFreight) sel.value = '1';
+      sel.innerHTML = `<option value="">— Select cost type —</option>${types.map(t =>
+        `<option value="${esc(String(t.typeID))}">${esc(String(t.typeID))} — ${esc(t.typeDescription || '')}</option>`
+      ).join('')}`;
     }).catch(() => {});
 
     // Cost Centre options — same default (PTFE, 0000002004) as the booking
@@ -4301,6 +4301,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
       const amount = document.getElementById('sd-cost-amount').value;
 
       if (!costElement) { result.innerHTML = '<div class="sap-error">Select a GL Account.</div>'; return; }
+      if (!costType) { result.innerHTML = '<div class="sap-error">Select a Cost Type.</div>'; return; }
       if (!costCenter) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
       const amountNum = Number(amount);
       if (!amountNum || amountNum <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
@@ -4366,11 +4367,14 @@ async function renderShipmentAssociatedCosts(shipmentId) {
 }
 
 // ── Edit an unprocessed outbound cost line ──
-// PATCH /api/shipmentcost/:costId — amount, GL Account, and Cost Centre are
-// all editable here now (previously amount-only), per the user: a wrong GL
-// account or cost centre had no way to be corrected once added besides
-// deleting and re-adding. `line` is the row shape GET /shipment/:shipmentId
-// returns (costID, costElement, costCenter, expectedCost, …).
+// PATCH /api/shipmentcost/:costId — amount, GL Account, Cost Type, and Cost
+// Centre are all editable here now (previously amount-only), per the user:
+// a wrong GL account/cost type/cost centre had no way to be corrected once
+// added besides deleting and re-adding. Cost Type IS the SAP Material Group
+// post-migo sends directly (see routes/shipmentcost.js's
+// resolveMaterialGroup), so it's just as critical to get right as GL
+// Account. `line` is the row shape GET /shipment/:shipmentId returns
+// (costID, costElement, costType, costCenter, expectedCost, …).
 function openSdCostEditModal(line, shipmentId) {
   openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
     <div class="ps-modal-header">
@@ -4382,6 +4386,10 @@ function openSdCostEditModal(line, shipmentId) {
         <div class="tf-field tf-field--wide">
           <label class="tf-label">GL Account</label>
           <select class="tf-input" id="sd-cost-edit-element"></select>
+        </div>
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Cost Type</label>
+          <select class="tf-input" id="sd-cost-edit-type"><option value="">Loading…</option></select>
         </div>
       </div>
       <div class="tf-row">
@@ -4403,6 +4411,7 @@ function openSdCostEditModal(line, shipmentId) {
   </div>`);
 
   const elementSelect = document.getElementById('sd-cost-edit-element');
+  const typeSelect    = document.getElementById('sd-cost-edit-type');
   const centerSelect  = document.getElementById('sd-cost-edit-center');
 
   mgmLoadCostElements().then(elements => {
@@ -4412,6 +4421,14 @@ function openSdCostEditModal(line, shipmentId) {
     ).join('');
     if ([...elementSelect.options].some(o => o.value === line.costElement)) elementSelect.value = line.costElement;
   }).catch(() => { elementSelect.innerHTML = '<option value="">Failed to load GL accounts</option>'; });
+
+  fetch('/api/costtypes').then(r => r.json()).then(types => {
+    if (!Array.isArray(types)) return;
+    typeSelect.innerHTML = `<option value="">— Select cost type —</option>${types.map(t =>
+      `<option value="${esc(String(t.typeID))}">${esc(String(t.typeID))} — ${esc(t.typeDescription || '')}</option>`
+    ).join('')}`;
+    if ([...typeSelect.options].some(o => o.value === line.costType)) typeSelect.value = line.costType;
+  }).catch(() => { typeSelect.innerHTML = '<option value="">Failed to load cost types</option>'; });
 
   fetch('/api/costcenters').then(r => r.json()).then(data => {
     const centres = Array.isArray(data) ? data : (data.data || []);
@@ -4425,6 +4442,7 @@ function openSdCostEditModal(line, shipmentId) {
     const amount = Number(document.getElementById('sd-cost-edit-amount').value);
     const result = document.getElementById('sd-cost-edit-result');
     if (!elementSelect.value) { result.innerHTML = '<div class="sap-error">Select a GL Account.</div>'; return; }
+    if (!typeSelect.value) { result.innerHTML = '<div class="sap-error">Select a Cost Type.</div>'; return; }
     if (!centerSelect.value) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
     if (!Number.isFinite(amount) || amount <= 0) { result.innerHTML = '<div class="sap-error">Enter a valid amount.</div>'; return; }
 
@@ -4434,7 +4452,7 @@ function openSdCostEditModal(line, shipmentId) {
       const res = await fetch(`/api/shipmentcost/${line.costID}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expectedCost: amount, costElement: elementSelect.value, costCenter: centerSelect.value }),
+        body: JSON.stringify({ expectedCost: amount, costElement: elementSelect.value, costType: typeSelect.value, costCenter: centerSelect.value }),
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Failed to save');
@@ -5210,15 +5228,13 @@ async function runUpdateForwarders() {
   }
 }
 
-// ── Admin: Material Group Mapping ─────────────────────────────────────────────
-// SAP requires a real Material Group code (WGRU/MATKL, e.g. "ITLG01A") on
-// every freight PO item — post-migo (routes/shipmentcost.js) used to build
-// this as free text from modeOfTransport ("Road Freight" etc.), which isn't
-// a valid SAP code and was the root cause of PO creation rolling back. This
-// table (dbo.MaterialGroupMapping, see sql/migrate_material_group_mapping.sql)
-// maps GL account + mode of transport to the real code, with a
-// mode-independent default per GL account also supported (leave Mode of
-// Transport blank when adding/editing).
+// ── Shared GL Accounts cache ─────────────────────────────────────────────────
+// Used by every cost-line create/edit form (outbound Add/Edit Cost, Manual
+// Cost, and formerly Material Group Mapping's own GL Account dropdown — that
+// admin tile was removed once Cost Type started carrying the real SAP
+// Material Group code directly, making the old GL-account+mode-of-transport
+// lookup table it maintained unnecessary; see routes/shipmentcost.js's
+// post-migo for the replacement).
 let mgmCostElements = null; // cached GL account list — {elementCode, elementDescription, ...}[]
 
 async function mgmLoadCostElements() {
@@ -5226,180 +5242,6 @@ async function mgmLoadCostElements() {
   const rows = await fetch('/api/costelements').then(r => r.json());
   mgmCostElements = Array.isArray(rows) ? rows : [];
   return mgmCostElements;
-}
-
-async function runMaterialGroupMapping() {
-  showResultPanel('Material Group Mapping', 'Click a row to edit · Add Mapping for a new GL account / mode combination');
-  try {
-    const [mappingsResp] = await Promise.all([
-      fetch('/api/material-groups').then(r => r.json()),
-      mgmLoadCostElements(), // warm the cache the modal's GL Account dropdown needs
-    ]);
-    if (!mappingsResp.success) throw new Error(mappingsResp.error?.message || 'Failed to load material group mappings');
-    mgmRenderList(mappingsResp.data);
-  } catch (err) {
-    document.getElementById('result-body').innerHTML = `<div class="sap-error">✕ ${esc(err.message)}</div>`;
-  }
-}
-
-function mgmCostElementLabel(costElement) {
-  // Matched by elementCode, not elementID — elementID is CostElements' own
-  // surrogate PK and has no relationship to what's actually stored in
-  // ShipmentCost.costElement / MaterialGroupMapping.CostElement. elementCode
-  // (e.g. '602200') is the real SAP GL account short code both those columns
-  // hold — see routes/shipmentmain.js's INSERT (costElement = item.elementCode).
-  const match = (mgmCostElements || []).find(c => String(c.elementCode) === String(costElement));
-  return match ? `${costElement} — ${match.elementDescription || ''}` : String(costElement);
-}
-
-function mgmRenderList(mappings) {
-  document.getElementById('result-row-badge').textContent = `${mappings.length} mapping${mappings.length !== 1 ? 's' : ''}`;
-  document.getElementById('result-row-badge').classList.remove('hidden');
-
-  const rows = mappings.map(m => `
-    <tr class="admin-row">
-      <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${esc(mgmCostElementLabel(m.CostElement))}</td>
-      <td>${esc(m.ModeOfTransport || 'Any (default)')}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-weight:700">${esc(m.MaterialGroup)}</td>
-      <td>${esc(m.Description || '—')}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="btn-secondary mgm-edit" data-id="${esc(String(m.MappingId))}" style="padding:3px 10px;font-size:11px">Edit</button>
-        <button class="btn-secondary mgm-delete" data-id="${esc(String(m.MappingId))}" data-label="${esc(mgmCostElementLabel(m.CostElement))} / ${esc(m.ModeOfTransport || 'Any')}" style="padding:3px 10px;font-size:11px;color:var(--error,#DC2626)">Delete</button>
-      </td>
-    </tr>`).join('');
-
-  document.getElementById('result-body').innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
-      <button class="btn-submit" id="mgm-add-btn">+ Add Mapping</button>
-    </div>
-    ${mappings.length ? `
-      <div style="overflow-x:auto">
-        <table class="pn-batch-table admin-table">
-          <thead><tr><th>GL Account</th><th>Mode of Transport</th><th>Material Group</th><th>Description</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>` : '<div class="sap-empty">No mappings yet — add one so freight PO creation knows which SAP Material Group code to use for a GL account.</div>'}
-  `;
-
-  document.getElementById('mgm-add-btn').addEventListener('click', () => mgmOpenModal(null));
-  document.querySelectorAll('.mgm-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const m = mappings.find(x => String(x.MappingId) === btn.dataset.id);
-      if (m) mgmOpenModal(m);
-    });
-  });
-  document.querySelectorAll('.mgm-delete').forEach(btn => {
-    btn.addEventListener('click', () => mgmDeleteMapping(btn.dataset.id, btn.dataset.label));
-  });
-}
-
-function mgmOpenModal(mapping) {
-  const isEdit = !!mapping;
-
-  // A mapping being edited might reference a GL account no longer in
-  // costElements (deleted/renamed since) — keep it selectable rather than
-  // silently swapping it for whatever option happens to be first.
-  // Options are keyed on elementCode (the real GL account short code, e.g.
-  // '602200') — NOT elementID, which is just CostElements' own surrogate PK
-  // and has no relationship to what ShipmentCost.costElement actually holds.
-  const currentInList = isEdit && (mgmCostElements || []).some(c => String(c.elementCode) === String(mapping.CostElement));
-  const extraOption = isEdit && !currentInList
-    ? `<option value="${esc(mapping.CostElement)}" selected>${esc(mapping.CostElement)} (not in GL Accounts list)</option>`
-    : '';
-  const costElementOptions = (mgmCostElements || [])
-    .slice()
-    .sort((a, b) => String(a.elementCode).localeCompare(String(b.elementCode)))
-    .map(c => `<option value="${esc(c.elementCode)}" ${isEdit && String(mapping.CostElement) === String(c.elementCode) ? 'selected' : ''}>${esc(c.elementCode)} — ${esc(c.elementDescription || '')}</option>`)
-    .join('');
-
-  openModal(`<div class="ps-modal" style="max-width:520px;width:92vw">
-    <div class="ps-modal-header">
-      <div><div class="ps-modal-title">${isEdit ? 'Edit Mapping' : 'Add Mapping'}</div></div>
-      <button class="ps-modal-close" onclick="closePickModal()">×</button>
-    </div>
-    <div class="ps-modal-body">
-      <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">GL Account</label>
-          <select class="tf-input" id="mgm-cost-element">
-            <option value=""></option>
-            ${extraOption}
-            ${costElementOptions}
-          </select>
-        </div>
-      </div>
-      <div class="tf-row">
-        <div class="tf-field">
-          <label class="tf-label">Mode of Transport</label>
-          <select class="tf-input" id="mgm-mode">
-            <option value="">Any (default for this GL account)</option>
-            ${OS_TRANSPORT_MODES.map(mo => `<option value="${mo}" ${isEdit && mapping.ModeOfTransport === mo ? 'selected' : ''}>${mo}</option>`).join('')}
-          </select>
-        </div>
-        <div class="tf-field">
-          <label class="tf-label">Material Group (SAP code)</label>
-          <input class="tf-input" type="text" id="mgm-material-group" maxlength="9" style="text-transform:uppercase" value="${esc(mapping?.MaterialGroup || '')}" placeholder="e.g. ITLG01A">
-        </div>
-      </div>
-      <div class="tf-row">
-        <div class="tf-field tf-field--wide">
-          <label class="tf-label">Description</label>
-          <input class="tf-input" type="text" id="mgm-description" value="${esc(mapping?.Description || '')}" placeholder="e.g. Inbound freight">
-        </div>
-      </div>
-      <div class="toolbar-hint" style="margin:2px 0 10px">Leave Mode of Transport blank to use this code as the default for the GL account regardless of mode. A specific mode always takes priority over the default when both exist.</div>
-      <div id="mgm-result"></div>
-    </div>
-    <div class="ps-modal-actions">
-      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
-      <button type="button" class="btn-submit" id="mgm-save-btn">${isEdit ? 'Save Changes' : 'Add Mapping'}</button>
-    </div>
-  </div>`);
-
-  document.getElementById('mgm-save-btn').addEventListener('click', async () => {
-    const body = {
-      costElement: document.getElementById('mgm-cost-element').value.trim(),
-      modeOfTransport: document.getElementById('mgm-mode').value || null,
-      materialGroup: document.getElementById('mgm-material-group').value.trim().toUpperCase(),
-      description: document.getElementById('mgm-description').value.trim() || null,
-    };
-    if (!body.costElement) {
-      document.getElementById('mgm-result').innerHTML = '<div class="sap-error">GL Account is required.</div>';
-      return;
-    }
-    if (!body.materialGroup) {
-      document.getElementById('mgm-result').innerHTML = '<div class="sap-error">Material Group is required.</div>';
-      return;
-    }
-    const btn = document.getElementById('mgm-save-btn');
-    btn.disabled = true; btn.textContent = 'Saving…';
-    try {
-      const res = await fetch(isEdit ? `/api/material-groups/${mapping.MappingId}` : '/api/material-groups', {
-        method: isEdit ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error?.message || 'Save failed');
-      closePickModal();
-      runMaterialGroupMapping();
-    } catch (err) {
-      document.getElementById('mgm-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Mapping';
-    }
-  });
-}
-
-async function mgmDeleteMapping(mappingId, label) {
-  if (!(await confirmDialog(`Delete the mapping for ${label}? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }))) return;
-  try {
-    const res = await fetch(`/api/material-groups/${mappingId}`, { method: 'DELETE' });
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error?.message || 'Delete failed');
-    runMaterialGroupMapping();
-  } catch (err) {
-    await alertDialog(err.message);
-  }
 }
 
 // ── Admin: Material Request Units ───────────────────────────────────────────────
@@ -5899,12 +5741,11 @@ async function ccDeleteRow(centerId, label) {
 
 // ── Admin: GL Accounts ─────────────────────────────────────────────────────────
 // Logistics.dbo.CostElements — elementCode is the real SAP GL account short
-// code (e.g. '602200'). This is what ShipmentCost.costElement holds and
-// what Material Group Mapping's CostElement column is keyed on (see
-// mgmCostElementLabel/mgmOpenModal above) — elementID is only a surrogate
-// PK, never used as the GL account value anywhere in the app.
+// code (e.g. '602200'). This is what ShipmentCost.costElement holds —
+// elementID is only a surrogate PK, never used as the GL account value
+// anywhere in the app.
 async function runGlAccounts() {
-  showResultPanel('GL Accounts', 'Click a row to edit · Add GL Account for a new freight cost code — feeds Material Group Mapping\'s GL account list');
+  showResultPanel('GL Accounts', 'Click a row to edit · Add GL Account for a new freight cost code');
   try {
     const rows = await fetch('/api/costelements').then(r => r.json());
     if (!Array.isArray(rows)) throw new Error('Failed to load GL accounts');
@@ -6023,7 +5864,7 @@ function glaOpenModal(row) {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error?.message || 'Save failed');
-      // Material Group Mapping's GL Account dropdown caches this list
+      // Every cost-line form's GL Account dropdown caches this list
       // (mgmCostElements) — invalidate so a newly added/renamed code shows
       // up there without a hard page refresh.
       mgmCostElements = null;
@@ -7075,9 +6916,9 @@ async function openManualCostModal(onSaved, editRow = null) {
   fetch('/api/costtypes').then(r => r.json()).then(types => {
     const sel = document.getElementById('mc-cost-type');
     if (!Array.isArray(types)) return;
-    sel.innerHTML = types.map(t =>
-      `<option value="${esc(String(t.typeID))}">${esc(t.typeDescription || '')}</option>`
-    ).join('');
+    sel.innerHTML = `<option value="">— Select cost type —</option>${types.map(t =>
+      `<option value="${esc(String(t.typeID))}">${esc(String(t.typeID))} — ${esc(t.typeDescription || '')}</option>`
+    ).join('')}`;
     if (isEdit && editRow.costType && [...sel.options].some(o => o.value === String(editRow.costType))) {
       sel.value = String(editRow.costType);
     }
@@ -7144,6 +6985,7 @@ async function openManualCostModal(onSaved, editRow = null) {
 
     if (!body.costCenter) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
     if (!body.costElement) { result.innerHTML = '<div class="sap-error">Select a Cost Element.</div>'; return; }
+    if (!body.costType) { result.innerHTML = '<div class="sap-error">Select a Cost Type.</div>'; return; }
     if (!body.expectedCost || body.expectedCost <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
     if (!body.forwarderID) { result.innerHTML = '<div class="sap-error">Select a mode of transport and haulier.</div>'; return; }
     if (!body.modeOfTransport) { result.innerHTML = '<div class="sap-error">Select a mode of transport.</div>'; return; }
@@ -13206,6 +13048,7 @@ async function renderAssociatedCosts(shipmentId, shipment) {
     const rows = lines.map(l => `
       <tr class="admin-row">
         <td>${esc(l.elementDescription || l.costElement)}</td>
+        <td class="pn-batch-mono">${esc(l.costType || '—')}</td>
         ${shipment.IsManual ? `<td>${esc(l.costCenter || '—')}</td>` : ''}
         <td>£${Number(l.expectedCost).toFixed(2)}</td>
         <td>${l.migoStatus ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
@@ -13215,11 +13058,11 @@ async function renderAssociatedCosts(shipmentId, shipment) {
              <button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
       </tr>`).join('');
 
-    const colCount = shipment.IsManual ? 5 : 4;
+    const colCount = shipment.IsManual ? 6 : 5;
     container.innerHTML = `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>GL Element</th>${shipment.IsManual ? '<th>Cost Centre</th>' : ''}<th>Amount</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>GL Element</th><th>Cost Type</th>${shipment.IsManual ? '<th>Cost Centre</th>' : ''}<th>Amount</th><th>Status</th><th></th></tr></thead>
           <tbody>${rows.length ? rows : `<tr><td colspan="${colCount}" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>`}</tbody>
         </table>
       </div>
@@ -13230,6 +13073,10 @@ async function renderAssociatedCosts(shipmentId, shipment) {
             <option value="standard">Standard (602200)</option>
             <option value="premium">Premium (602100)</option>
           </select>
+        </div>
+        <div class="tf-field">
+          <label class="tf-label">Cost Type</label>
+          <select class="tf-input" id="isd-cost-type"><option value="">Loading…</option></select>
         </div>
         ${shipment.IsManual ? `
         <div class="tf-field">
@@ -13250,6 +13097,20 @@ async function renderAssociatedCosts(shipmentId, shipment) {
       ${unprocessed.length ? `<div class="toolbar-hint" style="margin-top:8px">${unprocessed.length} line${unprocessed.length === 1 ? '' : 's'} awaiting SAP posting — post from Admin &rarr; Unprocessed Costs, alongside outbound freight.</div>` : ''}
       <div id="isd-cost-result" style="margin-top:8px"></div>`;
 
+    // Cost Type IS the SAP Material Group post-migo sends directly (see
+    // routes/shipmentcost.js's resolveMaterialGroup) — no default, since a
+    // wrong pick here means a failed SAP post, not just a display label.
+    fetch('/api/costtypes').then(r => r.json()).then(types => {
+      const sel = document.getElementById('isd-cost-type');
+      if (!sel || !Array.isArray(types)) return;
+      sel.innerHTML = `<option value="">— Select cost type —</option>${types.map(t =>
+        `<option value="${esc(String(t.typeID))}">${esc(String(t.typeID))} — ${esc(t.typeDescription || '')}</option>`
+      ).join('')}`;
+    }).catch(() => {
+      const sel = document.getElementById('isd-cost-type');
+      if (sel) sel.innerHTML = '<option value="">Failed to load cost types</option>';
+    });
+
     if (shipment.IsManual) {
       fetch('/api/costcenters').then(r => r.json()).then(data => {
         const sel = document.getElementById('isd-cost-center');
@@ -13269,7 +13130,9 @@ async function renderAssociatedCosts(shipmentId, shipment) {
       const result = document.getElementById('isd-cost-result');
       const amount = document.getElementById('isd-cost-amount').value;
       const tier = document.getElementById('isd-cost-tier').value;
+      const costType = document.getElementById('isd-cost-type').value;
       const costCenterSel = document.getElementById('isd-cost-center');
+      if (!costType) { result.innerHTML = '<div class="sap-error">Select a Cost Type.</div>'; return; }
       if (shipment.IsManual && !costCenterSel.value) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
       if (!amount || Number(amount) <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
       btn.disabled = true; btn.textContent = 'Adding…';
@@ -13278,7 +13141,7 @@ async function renderAssociatedCosts(shipmentId, shipment) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            poShipmentID: shipmentId, tier, amount: Number(amount),
+            poShipmentID: shipmentId, tier, amount: Number(amount), costType,
             ...(shipment.IsManual ? { costCenter: costCenterSel.value } : {}),
           }),
         });
@@ -13333,13 +13196,16 @@ async function renderAssociatedCosts(shipmentId, shipment) {
 }
 
 // ── Edit an unprocessed inbound cost line ──
-// PATCH /api/inboundcosts/:costId — Tier (GL account) and Amount are always
-// editable; Cost Centre only for a Manual Inbound Shipment (tracked
-// shipments stay fixed at the 2012 default, same restriction the Add Cost
-// form above applies). A wrong tier/amount/cost centre previously had no
-// way to be corrected once added besides deleting and re-adding, per the
-// user. `line` is the row shape GET /shipment/:poShipmentId returns
-// (costID, costCenter, tier, expectedCost, …).
+// PATCH /api/inboundcosts/:costId — Tier (GL account), Cost Type, and
+// Amount are always editable; Cost Centre only for a Manual Inbound
+// Shipment (tracked shipments stay fixed at the 2012 default, same
+// restriction the Add Cost form above applies). Cost Type IS the SAP
+// Material Group post-migo sends directly (see routes/shipmentcost.js's
+// resolveMaterialGroup), so it's just as critical to get right as Tier. A
+// wrong tier/cost type/amount/cost centre previously had no way to be
+// corrected once added besides deleting and re-adding, per the user.
+// `line` is the row shape GET /shipment/:poShipmentId returns (costID,
+// costCenter, costType, tier, expectedCost, …).
 function openIsdCostEditModal(line, shipmentId, shipment) {
   openModal(`<div class="ps-modal" style="max-width:460px;width:92vw">
     <div class="ps-modal-header">
@@ -13355,6 +13221,12 @@ function openIsdCostEditModal(line, shipmentId, shipment) {
             <option value="premium">Premium (602100)</option>
           </select>
         </div>
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Cost Type</label>
+          <select class="tf-input" id="isd-cost-edit-type"><option value="">Loading…</option></select>
+        </div>
+      </div>
+      <div class="tf-row">
         ${shipment.IsManual ? `
         <div class="tf-field tf-field--wide">
           <label class="tf-label">Cost Centre</label>
@@ -13375,6 +13247,18 @@ function openIsdCostEditModal(line, shipmentId, shipment) {
 
   document.getElementById('isd-cost-edit-tier').value = line.tier === 'premium' ? 'premium' : 'standard';
 
+  fetch('/api/costtypes').then(r => r.json()).then(types => {
+    const sel = document.getElementById('isd-cost-edit-type');
+    if (!sel || !Array.isArray(types)) return;
+    sel.innerHTML = `<option value="">— Select cost type —</option>${types.map(t =>
+      `<option value="${esc(String(t.typeID))}">${esc(String(t.typeID))} — ${esc(t.typeDescription || '')}</option>`
+    ).join('')}`;
+    if ([...sel.options].some(o => o.value === line.costType)) sel.value = line.costType;
+  }).catch(() => {
+    const sel = document.getElementById('isd-cost-edit-type');
+    if (sel) sel.innerHTML = '<option value="">Failed to load cost types</option>';
+  });
+
   if (shipment.IsManual) {
     fetch('/api/costcenters').then(r => r.json()).then(data => {
       const sel = document.getElementById('isd-cost-edit-center');
@@ -13393,8 +13277,10 @@ function openIsdCostEditModal(line, shipmentId, shipment) {
   document.getElementById('isd-cost-edit-save-btn').addEventListener('click', async () => {
     const result = document.getElementById('isd-cost-edit-result');
     const tier = document.getElementById('isd-cost-edit-tier').value;
+    const costType = document.getElementById('isd-cost-edit-type').value;
     const amount = Number(document.getElementById('isd-cost-edit-amount').value);
     const centerSel = document.getElementById('isd-cost-edit-center');
+    if (!costType) { result.innerHTML = '<div class="sap-error">Select a Cost Type.</div>'; return; }
     if (shipment.IsManual && !centerSel.value) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
     if (!Number.isFinite(amount) || amount <= 0) { result.innerHTML = '<div class="sap-error">Enter a valid amount.</div>'; return; }
 
@@ -13404,7 +13290,7 @@ function openIsdCostEditModal(line, shipmentId, shipment) {
       const res = await fetch(`/api/inboundcosts/${line.costID}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tier, amount, ...(shipment.IsManual ? { costCenter: centerSel.value } : {}) }),
+        body: JSON.stringify({ tier, amount, costType, ...(shipment.IsManual ? { costCenter: centerSel.value } : {}) }),
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error?.message || 'Failed to save');

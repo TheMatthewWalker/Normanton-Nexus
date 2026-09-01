@@ -6,7 +6,6 @@ import jwt    from 'jsonwebtoken';
 import fs     from 'fs';
 import { sapConfig, sapServerSecret, getNexusOperationsPool } from '../config.js';
 import { getDecryptedSapCredentials } from '../lib/sapCredentials.js';
-import { lookupMaterialGroup } from './materialgroups.js';
 import { requireAnyPermission, requirePermission } from '../middleware/auth.js';
 
 const certPath = new URL('../certs/sap-server-cert.pem', import.meta.url);
@@ -58,6 +57,29 @@ export async function lookupCostElement(pool, direction, tier) {
     return recordset[0]?.elementCode ?? null;
 }
 
+// Cost Type IS the SAP Material Group code directly (e.g. 'ITLG01A' for
+// Road Freight) — per the user, this replaced the old GL-account +
+// mode-of-transport -> Material Group lookup table (log.MaterialGroupMapping,
+// now dropped) that post-migo below used to call for every PO item. This
+// just confirms the value a cost line was actually given is a real,
+// currently-known code before it's sent to SAP as MaterialGroup — throwing
+// a clear, specific error (same fail-before-SAP philosophy the old lookup
+// had) rather than letting a blank or stale costType roll back in SAP with
+// a confusing error there instead.
+export async function resolveMaterialGroup(pool, costType) {
+    const value = String(costType || '').trim();
+    if (!value) {
+        throw new Error('This cost line has no Cost Type set — Cost Type is now the SAP Material Group, so one must be picked before it can post to SAP.');
+    }
+    const { recordset } = await pool.request()
+        .input('typeID', sql.NVarChar(10), value)
+        .query('SELECT typeID FROM log.CostTypes WHERE typeID = @typeID');
+    if (!recordset.length) {
+        throw new Error(`Cost Type "${value}" is not a recognised SAP Material Group code — check it on the Cost Types list before posting.`);
+    }
+    return value;
+}
+
 // ── Get all records ──
 router.get('/', async (req, res) => {
     try {
@@ -86,16 +108,18 @@ router.get('/id/:costId', async (req, res) => {
 // ── Edit an unprocessed cost line (outbound) — mirrors the DELETE guard
 // below (blocked once migoStatus=1 — reverse first via POST
 // /:costId/reverse, then it drops back to Unprocessed Costs and can be
-// edited/reposted). Lets a wrong amount, GL account, or cost centre be
-// corrected in place instead of deleting and re-adding, which the
+// edited/reposted). Lets a wrong amount, GL account, cost centre, or cost
+// type be corrected in place instead of deleting and re-adding, which the
 // Associated Costs tile on the Search Shipment modal previously had no way
-// to do at all. costElement/costCenter are optional (PATCH semantics — a
-// caller only sending expectedCost still works exactly as before); when
-// sent, blank isn't accepted since both are NOT NULL-equivalent fields
-// everywhere else they're set.
+// to do at all. costElement/costCenter/costType are optional (PATCH
+// semantics — a caller only sending expectedCost still works exactly as
+// before); when sent, blank isn't accepted for any of them. costType is
+// the SAP Material Group post-migo below sends directly (see
+// resolveMaterialGroup), so getting it wrong here means a failed SAP post,
+// not just a display label.
 router.patch('/:costId', requirePermission('LOG_PLANNING'), async (req, res) => {
     try {
-        const { expectedCost, costElement, costCenter } = req.body;
+        const { expectedCost, costElement, costCenter, costType } = req.body;
         const amount = Number(expectedCost);
         if (!Number.isFinite(amount) || amount <= 0) {
             return res.status(400).json({ success: false, error: 'expectedCost must be a positive number.' });
@@ -105,6 +129,9 @@ router.patch('/:costId', requirePermission('LOG_PLANNING'), async (req, res) => 
         }
         if (costCenter !== undefined && !String(costCenter).trim()) {
             return res.status(400).json({ success: false, error: 'costCenter cannot be blank.' });
+        }
+        if (costType !== undefined && !String(costType).trim()) {
+            return res.status(400).json({ success: false, error: 'costType cannot be blank.' });
         }
 
         const pool = await getPool();
@@ -120,6 +147,10 @@ router.patch('/:costId', requirePermission('LOG_PLANNING'), async (req, res) => 
         if (costCenter !== undefined) {
             dbRequest.input('costCenter', sql.NVarChar, String(costCenter).trim());
             setClauses.push('costCenter = @costCenter');
+        }
+        if (costType !== undefined) {
+            dbRequest.input('costType', sql.NVarChar(10), String(costType).trim());
+            setClauses.push('costType = @costType');
         }
 
         const result = await dbRequest.query(`UPDATE log.ShipmentCost
@@ -218,6 +249,12 @@ router.post('/', requirePermission('LOG_PLANNING'), async (req, res) => {
         if (!costCenter || !String(costCenter).trim()) {
             return res.status(400).json({ error: 'costCenter is required.' });
         }
+        // costType doubles as the SAP Material Group post-migo sends directly
+        // (see resolveMaterialGroup) — required here so nothing lands in
+        // Unprocessed Costs without one already.
+        if (!costType || !String(costType).trim()) {
+            return res.status(400).json({ error: 'costType is required.' });
+        }
         const expectedCostNum = Number(expectedCost);
         if (!Number.isFinite(expectedCostNum) || expectedCostNum <= 0) {
             return res.status(400).json({ error: 'expectedCost must be a positive number.' });
@@ -302,6 +339,13 @@ router.post('/manual', requirePermission('LOG_PLANNING'), async (req, res) => {
         if (!postcode || !String(postcode).trim()) {
             return res.status(400).json({ success: false, error: 'postcode is required.' });
         }
+        // costType doubles as the SAP Material Group post-migo sends directly
+        // (see resolveMaterialGroup) — no default here any more (it used to
+        // silently fall back to the now-deleted '1' General Freight code,
+        // which isn't a real Material Group and would fail at posting).
+        if (!costType || !String(costType).trim()) {
+            return res.status(400).json({ success: false, error: 'costType is required.' });
+        }
 
         const pool = await getPool();
 
@@ -313,7 +357,7 @@ router.post('/manual', requirePermission('LOG_PLANNING'), async (req, res) => {
         }
 
         const result = await pool.request()
-            .input('costType',             sql.NVarChar,       costType || '1')
+            .input('costType',             sql.NVarChar(10),   String(costType).trim())
             .input('costElement',          sql.NVarChar,       costElement)
             .input('costCenter',           sql.NVarChar,       costCenter)
             .input('expectedCost',         sql.Decimal(18, 2), expectedCostNum)
@@ -390,6 +434,13 @@ router.patch('/manual/:costId', requirePermission('LOG_PLANNING'), async (req, r
         if (!postcode || !String(postcode).trim()) {
             return res.status(400).json({ success: false, error: 'postcode is required.' });
         }
+        // costType doubles as the SAP Material Group post-migo sends directly
+        // (see resolveMaterialGroup) — no default here any more (it used to
+        // silently fall back to the now-deleted '1' General Freight code,
+        // which isn't a real Material Group and would fail at posting).
+        if (!costType || !String(costType).trim()) {
+            return res.status(400).json({ success: false, error: 'costType is required.' });
+        }
 
         const pool = await getPool();
 
@@ -402,7 +453,7 @@ router.patch('/manual/:costId', requirePermission('LOG_PLANNING'), async (req, r
 
         const result = await pool.request()
             .input('costId',               sql.BigInt,         req.params.costId)
-            .input('costType',             sql.NVarChar,       costType || '1')
+            .input('costType',             sql.NVarChar(10),   String(costType).trim())
             .input('costElement',          sql.NVarChar,       costElement)
             .input('costCenter',           sql.NVarChar,       costCenter)
             .input('expectedCost',         sql.Decimal(18, 2), expectedCostNum)
@@ -870,14 +921,16 @@ router.get('/analytics', requireAnyPermission(['LOG_ADMIN', 'LOG_MRP', 'LOG_REPO
 // fails fast with a clear message rather than a confusing SAP logon error.
 //
 // Vendor = the shipment's forwarderID (forwarderID doubles as the SAP
-// vendor number — see routes/forwarders.js). MaterialGroup used to be
-// derived as free text from modeOfTransport (e.g. "Road Freight") — that
-// wasn't a real SAP material group code and is exactly why PO creation
-// kept rolling back (confirmed by testing the real code, ITLG01A, directly
-// against SapServer). It's now looked up per line via
-// materialgroups.js's lookupMaterialGroup(costElement, modeOfTransport) —
-// see sql/migrate_material_group_mapping.sql. GlAccount/CostCenterOrOrder
-// come straight from the cost line's costElement/costCenter, same as before.
+// vendor number — see routes/forwarders.js). MaterialGroup was originally
+// derived as free text from modeOfTransport (e.g. "Road Freight") — not a
+// real SAP material group code, and exactly why PO creation kept rolling
+// back (confirmed by testing the real code, ITLG01A, directly against
+// SapServer). That was replaced by a GL-account + mode-of-transport lookup
+// table (log.MaterialGroupMapping), and per the user that table is now
+// replaced too: costType IS the Material Group directly (log.CostTypes was
+// reseeded with real codes like 'ITLG01A' for exactly this) — see
+// resolveMaterialGroup above. GlAccount/CostCenterOrOrder still come
+// straight from the cost line's costElement/costCenter, same as before.
 router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) => {
     const { costIDs } = req.body;
     if (!Array.isArray(costIDs) || !costIDs.length)
@@ -891,7 +944,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
         const inClause = costIDs.map((_, i) => `@id${i}`).join(',');
 
         const fetched = await req2.query(`
-            SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
+            SELECT sc.costID, sc.costCenter, sc.costElement, sc.costType, sc.expectedCost, sc.modeOfTransport,
                    'outbound' AS direction, 'outbound' AS sourceType, sm.shipmentID AS refID,
                    RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
                    sm.forwarderID, sm.actualCollection, sm.ActualDelivery AS deliveredDate, sm.trackingNumber,
@@ -902,7 +955,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
 
             UNION ALL
 
-            SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
+            SELECT sc.costID, sc.costCenter, sc.costElement, sc.costType, sc.expectedCost, sc.modeOfTransport,
                    'inbound' AS direction, 'inbound' AS sourceType, ps.ShipmentId AS refID,
                    ps.ShipmentReference AS shipmentRef,
                    ps.ForwarderID AS forwarderID, ps.DispatchDate AS actualCollection, ps.ReceivedAtUtc AS deliveredDate, ps.TrackingNumber AS trackingNumber,
@@ -920,7 +973,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             -- still resolved via CostElements for the GL/vendor logic
             -- further down) to keep this from colliding with a real
             -- shipmentID/poShipmentID that happens to equal the same number.
-            SELECT sc.costID, sc.costCenter, sc.costElement, sc.expectedCost, sc.modeOfTransport,
+            SELECT sc.costID, sc.costCenter, sc.costElement, sc.costType, sc.expectedCost, sc.modeOfTransport,
                    ISNULL(ce.direction, 'outbound') AS direction, 'manual' AS sourceType, sc.costID AS refID,
                    sc.manualReference AS shipmentRef,
                    sc.manualForwarderID AS forwarderID, sc.manualIncurredDate AS actualCollection,
@@ -984,6 +1037,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             groups[key].costLines.push({
                 costCenter:   r.costCenter   || null,
                 costElement:  r.costElement  || null,
+                costType:     r.costType     || null,
                 expectedCost: r.expectedCost != null ? Number(r.expectedCost) : null,
             });
             groups[key]._costIDs.push(r.costID);
@@ -1025,14 +1079,14 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
                 : group.sourceType === 'manual' ? group.manualCostID
                 : group.shipmentID;
 
-            // MaterialGroup is looked up per line (not per group) because
-            // costElement/GL account can differ line-to-line within the
-            // same shipment group, and the mapping is keyed on GL account
-            // (+ mode of transport) — see materialgroups.js. A missing
-            // mapping throws with the exact combination that's needed, so
-            // it's resolved BEFORE calling SAP: better to fail clearly here
-            // than send SapServer another bad code that just rolls back
-            // with a confusing SAP-side error.
+            // MaterialGroup is resolved per line (not per group) because
+            // costType can differ line-to-line within the same shipment
+            // group. resolveMaterialGroup throws a clear error naming
+            // exactly what's wrong (missing / not a recognised code) if a
+            // line's Cost Type isn't postable, so it's resolved BEFORE
+            // calling SAP: better to fail clearly here than send SapServer
+            // another bad code that just rolls back with a confusing
+            // SAP-side error.
             let items;
             try {
                 items = await Promise.all(group.costLines.map(async line => ({
@@ -1042,7 +1096,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
                     NetPrice:                line.expectedCost ?? 0,
                     DeliveryDate:            deliveredDayStr,
                     AcctAssCat:              'K',
-                    MaterialGroup:           await lookupMaterialGroup(line.costElement, group.modeOfTransport),
+                    MaterialGroup:           await resolveMaterialGroup(pool, line.costType),
                     GlAccount:               line.costElement,
                     CostCenterOrOrder:       line.costCenter,
                     Reference:               group.shipmentReference,

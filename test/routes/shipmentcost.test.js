@@ -25,9 +25,10 @@ let costRouter;
 let app;
 let appReports;
 let appPlanning;
+let resolveMaterialGroup;
 
 beforeAll(async () => {
-  ({ default: costRouter } = await import('../../routes/shipmentcost.js'));
+  ({ default: costRouter, resolveMaterialGroup } = await import('../../routes/shipmentcost.js'));
   app = buildTestApp(costRouter, { sessionUser: operatorUser });
   appReports = buildTestApp(costRouter, { sessionUser: reportsUser });
   appPlanning = buildTestApp(costRouter, { sessionUser: planningUser });
@@ -155,9 +156,14 @@ describe('POST / (create)', () => {
     expect(res.status).toBe(400);
   });
 
+  test('requires costType', async () => {
+    const res = await request(appPlanning).post('/').send({ shipmentID: 1, costElement: 'X', costCenter: 'Y', expectedCost: 10 });
+    expect(res.status).toBe(400);
+  });
+
   test('creates a cost line and returns the new costID', async () => {
     queueResults({ recordset: [{ costID: 42 }] });
-    const res = await request(appPlanning).post('/').send({ shipmentID: 1, costElement: 'X', costCenter: 'Y', expectedCost: 100 });
+    const res = await request(appPlanning).post('/').send({ shipmentID: 1, costElement: 'X', costCenter: 'Y', costType: 'ITLG01A', expectedCost: 100 });
     expect(res.status).toBe(201);
     expect(res.body.costID).toBe(42);
   });
@@ -221,6 +227,7 @@ describe('POST /manual (create manual cost line)', () => {
 
   test.each([
     ['costCenter', ''],
+    ['costType', ''],
     ['forwarderID', null],
     ['modeOfTransport', ''],
     ['incurredDate', null],
@@ -294,6 +301,7 @@ describe('PATCH /manual/:costId (edit manual cost line)', () => {
 
   test.each([
     ['costCenter', ''],
+    ['costType', ''],
     ['forwarderID', null],
     ['modeOfTransport', ''],
     ['incurredDate', null],
@@ -329,6 +337,28 @@ describe('PATCH /manual/:costId (edit manual cost line)', () => {
     const res = await request(appPlanning).patch('/manual/1').send(bodyWithoutElement);
     expect(res.status).toBe(200);
     expect(res.body.data.costElement).toBe('601300');
+  });
+});
+
+// Cost Type IS the SAP Material Group post-migo sends directly now (per the
+// user, replacing the old GL-account + mode-of-transport -> Material Group
+// lookup table, log.MaterialGroupMapping, now dropped). resolveMaterialGroup
+// is the pre-flight check post-migo runs per line before ever calling SAP —
+// see its own comment in routes/shipmentcost.js for the fail-fast reasoning.
+describe('resolveMaterialGroup', () => {
+  test('throws a clear error when costType is blank', async () => {
+    await expect(resolveMaterialGroup(pool, '')).rejects.toThrow(/no Cost Type set/i);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('throws a clear error when costType is not a recognised code', async () => {
+    queueResults({ recordset: [] });
+    await expect(resolveMaterialGroup(pool, 'BOGUS')).rejects.toThrow(/not a recognised SAP Material Group code/i);
+  });
+
+  test('returns the costType unchanged when it is a recognised code', async () => {
+    queueResults({ recordset: [{ typeID: 'ITLG01A' }] });
+    await expect(resolveMaterialGroup(pool, 'ITLG01A')).resolves.toBe('ITLG01A');
   });
 });
 
