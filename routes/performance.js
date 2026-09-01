@@ -227,11 +227,12 @@ function mergeWeeklyForecasts(forecasts, materials = []) {
 // frequent supplier date slips, so a buffer is kept on purpose.
 const ORDER_REVIEW_HORIZON_DAYS = 14;   // how far ahead to surface upcoming shortages, not just overdue ones
 const ORDER_COVERAGE_BUFFER_DAYS = 30;  // extra cover beyond lead time, so the next order isn't due immediately
-// How far ahead the Isopar-specific daily stock forecast (Stock History & Forecast tile and the
-// Build Order preview, when viewing Material 10010 alone) runs, in place of the usual 26-week
-// horizon everyone else gets — day-level buckets over 26 weeks would be ~180 chart points, so this
-// is trimmed down to keep the chart readable while still covering several times the order review
-// window above.
+// How far ahead a daily-bucketed stock forecast runs, in place of the usual 26-week horizon
+// everyone else gets — day-level buckets over 26 weeks would be ~180 chart points, so this is
+// trimmed down to keep the chart readable while still covering several times the order review
+// window above. Applies to Isopar's always-daily view (Stock History & Forecast tile and the
+// Build Order preview, when viewing Material 10010 alone) and to any other single material
+// whose daily view was explicitly requested via Stock History & Forecast's Weeks/Days toggle.
 const ISOPAR_DAILY_FORECAST_HORIZON_DAYS = 60;
 // Fallback rounding increment (in the vendor's own order unit) for a
 // material with no MaterialMoqQty lot size on file, when that order unit
@@ -2681,13 +2682,17 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         : []
     );
 
-    // Isopar gets day-bucketed forecast entries instead of the usual week-bucketed ones (see
-    // buildWeeklyStockForecast's bucketDays comment) — but only when it's the one material in
-    // scope. mergeWeeklyForecasts sums per-material forecasts index-by-index, which requires
-    // every forecast in the merge to share the same bucket grid, so a combined/multi-material
-    // view (including "Show All") stays on the standard weekly buckets even if Isopar happens
-    // to be one of the materials in it.
-    const singleIsoparView = materialsInScope.length === 1 && materialsInScope[0] === ISOPAR_MATERIAL;
+    // Isopar always gets day-bucketed forecast entries (see buildWeeklyStockForecast's
+    // bucketDays comment). Any other single material can now ask for the same day-level view
+    // via ?bucket=days — the Stock History & Forecast page's Weeks/Days toggle, for the
+    // "hand to mouth" case where a week-level bucket can hide a stockout that actually lands
+    // mid-week. Either way this only applies with exactly one material in scope —
+    // mergeWeeklyForecasts sums per-material forecasts index-by-index, which requires every
+    // forecast in the merge to share the same bucket grid, so a combined/multi-material view
+    // (including "Show All") stays on the standard weekly buckets regardless of this param.
+    const dailyBucketRequested = String(req.query.bucket || '').toLowerCase() === 'days';
+    const useDailyBuckets = materialsInScope.length === 1
+      && (materialsInScope[0] === ISOPAR_MATERIAL || dailyBucketRequested);
 
     const perMaterialForecasts = data.map(r => {
       const onHandStock = (Number(r.stockQty) || 0) + (Number(r.consignmentQty) || 0);
@@ -2716,17 +2721,17 @@ router.get('/turns-valclass/history', requirePermission('LOG_MRP'), async (req, 
         .filter(o => o.DeliveryDate && !excludeDeliveryIds.has(o.SuggestionId))
         .map(o => ({ date: new Date(o.DeliveryDate), qty: Number(o.OrderQty) || 0, id: o.SuggestionId, poNumber: o.PoNumber }));
       const materialAdjustments = adjustmentsByMaterial.get(r.material) || [];
-      return buildWeeklyStockForecast(effectiveOnHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments, isoparDailyUsageFnOverride, (isIsopar && singleIsoparView) ? 1 : 7);
+      return buildWeeklyStockForecast(effectiveOnHandStock, r.predictedUsage, new Date(), incomingDeliveries, materialAdjustments, isoparDailyUsageFnOverride, useDailyBuckets ? 1 : 7);
     });
     const stockForecast = mergeWeeklyForecasts(perMaterialForecasts, materialsInScope);
 
-    // The chart only needs a 26-week horizon (or, for Isopar's own daily view, the shorter
-    // ISOPAR_DAILY_FORECAST_HORIZON_DAYS) — the vendor's longest lead time is 16 weeks, so
-    // 26 weeks of runway is enough to judge stock position without the full 13-month/~56-week
-    // computation making the graph harder to read. buildWeeklyStockForecast itself still computes
-    // the full horizon (other callers, e.g. order-suggestion breach-date detection, need it) —
-    // this is a response-level truncation only.
-    stockForecast.weeks = stockForecast.weeks.slice(0, singleIsoparView ? ISOPAR_DAILY_FORECAST_HORIZON_DAYS : 26);
+    // The chart only needs a 26-week horizon (or, for a daily-bucketed view — Isopar's own or a
+    // manually-requested one, the shorter ISOPAR_DAILY_FORECAST_HORIZON_DAYS) — the vendor's
+    // longest lead time is 16 weeks, so 26 weeks of runway is enough to judge stock position
+    // without the full 13-month/~56-week computation making the graph harder to read.
+    // buildWeeklyStockForecast itself still computes the full horizon (other callers, e.g.
+    // order-suggestion breach-date detection, need it) — this is a response-level truncation only.
+    stockForecast.weeks = stockForecast.weeks.slice(0, useDailyBuckets ? ISOPAR_DAILY_FORECAST_HORIZON_DAYS : 26);
 
     // ── Recorded accuracy overlay (log.ForecastAccuracyLog) ─────────────────────
     // What SAP demand and our prediction WERE for each of the last 12 months, frozen

@@ -8056,6 +8056,12 @@ let shfExcludedDeliveryIds = new Set(); // single-material/combined view's what-
 let shfStockChartRef = { instance: null }; // lets shfRefetchStockChart replace just the stock chart, not the whole panel
 let shfVendorId = ''; // '' = not in vendor-filter mode; mutually exclusive with material search / MRP controller
 let shfVendorRowCharts = new Map(); // material -> { consumption, stock } Chart instances, for per-row refresh on delivery toggle
+// User's last-picked stock-chart granularity ('weeks' | 'days') — only meaningful (and only
+// shown) for a single-material view, since a combined forecast must stay weekly server-side
+// (see routes/performance.js's /turns-valclass/history). Kept sticky across material switches
+// within single-material view, so browsing several materials during a "hand to mouth" check
+// doesn't require re-toggling for each one.
+let shfBucketMode = 'weeks';
 
 async function runStockHistoryForecast() {
   showResultPanel('Stock History & Forecast', '13-month consumption history vs. demand forecast, plus a weekly expected-stock-level projection — search for a material, view the combined trend for all materials, or filter by vendor to see each of its materials side by side');
@@ -8105,7 +8111,13 @@ async function runStockHistoryForecast() {
         <canvas id="shf-chart" style="max-height:320px"></canvas>
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
-        <div id="shf-stock-chart-heading" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Expected Stock Level (Next 26 Weeks)</div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px">
+          <div id="shf-stock-chart-heading" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Expected Stock Level (Next 26 Weeks)</div>
+          <div id="shf-bucket-toggle" class="hidden" style="display:flex;gap:4px;flex-shrink:0" title="Only available for a single material — a combined view must stay on weekly buckets">
+            <button type="button" class="btn-secondary shf-bucket-btn" data-bucket="weeks" style="padding:2px 10px;font-size:11px">Weeks</button>
+            <button type="button" class="btn-secondary shf-bucket-btn" data-bucket="days" style="padding:2px 10px;font-size:11px">Days</button>
+          </div>
+        </div>
         <div id="shf-stock-chart-desc" style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.</div>
         <canvas id="shf-stock-chart" style="max-height:280px"></canvas>
         <div id="shf-stock-deliveries" style="margin-top:10px"></div>
@@ -8122,6 +8134,14 @@ async function runStockHistoryForecast() {
   document.getElementById('shf-all-btn').addEventListener('click', () => shfLoadChart(null, 'All Materials (combined)'));
   document.getElementById('shf-add-adjustment-link').addEventListener('click', () => {
     if (shfCurrentMaterial) daOpenModal(null, shfCurrentMaterial);
+  });
+  document.querySelectorAll('.shf-bucket-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.bucket === shfBucketMode) return;
+      shfBucketMode = btn.dataset.bucket;
+      shfSetActiveBucketBtn(shfBucketMode);
+      shfRefetchStockChart();
+    });
   });
   document.getElementById('shf-mrp-controller').addEventListener('change', e => {
     shfMrpController = e.target.value;
@@ -8335,11 +8355,15 @@ async function shfSearchMaterials() {
 
 // Shared GET /turns-valclass/history fetch — used by the single-material/combined view, its
 // delivery-exclude refresh, and each vendor-filter grid row. Throws on failure; caller catches.
-async function shfFetchHistory({ material, mrpController, excludeDeliveryIds } = {}) {
+async function shfFetchHistory({ material, mrpController, excludeDeliveryIds, bucket } = {}) {
   const materialParam = material ? `materials=${encodeURIComponent(material)}` : '';
   const ctrlParam = mrpController ? `mrpController=${encodeURIComponent(mrpController)}` : '';
   const excludeParam = excludeDeliveryIds && excludeDeliveryIds.size ? `excludeDeliveryIds=${[...excludeDeliveryIds].join(',')}` : '';
-  const qs = [materialParam, ctrlParam, excludeParam].filter(Boolean).join('&');
+  // Only meaningful (and only ever sent) for a single material — the server ignores it
+  // otherwise anyway (see /turns-valclass/history), but there's no reason to send it when the
+  // caller isn't in single-material view.
+  const bucketParam = material && bucket === 'days' ? 'bucket=days' : '';
+  const qs = [materialParam, ctrlParam, excludeParam, bucketParam].filter(Boolean).join('&');
   const resp = await fetch(`/api/performance/turns-valclass/history${qs ? '?' + qs : ''}`);
   const json = await resp.json();
   if (!json.success) throw new Error(json.error?.message || 'Failed to load history');
@@ -8411,10 +8435,12 @@ function shfClampStock(v) { return Math.max(0, v); }
 // ({ asOfDate, currentStock, bucketDays, weeks: [{ weekEnding, weeklyUsage, incomingQty,
 // deliveries, expectedStock }] }) already truncated to its horizon server-side (26 weeks
 // normally; ISOPAR_DAILY_FORECAST_HORIZON_DAYS days when bucketDays is 1 — see
-// buildWeeklyStockForecast's comment in routes/performance.js for why Isopar alone gets
-// day-bucketed entries instead of week-bucketed ones). The `weeks`/`weekEnding`/`weeklyUsage`
-// field names are unchanged either way — only the label/axis text below adapts. Shared by the
-// single-material/combined view and each vendor-filter grid row.
+// buildWeeklyStockForecast's comment in routes/performance.js). bucketDays is 1 for Isopar
+// always, or for any other single material whose daily view was requested via the Weeks/Days
+// toggle (shfBucketMode) — either way the day-bucketed entries replace the usual week-bucketed
+// ones. The `weeks`/`weekEnding`/`weeklyUsage` field names are unchanged either way — only the
+// label/axis text below adapts. Shared by the single-material/combined view and each
+// vendor-filter grid row (which always stays weekly — see shfRenderVendorRow).
 function shfBuildStockChartConfig(stockForecast) {
   const isDaily = stockForecast.bucketDays === 1;
   const usageLabel = isDaily ? 'Daily Usage' : 'Weekly Usage';
@@ -8448,17 +8474,38 @@ function shfBuildStockChartConfig(stockForecast) {
   };
 }
 
-// Updates the "Expected Stock Level" panel's heading/description to match the loaded
-// stockForecast's granularity — daily buckets for Isopar's own single-material view (see
-// shfBuildStockChartConfig), weekly for everything else. No-op for the vendor-filter grid rows,
-// which don't have their own heading/description elements.
-function shfUpdateStockChartHeading(stockForecast) {
+// Highlights whichever Weeks/Days button matches `bucket` ('weeks' | 'days') — a plain inline
+// style toggle, same pattern shfSearchMaterials' row-picker setActive uses, rather than a CSS
+// class this file doesn't otherwise define. Reflects the ACTUAL bucketDays a response came back
+// with, not just whatever was last clicked — Isopar always comes back daily regardless of the
+// requested bucket (see routes/performance.js), so this keeps the button state honest even then.
+function shfSetActiveBucketBtn(bucket) {
+  document.querySelectorAll('.shf-bucket-btn').forEach(btn => {
+    const active = btn.dataset.bucket === bucket;
+    btn.style.background = active ? 'var(--accent)' : '';
+    btn.style.color = active ? '#fff' : '';
+    btn.style.borderColor = active ? 'var(--accent)' : '';
+  });
+}
+
+// Updates the "Expected Stock Level" panel's heading/description/Weeks-Days toggle to match the
+// loaded stockForecast's granularity — daily buckets for Isopar's own single-material view or a
+// manually-requested daily view (see shfBuildStockChartConfig), weekly for everything else.
+// `singleMaterial` controls whether the toggle itself is even shown — a combined/"Show All"/
+// MRP-controller/vendor-filter view can't switch to daily server-side (see routes/performance.js),
+// so the toggle only appears once a specific material is loaded. No-op for the vendor-filter grid
+// rows, which don't have their own heading/description/toggle elements.
+function shfUpdateStockChartHeading(stockForecast, singleMaterial) {
   const heading = document.getElementById('shf-stock-chart-heading');
   const desc = document.getElementById('shf-stock-chart-desc');
+  const toggle = document.getElementById('shf-bucket-toggle');
   if (!heading || !desc) return;
-  if (stockForecast.bucketDays === 1) {
+  if (toggle) toggle.classList.toggle('hidden', !singleMaterial);
+  const isDaily = stockForecast.bucketDays === 1;
+  shfSetActiveBucketBtn(isDaily ? 'days' : 'weeks');
+  if (isDaily) {
     heading.textContent = `Expected Stock Level (Next ${stockForecast.weeks.length} Days)`;
-    desc.textContent = 'Projected forward day by day from the latest meter reading using the planning rate, plus open incoming deliveries — Isopar’s small tank means a weekly view can hide a stockout or overfill that actually lands mid-week. Untick a delivery below to simulate it arriving late or being lost.';
+    desc.textContent = 'Projected forward day by day using predicted usage, plus open incoming deliveries — a weekly view can hide a stockout or overfill that actually lands mid-week. Untick a delivery below to simulate it arriving late or being lost.';
   } else {
     heading.textContent = 'Expected Stock Level (Next 26 Weeks)';
     desc.textContent = 'Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.';
@@ -8518,7 +8565,7 @@ async function shfLoadChart(material, title) {
   if (addAdjLink) addAdjLink.classList.toggle('hidden', !shfCurrentMaterial);
 
   try {
-    const json = await shfFetchHistory({ material, mrpController: shfMrpController });
+    const json = await shfFetchHistory({ material, mrpController: shfMrpController, bucket: shfBucketMode });
 
     let row;
     if (material) {
@@ -8565,7 +8612,7 @@ async function shfLoadChart(material, title) {
     const stockForecast = json.stockForecast;
     const stockCanvas = document.getElementById('shf-stock-chart');
     if (stockForecast && stockCanvas) {
-      shfUpdateStockChartHeading(stockForecast);
+      shfUpdateStockChartHeading(stockForecast, !!material);
       const chart = new Chart(stockCanvas, shfBuildStockChartConfig(stockForecast));
       turnsCharts.push(chart);
       shfStockChartRef.instance = chart;
@@ -8591,19 +8638,20 @@ async function shfLoadChart(material, title) {
   }
 }
 
-// Re-requests just the stock forecast (current material/MRP-controller scope, current
+// Re-requests just the stock forecast (current material/MRP-controller/bucket scope, current
 // excludeDeliveryIds) and replaces only the stock chart + deliveries list — the consumption/
-// forecast chart above is left untouched. Used by the delivery-exclude checkboxes' onToggle.
+// forecast chart above is left untouched. Used by the delivery-exclude checkboxes' onToggle and
+// the Weeks/Days bucket toggle's onclick.
 async function shfRefetchStockChart() {
   const stockCanvas = document.getElementById('shf-stock-chart');
   const listEl = document.getElementById('shf-stock-deliveries');
   if (!stockCanvas) return;
 
   try {
-    const json = await shfFetchHistory({ material: shfCurrentMaterial, mrpController: shfMrpController, excludeDeliveryIds: shfExcludedDeliveryIds });
+    const json = await shfFetchHistory({ material: shfCurrentMaterial, mrpController: shfMrpController, excludeDeliveryIds: shfExcludedDeliveryIds, bucket: shfBucketMode });
     if (!json.stockForecast) return;
 
-    shfUpdateStockChartHeading(json.stockForecast);
+    shfUpdateStockChartHeading(json.stockForecast, !!shfCurrentMaterial);
     if (shfStockChartRef.instance) {
       const idx = turnsCharts.indexOf(shfStockChartRef.instance);
       if (idx !== -1) turnsCharts.splice(idx, 1);

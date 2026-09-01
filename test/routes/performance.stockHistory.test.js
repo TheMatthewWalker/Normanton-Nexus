@@ -115,6 +115,34 @@ test('reports a per-week delivery breakdown, which excludeDeliveryIds can filter
   expect(firstWeekExcluded.expectedStock).toBe(firstWeek.expectedStock - 500);
 });
 
+// Stock History & Forecast's Weeks/Days toggle — ?bucket=days switches a single material's
+// stock forecast to daily buckets (see the useDailyBuckets branch inside the route).
+describe('?bucket=days (manual daily-view toggle)', () => {
+  test('defaults to weekly buckets (26 weeks) for a single non-Isopar material with no bucket param', async () => {
+    queueSnapshotAndAccuracy([snapshotRow()]);
+    const res = await request(appMrp).get('/turns-valclass/history?materials=M1');
+    expect(res.status).toBe(200);
+    expect(res.body.stockForecast.bucketDays).toBe(7);
+    expect(res.body.stockForecast.weeks.length).toBe(26);
+  });
+
+  test('switches to daily buckets when bucket=days is requested for a single material', async () => {
+    queueSnapshotAndAccuracy([snapshotRow()]);
+    const res = await request(appMrp).get('/turns-valclass/history?materials=M1&bucket=days');
+    expect(res.status).toBe(200);
+    expect(res.body.stockForecast.bucketDays).toBe(1);
+    expect(res.body.stockForecast.weeks.length).toBe(60); // ISOPAR_DAILY_FORECAST_HORIZON_DAYS
+  });
+
+  test('ignores bucket=days for a multi-material request — a combined forecast must stay weekly', async () => {
+    queueSnapshotAndAccuracy([snapshotRow({ Material: 'M1' }), snapshotRow({ Material: 'M2' })]);
+    const res = await request(appMrp).get('/turns-valclass/history?materials=M1,M2&bucket=days');
+    expect(res.status).toBe(200);
+    expect(res.body.stockForecast.bucketDays).toBe(7);
+    expect(res.body.stockForecast.weeks.length).toBe(26);
+  });
+});
+
 // Isopar (Material 10010) is planned off a manual meter reading + fixed weekday/weekend rate
 // instead of SAP figures — see the Isopar branch inside the /turns-valclass/history route.
 describe('Isopar (Material 10010) override', () => {
