@@ -236,6 +236,79 @@ describe('POST /manual (create manual cost line)', () => {
   });
 });
 
+describe('PATCH /manual/:costId (edit manual cost line)', () => {
+  const validBody = {
+    direction: 'outbound',
+    tier: 'standard',
+    costType: '1',
+    costCenter: '0000002004',
+    costElement: '601200',
+    expectedCost: 150,
+    forwarderID: 7,
+    modeOfTransport: 'Road',
+    incurredDate: '2026-08-01',
+    reference: 'Haulier invoice INV-123 (corrected)',
+    country: 'GB',
+    postcode: 'LS1',
+  };
+
+  test('is rejected for a user without LOG_PLANNING', async () => {
+    const res = await request(app).patch('/manual/1').send(validBody);
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rejects an invalid direction', async () => {
+    const res = await request(appPlanning).patch('/manual/1').send({ ...validBody, direction: 'sideways' });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rejects a non-positive expectedCost', async () => {
+    const res = await request(appPlanning).patch('/manual/1').send({ ...validBody, expectedCost: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  test.each([
+    ['costCenter', ''],
+    ['forwarderID', null],
+    ['modeOfTransport', ''],
+    ['incurredDate', null],
+    ['reference', '  '],
+    ['country', ''],
+    ['postcode', ''],
+  ])('requires %s', async (field, badValue) => {
+    const res = await request(appPlanning).patch('/manual/1').send({ ...validBody, [field]: badValue });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('400s when the line does not exist, is not a manual line, or is already posted to SAP', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(appPlanning).patch('/manual/1').send(validBody);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/already posted/);
+  });
+
+  test('updates an editable manual line and returns its costID', async () => {
+    queueResults({ recordset: [{ costID: 1 }] });
+    const res = await request(appPlanning).patch('/manual/1').send(validBody);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { costID: 1, costElement: '601200' } });
+  });
+
+  test('falls back to a server-side cost element lookup when the client omits one', async () => {
+    queueResults(
+      { recordset: [{ elementCode: '601300' }] }, // lookupCostElement
+      { recordset: [{ costID: 1 }] },              // UPDATE
+    );
+    const { costElement, ...bodyWithoutElement } = validBody;
+    const res = await request(appPlanning).patch('/manual/1').send(bodyWithoutElement);
+    expect(res.status).toBe(200);
+    expect(res.body.data.costElement).toBe('601300');
+  });
+});
+
 describe('POST /post-migo', () => {
   test('is rejected for a user without LOG_PLANNING', async () => {
     const res = await request(app).post('/post-migo').send({ costIDs: [1] });

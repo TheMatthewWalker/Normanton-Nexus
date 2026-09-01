@@ -6569,6 +6569,7 @@ async function runUnprocessedCosts() {
       <th>Location</th>
       <th>Tracking</th>
       <th>Result</th>
+      <th></th>
     </tr>`;
 
     body.innerHTML = `
@@ -6662,8 +6663,16 @@ function renderUnprocessedTbody(rows) {
       <td class="pn-batch-mono">${location(r)}</td>
       <td class="pn-batch-mono">${esc(r.trackingNumber || '—')}</td>
       <td class="migo-result-cell">${delivered ? '' : '<span style="color:var(--text-muted);font-size:11px">Awaiting delivery</span>'}</td>
+      <td>${r.sourceType === 'manual' ? `<button type="button" class="btn-secondary migo-edit-manual" data-cost-id="${r.costID}" style="padding:2px 8px;font-size:11px">Edit</button>` : ''}</td>
     </tr>`;
-  }).join('') : '<tr><td colspan="14" style="text-align:center;color:var(--text-secondary,#666)">No lines match the current filters.</td></tr>';
+  }).join('') : '<tr><td colspan="15" style="text-align:center;color:var(--text-secondary,#666)">No lines match the current filters.</td></tr>';
+
+  document.querySelectorAll('.migo-edit-manual').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = rows.find(r => String(r.costID) === btn.dataset.costId);
+      if (row) openManualCostModal(runUnprocessedCosts, row);
+    });
+  });
 
   updateMigoSelection();
 }
@@ -6888,12 +6897,24 @@ function renderProcessedTbody(rows) {
 // the user. Modeled on openManualInboundShipmentModal (Mode -> Haulier via
 // loadForwarderOptionsByMode) and renderShipmentAssociatedCosts's GL
 // Account/Cost Type/Cost Centre dropdowns. onSaved is called after a
-// successful POST so the caller (currently only Unprocessed Costs) can
+// successful save so the caller (currently only Unprocessed Costs) can
 // refresh its own list.
-async function openManualCostModal(onSaved) {
+//
+// editRow, when passed (from the Unprocessed Costs table's Edit button on a
+// sourceType==='manual' row — see renderUnprocessedTbody), switches this into
+// edit mode: fields prefill from the existing line and Save PATCHes
+// /api/shipmentcost/manual/:costId instead of POSTing a new one — a manual
+// cost previously had no way to be corrected once created besides delete
+// and re-add, per the user. editRow is the row shape buildCostListQuery
+// returns (costID, direction, costCenter, costElement, expectedCost,
+// costType, modeOfTransport, forwarderID, plannedCollection,
+// destinationCountry, destinationPostCode, trackingNumber, shipmentRef —
+// the last being manualReference for a manual row).
+async function openManualCostModal(onSaved, editRow = null) {
+  const isEdit = !!editRow;
   openModal(`<div class="ps-modal lg-modal" style="max-width:640px;width:94vw">
     <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Manual Cost</div><div class="ps-modal-sub">Not linked to any shipment — e.g. a standalone invoice</div></div>
+      <div><div class="ps-modal-title">${isEdit ? 'Edit Manual Cost' : 'Manual Cost'}</div><div class="ps-modal-sub">Not linked to any shipment — e.g. a standalone invoice</div></div>
       <button class="ps-modal-close" onclick="closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
@@ -6972,7 +6993,7 @@ async function openManualCostModal(onSaved) {
     </div>
     <div class="ps-modal-actions">
       <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
-      <button type="button" class="btn-submit" id="mc-save-btn">Add Cost</button>
+      <button type="button" class="btn-submit" id="mc-save-btn">${isEdit ? 'Save Changes' : 'Add Cost'}</button>
     </div>
   </div>`);
 
@@ -6981,13 +7002,32 @@ async function openManualCostModal(onSaved) {
   const elementSelect   = document.getElementById('mc-cost-element');
   const centerSelect    = document.getElementById('mc-cost-center');
 
+  if (isEdit) {
+    directionSelect.value = editRow.direction === 'inbound' ? 'inbound' : 'outbound';
+    document.getElementById('mc-amount').value = editRow.expectedCost != null ? Number(editRow.expectedCost) : '';
+    document.getElementById('mc-date').value = editRow.plannedCollection ? new Date(editRow.plannedCollection).toISOString().slice(0, 10) : '';
+    document.getElementById('mc-reference').value = editRow.shipmentRef || '';
+    document.getElementById('mc-country').value = editRow.destinationCountry || '';
+    document.getElementById('mc-postcode').value = editRow.destinationPostCode || '';
+    document.getElementById('mc-tracking').value = editRow.trackingNumber || '';
+    document.getElementById('mc-mode').value = editRow.modeOfTransport || '';
+    await loadForwarderOptionsByMode('mc-haulier', editRow.modeOfTransport, editRow.forwarderID);
+  }
+
   // Cost Centre — same direction-based default the rest of the app already
   // uses (0000002012 inbound / 0000002004 PTFE outbound — see
   // routes/inboundcosts.js's INBOUND_COST_CENTER and
-  // renderShipmentAssociatedCosts's outbound default above).
+  // renderShipmentAssociatedCosts's outbound default above). In edit mode,
+  // re-asserts the line's own cost centre after the direction-based default —
+  // called from two racy places below (the /api/costcenters .then() and
+  // right after awaiting mgmLoadCostElements()), so folding the override in
+  // here covers both instead of duplicating the isEdit check at each site.
   function applyCostCenterDefault() {
     const def = directionSelect.value === 'inbound' ? '0000002012' : '0000002004';
     if ([...centerSelect.options].some(o => o.value === def)) centerSelect.value = def;
+    if (isEdit && editRow.costCenter && [...centerSelect.options].some(o => o.value === editRow.costCenter)) {
+      centerSelect.value = editRow.costCenter;
+    }
   }
 
   fetch('/api/costcenters').then(r => r.json()).then(data => {
@@ -7004,6 +7044,9 @@ async function openManualCostModal(onSaved) {
     sel.innerHTML = types.map(t =>
       `<option value="${esc(String(t.typeID))}">${esc(t.typeDescription || '')}</option>`
     ).join('');
+    if (isEdit && editRow.costType && [...sel.options].some(o => o.value === String(editRow.costType))) {
+      sel.value = String(editRow.costType);
+    }
   }).catch(() => {});
 
   // Cost Element — filtered to the chosen direction (mgmLoadCostElements is
@@ -7024,6 +7067,18 @@ async function openManualCostModal(onSaved) {
   const elements = await mgmLoadCostElements();
   applyElementOptions(elements);
   applyCostCenterDefault();
+
+  // Overrides applyElementOptions' direction/tier-driven auto-pick with the
+  // line's own actual GL element (already in-scope since direction was set
+  // from editRow before this ran) — awaited directly rather than inside a
+  // .then(), so no raciness against the fetch-based prefills above.
+  if (isEdit && editRow.costElement) {
+    const matched = elements.find(e => e.elementCode === editRow.costElement);
+    if (matched && [...elementSelect.options].some(o => o.value === editRow.costElement)) {
+      elementSelect.value = editRow.costElement;
+      tierSelect.value = matched.tier === 'premium' ? 'premium' : 'standard';
+    }
+  }
 
   directionSelect.addEventListener('change', () => { applyElementOptions(elements); applyCostCenterDefault(); });
   tierSelect.addEventListener('change', () => applyElementOptions(elements));
@@ -7063,20 +7118,20 @@ async function openManualCostModal(onSaved) {
     if (!body.country) { result.innerHTML = '<div class="sap-error">Enter a country.</div>'; return; }
     if (!body.postcode) { result.innerHTML = '<div class="sap-error">Enter a postcode.</div>'; return; }
 
-    btn.disabled = true; btn.textContent = 'Adding…';
+    btn.disabled = true; btn.textContent = isEdit ? 'Saving…' : 'Adding…';
     try {
-      const res = await fetch('/api/shipmentcost/manual', {
-        method: 'POST',
+      const res = await fetch(isEdit ? `/api/shipmentcost/manual/${editRow.costID}` : '/api/shipmentcost/manual', {
+        method: isEdit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       const json = await res.json();
-      if (!json.success) throw new Error(json.error || 'Failed to add cost');
+      if (!json.success) throw new Error(json.error || `Failed to ${isEdit ? 'save' : 'add'} cost`);
       closePickModal();
       if (onSaved) onSaved();
     } catch (err) {
       result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
-      btn.disabled = false; btn.textContent = 'Add Cost';
+      btn.disabled = false; btn.textContent = isEdit ? 'Save Changes' : 'Add Cost';
     }
   });
 }

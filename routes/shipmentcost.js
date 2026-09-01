@@ -320,6 +320,96 @@ router.post('/manual', requirePermission('LOG_PLANNING'), async (req, res) => {
     }
 });
 
+// ── Edit a manual cost line — a Manual Cost had no way to be corrected once
+// created (only delete-and-recreate), per the user. Same fields/validation
+// as POST /manual above, applied as an UPDATE instead of an INSERT. Blocked
+// once migoStatus=1, same guard PATCH /:costId and DELETE /:costId use
+// (reverse via POST /:costId/reverse first — that drops it back into
+// Unprocessed Costs and clears this guard). The WHERE clause also requires
+// shipmentID/poShipmentID both NULL, so this can't be pointed at an
+// outbound/inbound shipment-linked line by id guessing — those have their
+// own edit path (outbound: PATCH /:costId, amount only; inbound has none yet).
+router.patch('/manual/:costId', requirePermission('LOG_PLANNING'), async (req, res) => {
+    try {
+        const {
+            direction, tier, costType, costCenter, expectedCost,
+            forwarderID, modeOfTransport, incurredDate, reference,
+            country, postcode, trackingNumber,
+        } = req.body;
+        let { costElement } = req.body;
+
+        if (direction !== 'inbound' && direction !== 'outbound') {
+            return res.status(400).json({ success: false, error: "direction must be 'inbound' or 'outbound'." });
+        }
+        if (tier !== 'standard' && tier !== 'premium') {
+            return res.status(400).json({ success: false, error: "tier must be 'standard' or 'premium'." });
+        }
+        const expectedCostNum = Number(expectedCost);
+        if (!Number.isFinite(expectedCostNum) || expectedCostNum <= 0) {
+            return res.status(400).json({ success: false, error: 'expectedCost must be a positive number.' });
+        }
+        if (!costCenter || !String(costCenter).trim()) {
+            return res.status(400).json({ success: false, error: 'costCenter is required.' });
+        }
+        if (!forwarderID) {
+            return res.status(400).json({ success: false, error: 'forwarderID (haulier) is required.' });
+        }
+        if (!modeOfTransport || !String(modeOfTransport).trim()) {
+            return res.status(400).json({ success: false, error: 'modeOfTransport is required.' });
+        }
+        if (!incurredDate) {
+            return res.status(400).json({ success: false, error: 'incurredDate is required.' });
+        }
+        if (!reference || !String(reference).trim()) {
+            return res.status(400).json({ success: false, error: 'reference is required.' });
+        }
+        if (!country || !String(country).trim()) {
+            return res.status(400).json({ success: false, error: 'country is required.' });
+        }
+        if (!postcode || !String(postcode).trim()) {
+            return res.status(400).json({ success: false, error: 'postcode is required.' });
+        }
+
+        const pool = await getPool();
+
+        if (!costElement || !String(costElement).trim()) {
+            costElement = await lookupCostElement(pool, direction, tier);
+            if (!costElement) {
+                return res.status(422).json({ success: false, error: `No ${direction} ${tier} cost element configured in log.CostElements.` });
+            }
+        }
+
+        const result = await pool.request()
+            .input('costId',               sql.BigInt,         req.params.costId)
+            .input('costType',             sql.NVarChar,       costType || '1')
+            .input('costElement',          sql.NVarChar,       costElement)
+            .input('costCenter',           sql.NVarChar,       costCenter)
+            .input('expectedCost',         sql.Decimal(18, 2), expectedCostNum)
+            .input('modeOfTransport',      sql.NVarChar(20),   modeOfTransport)
+            .input('manualReference',      sql.NVarChar(100),  String(reference).trim())
+            .input('manualForwarderID',    sql.BigInt,         Number(forwarderID))
+            .input('manualCountry',        sql.NVarChar(50),   String(country).trim())
+            .input('manualPostcode',       sql.NVarChar(20),   String(postcode).trim())
+            .input('manualTrackingNumber', sql.NVarChar(50),   trackingNumber ? String(trackingNumber).trim() : null)
+            .input('manualIncurredDate',   sql.DateTime,       new Date(incurredDate))
+            .query(`UPDATE log.ShipmentCost
+                    SET costType = @costType, costElement = @costElement, costCenter = @costCenter,
+                        expectedCost = @expectedCost, actualCost = @expectedCost, modeOfTransport = @modeOfTransport,
+                        manualReference = @manualReference, manualForwarderID = @manualForwarderID,
+                        manualCountry = @manualCountry, manualPostcode = @manualPostcode,
+                        manualTrackingNumber = @manualTrackingNumber, manualIncurredDate = @manualIncurredDate
+                    OUTPUT INSERTED.costID
+                    WHERE costID = @costId AND shipmentID IS NULL AND poShipmentID IS NULL AND ISNULL(migoStatus, 0) = 0`);
+
+        if (!result.recordset.length) {
+            return res.status(400).json({ success: false, error: 'Line not found, not a manual cost line, or already posted to SAP.' });
+        }
+        res.json({ success: true, data: { costID: result.recordset[0].costID, costElement } });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ── Cost estimate for a shipment — used by booking modal ──────────────────────
 // Returns: isKN, isKennethHowley, direction, tier, elementCode,
 //          chargeableWeight, expectedCost (KN only), rateFound
