@@ -12810,6 +12810,7 @@ async function refreshInboundShipmentDetail(shipmentId) {
       <input type="file" id="isd-doc-file-input" accept=".pdf,.jpg,.jpeg,.png,.docx,.doc,.xlsx,.xls,.msg,.eml,.txt,.csv" style="display:none">
       <div class="tf-row" style="margin-top:8px">
         <button type="button" class="btn-secondary" id="isd-doc-upload-btn">Upload Document</button>
+        <button type="button" class="btn-secondary" id="isd-doc-folder-btn" disabled title="Loading folder…">Open Folder</button>
       </div>
       <div class="tf-section-label">Associated Costs</div>
       <div id="isd-costs"><div class="sap-loading"><div class="spinner"></div>Loading…</div></div>`;
@@ -12911,8 +12912,27 @@ async function refreshInboundShipmentDetail(shipmentId) {
 // autoFileShipmentPoDocuments in performance.js) show up in this same list
 // with no extra step — they're just files that were already sitting in the
 // folder before the modal ever loaded.
+// Converts a Windows UNC (\\server\share\a\b) or drive-letter (C:\a\b)
+// filesystem path into a file:// URI the browser can navigate to — clicking
+// it hands off to Windows' own file:// handler (Explorer), which is the
+// only way a web page can open a real folder browser. Each path segment is
+// percent-encoded individually (not the whole string) since shipment
+// reference/supplier-name folder names routinely contain spaces and other
+// characters that aren't valid unescaped in a URI.
+function pathToFileUrl(rawPath) {
+  const p = String(rawPath || '').trim();
+  const driveMatch = p.match(/^([A-Za-z]:)[\\/](.*)$/);
+  if (driveMatch) {
+    const rest = driveMatch[2].split(/[\\/]/).filter(Boolean).map(encodeURIComponent).join('/');
+    return `file:///${driveMatch[1]}/${rest}`;
+  }
+  const unc = p.replace(/^[\\/]{2}/, '').split(/[\\/]/).filter(Boolean).map(encodeURIComponent).join('/');
+  return `file://${unc}`;
+}
+
 async function renderShipmentDocuments(shipmentId) {
   const container = document.getElementById('isd-documents');
+  const folderBtn = document.getElementById('isd-doc-folder-btn');
   if (!container) return;
   container.innerHTML = '<div class="sap-loading"><div class="spinner"></div>Loading…</div>';
   try {
@@ -12920,6 +12940,18 @@ async function renderShipmentDocuments(shipmentId) {
     const json = await res.json();
     if (!json.success) throw new Error(json.error?.message || 'Failed to load documents.');
     const files = json.data.files || [];
+
+    if (folderBtn) {
+      if (json.data.folderPath) {
+        folderBtn.disabled = false;
+        folderBtn.title = json.data.folderPath;
+        folderBtn.onclick = () => window.open(pathToFileUrl(json.data.folderPath), '_blank');
+      } else {
+        folderBtn.disabled = true;
+        folderBtn.title = 'Folder path unavailable';
+      }
+    }
+
     container.innerHTML = !files.length
       ? '<div class="sap-empty">No documents yet.</div>'
       : `<div style="overflow-x:auto"><table class="pn-batch-table admin-table">
@@ -12932,6 +12964,7 @@ async function renderShipmentDocuments(shipmentId) {
           </tr>`).join('')}</tbody>
         </table></div>`;
   } catch (err) {
+    if (folderBtn) { folderBtn.disabled = true; folderBtn.title = 'Loading folder…'; }
     container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
 }

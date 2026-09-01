@@ -4658,7 +4658,10 @@ router.get('/order-suggestions/shipments/:shipmentId/documents/folder', requireA
     }
     files.sort((a, b) => a.fileName.localeCompare(b.fileName));
 
-    res.json({ success: true, data: { supplierName, files } });
+    // folderPath (the raw filesystem/UNC path) lets the Inbound Log UI offer
+    // an "Open Folder" button — same folderPath field name
+    // routes/shipmentmain.js's outbound equivalent already returns.
+    res.json({ success: true, data: { supplierName, files, folderPath: folder.shipmentPath } });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
   }
