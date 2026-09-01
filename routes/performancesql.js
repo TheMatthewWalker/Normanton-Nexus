@@ -1631,20 +1631,34 @@ export async function listVendorMaterialsForSuggestions() {
 //  - the /turns-valclass/history route calls this scoped to the materials
 //    already resolved for that request, to bump the weekly stock-forecast
 //    chart with expected deliveries.
+//
+// The returned DeliveryDate is the shipment's own ExpectedEta once the order
+// is assigned to one (log.PurchaseOrderShipment.ExpectedEta, kept current as
+// tracking updates come in), falling back to the order line's own
+// PurchaseOrderSuggestion.DeliveryDate when it isn't assigned yet or the
+// shipment has no ETA recorded. PurchaseOrderSuggestion.DeliveryDate is
+// deliberately left untouched once an order is assigned — it's the original
+// expected date, kept static so delivery-date accuracy can be tracked
+// against it — so every forward-looking consumer of this function (stock
+// forecast, order-suggestion breach-date detection, Build Order preview)
+// needs the live ETA read here instead of that frozen column.
 export async function listOpenIncomingOrders(materials = null) {
   const pool = await getPool();
   const request = pool.request();
-  let whereSql = "WHERE Status IN ('Accepted', 'Ordered')";
+  let whereSql = "WHERE pos.Status IN ('Accepted', 'Ordered')";
   if (materials && materials.length) {
     const inClause = materials.map((m, i) => {
       request.input(`im${i}`, sql.NVarChar(18), m);
       return `@im${i}`;
     }).join(',');
-    whereSql += ` AND Material IN (${inClause})`;
+    whereSql += ` AND pos.Material IN (${inClause})`;
   }
   const { recordset } = await request.query(`
-    SELECT SuggestionId, Material, OrderQty, DeliveryDate, Status, PoNumber
-    FROM log.PurchaseOrderSuggestion
+    SELECT pos.SuggestionId, pos.Material, pos.OrderQty,
+           COALESCE(shp.ExpectedEta, pos.DeliveryDate) AS DeliveryDate,
+           pos.Status, pos.PoNumber
+    FROM log.PurchaseOrderSuggestion pos
+    LEFT JOIN log.PurchaseOrderShipment shp ON shp.ShipmentId = pos.ShipmentId
     ${whereSql}
   `);
   return recordset;

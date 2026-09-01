@@ -27,13 +27,14 @@ let deleteOrderSuggestion;
 let assignOrderShipment;
 let addVendorMaterial;
 let updateVendorMaterial;
+let listOpenIncomingOrders;
 
 beforeAll(async () => {
   ({
     createDemandAdjustment, markShipmentReceived, undoShipmentReceived, addManualInboundItem,
     removeManualInboundItem, upsertForecastAccuracyLog, updateOrderSuggestionStatus,
     updateOrderSuggestionPoItem, deleteOrderSuggestion, assignOrderShipment,
-    addVendorMaterial, updateVendorMaterial,
+    addVendorMaterial, updateVendorMaterial, listOpenIncomingOrders,
   } = await import('../../routes/performancesql.js'));
 });
 
@@ -81,6 +82,35 @@ describe('createDemandAdjustment', () => {
       statusCode: 400,
       message: expect.stringContaining('2026-01-01 to indefinitely'),
     });
+  });
+});
+
+// listOpenIncomingOrders backs every forward-looking consumer of "when will this order land"
+// (stock forecast, order-suggestion breach-date detection, Build Order preview). Its DeliveryDate
+// must come from the assigned shipment's own live ExpectedEta once one exists, not the order
+// line's own frozen PurchaseOrderSuggestion.DeliveryDate (kept static on purpose, for delivery-
+// date accuracy tracking — see the function's own comment). Since mssql is mocked, this only
+// verifies the query is actually built with that JOIN/COALESCE (a real-DB integration test would
+// be needed to confirm the SQL resolves correctly) and that the recordset passes through as-is.
+describe('listOpenIncomingOrders', () => {
+  test('selects DeliveryDate via COALESCE(shipment ExpectedEta, order DeliveryDate), joined on ShipmentId', async () => {
+    dbRequest.query.mockResolvedValueOnce({ recordset: [] });
+
+    await listOpenIncomingOrders();
+
+    const sqlText = dbRequest.query.mock.calls[0][0];
+    expect(sqlText).toMatch(/LEFT JOIN log\.PurchaseOrderShipment shp ON shp\.ShipmentId = pos\.ShipmentId/);
+    expect(sqlText).toMatch(/COALESCE\(shp\.ExpectedEta,\s*pos\.DeliveryDate\)\s+AS DeliveryDate/);
+  });
+
+  test('passes the resolved recordset straight through', async () => {
+    const rows = [{ SuggestionId: 1, Material: 'M1', OrderQty: 500, DeliveryDate: '2026-02-01T00:00:00Z', Status: 'Ordered', PoNumber: 'PO1' }];
+    dbRequest.query.mockResolvedValueOnce({ recordset: rows });
+
+    const result = await listOpenIncomingOrders(['M1']);
+
+    expect(result).toEqual(rows);
+    expect(dbRequest.query.mock.calls[0][0]).toMatch(/pos\.Material IN \(@im0\)/);
   });
 });
 
