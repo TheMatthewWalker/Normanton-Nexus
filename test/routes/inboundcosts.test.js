@@ -108,6 +108,30 @@ describe('POST / — creating a cost line', () => {
     expect(dbRequest.input).toHaveBeenCalledWith('modeOfTransport', 'NVarChar(20)', 'Sea');
   });
 
+  test('honors a supplied costCenter when the shipment IsManual', async () => {
+    queueResults(
+      { recordset: [{ ShipmentId: 1, ForwarderID: null, IsManual: true }] },
+      { recordset: [{ elementCode: '602200' }] },
+      { recordset: [{ ModeOfTransport: 'Road' }] },
+      { recordset: [{ costID: 58 }] },
+    );
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costCenter: '900-36GBNO' });
+    expect(res.status).toBe(201);
+    expect(dbRequest.input).toHaveBeenCalledWith('costCenter', expect.anything(), '900-36GBNO');
+  });
+
+  test('ignores a supplied costCenter when the shipment is not manual, falling back to the fixed inbound default', async () => {
+    queueResults(
+      { recordset: [{ ShipmentId: 1, ForwarderID: null, IsManual: false }] },
+      { recordset: [{ elementCode: '602200' }] },
+      { recordset: [{ ModeOfTransport: 'Road' }] },
+      { recordset: [{ costID: 59 }] },
+    );
+    const res = await request(appMrp).post('/').send({ poShipmentID: 1, tier: 'standard', amount: 10, costCenter: '900-36GBNO' });
+    expect(res.status).toBe(201);
+    expect(dbRequest.input).toHaveBeenCalledWith('costCenter', expect.anything(), '0000002012');
+  });
+
   test('422s when no matching cost element is configured', async () => {
     queueResults(
       { recordset: [{ ShipmentId: 1, ForwarderID: null }] },

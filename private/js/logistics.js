@@ -13017,9 +13017,12 @@ async function renderManualInboundItems(shipmentId) {
 }
 
 // ── Associated Costs (Inbound Log detail) ───────────────────────────────────
-// Cost centre is always the fixed inbound default (2012) here, per the
-// user's spec — only the GL tier (standard/premium -> 602200/602100) is
-// chosen per line. See routes/inboundcosts.js for the posting mechanics.
+// Cost centre is the fixed inbound default (2012) for a tracked shipment —
+// only the GL tier (standard/premium -> 602200/602100) is chosen per line.
+// A Manual Inbound Shipment isn't always PTFE raw material though, so those
+// get their own Cost Centre dropdown (same log.CostCenters list as
+// elsewhere) alongside Tier. See routes/inboundcosts.js for the posting
+// mechanics and the server-side IsManual gate.
 async function renderAssociatedCosts(shipmentId, shipment) {
   const container = document.getElementById('isd-costs');
   if (!container) return;
@@ -13033,6 +13036,7 @@ async function renderAssociatedCosts(shipmentId, shipment) {
     const rows = lines.map(l => `
       <tr class="admin-row">
         <td>${esc(l.elementDescription || l.costElement)}</td>
+        ${shipment.IsManual ? `<td>${esc(l.costCenter || '—')}</td>` : ''}
         <td>£${Number(l.expectedCost).toFixed(2)}</td>
         <td>${l.migoStatus ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
         <td>${l.migoStatus
@@ -13040,11 +13044,12 @@ async function renderAssociatedCosts(shipmentId, shipment) {
           : `<button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
       </tr>`).join('');
 
+    const colCount = shipment.IsManual ? 5 : 4;
     container.innerHTML = `
       <div style="overflow-x:auto">
         <table class="pn-batch-table admin-table">
-          <thead><tr><th>GL Element</th><th>Amount</th><th>Status</th><th></th></tr></thead>
-          <tbody>${rows.length ? rows : '<tr><td colspan="4" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>'}</tbody>
+          <thead><tr><th>GL Element</th>${shipment.IsManual ? '<th>Cost Centre</th>' : ''}<th>Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows : `<tr><td colspan="${colCount}" style="color:var(--text-secondary,#666)">No cost lines yet</td></tr>`}</tbody>
         </table>
       </div>
       <div class="tf-row" style="margin-top:10px;align-items:flex-end">
@@ -13055,6 +13060,13 @@ async function renderAssociatedCosts(shipmentId, shipment) {
             <option value="premium">Premium (602100)</option>
           </select>
         </div>
+        ${shipment.IsManual ? `
+        <div class="tf-field">
+          <label class="tf-label">Cost Centre</label>
+          <select class="tf-input" id="isd-cost-center">
+            <option value="">Loading…</option>
+          </select>
+        </div>` : ''}
         <div class="tf-field">
           <label class="tf-label">Amount (£)</label>
           <input class="tf-input" type="number" step="0.01" id="isd-cost-amount">
@@ -13067,18 +13079,37 @@ async function renderAssociatedCosts(shipmentId, shipment) {
       ${unprocessed.length ? `<div class="toolbar-hint" style="margin-top:8px">${unprocessed.length} line${unprocessed.length === 1 ? '' : 's'} awaiting SAP posting — post from Admin &rarr; Unprocessed Costs, alongside outbound freight.</div>` : ''}
       <div id="isd-cost-result" style="margin-top:8px"></div>`;
 
+    if (shipment.IsManual) {
+      fetch('/api/costcenters').then(r => r.json()).then(data => {
+        const sel = document.getElementById('isd-cost-center');
+        if (!sel) return;
+        const centres = Array.isArray(data) ? data : (data.data || []);
+        sel.innerHTML = `<option value="">— Select cost centre —</option>${centres.map(c =>
+          `<option value="${esc(c.centerCode || '')}">${esc(c.centerCode || '')} — ${esc(c.centerDescription || '')}</option>`
+        ).join('')}`;
+      }).catch(() => {
+        const sel = document.getElementById('isd-cost-center');
+        if (sel) sel.innerHTML = '<option value="">Failed to load cost centres</option>';
+      });
+    }
+
     document.getElementById('isd-cost-add-btn').addEventListener('click', async () => {
       const btn = document.getElementById('isd-cost-add-btn');
       const result = document.getElementById('isd-cost-result');
       const amount = document.getElementById('isd-cost-amount').value;
       const tier = document.getElementById('isd-cost-tier').value;
+      const costCenterSel = document.getElementById('isd-cost-center');
+      if (shipment.IsManual && !costCenterSel.value) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
       if (!amount || Number(amount) <= 0) { result.innerHTML = '<div class="sap-error">Enter an amount greater than 0.</div>'; return; }
       btn.disabled = true; btn.textContent = 'Adding…';
       try {
         const res2 = await fetch('/api/inboundcosts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ poShipmentID: shipmentId, tier, amount: Number(amount) }),
+          body: JSON.stringify({
+            poShipmentID: shipmentId, tier, amount: Number(amount),
+            ...(shipment.IsManual ? { costCenter: costCenterSel.value } : {}),
+          }),
         });
         const json2 = await res2.json();
         if (!json2.success) throw new Error(json2.error?.message || 'Failed to add cost');

@@ -21,13 +21,15 @@
 // poShipmentID set are automatically invisible to that code unless it's
 // been updated to also look at poShipmentID (as shipmentcost.js now is).
 //
-// GL account + cost centre: per the user's spec, associated-cost lines on
-// an Inbound Log shipment always use cost centre 2012 (fixed — not a
-// dropdown), with the GL code driven by a standard/premium toggle
-// (602200 / 602100, both already seeded in log.CostElements by
-// migrate_shipment_costing.sql). The cost-centre DROPDOWN the user asked
-// for is specific to Manual Inbound Shipment creation (routes/performance.js
-// createManualOrderShipment caller below) — see that route.
+// GL account + cost centre: associated-cost lines on a tracked Inbound Log
+// shipment always use cost centre 2012 (fixed — not a dropdown), with the
+// GL code driven by a standard/premium toggle (602200 / 602100, both
+// already seeded in log.CostElements by migrate_shipment_costing.sql). A
+// Manual Inbound Shipment isn't always PTFE raw material though, so those
+// get a cost-centre DROPDOWN (log.CostCenters, same list as everywhere
+// else) both at creation (routes/performance.js createManualOrderShipment
+// caller below) and on every cost line added afterwards (POST / below) —
+// gated on the shipment's own IsManual flag, not left to the caller.
 //
 // modeOfTransport is captured per line (defaulted from the shipment's own
 // ModeOfTransport at insert time) — per the user, this will drive the
@@ -105,14 +107,19 @@ router.get('/shipment/:poShipmentId', canView, async (req, res) => {
 });
 
 // ── Add a cost line ─────────────────────────────────────────────────────────
-// Body: { poShipmentID, tier: 'standard'|'premium', amount, information?, modeOfTransport? }
-// Cost centre is always the fixed inbound default (2012) here — see header
-// comment for why that differs from Manual Inbound Shipment creation.
+// Body: { poShipmentID, tier: 'standard'|'premium', amount, information?, modeOfTransport?, costCenter? }
+// Cost centre stays the fixed inbound default (2012) for a tracked Inbound
+// Log shipment, per the original spec. A Manual Inbound Shipment isn't
+// always PTFE raw material though — those can be against any cost centre,
+// so callers may supply one (picked from the same log.CostCenters list as
+// everywhere else, via GET /api/costcenters) — honored only when the
+// shipment IsManual, silently ignored otherwise so a tracked shipment can't
+// be pointed at a cost centre it shouldn't.
 // Posting to SAP happens from the Unprocessed Costs admin tile, not here —
 // see routes/shipmentcost.js.
 router.post('/', canView, async (req, res) => {
   try {
-    const { poShipmentID, tier, amount, information, modeOfTransport } = req.body;
+    const { poShipmentID, tier, amount, information, modeOfTransport, costCenter } = req.body;
     if (!poShipmentID) return res.status(400).json({ success: false, error: { message: 'poShipmentID is required.' } });
     if (!amount || Number(amount) <= 0) return res.status(400).json({ success: false, error: { message: 'amount must be greater than 0.' } });
 
@@ -123,11 +130,12 @@ router.post('/', canView, async (req, res) => {
     // the line itself doesn't need it.
     const { recordset: shipRows } = await pool.request()
       .input('poShipmentId', sql.Int, poShipmentID)
-      .query('SELECT ShipmentId, ForwarderID FROM log.PurchaseOrderShipment WHERE ShipmentId = @poShipmentId');
+      .query('SELECT ShipmentId, ForwarderID, IsManual FROM log.PurchaseOrderShipment WHERE ShipmentId = @poShipmentId');
     if (!shipRows.length) return res.status(404).json({ success: false, error: { message: 'Shipment not found.' } });
 
     const data = await insertInboundCostLine(pool, {
       poShipmentID, tier, amount: Number(amount), information, modeOfTransport,
+      costCenter: shipRows[0].IsManual ? (costCenter || null) : null,
     });
     res.status(201).json({ success: true, data: { ...data, forwarderSet: !!shipRows[0].ForwarderID } });
   } catch (err) {
