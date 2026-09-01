@@ -45,6 +45,16 @@ test('POST / creates a record', async () => {
   expect(res.status).toBe(201);
 });
 
+// typeID is a SAP-issued code, not always numeric (e.g. 'ITLG06A' for
+// Warehousing) — binding it as sql.BigInt would throw a conversion error
+// for these before it ever reached the (mocked) query call.
+test('POST / accepts an alphanumeric typeID', async () => {
+  queueResults({ recordset: [] });
+  const res = await request(app).post('/').send({ typeID: 'ITLG06A', typeDescription: 'Warehousing' });
+  expect(res.status).toBe(201);
+  expect(dbRequest.input).toHaveBeenCalledWith('typeID', 'NVarChar(10)', 'ITLG06A');
+});
+
 test('a DB failure on GET / is reported as a 500', async () => {
   dbRequest.query.mockRejectedValueOnce(new Error('connection lost'));
   const res = await request(app).get('/');
