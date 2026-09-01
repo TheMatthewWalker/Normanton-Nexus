@@ -148,6 +148,63 @@ describe('POST / — creating a cost line', () => {
   });
 });
 
+describe('PATCH /:costId — editing a cost line', () => {
+  test('403s without LOG_MRP', async () => {
+    const res = await request(app).patch('/1').send({ tier: 'standard', amount: 100 });
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('400s on a zero/negative amount', async () => {
+    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/amount/);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('400s when the line does not exist or is already posted to SAP', async () => {
+    queueResults({ recordset: [] });
+    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 100 });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/already posted/);
+  });
+
+  test('updates tier/amount for a tracked (non-manual) shipment, ignoring any supplied costCenter', async () => {
+    queueResults(
+      { recordset: [{ costID: 1, IsManual: false }] },
+      { recordset: [{ elementCode: '602100' }] }, // lookupCostElement (premium)
+      { recordset: [{ costID: 1 }] },              // UPDATE
+    );
+    const res = await request(appMrp).patch('/1').send({ tier: 'premium', amount: 250, costCenter: '900-36GBNO' });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ costID: 1, elementCode: '602100' });
+    const sqlText = dbRequest.query.mock.calls[2][0];
+    expect(sqlText).not.toMatch(/costCenter/);
+  });
+
+  test('also updates costCenter when the shipment IsManual', async () => {
+    queueResults(
+      { recordset: [{ costID: 2, IsManual: true }] },
+      { recordset: [{ elementCode: '602200' }] },
+      { recordset: [{ costID: 2 }] },
+    );
+    const res = await request(appMrp).patch('/2').send({ tier: 'standard', amount: 10, costCenter: '900-36GBNO' });
+    expect(res.status).toBe(200);
+    const sqlText = dbRequest.query.mock.calls[2][0];
+    expect(sqlText).toMatch(/costCenter = @costCenter/);
+    expect(dbRequest.input).toHaveBeenCalledWith('costCenter', expect.anything(), '900-36GBNO');
+  });
+
+  test('422s when no matching cost element is configured for the requested tier', async () => {
+    queueResults(
+      { recordset: [{ costID: 1, IsManual: false }] },
+      { recordset: [] }, // lookupCostElement finds nothing
+    );
+    const res = await request(appMrp).patch('/1').send({ tier: 'standard', amount: 10 });
+    expect(res.status).toBe(422);
+  });
+});
+
 describe('DELETE /:costId', () => {
   test('400s when the line is missing or already posted', async () => {
     queueResults({ recordset: [] });

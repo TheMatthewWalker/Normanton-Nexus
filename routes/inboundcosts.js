@@ -143,6 +143,64 @@ router.post('/', canView, async (req, res) => {
   }
 });
 
+// ── Edit an unprocessed cost line ───────────────────────────────────────────
+// Body: { tier: 'standard'|'premium', amount, costCenter? } — mirrors POST /
+// above: tier drives the GL account via the same lookupCostElement call,
+// costCenter is only honored when the line's own shipment IsManual (same
+// gate POST / applies at creation), silently ignored otherwise. Blocked
+// once migoStatus=1, same guard DELETE /:costId uses below (reverse via
+// routes/shipmentcost.js's POST /:costId/reverse first — that drops it back
+// into Unprocessed Costs and clears this guard). A wrong tier/amount/cost
+// centre previously had no way to be corrected once added besides deleting
+// and re-adding, per the user.
+//
+// The JOIN to PurchaseOrderShipment (needed for IsManual) doubles as scope
+// protection — costID is unique across the whole log.ShipmentCost table, so
+// without it this route could otherwise be pointed at an outbound or manual
+// line by id guessing; the JOIN naturally excludes both (poShipmentID is
+// NULL for each).
+router.patch('/:costId', canView, async (req, res) => {
+  try {
+    const { tier, amount, costCenter } = req.body;
+    const amountNum = Number(amount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      return res.status(400).json({ success: false, error: { message: 'amount must be greater than 0.' } });
+    }
+
+    const pool = await getPool();
+
+    const { recordset: rows } = await pool.request()
+      .input('costId', sql.BigInt, req.params.costId)
+      .query(`SELECT sc.costID, ps.IsManual
+              FROM log.ShipmentCost sc
+              JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
+              WHERE sc.costID = @costId AND ISNULL(sc.migoStatus, 0) = 0`);
+    if (!rows.length) return res.status(400).json({ success: false, error: { message: 'Line not found, or already posted to SAP.' } });
+
+    const elementCode = await lookupCostElement(pool, 'inbound', tier === 'premium' ? 'premium' : 'standard');
+    if (!elementCode) {
+      return res.status(422).json({ success: false, error: { message: `No inbound ${tier} cost element configured in log.CostElements.` } });
+    }
+
+    const dbRequest = pool.request()
+      .input('costId',       sql.BigInt,         req.params.costId)
+      .input('costElement',  sql.NVarChar,       elementCode)
+      .input('expectedCost', sql.Decimal(18, 2), amountNum);
+
+    let setSql = 'costElement = @costElement, expectedCost = @expectedCost, actualCost = @expectedCost';
+    if (rows[0].IsManual && costCenter) {
+      dbRequest.input('costCenter', sql.NVarChar, costCenter);
+      setSql += ', costCenter = @costCenter';
+    }
+
+    await dbRequest.query(`UPDATE log.ShipmentCost SET ${setSql} WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
+
+    res.json({ success: true, data: { costID: Number(req.params.costId), elementCode } });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: { message: err.message } });
+  }
+});
+
 // ── Delete an unprocessed cost line ─────────────────────────────────────────
 router.delete('/:costId', canView, async (req, res) => {
   try {

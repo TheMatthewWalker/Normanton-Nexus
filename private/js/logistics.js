@@ -4210,7 +4210,7 @@ async function renderShipmentAssociatedCosts(shipmentId) {
           : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
         <td style="white-space:nowrap">${!canEdit ? '' : l.migoStatus
           ? `<button type="button" class="btn-secondary sd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
-          : `<button type="button" class="btn-secondary sd-cost-edit" data-cost-id="${l.costID}" data-amount="${esc(String(l.expectedCost))}" style="padding:2px 8px;font-size:11px">Edit</button>
+          : `<button type="button" class="btn-secondary sd-cost-edit" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Edit</button>
              <button type="button" class="btn-secondary sd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
       </tr>`).join('');
 
@@ -4326,7 +4326,8 @@ async function renderShipmentAssociatedCosts(shipmentId) {
 
     document.querySelectorAll('.sd-cost-edit').forEach(b => {
       b.addEventListener('click', () => {
-        openSdCostEditModal(b.dataset.costId, b.dataset.amount, shipmentId);
+        const line = lines.find(l => String(l.costID) === b.dataset.costId);
+        if (line) openSdCostEditModal(line, shipmentId);
       });
     });
 
@@ -4364,20 +4365,33 @@ async function renderShipmentAssociatedCosts(shipmentId) {
   }
 }
 
-// ── Edit an unprocessed outbound cost line's amount ──
-// PATCH /api/shipmentcost/:costId — only the amount is editable here (GL
-// element/cost centre are set automatically at booking time).
-function openSdCostEditModal(costId, currentAmount, shipmentId) {
-  openModal(`<div class="ps-modal" style="max-width:420px;width:92vw">
+// ── Edit an unprocessed outbound cost line ──
+// PATCH /api/shipmentcost/:costId — amount, GL Account, and Cost Centre are
+// all editable here now (previously amount-only), per the user: a wrong GL
+// account or cost centre had no way to be corrected once added besides
+// deleting and re-adding. `line` is the row shape GET /shipment/:shipmentId
+// returns (costID, costElement, costCenter, expectedCost, …).
+function openSdCostEditModal(line, shipmentId) {
+  openModal(`<div class="ps-modal" style="max-width:480px;width:92vw">
     <div class="ps-modal-header">
-      <div><div class="ps-modal-title">Edit Cost Amount</div></div>
+      <div><div class="ps-modal-title">Edit Cost</div></div>
       <button class="ps-modal-close" onclick="closePickModal()">×</button>
     </div>
     <div class="ps-modal-body">
       <div class="tf-row">
         <div class="tf-field tf-field--wide">
+          <label class="tf-label">GL Account</label>
+          <select class="tf-input" id="sd-cost-edit-element"></select>
+        </div>
+      </div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Cost Centre</label>
+          <select class="tf-input" id="sd-cost-edit-center"></select>
+        </div>
+        <div class="tf-field">
           <label class="tf-label">Amount (£)</label>
-          <input class="tf-input" type="number" step="0.01" min="0.01" id="sd-cost-edit-amount" value="${esc(String(currentAmount))}">
+          <input class="tf-input" type="number" step="0.01" min="0.01" id="sd-cost-edit-amount" value="${esc(String(line.expectedCost))}">
         </div>
       </div>
       <div id="sd-cost-edit-result"></div>
@@ -4388,26 +4402,46 @@ function openSdCostEditModal(costId, currentAmount, shipmentId) {
     </div>
   </div>`);
 
+  const elementSelect = document.getElementById('sd-cost-edit-element');
+  const centerSelect  = document.getElementById('sd-cost-edit-center');
+
+  mgmLoadCostElements().then(elements => {
+    const outboundElements = elements.filter(e => e.direction === 'outbound');
+    elementSelect.innerHTML = outboundElements.map(e =>
+      `<option value="${esc(e.elementCode)}">${esc(e.elementCode)} — ${esc(e.elementDescription || '')}</option>`
+    ).join('');
+    if ([...elementSelect.options].some(o => o.value === line.costElement)) elementSelect.value = line.costElement;
+  }).catch(() => { elementSelect.innerHTML = '<option value="">Failed to load GL accounts</option>'; });
+
+  fetch('/api/costcenters').then(r => r.json()).then(data => {
+    const centres = Array.isArray(data) ? data : (data.data || []);
+    centerSelect.innerHTML = centres.map(c =>
+      `<option value="${esc(c.centerCode || '')}">${esc(c.centerCode || '')} — ${esc(c.centerDescription || '')}</option>`
+    ).join('');
+    if ([...centerSelect.options].some(o => o.value === line.costCenter)) centerSelect.value = line.costCenter;
+  }).catch(() => { centerSelect.innerHTML = '<option value="">Failed to load cost centres</option>'; });
+
   document.getElementById('sd-cost-edit-save-btn').addEventListener('click', async () => {
     const amount = Number(document.getElementById('sd-cost-edit-amount').value);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      document.getElementById('sd-cost-edit-result').innerHTML = '<div class="sap-error">Enter a valid amount.</div>';
-      return;
-    }
+    const result = document.getElementById('sd-cost-edit-result');
+    if (!elementSelect.value) { result.innerHTML = '<div class="sap-error">Select a GL Account.</div>'; return; }
+    if (!centerSelect.value) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
+    if (!Number.isFinite(amount) || amount <= 0) { result.innerHTML = '<div class="sap-error">Enter a valid amount.</div>'; return; }
+
     const btn = document.getElementById('sd-cost-edit-save-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
     try {
-      const res = await fetch(`/api/shipmentcost/${costId}`, {
+      const res = await fetch(`/api/shipmentcost/${line.costID}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expectedCost: amount }),
+        body: JSON.stringify({ expectedCost: amount, costElement: elementSelect.value, costCenter: centerSelect.value }),
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Failed to save');
       closePickModal();
       renderShipmentAssociatedCosts(shipmentId);
     } catch (err) {
-      document.getElementById('sd-cost-edit-result').innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
       btn.disabled = false; btn.textContent = 'Save Changes';
     }
   });
@@ -13177,7 +13211,8 @@ async function renderAssociatedCosts(shipmentId, shipment) {
         <td>${l.migoStatus ? `<span style="color:var(--success,#059669)">Posted — ${esc(l.materialDocument || '')}</span>` : '<span style="color:var(--text-secondary,#666)">Pending</span>'}</td>
         <td>${l.migoStatus
           ? `<button type="button" class="btn-secondary isd-cost-reverse" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Reverse</button>`
-          : `<button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
+          : `<button type="button" class="btn-secondary isd-cost-edit" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Edit</button>
+             <button type="button" class="btn-secondary isd-cost-delete" data-cost-id="${l.costID}" style="padding:2px 8px;font-size:11px">Remove</button>`}</td>
       </tr>`).join('');
 
     const colCount = shipment.IsManual ? 5 : 4;
@@ -13256,6 +13291,13 @@ async function renderAssociatedCosts(shipmentId, shipment) {
       }
     });
 
+    document.querySelectorAll('.isd-cost-edit').forEach(b => {
+      b.addEventListener('click', () => {
+        const line = lines.find(l => String(l.costID) === b.dataset.costId);
+        if (line) openIsdCostEditModal(line, shipmentId, shipment);
+      });
+    });
+
     document.querySelectorAll('.isd-cost-delete').forEach(b => {
       b.addEventListener('click', async () => {
         try {
@@ -13288,6 +13330,91 @@ async function renderAssociatedCosts(shipmentId, shipment) {
   } catch (err) {
     container.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
   }
+}
+
+// ── Edit an unprocessed inbound cost line ──
+// PATCH /api/inboundcosts/:costId — Tier (GL account) and Amount are always
+// editable; Cost Centre only for a Manual Inbound Shipment (tracked
+// shipments stay fixed at the 2012 default, same restriction the Add Cost
+// form above applies). A wrong tier/amount/cost centre previously had no
+// way to be corrected once added besides deleting and re-adding, per the
+// user. `line` is the row shape GET /shipment/:poShipmentId returns
+// (costID, costCenter, tier, expectedCost, …).
+function openIsdCostEditModal(line, shipmentId, shipment) {
+  openModal(`<div class="ps-modal" style="max-width:460px;width:92vw">
+    <div class="ps-modal-header">
+      <div><div class="ps-modal-title">Edit Cost</div></div>
+      <button class="ps-modal-close" onclick="closePickModal()">×</button>
+    </div>
+    <div class="ps-modal-body">
+      <div class="tf-row">
+        <div class="tf-field">
+          <label class="tf-label">Tier</label>
+          <select class="tf-input" id="isd-cost-edit-tier">
+            <option value="standard">Standard (602200)</option>
+            <option value="premium">Premium (602100)</option>
+          </select>
+        </div>
+        ${shipment.IsManual ? `
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Cost Centre</label>
+          <select class="tf-input" id="isd-cost-edit-center"><option value="">Loading…</option></select>
+        </div>` : ''}
+        <div class="tf-field">
+          <label class="tf-label">Amount (£)</label>
+          <input class="tf-input" type="number" step="0.01" min="0.01" id="isd-cost-edit-amount" value="${esc(String(line.expectedCost))}">
+        </div>
+      </div>
+      <div id="isd-cost-edit-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" onclick="closePickModal()">Cancel</button>
+      <button type="button" class="btn-submit" id="isd-cost-edit-save-btn">Save Changes</button>
+    </div>
+  </div>`);
+
+  document.getElementById('isd-cost-edit-tier').value = line.tier === 'premium' ? 'premium' : 'standard';
+
+  if (shipment.IsManual) {
+    fetch('/api/costcenters').then(r => r.json()).then(data => {
+      const sel = document.getElementById('isd-cost-edit-center');
+      if (!sel) return;
+      const centres = Array.isArray(data) ? data : (data.data || []);
+      sel.innerHTML = `<option value="">— Select cost centre —</option>${centres.map(c =>
+        `<option value="${esc(c.centerCode || '')}">${esc(c.centerCode || '')} — ${esc(c.centerDescription || '')}</option>`
+      ).join('')}`;
+      if ([...sel.options].some(o => o.value === line.costCenter)) sel.value = line.costCenter;
+    }).catch(() => {
+      const sel = document.getElementById('isd-cost-edit-center');
+      if (sel) sel.innerHTML = '<option value="">Failed to load cost centres</option>';
+    });
+  }
+
+  document.getElementById('isd-cost-edit-save-btn').addEventListener('click', async () => {
+    const result = document.getElementById('isd-cost-edit-result');
+    const tier = document.getElementById('isd-cost-edit-tier').value;
+    const amount = Number(document.getElementById('isd-cost-edit-amount').value);
+    const centerSel = document.getElementById('isd-cost-edit-center');
+    if (shipment.IsManual && !centerSel.value) { result.innerHTML = '<div class="sap-error">Select a Cost Centre.</div>'; return; }
+    if (!Number.isFinite(amount) || amount <= 0) { result.innerHTML = '<div class="sap-error">Enter a valid amount.</div>'; return; }
+
+    const btn = document.getElementById('isd-cost-edit-save-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await fetch(`/api/inboundcosts/${line.costID}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier, amount, ...(shipment.IsManual ? { costCenter: centerSel.value } : {}) }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error?.message || 'Failed to save');
+      closePickModal();
+      renderAssociatedCosts(shipmentId, shipment);
+    } catch (err) {
+      result.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      btn.disabled = false; btn.textContent = 'Save Changes';
+    }
+  });
 }
 
 async function saveInboundShipmentDetail(shipmentId) {

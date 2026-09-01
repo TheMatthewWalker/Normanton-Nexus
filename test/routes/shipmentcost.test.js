@@ -75,6 +75,29 @@ describe('PATCH /:costId', () => {
     const res = await request(appPlanning).patch('/1').send({ expectedCost: 100 });
     expect(res.status).toBe(200);
   });
+
+  test('rejects a blank costElement when one is supplied', async () => {
+    const res = await request(appPlanning).patch('/1').send({ expectedCost: 100, costElement: '  ' });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rejects a blank costCenter when one is supplied', async () => {
+    const res = await request(appPlanning).patch('/1').send({ expectedCost: 100, costCenter: '  ' });
+    expect(res.status).toBe(400);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('also updates costElement/costCenter when supplied', async () => {
+    queueResults({ recordset: [{ costID: 1 }] });
+    const res = await request(appPlanning).patch('/1').send({ expectedCost: 100, costElement: '601300', costCenter: '0000002011' });
+    expect(res.status).toBe(200);
+    const sqlText = dbRequest.query.mock.calls[0][0];
+    expect(sqlText).toMatch(/costElement = @costElement/);
+    expect(sqlText).toMatch(/costCenter = @costCenter/);
+    expect(dbRequest.input).toHaveBeenCalledWith('costElement', expect.anything(), '601300');
+    expect(dbRequest.input).toHaveBeenCalledWith('costCenter', expect.anything(), '0000002011');
+  });
 });
 
 describe('DELETE /:costId', () => {

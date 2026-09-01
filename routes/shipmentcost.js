@@ -83,26 +83,47 @@ router.get('/id/:costId', async (req, res) => {
     }
 });
 
-// ── Edit an unprocessed cost line's amount (outbound) — mirrors the DELETE
-// guard below (blocked once migoStatus=1 — reverse first via
-// POST /:costId/reverse, then it drops back to Unprocessed Costs and can be
-// edited/reposted). Lets a wrong amount be corrected in place instead of
-// deleting and re-adding, which the Associated Costs tile on the Search
-// Shipment modal previously had no way to do at all.
+// ── Edit an unprocessed cost line (outbound) — mirrors the DELETE guard
+// below (blocked once migoStatus=1 — reverse first via POST
+// /:costId/reverse, then it drops back to Unprocessed Costs and can be
+// edited/reposted). Lets a wrong amount, GL account, or cost centre be
+// corrected in place instead of deleting and re-adding, which the
+// Associated Costs tile on the Search Shipment modal previously had no way
+// to do at all. costElement/costCenter are optional (PATCH semantics — a
+// caller only sending expectedCost still works exactly as before); when
+// sent, blank isn't accepted since both are NOT NULL-equivalent fields
+// everywhere else they're set.
 router.patch('/:costId', requirePermission('LOG_PLANNING'), async (req, res) => {
     try {
-        const { expectedCost } = req.body;
+        const { expectedCost, costElement, costCenter } = req.body;
         const amount = Number(expectedCost);
         if (!Number.isFinite(amount) || amount <= 0) {
             return res.status(400).json({ success: false, error: 'expectedCost must be a positive number.' });
         }
+        if (costElement !== undefined && !String(costElement).trim()) {
+            return res.status(400).json({ success: false, error: 'costElement cannot be blank.' });
+        }
+        if (costCenter !== undefined && !String(costCenter).trim()) {
+            return res.status(400).json({ success: false, error: 'costCenter cannot be blank.' });
+        }
 
         const pool = await getPool();
-        const result = await pool.request()
+        const dbRequest = pool.request()
             .input('costId',       sql.BigInt,         req.params.costId)
-            .input('expectedCost', sql.Decimal(18, 2), amount)
-            .query(`UPDATE log.ShipmentCost
-                    SET expectedCost = @expectedCost
+            .input('expectedCost', sql.Decimal(18, 2), amount);
+
+        const setClauses = ['expectedCost = @expectedCost'];
+        if (costElement !== undefined) {
+            dbRequest.input('costElement', sql.NVarChar, String(costElement).trim());
+            setClauses.push('costElement = @costElement');
+        }
+        if (costCenter !== undefined) {
+            dbRequest.input('costCenter', sql.NVarChar, String(costCenter).trim());
+            setClauses.push('costCenter = @costCenter');
+        }
+
+        const result = await dbRequest.query(`UPDATE log.ShipmentCost
+                    SET ${setClauses.join(', ')}
                     OUTPUT INSERTED.costID
                     WHERE costID = @costId AND ISNULL(migoStatus, 0) = 0`);
 
