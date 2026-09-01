@@ -6,10 +6,11 @@ import fsp from 'fs/promises';
 import path from 'path';
 import net from 'net';
 import tls from 'tls';
-import { stampDbChange, getNexusOperationsPool } from '../config.js';
+import { stampDbChange, getNexusOperationsPool, getNexusPool } from '../config.js';
 
 import { requirePermission, requireAnyPermission } from '../middleware/auth.js';
 import { lookupModeOfTransport } from './forwardermodemapping.js';
+import { buildPackagingDeclarationPdf } from '../lib/packagingDeclarationPdf.js';
 import e from 'express';
 
 const router = express.Router();
@@ -207,6 +208,7 @@ function guessDocumentCategory(fileName, shipmentRef) {
   if (lower === `${shipmentRef}.pdf`.toLowerCase()) return 'packing-list';
   if (lower.includes('-customs-')) return 'customs';
   if (lower.includes('-invoice-')) return 'invoice';
+  if (lower.includes('-packaging-declaration-')) return 'packaging-declaration';
   return null;
 }
 
@@ -2292,14 +2294,89 @@ router.post('/:shipmentId/create-folder', requirePermission('LOG_PLANNING'), asy
 
 router.post('/:shipmentId/generate-packing-list', requirePermission('LOG_PLANNING'), async (req, res) => {
   try {
-    const context = await getShipmentContext(req.params.shipmentId); 
+    const context = await getShipmentContext(req.params.shipmentId);
     const generated = await generateShipmentDocuments(context);
-    res.json({ success: true, data: { 
-      shipmentRef: generated.shipmentRef, folderPath: generated.folderPath, 
-      files: generated.files.map(file => ({ 
-        fileName: file.fileName, deliveryID: file.deliveryID, 
-        downloadUrl: `/api/shipmentmain/${req.params.shipmentId}/documents/${encodeURIComponent(file.fileName)}` 
-      })) 
+    res.json({ success: true, data: {
+      shipmentRef: generated.shipmentRef, folderPath: generated.folderPath,
+      files: generated.files.map(file => ({
+        fileName: file.fileName, deliveryID: file.deliveryID,
+        downloadUrl: `/api/shipmentmain/${req.params.shipmentId}/documents/${encodeURIComponent(file.fileName)}`
+      }))
+    } });
+  } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
+});
+
+
+// Looks up the acting user's own display name (First+Last, falling back to
+// Username) for the packaging declaration's e-signature block — same
+// FirstName/LastName -> DisplayName convention routes/performance.js already
+// uses for the PO PDF's supplier-notice sign-off block. PortalUsers lives in
+// the portal/auth database (getNexusPool), not this file's own Logistics
+// pool (getPool/getNexusOperationsPool), so this needs its own connection.
+// Best-effort: a lookup failure must not block PDF generation.
+async function getUserDisplayName(userId) {
+  if (!userId) return null;
+  try {
+    const pool = await getNexusPool();
+    const result = await pool.request()
+      .input('userID', sql.Int, userId)
+      .query(`
+        SELECT COALESCE(NULLIF(RTRIM(ISNULL(FirstName,'')+' '+ISNULL(LastName,'')), ''), Username) AS DisplayName
+        FROM dbo.PortalUsers
+        WHERE UserID = @userID
+      `);
+    return result.recordset[0]?.DisplayName || null;
+  } catch {
+    return null;
+  }
+}
+
+
+router.post('/:shipmentId/generate-packaging-declaration', requirePermission('LOG_PLANNING'), async (req, res) => {
+  try {
+    const packaging = {
+      woodenPallets: toBool(req.body.packaging?.woodenPallets),
+      woodenSpools: toBool(req.body.packaging?.woodenSpools),
+      cardboardBoxes: toBool(req.body.packaging?.cardboardBoxes),
+      bubblewrapSheets: toBool(req.body.packaging?.bubblewrapSheets),
+    };
+    if (!Object.values(packaging).some(Boolean)) {
+      return res.status(400).json({ success: false, error: 'Select at least one packaging type used for this delivery.' });
+    }
+    const position = String(req.body.position || '').trim();
+    if (!position) {
+      return res.status(400).json({ success: false, error: 'Position / job title is required to sign the declaration.' });
+    }
+
+    const context = await getShipmentContext(req.params.shipmentId);
+    const { shipment, deliveries, manualCargo } = context;
+    const folder = await ensureShipmentFolder(shipment);
+    const ref = folder.shipmentRef;
+
+    const signedByName = (await getUserDisplayName(req.session?.user?.userID)) || req.session?.user?.username || 'unknown';
+    const deliveryRef = deliveries.length ? deliveries.map(d => d.deliveryID).join(', ') : (manualCargo.length ? ref : '—');
+
+    const pdfBuffer = await buildPackagingDeclarationPdf({
+      shipmentRef: ref,
+      deliveryRef,
+      customerName: shipment.destinationName,
+      dispatchDate: shipment.plannedCollection,
+      packaging,
+      ispm15: req.body.ispm15 === 'yes' ? 'yes' : 'na',
+      dunnageConfirmed: toBool(req.body.dunnageConfirmed),
+      containerClean: req.body.containerClean === 'yes' ? 'yes' : 'na',
+      signedByName,
+      signedByPosition: position,
+      signedAt: new Date(),
+    });
+
+    const fileName = `${ref}-packaging-declaration-${Date.now()}.pdf`;
+    const filePath = path.join(folder.shipmentPath, fileName);
+    await fsp.writeFile(filePath, pdfBuffer);
+
+    res.json({ success: true, data: {
+      shipmentRef: ref, folderPath: folder.shipmentPath,
+      files: [{ fileName, deliveryID: null, downloadUrl: `/api/shipmentmain/${req.params.shipmentId}/documents/${encodeURIComponent(fileName)}` }],
     } });
   } catch (err) { res.status(err.statusCode || 500).json({ success: false, error: err.message }); }
 });

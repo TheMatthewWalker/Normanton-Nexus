@@ -2511,10 +2511,133 @@ async function submitShipmentCreate() {
   }
 }
 function showPostCreateModal(data) {
-  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">Shipment ${esc(data.shipmentRef)}</div><div class="ps-modal-sub">Shipment created successfully</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="lg-post-grid"><div class="lg-post-card"><div class="lg-post-title">Folder</div><div class="toolbar-hint" id="lg-folder-result">${esc(data.folderPath || '')}</div><button class="btn-secondary lg-post-btn" id="lg-folder-btn">Create Folder</button></div><div class="lg-post-card"><div class="lg-post-title">Packing List</div><div class="toolbar-hint" id="lg-doc-result">Generate shipment and delivery PDFs.</div><button class="btn-secondary lg-post-btn" id="lg-doc-btn">Create Packing List</button><div id="lg-doc-links" class="lg-doc-links"></div></div><div class="lg-post-card${data.canSendEmail ? '' : ' lg-post-card--muted'}"><div class="lg-post-title">Collection Email</div><div class="toolbar-hint" id="lg-email-result">${data.canSendEmail ? 'Send Ex Works collection email with attachments.' : 'Available only for Ex Works shipments.'}</div><button class="btn-secondary lg-post-btn" id="lg-email-btn" ${data.canSendEmail ? '' : 'disabled'}>Send Email</button></div></div></div><div class="ps-modal-actions"><button type="button" class="btn-submit" onclick="closePickModal()">Done</button></div></div>`);
+  openModal(`<div class="ps-modal lg-modal"><div class="ps-modal-header"><div><div class="ps-modal-title">Shipment ${esc(data.shipmentRef)}</div><div class="ps-modal-sub">Shipment created successfully</div></div><button class="ps-modal-close" onclick="closePickModal()">x</button></div><div class="ps-modal-body"><div class="lg-post-grid"><div class="lg-post-card"><div class="lg-post-title">Folder</div><div class="toolbar-hint" id="lg-folder-result">${esc(data.folderPath || '')}</div><button class="btn-secondary lg-post-btn" id="lg-folder-btn">Create Folder</button></div><div class="lg-post-card"><div class="lg-post-title">Packing List</div><div class="toolbar-hint" id="lg-doc-result">Generate shipment and delivery PDFs.</div><button class="btn-secondary lg-post-btn" id="lg-doc-btn">Create Packing List</button><div id="lg-doc-links" class="lg-doc-links"></div></div><div class="lg-post-card${data.canSendEmail ? '' : ' lg-post-card--muted'}"><div class="lg-post-title">Collection Email</div><div class="toolbar-hint" id="lg-email-result">${data.canSendEmail ? 'Send Ex Works collection email with attachments.' : 'Available only for Ex Works shipments.'}</div><button class="btn-secondary lg-post-btn" id="lg-email-btn" ${data.canSendEmail ? '' : 'disabled'}>Send Email</button></div><div class="lg-post-card"><div class="lg-post-title">Packaging Declaration</div><div class="toolbar-hint" id="lg-pkgdec-result">Generate a signed packaging declaration PDF.</div><button class="btn-secondary lg-post-btn" id="lg-pkgdec-btn">Create Packaging Declaration</button><div id="lg-pkgdec-links" class="lg-doc-links"></div></div></div></div><div class="ps-modal-actions"><button type="button" class="btn-submit" onclick="closePickModal()">Done</button></div></div>`);
   document.getElementById('lg-folder-btn').addEventListener('click', () => runShipmentAction('create-folder', 'lg-folder-result'));
   document.getElementById('lg-doc-btn').addEventListener('click', () => runShipmentAction('generate-packing-list', 'lg-doc-result', true));
   if (data.canSendEmail) document.getElementById('lg-email-btn').addEventListener('click', () => runShipmentAction('send-collection-email', 'lg-email-result'));
+  document.getElementById('lg-pkgdec-btn').addEventListener('click', () => openPackagingDeclarationPrompt(latestShipment.shipmentID, 'lg-pkgdec-result', 'lg-pkgdec-links'));
+}
+
+
+// ── Packaging Declaration confirmation prompt ────────────────────────────────
+// Layered on top of the (already-open) post-create ps-modal via the shared
+// ensurePromptOverlay()/closePromptOverlay() mechanism used by
+// alertDialog/confirmDialog — a plain openModal() call would wholesale
+// replace #ps-modal-overlay's content (and the caller's result/link
+// elements along with it), since openModal isn't stackable.
+//
+// Presents the 4 confirmable tickbox groups from the reference declaration
+// document (packaging materials used / ISPM 15 / dunnage / container
+// cleanliness) with sensible pre-ticked defaults so the common case is a
+// single click, plus the one field the document needs that nothing in
+// PortalUsers can supply — the signer's position/job title.
+function openPackagingDeclarationPrompt(shipmentId, resultElId, linksElId) {
+  const overlay = ensurePromptOverlay();
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div class="ps-modal" style="max-width:560px;width:92vw">
+    <div class="ps-modal-header"><div class="ps-modal-title">Packaging Declaration</div></div>
+    <div class="ps-modal-body">
+      <div class="tf-section-label">Packaging Included In This Delivery</div>
+      <div class="tf-row">
+        <label class="lg-flag"><input type="checkbox" id="pkd-pallets"> Wooden pallets</label>
+        <label class="lg-flag"><input type="checkbox" id="pkd-spools"> Wooden spools</label>
+        <label class="lg-flag"><input type="checkbox" id="pkd-boxes"> Cardboard boxes</label>
+        <label class="lg-flag"><input type="checkbox" id="pkd-bubblewrap"> Bubblewrap sheets</label>
+      </div>
+      <div id="pkd-packaging-warn" style="font-size:12px;color:var(--text-muted);margin-top:4px"></div>
+
+      <div class="tf-section-label" style="margin-top:14px">Wood Packaging &amp; Shipment Statements</div>
+      <div class="tf-row" style="align-items:center">
+        <div style="flex:2;min-width:220px;font-size:12px;color:var(--text-muted)">ISPM 15 treatment/marking met (wooden pallets/spools)</div>
+        <label class="lg-flag"><input type="radio" name="pkd-ispm15" id="pkd-ispm15-yes" value="yes"> Yes</label>
+        <label class="lg-flag"><input type="radio" name="pkd-ispm15" id="pkd-ispm15-na" value="na"> N/A</label>
+      </div>
+      <div class="tf-row" style="align-items:center">
+        <div style="flex:2;min-width:220px;font-size:12px;color:var(--text-muted)">No straw/hay/peat/chaff or used produce cartons used as dunnage</div>
+        <label class="lg-flag"><input type="checkbox" id="pkd-dunnage" checked> Confirmed</label>
+      </div>
+      <div class="tf-row" style="align-items:center">
+        <div style="flex:2;min-width:220px;font-size:12px;color:var(--text-muted)">Container clean, free of visible animal/plant material and soil</div>
+        <label class="lg-flag"><input type="radio" name="pkd-container" id="pkd-container-yes" value="yes"> Yes</label>
+        <label class="lg-flag"><input type="radio" name="pkd-container" id="pkd-container-na" value="na"> N/A</label>
+      </div>
+
+      <div class="tf-section-label" style="margin-top:14px">Authorised Signature</div>
+      <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+          <label class="tf-label">Position / Job Title</label>
+          <input class="tf-input" type="text" id="pkd-position" placeholder="e.g. Logistics &amp; Systems Specialist">
+        </div>
+      </div>
+      <div id="pkd-result"></div>
+    </div>
+    <div class="ps-modal-actions">
+      <button type="button" class="btn-secondary" id="pkd-cancel-btn">Cancel</button>
+      <button type="button" class="btn-submit" id="pkd-confirm-btn">Generate</button>
+    </div>
+  </div>`;
+
+  document.getElementById('pkd-ispm15-na').checked = true;
+  document.getElementById('pkd-container-na').checked = true;
+
+  const woodBoxes = [document.getElementById('pkd-pallets'), document.getElementById('pkd-spools')];
+  const syncIspm15Default = () => {
+    if (woodBoxes.some(cb => cb.checked)) document.getElementById('pkd-ispm15-yes').checked = true;
+    else document.getElementById('pkd-ispm15-na').checked = true;
+  };
+  woodBoxes.forEach(cb => cb.addEventListener('change', syncIspm15Default));
+
+  document.getElementById('pkd-cancel-btn').addEventListener('click', () => closePromptOverlay());
+  document.getElementById('pkd-confirm-btn').addEventListener('click', () => submitPackagingDeclaration(shipmentId, resultElId, linksElId));
+}
+
+async function submitPackagingDeclaration(shipmentId, resultElId, linksElId) {
+  const packaging = {
+    woodenPallets: document.getElementById('pkd-pallets').checked,
+    woodenSpools: document.getElementById('pkd-spools').checked,
+    cardboardBoxes: document.getElementById('pkd-boxes').checked,
+    bubblewrapSheets: document.getElementById('pkd-bubblewrap').checked,
+  };
+  const warn = document.getElementById('pkd-packaging-warn');
+  if (!Object.values(packaging).some(Boolean)) {
+    warn.textContent = 'Select at least one packaging type used for this delivery.';
+    return;
+  }
+  warn.textContent = '';
+
+  const position = document.getElementById('pkd-position').value.trim();
+  const result = document.getElementById('pkd-result');
+  if (!position) {
+    result.innerHTML = `<div class="sap-error tf-inline-error">Position / job title is required to sign the declaration.</div>`;
+    return;
+  }
+
+  const button = document.getElementById('pkd-confirm-btn');
+  button.disabled = true; button.textContent = 'Generating...'; result.innerHTML = '';
+  try {
+    const payload = {
+      packaging,
+      ispm15: document.getElementById('pkd-ispm15-yes').checked ? 'yes' : 'na',
+      dunnageConfirmed: document.getElementById('pkd-dunnage').checked,
+      containerClean: document.getElementById('pkd-container-yes').checked ? 'yes' : 'na',
+      position,
+    };
+    const res = await fetch(`/api/shipmentmain/${encodeURIComponent(shipmentId)}/generate-packaging-declaration`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to generate packaging declaration');
+
+    closePromptOverlay();
+    const resultEl = document.getElementById(resultElId);
+    const linksEl = document.getElementById(linksElId);
+    if (resultEl) resultEl.textContent = json.data.folderPath;
+    if (linksEl) linksEl.innerHTML = (json.data.files || []).map(file =>
+      `<a class="lg-doc-link" target="_blank" href="${esc(file.downloadUrl)}">${esc(file.fileName)}</a>`).join('');
+  } catch (err) {
+    result.innerHTML = `<div class="sap-error tf-inline-error">${esc(err.message)}</div>`;
+    button.disabled = false; button.textContent = 'Generate';
+  }
 }
 async function runShipmentAction(action, resultId, showLinks = false) {
   const result = document.getElementById(resultId); if (!latestShipment?.shipmentID) return;

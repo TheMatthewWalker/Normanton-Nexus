@@ -120,6 +120,40 @@ describe('permission-gated routes', () => {
     expect(res.status).toBe(403);
     expect(dbRequest.query).not.toHaveBeenCalled();
   });
+
+  test('POST /:shipmentId/generate-packaging-declaration is rejected for a user without LOG_PLANNING', async () => {
+    const res = await request(app).post('/1/generate-packaging-declaration').send({});
+    expect(res.status).toBe(403);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+});
+
+
+// Validation runs before any DB/filesystem access (no shipment lookup or
+// folder write happens for a request that fails these checks), so these are
+// safe to exercise without mocking fs/promises or LOGISTICS_EXPORT_ROOT —
+// see this file's header comment on why the actual PDF-generation success
+// path isn't covered here either.
+describe('POST /:shipmentId/generate-packaging-declaration validation', () => {
+  test('rejects when no packaging type is selected', async () => {
+    const res = await request(appLogPlanning).post('/1/generate-packaging-declaration').send({
+      packaging: { woodenPallets: false, woodenSpools: false, cardboardBoxes: false, bubblewrapSheets: false },
+      position: 'Logistics Specialist',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/at least one packaging type/i);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
+
+  test('rejects a blank position', async () => {
+    const res = await request(appLogPlanning).post('/1/generate-packaging-declaration').send({
+      packaging: { woodenPallets: true },
+      position: '   ',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/position/i);
+    expect(dbRequest.query).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /', () => {
