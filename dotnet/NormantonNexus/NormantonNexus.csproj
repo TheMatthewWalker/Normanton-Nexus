@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NormantonNexus</RootNamespace>
+    <AssemblyName>NormantonNexus</AssemblyName>
+    <UserSecretsId>normanton-nexus-dotnet</UserSecretsId>
+  </PropertyGroup>
+
+  <!--
+    Microsoft.NET.Sdk.Web (unlike SapServer's plain Microsoft.NET.Sdk — see
+    that repo's CLAUDE.md "Critical Platform Constraints") already produces a
+    proper IIS-ready publish layout out of the box: web.config with the ANCM
+    <aspNetCore> handler pointing at this app's own executable, no bin\
+    relocation MSBuild target needed. Confirmed by ASP.NET Core's documented
+    IIS-hosting support — worth a one-time real `dotnet publish` + local IIS
+    smoke test once Phase 0 is otherwise done, rather than just assuming.
+  -->
+
+  <!--
+    Lets NormantonNexus.Tests unit-test the internal Helpers/* request
+    builders and response parsers directly without making them public —
+    same InternalsVisibleTo pattern SapServer.csproj uses.
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="NormantonNexus.Tests" />
+  </ItemGroup>
+
+</Project>
