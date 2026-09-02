@@ -1,0 +1,54 @@
+@page
+@model NormantonNexus.Pages.Quality.StockModel
+@{
+    ViewData["Title"] = "Display Stock";
+    ViewData["Department"] = "Quality";
+    ViewData["PageTitle"] = "Display Stock";
+    ViewData["PageSubtitle"] = "LQUA warehouse 312 — select rows to block/unblock in bulk, or use the row action";
+}
+
+<p><a asp-page="Index">&larr; Quality</a></p>
+
+<p id="q-row-count" style="color:#6b7280; font-size:0.85rem;"></p>
+
+<div id="q-selection-bar" hidden style="display:flex; gap:0.5rem; align-items:center; background:#eff6ff; padding:0.5rem 0.75rem; border-radius:6px; margin-bottom:0.5rem;">
+    <span id="q-selection-count"></span>
+    <button type="button" id="q-bulk-block">Block Selected</button>
+    <button type="button" id="q-bulk-unblock">Unblock Selected</button>
+    <button type="button" class="secondary" id="q-clear-selection">Clear</button>
+</div>
+
+<div style="overflow-x:auto;">
+    <table id="q-stock-table">
+        <thead>
+            <tr>
+                <th><input type="checkbox" id="q-select-all" /></th>
+                <th>Storage Loc</th>
+                <th>Storage Type</th>
+                <th>Storage Bin</th>
+                <th>Material</th>
+                <th>Qty</th>
+                <th>Batch</th>
+                <th>Stock Cat</th>
+                <th>Spc Stock</th>
+                <th>Spc Stock No</th>
+                <th></th>
+            </tr>
+            <tr id="q-filter-row"></tr>
+        </thead>
+        <tbody id="q-stock-body"></tbody>
+    </table>
+</div>
+
+<div id="q-pagination" style="display:flex; gap:0.5rem; align-items:center; margin-top:0.5rem;"></div>
+
+<div id="q-bulk-modal" hidden style="position:fixed; inset:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center;">
+    <div style="background:#fff; padding:1.5rem; border-radius:8px; min-width:320px;">
+        <h2 id="q-bulk-title" style="margin-top:0;"></h2>
+        <div id="q-bulk-body"></div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="~/js/quality/stock.js"></script>
+}
