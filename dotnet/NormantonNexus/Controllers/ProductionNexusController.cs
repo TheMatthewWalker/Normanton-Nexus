@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using NormantonNexus.Helpers.Production;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
@@ -27,8 +28,15 @@ namespace NormantonNexus.Controllers;
 /// </summary>
 [Route("api/productionnexus")]
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-public sealed class ProductionNexusController(INexusOperationsDb nexusOperationsDb) : NexusControllerBase
+public sealed class ProductionNexusController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient, IAuditLogger auditLogger) : NexusControllerBase
 {
+    [HttpPost("mixing/entry")]
+    public async Task<IActionResult> MixingEntry([FromBody] MixingEntryRequest body, CancellationToken ct)
+    {
+        var result = await MixingHelper.EnterAsync(nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return StatusCode(201, ApiResponse<MixingEntryResult>.Ok(result));
+    }
+
     [HttpGet("reports/output")]
     [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
     public async Task<IActionResult> ReportOutput([FromQuery] ReportFilterQuery query, CancellationToken ct)

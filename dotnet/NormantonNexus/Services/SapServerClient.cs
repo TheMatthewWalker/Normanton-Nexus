@@ -36,7 +36,14 @@ public sealed class SapProxyException(int statusCode, string code, string messag
 /// </summary>
 public interface ISapServerClient
 {
-    Task<T?> GetAsync<T>(string path, int userId, bool longRunning = false, CancellationToken ct = default);
+    /// <summary>
+    /// `body` is null for an ordinary GET; a handful of SapServer endpoints
+    /// (e.g. Production's check-profit-centre) are declared [HttpGet] but
+    /// still read a [FromBody] request, matching Node's own sapGet() helper
+    /// (axios.request({ method: 'get', data: body })) — pass one when the
+    /// specific endpoint's contract requires it.
+    /// </summary>
+    Task<T?> GetAsync<T>(string path, int userId, object? body = null, bool longRunning = false, CancellationToken ct = default);
     Task<T?> PostAsync<T>(string path, object body, int userId, bool longRunning = false, CancellationToken ct = default);
     Task<T?> PutAsync<T>(string path, object body, int userId, bool longRunning = false, CancellationToken ct = default);
     Task<T?> DeleteAsync<T>(string path, object? body, int userId, bool longRunning = false, CancellationToken ct = default);
@@ -46,8 +53,8 @@ internal sealed class SapServerClient(HttpClient httpClient, IOptions<SapServerO
 {
     private readonly SapServerOptions _options = options.Value;
 
-    public Task<T?> GetAsync<T>(string path, int userId, bool longRunning = false, CancellationToken ct = default) =>
-        SendAsync<T>(HttpMethod.Get, path, null, userId, longRunning, ct);
+    public Task<T?> GetAsync<T>(string path, int userId, object? body = null, bool longRunning = false, CancellationToken ct = default) =>
+        SendAsync<T>(HttpMethod.Get, path, body, userId, longRunning, ct);
 
     public Task<T?> PostAsync<T>(string path, object body, int userId, bool longRunning = false, CancellationToken ct = default) =>
         SendAsync<T>(HttpMethod.Post, path, body, userId, longRunning, ct);

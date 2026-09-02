@@ -32,7 +32,7 @@ public class EngineeringControllerTests
     public async Task MaterialExists_wraps_the_SapServerClient_result_in_ApiResponse()
     {
         var sap = new Mock<ISapServerClient>();
-        sap.Setup(s => s.GetAsync<bool>("api/packaging/IB_363800_SD/exists", 42, false, It.IsAny<CancellationToken>()))
+        sap.Setup(s => s.GetAsync<bool>("api/packaging/IB_363800_SD/exists", 42, null, false, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var controller = CreateController(sap: sap);
 
@@ -66,7 +66,7 @@ public class EngineeringControllerTests
     public async Task GetInstruction_returns_null_data_when_SapServer_has_none_saved_yet()
     {
         var sap = new Mock<ISapServerClient>();
-        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<object>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new SapProxyException(404, "NOT_FOUND", "No plant-default packaging instruction found."));
         var controller = CreateController(sap: sap);
 

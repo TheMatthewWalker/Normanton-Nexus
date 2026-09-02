@@ -13,7 +13,7 @@ public class EngineeringHelperTests
     public async Task GetInstructionAsync_swallows_a_404_into_null_not_an_error()
     {
         var sap = new Mock<ISapServerClient>();
-        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<object>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new SapProxyException(404, "NOT_FOUND", "No plant-default packaging instruction found."));
 
         var result = await EngineeringHelper.GetInstructionAsync(sap.Object, "IB_363800_SD", null, userId: 1, CancellationToken.None);
@@ -25,7 +25,7 @@ public class EngineeringHelperTests
     public async Task GetInstructionAsync_rethrows_a_non_404_SapProxyException()
     {
         var sap = new Mock<ISapServerClient>();
-        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<object>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new SapProxyException(503, "SAP_UNAVAILABLE", "Timed out."));
 
         await Assert.ThrowsAsync<SapProxyException>(() =>
@@ -37,7 +37,7 @@ public class EngineeringHelperTests
     {
         var row = new PackagingInstrRow("IB_TSHV3-4B01/S_SB", 10, 5, true, false, true, false, false, true, false);
         var sap = new Mock<ISapServerClient>();
-        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<object>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(row);
 
         var result = await EngineeringHelper.GetInstructionAsync(sap.Object, "IB_363800_SD", "363660", userId: 1, CancellationToken.None);
@@ -50,8 +50,8 @@ public class EngineeringHelperTests
     {
         var sap = new Mock<ISapServerClient>();
         string? capturedPath = null;
-        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
-            .Callback<string, int, bool, CancellationToken>((path, _, _, _) => capturedPath = path)
+        sap.Setup(s => s.GetAsync<PackagingInstrRow>(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<object>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+            .Callback<string, int, object?, bool, CancellationToken>((path, _, _, _, _) => capturedPath = path)
             .ReturnsAsync((PackagingInstrRow?)null);
 
         await EngineeringHelper.GetInstructionAsync(sap.Object, "MAT1", "363660", userId: 1, CancellationToken.None);
