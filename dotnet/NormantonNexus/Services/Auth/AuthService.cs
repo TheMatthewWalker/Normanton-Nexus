@@ -21,9 +21,26 @@ public abstract record LoginResult
     private LoginResult() { }
 }
 
+public enum ChangePasswordFailureReason
+{
+    IncorrectCurrentPassword,
+    NewPasswordTooShort,
+}
+
+public abstract record ChangePasswordResult
+{
+    public sealed record Success : ChangePasswordResult;
+    public sealed record Failure(ChangePasswordFailureReason Reason) : ChangePasswordResult;
+
+    private ChangePasswordResult() { }
+}
+
 public interface IAuthService
 {
     Task<LoginResult> LoginAsync(string username, string password, string? ipAddress, CancellationToken ct = default);
+
+    /// <summary>Also clears PortalUsers.MustChangePassword — callers must re-issue the sign-in ticket afterward to drop the stale claim from the live session (see Pages/ChangePassword.cshtml.cs).</summary>
+    Task<ChangePasswordResult> ChangePasswordAsync(int userId, string currentPassword, string newPassword, string? ipAddress, CancellationToken ct = default);
 }
 
 internal sealed record PortalUserRow(
@@ -150,5 +167,39 @@ internal sealed class AuthService(
         };
 
         return new LoginResult.Success(principal, properties);
+    }
+
+    // Minimum length only — NOT yet confirmed against Node's real password
+    // policy (no routes/profile.js change-password endpoint has been read in
+    // this session). Revisit once that's researched; this is a reasonable
+    // floor, not a confirmed port.
+    private const int MinimumNewPasswordLength = 8;
+
+    public async Task<ChangePasswordResult> ChangePasswordAsync(
+        int userId, string currentPassword, string newPassword, string? ipAddress, CancellationToken ct = default)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var currentHash = await connection.QuerySingleAsync<string>(new CommandDefinition(
+            "SELECT PasswordHash FROM dbo.PortalUsers WHERE UserID = @userId", new { userId }, cancellationToken: ct));
+
+        if (!BCrypt.Net.BCrypt.Verify(currentPassword, currentHash))
+        {
+            await auditLogger.LogAsync("PASSWORD_CHANGE_FAIL", null, "Incorrect current password", ipAddress, ct);
+            return new ChangePasswordResult.Failure(ChangePasswordFailureReason.IncorrectCurrentPassword);
+        }
+
+        if (newPassword.Length < MinimumNewPasswordLength)
+        {
+            return new ChangePasswordResult.Failure(ChangePasswordFailureReason.NewPasswordTooShort);
+        }
+
+        var newHash = BCrypt.Net.BCrypt.HashPassword(newPassword, workFactor: 12);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE dbo.PortalUsers SET PasswordHash = @newHash, MustChangePassword = 0 WHERE UserID = @userId",
+            new { newHash, userId }, cancellationToken: ct));
+
+        await auditLogger.LogAsync("PASSWORD_CHANGE_OK", null, null, ipAddress, ct);
+        return new ChangePasswordResult.Success();
     }
 }

@@ -13,7 +13,8 @@ using NormantonNexus.Services.Sql;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddRazorPages();
+builder.Services.AddRazorPages()
+    .AddMvcOptions(options => options.Filters.Add<MustChangePasswordPageFilter>());
 builder.Services.AddControllers();
 
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
