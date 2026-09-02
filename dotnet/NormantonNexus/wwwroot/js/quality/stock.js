@@ -4,6 +4,15 @@
 // link (same underlying API calls, simpler and more discoverable) — see
 // Pages/Quality/Stock.cshtml.cs's own comments.
 (function () {
+  // Escapes text before it's interpolated into an innerHTML template —
+  // error text can come from SapServer/SAP and must never be trusted as
+  // safe HTML (CodeQL js/html-constructed-from-input).
+  function esc(str) {
+    const div = document.createElement("div");
+    div.textContent = String(str ?? "");
+    return div.innerHTML;
+  }
+
   const COLS = [
     ["storageLocation", "Storage Loc"],
     ["storageType", "Storage Type"],
@@ -60,7 +69,7 @@
       allRows = data;
       applyFilters();
     } catch (err) {
-      bodyEl.innerHTML = `<tr><td colspan="${COLS.length + 2}" class="result-fail">${err.message}</td></tr>`;
+      bodyEl.innerHTML = `<tr><td colspan="${COLS.length + 2}" class="result-fail">${esc(err.message)}</td></tr>`;
     }
   }
 
@@ -332,7 +341,7 @@
         }
       }
     } catch (err) {
-      resultsEl.innerHTML += `<div class="result-fail">${err.message}</div>`;
+      resultsEl.innerHTML += `<div class="result-fail">${esc(err.message)}</div>`;
     } finally {
       closeBtn.disabled = false;
     }

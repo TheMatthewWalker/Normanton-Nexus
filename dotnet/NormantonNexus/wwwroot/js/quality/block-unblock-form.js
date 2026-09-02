@@ -3,6 +3,15 @@
 // attribute. Ported from private/js/quality.js's openBlockUnblockModal()/
 // submitBlockUnblock(), as a standalone page instead of a modal.
 (function () {
+  // Escapes text before it's interpolated into an innerHTML template —
+  // error/message text can come from SapServer/SAP and must never be
+  // trusted as safe HTML (CodeQL js/html-constructed-from-input).
+  function esc(str) {
+    const div = document.createElement("div");
+    div.textContent = String(str ?? "");
+    return div.innerHTML;
+  }
+
   const form = document.getElementById("q-form");
   const direction = form.dataset.direction;
   const resultEl = document.getElementById("q-result");
@@ -71,15 +80,15 @@
       });
 
       const lines = [
-        data.mb1bMessage ? `MB1B: ${data.mb1bMessage}` : null,
-        data.toBlockedMessage ? `→ Blocked: ${data.toBlockedMessage}` : null,
-        data.toNonBlockedMessage ? `→ Unrestricted: ${data.toNonBlockedMessage}` : null,
+        data.mb1bMessage ? `MB1B: ${esc(data.mb1bMessage)}` : null,
+        data.toBlockedMessage ? `→ Blocked: ${esc(data.toBlockedMessage)}` : null,
+        data.toNonBlockedMessage ? `→ Unrestricted: ${esc(data.toNonBlockedMessage)}` : null,
       ].filter(Boolean);
       resultEl.innerHTML = `<p class="result-ok">Success</p><ul>${lines.map((l) => `<li>${l}</li>`).join("")}</ul>`;
       form.reset();
       updateWmFields();
     } catch (err) {
-      resultEl.innerHTML = `<p class="result-fail">${err.message}</p>`;
+      resultEl.innerHTML = `<p class="result-fail">${esc(err.message)}</p>`;
     } finally {
       submitBtn.disabled = false;
     }

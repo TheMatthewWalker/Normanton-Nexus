@@ -100,11 +100,31 @@
     resultTableEl.innerHTML = "";
     const table = document.createElement("table");
     const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>Material</th><th>Result</th><th>Message</th></tr>";
+    const headRow = document.createElement("tr");
+    for (const label of ["Material", "Result", "Message"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+
     const tbody = document.createElement("tbody");
     for (const r of results) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${r.material}</td><td class="${r.success ? "result-ok" : "result-fail"}">${r.success ? "OK" : "FAILED"}</td><td>${r.message ?? ""}</td>`;
+
+      const materialTd = document.createElement("td");
+      materialTd.textContent = r.material;
+
+      // r.message can come straight from a SapServer/SAP error string —
+      // build via textContent, never innerHTML, so it's never parsed as markup.
+      const resultTd = document.createElement("td");
+      resultTd.className = r.success ? "result-ok" : "result-fail";
+      resultTd.textContent = r.success ? "OK" : "FAILED";
+
+      const messageTd = document.createElement("td");
+      messageTd.textContent = r.message ?? "";
+
+      tr.append(materialTd, resultTd, messageTd);
       tbody.appendChild(tr);
     }
     table.append(thead, tbody);

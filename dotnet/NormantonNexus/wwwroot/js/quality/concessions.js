@@ -50,47 +50,72 @@
   }
 
   function renderTable(rows) {
+    tableEl.innerHTML = "";
     if (rows.length === 0) {
-      tableEl.innerHTML = `<p>No ${currentStatus.toLowerCase()} concessions.</p>`;
+      const empty = document.createElement("p");
+      empty.textContent = `No ${currentStatus.toLowerCase()} concessions.`;
+      tableEl.appendChild(empty);
       return;
     }
 
     const table = document.createElement("table");
     const thead = document.createElement("thead");
-    thead.innerHTML =
-      "<tr><th>Job</th><th>Linked Batch</th><th>Expected Component</th><th>Actual Material</th><th>Reason</th><th>Raised By</th><th>Raised At</th><th></th></tr>";
+    const headRow = document.createElement("tr");
+    for (const label of ["Job", "Linked Batch", "Expected Component", "Actual Material", "Reason", "Raised By", "Raised At", ""]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
 
+    // component/actualMaterial/reason/raisedByUsername are free text
+    // (reason in particular is typed by a Production user raising the
+    // concession) — every cell is built via textContent, never innerHTML,
+    // so none of it is ever parsed as markup.
     for (const c of rows) {
       const tr = document.createElement("tr");
-      const lastCellHtml =
-        c.status === "PENDING"
-          ? `<button type="button" class="qc-approve" data-id="${c.concessionId}">Approve</button>
-             <button type="button" class="secondary qc-reject" data-id="${c.concessionId}">Reject</button>`
-          : c.reviewedByUsername || "—";
 
-      tr.innerHTML = `
-        <td>${jobLabel(c.processCode, c.recordId)}</td>
-        <td>${jobLabel(c.parentProcessCode, c.parentRecordId)}</td>
-        <td>${c.component}</td>
-        <td>${c.actualMaterial}</td>
-        <td>${c.reason}</td>
-        <td>${c.raisedByUsername || "—"}</td>
-        <td>${formatDate(c.raisedAt)}</td>
-        <td>${lastCellHtml}</td>`;
+      const jobTd = document.createElement("td");
+      jobTd.textContent = jobLabel(c.processCode, c.recordId);
+      const batchTd = document.createElement("td");
+      batchTd.textContent = jobLabel(c.parentProcessCode, c.parentRecordId);
+      const componentTd = document.createElement("td");
+      componentTd.textContent = c.component;
+      const actualMaterialTd = document.createElement("td");
+      actualMaterialTd.textContent = c.actualMaterial;
+      const reasonTd = document.createElement("td");
+      reasonTd.textContent = c.reason;
+      const raisedByTd = document.createElement("td");
+      raisedByTd.textContent = c.raisedByUsername || "—";
+      const raisedAtTd = document.createElement("td");
+      raisedAtTd.textContent = formatDate(c.raisedAt);
+
+      const actionTd = document.createElement("td");
+      if (c.status === "PENDING") {
+        const approveBtn = document.createElement("button");
+        approveBtn.type = "button";
+        approveBtn.className = "qc-approve";
+        approveBtn.textContent = "Approve";
+        approveBtn.addEventListener("click", () => reviewConcession(c.concessionId, "approve"));
+
+        const rejectBtn = document.createElement("button");
+        rejectBtn.type = "button";
+        rejectBtn.className = "secondary qc-reject";
+        rejectBtn.textContent = "Reject";
+        rejectBtn.addEventListener("click", () => reviewConcession(c.concessionId, "reject"));
+
+        actionTd.append(approveBtn, rejectBtn);
+      } else {
+        actionTd.textContent = c.reviewedByUsername || "—";
+      }
+
+      tr.append(jobTd, batchTd, componentTd, actualMaterialTd, reasonTd, raisedByTd, raisedAtTd, actionTd);
       tbody.appendChild(tr);
     }
 
     table.append(thead, tbody);
-    tableEl.innerHTML = "";
     tableEl.appendChild(table);
-
-    tableEl.querySelectorAll(".qc-approve").forEach((btn) =>
-      btn.addEventListener("click", () => reviewConcession(btn.dataset.id, "approve"))
-    );
-    tableEl.querySelectorAll(".qc-reject").forEach((btn) =>
-      btn.addEventListener("click", () => reviewConcession(btn.dataset.id, "reject"))
-    );
   }
 
   async function reviewConcession(id, action) {
