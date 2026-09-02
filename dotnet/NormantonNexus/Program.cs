@@ -51,7 +51,17 @@ builder.Services.AddAuthentication(NexusAuthScheme.Name)
     {
         options.Cookie.Name = "nnx_session";
         options.Cookie.HttpOnly = true;
-        options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+        // Always in Production (real deployment is behind IIS/HTTPS, and this
+        // is session-authentication state — no reason to ever allow it over
+        // plain HTTP there). SameAsRequest in every other environment so a
+        // plain `dotnet run` + http://localhost smoke test (this app's own
+        // launchSettings.json only defines an "http" profile) actually gets
+        // the cookie back on the next request instead of silently never
+        // persisting a session — Always would set the Secure flag even over
+        // HTTP, and browsers refuse to send it back on a non-HTTPS request.
+        options.Cookie.SecurePolicy = builder.Environment.IsProduction()
+            ? CookieSecurePolicy.Always
+            : CookieSecurePolicy.SameAsRequest;
         options.Cookie.SameSite = SameSiteMode.Lax;
         options.LoginPath = "/Login";
         options.AccessDeniedPath = "/AccessDenied";
