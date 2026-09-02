@@ -1,0 +1,35 @@
+@page
+@model NormantonNexus.Pages.Finance.GlGroupsModel
+@{
+    ViewData["Title"] = "GL Account Groups";
+    ViewData["Department"] = "Finance";
+    ViewData["PageTitle"] = "GL Account Groups";
+    ViewData["PageSubtitle"] = "Named groups of GL accounts reused by Actual Costs and Profit Center Data";
+}
+
+<p><a asp-page="Index">&larr; Finance</a></p>
+
+<button type="button" id="gg-add-btn">+ Add Group</button>
+
+<div id="gg-form" style="display:none; border:1px solid #e5e7eb; border-radius:8px; padding:1rem; margin:0.75rem 0;">
+    <h3 id="gg-form-title">Add Group</h3>
+    <label for="gg-label">Label</label>
+    <input type="text" id="gg-label" />
+
+    <label for="gg-accounts">GL Accounts (one per line)</label>
+    <textarea id="gg-accounts" rows="6" style="width:100%; box-sizing:border-box; font-family:monospace;"></textarea>
+
+    <p id="gg-form-msg" style="color:#b91c1c;"></p>
+
+    <div style="display:flex; gap:0.5rem;">
+        <button type="button" id="gg-save-btn">Save</button>
+        <button type="button" id="gg-cancel-btn" class="secondary">Cancel</button>
+    </div>
+</div>
+
+<div id="gg-list"></div>
+<p id="gg-msg" style="color:#b91c1c;"></p>
+
+@section Scripts {
+    <script src="~/js/finance/gl-groups.js"></script>
+}

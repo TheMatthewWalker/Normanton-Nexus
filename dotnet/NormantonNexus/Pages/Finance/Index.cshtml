@@ -1,0 +1,43 @@
+@page
+@model NormantonNexus.Pages.Finance.IndexModel
+@{
+    ViewData["Title"] = "Finance";
+    ViewData["Department"] = "Finance";
+    ViewData["PageTitle"] = "Finance";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<div class="tile-grid">
+    <a class="tile" asp-page="MaterialCosting">
+        <p class="tile-title">Material Costing</p>
+        <p class="tile-hint">Pull SAP's cost sheet (KST breakdown) for a list of materials</p>
+    </a>
+    <a class="tile" asp-page="ActualCosts">
+        <p class="tile-title">Actual Costs</p>
+        <p class="tile-hint">Period debit/credit/balance by GL account, with a cumulative-balance chart</p>
+    </a>
+    <a class="tile" asp-page="GlGroups">
+        <p class="tile-title">GL Account Groups</p>
+        <p class="tile-hint">Manage named groups of GL accounts reused by Actual Costs and Profit Center Data</p>
+    </a>
+    <a class="tile" asp-page="ProfitCenter">
+        <p class="tile-title">Profit Center Data</p>
+        <p class="tile-hint">Transaction-level profit center detail, segmented by PV / PTFE / Other</p>
+    </a>
+    <a class="tile" asp-page="StockAdjustments">
+        <p class="tile-title">Stock Adjustments</p>
+        <p class="tile-hint">Approve or reject submitted stock counts and view the Gains/Losses report</p>
+    </a>
+    <div class="tile" style="opacity:0.5; cursor:default;">
+        <p class="tile-title">Cost Centre</p>
+        <p class="tile-hint">Coming soon</p>
+    </div>
+    <div class="tile" style="opacity:0.5; cursor:default;">
+        <p class="tile-title">Vendor Invoices</p>
+        <p class="tile-hint">Coming soon</p>
+    </div>
+    <div class="tile" style="opacity:0.5; cursor:default;">
+        <p class="tile-title">Exchange Rates</p>
+        <p class="tile-hint">Coming soon</p>
+    </div>
+</div>
