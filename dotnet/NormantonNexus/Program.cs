@@ -115,6 +115,15 @@ app.MapRazorPages()
    .WithStaticAssets();
 app.MapControllers();
 
+// Deliberately unauthenticated liveness check for external monitoring and
+// IIS Application Initialization warm-up (see dotnet/CLAUDE.md's "Hosting"
+// section — startMode=AlwaysRunning + preloadEnabled needs a real
+// unauthenticated route to hit, same reasoning as SapServer's own
+// HealthController). No DB/SapServer dependency — this only proves the app
+// itself is up, not its dependencies.
+app.MapGet("/health", () => Results.Ok(new { status = "ok", timestampUtc = DateTime.UtcNow }))
+   .AllowAnonymous();
+
 // C# port of GET /logout in routes/auth.js: destroy the ticket (removes the
 // PortalSessions row via PortalSessionStore.RemoveAsync), audit it, redirect home.
 app.MapGet("/Logout", async (HttpContext httpContext, IAuditLogger auditLogger) =>
