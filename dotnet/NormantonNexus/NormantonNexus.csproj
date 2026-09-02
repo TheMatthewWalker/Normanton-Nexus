@@ -29,4 +29,22 @@
     <InternalsVisibleTo Include="NormantonNexus.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Runtime SQL access: Dapper over Microsoft.Data.SqlClient, matching the
+         existing app's 100%-raw-parameterized-SQL style (see dotnet/CLAUDE.md /
+         the migration plan's Architecture section) — no runtime ORM. -->
+    <PackageReference Include="Dapper" Version="2.*" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.*" />
+
+    <!-- EF Core is schema-migration tooling ONLY here (raw-SQL migrationBuilder.Sql()
+         calls, not fluent model-first) — runtime queries stay on Dapper above. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <PackageReference Include="BCrypt.Net-Next" Version="4.*" />
+  </ItemGroup>
+
 </Project>
