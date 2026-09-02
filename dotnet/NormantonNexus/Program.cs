@@ -5,12 +5,15 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using NormantonNexus.Data;
+using NormantonNexus.Middleware;
+using NormantonNexus.Services.Admin;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddRazorPages();
+builder.Services.AddControllers();
 
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 
@@ -33,6 +36,7 @@ builder.Services.AddSingleton<ITicketStore, PortalSessionStore>();
 builder.Services.AddScoped<IPermissionResolver, PermissionResolver>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminService>();
 
 builder.Services.AddAuthentication(NexusAuthScheme.Name)
     .AddCookie(NexusAuthScheme.Name, options =>
@@ -93,6 +97,7 @@ if (!app.Environment.IsDevelopment())
 
 app.UseRouting();
 
+app.UseApiExceptionHandling();
 app.UseRateLimiter();
 
 app.UseAuthentication();
@@ -101,6 +106,7 @@ app.UseAuthorization();
 app.MapStaticAssets();
 app.MapRazorPages()
    .WithStaticAssets();
+app.MapControllers();
 
 // C# port of GET /logout in routes/auth.js: destroy the ticket (removes the
 // PortalSessions row via PortalSessionStore.RemoveAsync), audit it, redirect home.

@@ -1,0 +1,62 @@
+@page "{groupId:int}"
+@model NormantonNexus.Pages.Admin.PermissionGroupDetailModel
+@{
+    ViewData["Title"] = Model.Group?.GroupName ?? "Permission Group";
+}
+
+@if (Model.Group is { } group)
+{
+    <h1>@group.GroupName</h1>
+    <p>@group.Description</p>
+    <p><a asp-page="PermissionGroups">&larr; All groups</a></p>
+
+    <h2>Permissions in this group</h2>
+    <ul>
+        @foreach (var code in group.PermissionCodes)
+        {
+            <li>
+                @code
+                <form method="post" asp-page-handler="RemovePermission" style="display:inline">
+                    <input type="hidden" name="permissionCode" value="@code" />
+                    <button type="submit">Remove</button>
+                </form>
+            </li>
+        }
+    </ul>
+
+    <form method="post" asp-page-handler="AddPermission">
+        <select asp-for="PermissionCodeToAdd">
+            <option value="">-- choose a permission --</option>
+            @foreach (var permission in Model.AllPermissions)
+            {
+                <option value="@permission.PermissionCode">@permission.PermissionCode — @permission.PermissionName (@permission.Category)</option>
+            }
+        </select>
+        <button type="submit">Add permission</button>
+    </form>
+
+    <h2>Members</h2>
+    <ul>
+        @foreach (var member in group.Members)
+        {
+            <li>
+                @member.Username
+                <form method="post" asp-page-handler="RemoveUser" style="display:inline">
+                    <input type="hidden" name="userId" value="@member.UserId" />
+                    <button type="submit">Remove</button>
+                </form>
+            </li>
+        }
+    </ul>
+
+    <form method="post" asp-page-handler="AssignUser">
+        <select asp-for="UserIdToAssign">
+            <option value="">-- choose a user --</option>
+            @foreach (var user in Model.AllUsers)
+            {
+                <option value="@user.UserId">@user.Username</option>
+            }
+        </select>
+        <button type="submit">Assign to user</button>
+    </form>
+}

@@ -1,0 +1,44 @@
+@page
+@model NormantonNexus.Pages.Admin.PermissionGroupsModel
+@{
+    ViewData["Title"] = "Permission Groups";
+}
+
+<h1>Permission Groups</h1>
+<p>Bundle tile permissions into a named, reusable group and assign the whole group to a user instead of granting codes one at a time.</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>Group</th>
+            <th>Description</th>
+            <th>Permissions</th>
+            <th>Members</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var group in Model.Groups)
+        {
+            <tr>
+                <td>@group.GroupName</td>
+                <td>@group.Description</td>
+                <td>@group.PermissionCount</td>
+                <td>@group.MemberCount</td>
+                <td><a asp-page="PermissionGroupDetail" asp-route-groupId="@group.GroupId">Manage</a></td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<h2>Create group</h2>
+<form method="post" asp-page-handler="Create">
+    <label for="NewGroupName">Name</label>
+    <input type="text" id="NewGroupName" asp-for="NewGroupName" required />
+
+    <label for="NewGroupDescription">Description</label>
+    <input type="text" id="NewGroupDescription" asp-for="NewGroupDescription" />
+
+    <button type="submit">Create</button>
+</form>
+<span asp-validation-for="NewGroupName"></span>
