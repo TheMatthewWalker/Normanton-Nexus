@@ -1,0 +1,57 @@
+@page
+@model NormantonNexus.Pages.Production.IndexModel
+@{
+    ViewData["Title"] = "Production";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Production";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<p style="color:#6b7280; font-size:0.85rem;">
+    Entry, data, and Supervisor tiles for Mixing/Extrusion/Drumming/etc. are being ported in a later slice of this
+    department — only Reports, Batch History, and Traceability are available so far.
+</p>
+
+<h3>Supervisor Reports</h3>
+<div class="tile-grid">
+    <a class="tile" asp-page="Reports/Output">
+        <p class="tile-title">Production Output</p>
+        <p class="tile-hint">Metres/KG produced by process over time</p>
+    </a>
+    <a class="tile" asp-page="Reports/Scrap">
+        <p class="tile-title">Scrap Analysis</p>
+        <p class="tile-hint">Scrap KG by reason, process and trend</p>
+    </a>
+    <a class="tile" asp-page="Reports/SapPerformance">
+        <p class="tile-title">SAP Performance</p>
+        <p class="tile-hint">Backflush success rate, failures, and alerts</p>
+    </a>
+    <a class="tile" asp-page="Reports/Batches">
+        <p class="tile-title">Batch Summary</p>
+        <p class="tile-hint">Batch counts by status</p>
+    </a>
+    <a class="tile" asp-page="Reports/ShiftComparison">
+        <p class="tile-title">Shift Performance</p>
+        <p class="tile-hint">Days/Afters/Nights comparison</p>
+    </a>
+    <a class="tile" asp-page="Reports/OperatorOutput">
+        <p class="tile-title">Operator Output</p>
+        <p class="tile-hint">Output ranked by primary operator</p>
+    </a>
+    <a class="tile" asp-page="Reports/MaterialOutput">
+        <p class="tile-title">Material Throughput</p>
+        <p class="tile-hint">Output ranked by material</p>
+    </a>
+</div>
+
+<h3>Production Data</h3>
+<div class="tile-grid">
+    <a class="tile" asp-page="Traceability">
+        <p class="tile-title">Traceability</p>
+        <p class="tile-hint">Trace a batch through the full production chain</p>
+    </a>
+    <a class="tile" asp-page="BatchHistory">
+        <p class="tile-title">Batch History</p>
+        <p class="tile-hint">Search completed/cancelled batches</p>
+    </a>
+</div>

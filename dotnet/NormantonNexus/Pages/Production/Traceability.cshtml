@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Production.TraceabilityModel
+@{
+    ViewData["Title"] = "Traceability";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Traceability";
+    ViewData["PageSubtitle"] = "Trace a batch through the full production chain";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+    <input type="text" id="trace-ref" placeholder="Batch ref e.g. EX00000031" style="max-width:260px;" />
+    <select id="trace-pc" style="max-width:180px;">
+        <option value="">All processes</option>
+    </select>
+    <button type="button" id="trace-btn">Trace</button>
+</div>
+
+<div id="trace-results">Enter a batch reference to trace its full production history.</div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/traceability.js"></script>
+}
