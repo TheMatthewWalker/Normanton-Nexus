@@ -42,6 +42,9 @@ builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminSer
 builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(SapServerOptions.SectionName));
 builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();
 
+builder.Services.Configure<SapCredentialOptions>(builder.Configuration.GetSection(SapCredentialOptions.SectionName));
+builder.Services.AddSingleton<ISapCredentialCipher, SapCredentialCipher>();
+
 builder.Services.AddAuthentication(NexusAuthScheme.Name)
     .AddCookie(NexusAuthScheme.Name, options =>
     {

@@ -12,6 +12,10 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- Same convention as SapServer.Tests: mock external dependencies
+         (ISapServerClient, IAuditLogger, ISqlConnectionFactory) rather than
+         hitting a real SapServer/SQL Server from a Helper unit test. -->
+    <PackageReference Include="Moq" Version="4.*" />
   </ItemGroup>
 
   <ItemGroup>

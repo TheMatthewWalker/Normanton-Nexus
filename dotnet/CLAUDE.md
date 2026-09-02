@@ -4,7 +4,22 @@ Guidance for working in this subtree — the ASP.NET Core 10 rewrite of Normanto
 
 ## Status
 
-**Phase 0 (Scaffold) done. Phase 1 (Foundation) essentially done** — auth/session/permission-group core, layout, session-guard.js port, the minimal admin group-management screen, the API envelope/exception layer, and `SapServerClient` are all built. `notifications.js`/`deploy-banner.js` are deliberately deferred (see below). Phase 2 (Engineering) is next/in progress.
+**Phase 0 (Scaffold) done. Phase 1 (Foundation) done** (`notifications.js`/`deploy-banner.js` deliberately deferred, see below). **Phase 2 (Engineering) done** — the first complete vertical slice (Controller/Helper/Models/Pages/JS/tests/permission migration), the "is the pattern actually settled" checkpoint the plan calls for. Phase 3 (Quality) is next.
+
+**Real, confirmed verification** (not just "it compiles"): started the app for real (`dotnet run`) in Development — which enables ASP.NET Core's strictest DI validation (`ValidateOnBuild`/`ValidateScopes`) — and it booted clean with no DI graph errors across every service registered so far. Then hit it with real HTTP requests: `GET /Login` → 200 with correctly rendered HTML; `GET /Engineering` (unauthenticated) → 302 to `/Login?ReturnUrl=%2FEngineering`; an unmatched route → clean 404. This confirms the whole auth/routing/authorization pipeline wiring is real and working, not just type-checked — the actual login round-trip and any SQL/SapServer-touching path are still unverified (no live SQL Server or SapServer reachable in this sandbox).
+
+## Phase 2: Engineering (reference implementation for every later department phase)
+
+Full vertical slice for Packaging Data (3 tiles), ported from `routes/packaging.js` + `private/engineering.html`/`private/js/engineering.js`:
+- `Controllers/EngineeringController.cs` (`[Route("api/packaging")]`, same URL prefix Node used — only page URLs change in this migration, not the JSON API shape) + `Helpers/Engineering/EngineeringHelper.cs` (100% of the logic — thin-controller pattern starts here) + `Models/Dto/EngineeringModels.cs`.
+- **`Services/SapServerClient.cs` turned out to be needed here, not in Quality as the plan originally guessed** — 8 of Engineering's 11 routes proxy to SapServer's own `PackagingController`. DTOs in `EngineeringModels.cs` mirror `SapServer/Models/Bapi/PackagingModels.cs` field-for-field (read directly from the SapServer repo in this same session, not guessed) so the wire format matches exactly.
+- **A deliberate, documented security tightening over Node's literal current behavior**: Node's write routes (`PUT/DELETE /instruction`, `POST /mass-update`, `POST /create`) check ONLY `requirePermission('MASTER_DATA')`, never additionally `requireDepartment('engineering')` — the two gates are independent in Node and a route picks exactly one. `EngineeringController` requires BOTH (`Dept:engineering` at the class level, `Perm:ENG_*` added per write action) — matches the plan's "Authorization model" intent that permission groups are the tile-access mechanism *within* an already-accessible department, not a substitute for it. Strictly more restrictive than Node, never less.
+- `Services/Auth/SapCredentialCipher.cs` — the "New Packaging Creation" tile needs a user's own saved SAP password (`PortalUsers.SapPasswordEncrypted`) to call SapServer's elevated `create-elevated` endpoint. Byte-for-byte AES-256-GCM port of `lib/sapCredentials.js` (12-byte IV, 16-byte tag, `base64(IV‖tag‖ciphertext)`, UTF-8 plaintext) — read from the real Node source, not guessed, since credential crypto is not something to approximate. Round-trip + tamper-detection unit tests confirm the implementation is internally correct; byte-level interop with a real Node-encrypted value is still unverified (no shared key/no live DB in this sandbox).
+- `Data/Migrations/20260902054517_SeedEngineeringPermissions.cs` — first real run of the plan's per-department permission migration path: defines `ENG_MASS_UPDATE`/`ENG_NEW_PACKAGING`/`ENG_INSTRUCTION_DETAIL`, creates a default "Engineering Master Data" group bundling all three, and migrates every existing `MASTER_DATA` grant into membership of that group so nobody loses access. Legacy `MASTER_DATA` itself is deliberately left in place (not deleted) — full retirement is a later cleanup once this pattern is confirmed against a real database.
+- `Pages/Engineering/{Index,MassUpdate,NewPackaging,InstructionDetail}.cshtml(.cs)` + `wwwroot/js/engineering/{mass-update,new-packaging,instruction-detail}.js` — one real page and one dedicated JS file per tile, replacing `engineering.js`'s single-file `openFunction()`/innerHTML-swap dispatch. Client-side tile logic (search debounce, selection-persists-across-refresh, scope picker, form field set) is a faithful behavioral port, verified against the Node source read in full.
+- 14 new Helper-level tests (Moq-mocked `ISapServerClient`/`IAuditLogger`) covering the 404-swallow behavior (`GetInstructionAsync`), the empty-rows validation, and audit-message formatting. `CreatePackagingAsync`'s DB-touching credential lookup isn't unit-tested (needs a real `INexusDb`) — same class of gap as SapServer's own DB-dependent integration tests.
+
+Not yet done for Engineering: manual click-through against real data (no SQL Server/SapServer reachable here), and the frontend's exact CSS (functional but not pixel-matched — see Phase 1 notes).
 
 Done so far:
 - Three Dapper connection factories (`Services/Sql/`) — `INexusDb`/`INexusOperationsDb`/`INexusArchiveDb`, each just a captured connection string, safe as singletons.
@@ -52,9 +67,16 @@ NormantonNexus.slnx
 NormantonNexus/
   Data/                     EF Core migration tooling only (Data/Migrations/) — see Data/NexusMigrationContext.cs
   Services/Sql/             Dapper connection factories (INexusDb/INexusOperationsDb/INexusArchiveDb)
-  Services/Auth/            Cookie auth, SQL-backed session store, idle timeout, role/department/permission authorization
-  Pages/                    Razor Pages (Login.cshtml so far; one per tile from Phase 2 onward)
-  Controllers/Helpers/Models/Middleware/   Not populated yet — start with the first department phase (Phase 2, Engineering)
+  Services/Auth/            Cookie auth, SQL-backed session store, idle timeout, role/department/permission authorization, SAP-credential cipher
+  Services/                 SapServerClient.cs (root of Services/ — cross-department, not tied to one Helpers/ folder)
+  Services/Admin/           Minimal permission-group management (Phase 9 gets the full CRUD UI)
+  Controllers/              Thin [ApiController] JSON layer, one per department — EngineeringController.cs so far
+  Helpers/<Department>/     100% of each department's logic — Helpers/Engineering/ so far
+  Models/Dto/               Wire DTOs, one file per department — EngineeringModels.cs so far
+  Models/                   ApiResponse<T>/NexusExceptions.cs (root — shared by every department)
+  Middleware/                ApiExceptionMiddleware.cs
+  Pages/                    Razor Pages — Login.cshtml, Index.cshtml (Hub), Admin/, Engineering/ (one page per tile) so far
+  wwwroot/js/<department>/  One dedicated JS file per tile page (wwwroot/js/engineering/ so far) + wwwroot/js/shared/ (session-guard.js)
 NormantonNexus.Tests/      xUnit, InternalsVisibleTo from NormantonNexus — mirrors SapServer.Tests's Helpers-first testing approach
 ```
 

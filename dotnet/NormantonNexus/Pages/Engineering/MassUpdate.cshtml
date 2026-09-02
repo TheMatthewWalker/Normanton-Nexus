@@ -1,0 +1,37 @@
+@page
+@model NormantonNexus.Pages.Engineering.MassUpdateModel
+@{
+    ViewData["Title"] = "Mass Packaging Update";
+    ViewData["Department"] = "Engineering";
+    ViewData["PageTitle"] = "Mass Packaging Update";
+    ViewData["PageSubtitle"] = "Bulk-update the default (plant-level) packaging instruction assignment for a list of part numbers";
+}
+
+<p><a asp-page="Index">&larr; Engineering</a></p>
+
+<div>
+    <label for="mu-search">Search materials</label>
+    <input type="text" id="mu-search" placeholder="Material number or description" />
+
+    <div id="mu-results" style="margin-top:0.5rem;"></div>
+
+    <div style="margin-top:0.5rem; display:flex; gap:0.5rem;">
+        <button type="button" class="secondary" id="mu-select-all">Select All Visible</button>
+        <button type="button" class="secondary" id="mu-clear">Clear Selection</button>
+    </div>
+
+    <p id="mu-selected-count" style="color:#6b7280; font-size:0.85rem;">0 selected</p>
+
+    <label for="mu-packmat">New packaging material</label>
+    <input type="text" id="mu-packmat" placeholder="e.g. IB_TSHV3-4B01/S_SB" />
+
+    <button type="button" id="mu-run">Run Update</button>
+
+    <p id="mu-msg" style="color:#b91c1c;"></p>
+
+    <div id="mu-result-table"></div>
+</div>
+
+@section Scripts {
+    <script src="~/js/engineering/mass-update.js"></script>
+}

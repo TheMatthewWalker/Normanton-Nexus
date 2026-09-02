@@ -1,0 +1,38 @@
+@page
+@model NormantonNexus.Pages.Engineering.NewPackagingModel
+@{
+    ViewData["Title"] = "New Customer Packaging Creation";
+    ViewData["Department"] = "Engineering";
+    ViewData["PageTitle"] = "New Customer Packaging Creation";
+    ViewData["PageSubtitle"] = "Create the material masters & BOMs needed for a customer's packaging set-up";
+}
+
+<p><a asp-page="Index">&larr; Engineering</a></p>
+
+<p>
+    Creates material <code>IB_&lt;customer&gt;_&lt;code&gt;</code> copied from reference material
+    <code>IB_363800_&lt;code&gt;</code>, plus its BOM. Codes whose material already exists are skipped, not overwritten.
+</p>
+
+<label for="np-part">Customer number</label>
+<input type="text" id="np-part" placeholder="e.g. 363660" />
+
+<fieldset style="border:1px solid #d1d5db; border-radius:6px; padding:0.75rem; margin-top:0.5rem;">
+    <legend>Packaging codes</legend>
+    @foreach (var code in Model.AvailableCodes)
+    {
+        <label style="display:inline-flex; align-items:center; gap:0.3rem; margin-right:1rem; font-weight:400;">
+            <input type="checkbox" class="np-code" value="@code" checked /> @code
+        </label>
+    }
+</fieldset>
+
+<button type="button" id="np-create" style="margin-top:0.75rem;">Create Selected</button>
+
+<p id="np-msg" style="color:#b91c1c;"></p>
+
+<div id="np-result-table"></div>
+
+@section Scripts {
+    <script src="~/js/engineering/new-packaging.js"></script>
+}
