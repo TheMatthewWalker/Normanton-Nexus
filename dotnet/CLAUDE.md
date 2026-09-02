@@ -4,7 +4,7 @@ Guidance for working in this subtree — the ASP.NET Core 10 rewrite of Normanto
 
 ## Status
 
-**Phase 0 (Scaffold) done. Phase 1 (Foundation) done. Phase 2 (Engineering) done. Phase 3 (Quality) done.** Phase 4 (Sales) is next.
+**Phase 0 (Scaffold) done. Phase 1 (Foundation) done. Phase 2 (Engineering) done. Phase 3 (Quality) done. Phase 4 (Sales) done.** Phase 5 (Finance) is next.
 
 **Real, confirmed verification** (not just "it compiles"): `dotnet run` in Development — which enables ASP.NET Core's strictest DI validation (`ValidateOnBuild`/`ValidateScopes`) — boots clean with no DI graph errors across every service registered so far, including Quality's SSE-streaming bulk endpoint and its dynamic per-direction `IAuthorizationService` check. Real HTTP requests confirmed: `GET /Login` → 200 with correctly rendered HTML; unauthenticated department Razor Pages → 302 to `/Login?ReturnUrl=...`; unauthenticated `[ApiController]` JSON endpoints → 401 (not a redirect — matters, since `session-guard.js` keys off exactly that distinction); unmatched route → clean 404; `GET /health` → 200. This confirms the whole auth/routing/authorization pipeline wiring is real and working, not just type-checked.
 
@@ -54,6 +54,22 @@ Stock Information (Display/Block/Unblock Stock) + Traceability Concessions, port
 - Simplified Node's right-click context-menu to a plain inline per-row action link (same API call, more discoverable, no client-side permission-based hide/show — the API's 403 is the real gate either way).
 - 12 Helper tests (SSE row-result mapping, SAP-formatted quantity parsing — including the not-obviously-correct "any all-period no-comma string is thousands-grouped" behavior Node's own bulk loop has, ported faithfully rather than silently "fixed" — the fixed service-user-id, audit-message formatting, WM-vs-non-WM field gating).
 
+## Phase 4: Sales
+
+Customer Standard Instructions (SQL-only CRUD + bulk import) + the shared Production Schedule report + Schedule Agreement Waterfall (proxies to SapServer), ported from `routes/sales.js`, `routes/salessap.js`, `routes/productionschedule.js`/`productionschedulesql.js`, and `private/js/sales.js`/`production-schedule.js`/`salesWaterfall.js`/`salesWaterfallPivot.js`.
+
+- **First Helpers in this migration to touch Dapper/SQL directly** (Engineering/Quality were both SAP-proxy-only) — `Helpers/Sales/SalesHelper.cs` (`log.CustomerStandardInstructions`) and `Helpers/ProductionSchedule/ProductionScheduleHelper.cs` (`log.AgreementSnapshot`/`prod.ProductionScheduleComments`/`log.OrderFulfillmentTracking`). Confirms the three-connection-factory + Dapper wiring compiles and DI-resolves correctly, though — same caveat as everywhere else — no real query has run against a live SQL Server yet.
+- **`ProductionScheduleHelper`'s schema note**: the SQL migration *comments* elsewhere in this codebase reference a `dbo` schema for this feature, but the real Node querying code (`productionschedulesql.js`) uses `log.AgreementSnapshot`/`prod.ProductionScheduleComments`/`log.OrderFulfillmentTracking` (schema-qualified) — this port follows the real querying code, not the stale-looking comment. Confirm against the real `NexusOperations` database before trusting this.
+- **`AgreementSnapshotColumns`'s `OriginalDoc`/`OriginalDocItem` → `ReferenceDocument`/`Item` column aliasing is deliberate and load-bearing**, not a naming preference — the raw `AgreementSnapshot` columns flip meaning once SAP creates a delivery against the line, so the alias is what keeps the C# model's field names accurate across that transition (flagged by research as critical to preserve).
+- Split legacy `SALES_SUPERVISOR` (which covered both Sales' own Customer Standard Instructions writes AND, via Node's `requireAnyPermission(['PROD_SUPERVISOR','SALES_SUPERVISOR'])`, the shared Production Schedule comment/ETA edit) into two codes: `SALES_CUSTOMER_INSTRUCTIONS` (Sales-only) and `PROD_SCHEDULE_EDIT` (shared with Production). `Data/Migrations/20260902061656_SeedSalesPermissions.cs` creates both default groups; the `PROD_SCHEDULE_EDIT` group's holder-migration query is the first one in this codebase with a genuine multi-value `WHERE PermissionCode IN (...)` source filter (every earlier migration filtered on one legacy code, where `UQ_UserPermission` alone guarantees no duplicate source rows) — deduplicates `UserID` in an inner subquery *before* computing `GETDATE()` in the outer `SELECT`, since a user holding both legacy codes would otherwise produce two source rows whose independently-evaluated `GETDATE()` values could both survive a naive `SELECT DISTINCT` and then collide on the `(UserID, GroupID)` primary key. Caught during self-review, not by any test or tool — see the migration's own inline comment for the full reasoning.
+- **First real exercise of the new `AnyDepartmentRequirement`/`Dept:production,sales` comma-syntax** (added to `Services/Auth/AuthorizationRequirements.cs`/`NexusPolicyProvider.cs` specifically for this tile) — `ProductionScheduleController`'s class-level gate.
+- Frontend: `Pages/Sales/{Index,CustomerInstructions,ProductionSchedule,ScheduleWaterfall}.cshtml(.cs)` + `wwwroot/js/sales/{customer-instructions,schedule-waterfall}.js`. The Production Schedule tile's JS is deliberately placed at the department-neutral `wwwroot/js/production-schedule/index.js` rather than under `wwwroot/js/sales/`, since Node mounts the exact same component on both the Sales and Production pages — Phase 6 (Production) will add its own page linking this same file rather than duplicating it.
+- **Two deliberate frontend simplifications over the Node original, both matching the "clean functional approximation, not pixel parity" precedent already set by Engineering/Quality**: (1) Production Schedule's per-date buckets render always-expanded (no collapsible sections); (2) the Schedule Agreement Waterfall grid drops the sticky label-column/rowspan-merged-cell visual polish (the DOM equivalent of the source Excel PivotTable's frozen panes) in favour of a plain table with label columns repeated on every row — the pivot-building logic itself (`buildWaterfallPivot`, including the cumulative-vs-raw toggle) is ported verbatim and unsimplified, since that's actual behavior, not visual polish.
+- No client-side permission-based hide/show anywhere in this phase (Customer Standard Instructions' Add/Edit/Delete/Import controls, Production Schedule's row-edit controls) — same simplification Quality's Concessions page already established; the API's 403 is the real gate either way.
+- `ScheduleWaterfall`'s SapServer call uses the real calling user's ID, confirmed against `salessap.js` — distinct from Quality's fixed `{userId: 0}` service identity (`QualityHelper.SapServiceUserId`). Locked in by a dedicated test.
+- 15 `SalesHelperTests` + 5 `SalesControllerTests`. **No tests exist for `ProductionScheduleHelper`/`ProductionScheduleController`** — every one of its methods opens a real SQL connection unconditionally before any other logic runs (`INexusOperationsDb.CreateConnectionAsync` actually calls `SqlConnection.OpenAsync`, unlike a lazy-open pattern), so there is no validation-only code path to exercise without a live SQL Server, unlike `SalesHelper` (whose validation happens before ever calling `CreateConnectionAsync`, and whose bulk-import all-rows-invalid case never reaches a query) or `GetScheduleWaterfallAsync` (SAP-only, no SQL at all). Come back to this once a real `NexusOperations` database is reachable, or if `ProductionScheduleHelper` gets refactored to validate/branch before opening a connection.
+- Real HTTP smoke test (`dotnet run`, `ValidateOnBuild`/`ValidateScopes` in Development): DI graph resolves cleanly with the new SQL-touching Helpers in the mix; `/Sales`, `/Sales/CustomerInstructions`, `/Sales/ProductionSchedule`, `/Sales/ScheduleWaterfall` → 302 to `/Login` when unauthenticated; `/api/sales/customer-instructions`, `/api/production-schedule` → 401 (not a redirect); all three new JS files serve 200 from `wwwroot`.
+
 ## Build & Test
 
 ```bash
@@ -85,13 +101,13 @@ NormantonNexus/
   Services/Auth/            Cookie auth, SQL-backed session store, idle timeout, role/department/permission authorization, SAP-credential cipher
   Services/                 SapServerClient.cs (root of Services/ — cross-department, not tied to one Helpers/ folder)
   Services/Admin/           Minimal permission-group management (Phase 9 gets the full CRUD UI)
-  Controllers/              Thin [ApiController] JSON layer, one per department — Engineering, Quality so far
-  Helpers/<Department>/     100% of each department's logic — Engineering/, Quality/ so far
-  Models/Dto/               Wire DTOs, one file per department — Engineering, Quality so far
+  Controllers/              Thin [ApiController] JSON layer, one per department — Engineering, Quality, Sales, ProductionSchedule so far
+  Helpers/<Department>/     100% of each department's logic — Engineering/, Quality/, Sales/, ProductionSchedule/ so far
+  Models/Dto/               Wire DTOs, one file per department — Engineering, Quality, Sales, ProductionSchedule so far
   Models/                   ApiResponse<T>/NexusExceptions.cs (root — shared by every department)
   Middleware/               ApiExceptionMiddleware.cs
-  Pages/                    Razor Pages — Login, Index (Hub), ChangePassword, Admin/, Engineering/, Quality/ (one page per tile) so far
-  wwwroot/js/<department>/  One dedicated JS file per tile page (engineering/, quality/ so far) + wwwroot/js/shared/ (session-guard.js)
+  Pages/                    Razor Pages — Login, Index (Hub), ChangePassword, Admin/, Engineering/, Quality/, Sales/ (one page per tile) so far
+  wwwroot/js/<department>/  One dedicated JS file per tile page (engineering/, quality/, sales/ so far) + wwwroot/js/production-schedule/ (department-neutral — shared between Sales and Production) + wwwroot/js/shared/ (session-guard.js)
 NormantonNexus.Tests/      xUnit, InternalsVisibleTo from NormantonNexus — mirrors SapServer.Tests's Helpers-first testing approach
 ```
 

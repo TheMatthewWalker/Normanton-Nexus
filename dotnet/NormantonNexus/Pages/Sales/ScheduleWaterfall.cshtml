@@ -1,0 +1,58 @@
+@page
+@model NormantonNexus.Pages.Sales.ScheduleWaterfallModel
+@{
+    ViewData["Title"] = "Schedule Agreement Waterfall";
+    ViewData["Department"] = "Sales";
+    ViewData["PageTitle"] = "Schedule Agreement Waterfall";
+    ViewData["PageSubtitle"] = "History of past schedule agreement releases — compare cumulative totals release-over-release";
+}
+
+<p><a asp-page="Index">&larr; Sales</a></p>
+
+<form id="wf-filters" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:0.75rem; align-items:end; max-width:900px;">
+    <div>
+        <label for="wf-salesorg">Sales Org *</label>
+        <input type="text" id="wf-salesorg" required />
+    </div>
+    <div>
+        <label for="wf-shipto">Ship-to Part(y/ies) *</label>
+        <input type="text" id="wf-shipto" required placeholder="comma/space separated" />
+    </div>
+    <div>
+        <label for="wf-material">Material(s)</label>
+        <input type="text" id="wf-material" placeholder="optional" />
+    </div>
+    <div>
+        <label for="wf-idocdate">Idoc Created After</label>
+        <input type="date" id="wf-idocdate" />
+    </div>
+    <div>
+        <label for="wf-datefrom">Schedule Date From *</label>
+        <input type="date" id="wf-datefrom" required />
+    </div>
+    <div>
+        <label for="wf-dateto">Schedule Date To *</label>
+        <input type="date" id="wf-dateto" required />
+    </div>
+    <div style="display:flex; gap:0.9rem; align-items:center; font-size:0.85rem;">
+        <label style="display:flex; align-items:center; gap:0.3rem; font-weight:normal;"><input type="checkbox" id="wf-forecast" checked />Forecast</label>
+        <label style="display:flex; align-items:center; gap:0.3rem; font-weight:normal;"><input type="checkbox" id="wf-jit" checked />JIT</label>
+        <label style="display:flex; align-items:center; gap:0.3rem; font-weight:normal;"><input type="checkbox" id="wf-zeroqty" />Show 0 Qty.</label>
+    </div>
+    <div>
+        <button type="submit">Get SAP Data</button>
+    </div>
+</form>
+
+<p id="wf-msg" style="color:#b91c1c;"></p>
+
+<div id="wf-toolbar" style="display:none; gap:0.75rem; align-items:center; margin:0.75rem 0;">
+    <button type="button" id="wf-toggle-cumulative" class="secondary">Show Cumulative</button>
+    <span id="wf-row-count" style="color:#6b7280; font-size:0.85rem;"></span>
+</div>
+
+<div id="wf-grid"></div>
+
+@section Scripts {
+    <script src="~/js/sales/schedule-waterfall.js"></script>
+}
