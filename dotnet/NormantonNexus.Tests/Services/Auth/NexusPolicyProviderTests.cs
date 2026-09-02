@@ -53,4 +53,28 @@ public class NexusPolicyProviderTests
 
         Assert.Null(policy);
     }
+
+    [Fact]
+    public async Task GetPolicyAsync_Dept_prefix_with_a_comma_builds_an_AnyDepartmentRequirement()
+    {
+        var provider = CreateProvider();
+
+        var policy = await provider.GetPolicyAsync("Dept:production,sales");
+
+        var requirement = Assert.Single(policy!.Requirements);
+        var anyDeptRequirement = Assert.IsType<AnyDepartmentRequirement>(requirement);
+        Assert.Equal(["production", "sales"], anyDeptRequirement.Departments);
+    }
+
+    [Fact]
+    public async Task GetPolicyAsync_Perm_prefix_with_a_comma_builds_an_AnyPermissionRequirement()
+    {
+        var provider = CreateProvider();
+
+        var policy = await provider.GetPolicyAsync("Perm:PROD_SUPERVISOR,SALES_SUPERVISOR");
+
+        var requirement = Assert.Single(policy!.Requirements);
+        var anyPermRequirement = Assert.IsType<AnyPermissionRequirement>(requirement);
+        Assert.Equal(["PROD_SUPERVISOR", "SALES_SUPERVISOR"], anyPermRequirement.PermissionCodes);
+    }
 }

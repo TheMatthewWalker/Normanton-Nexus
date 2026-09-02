@@ -90,6 +90,8 @@ builder.Services.AddSingleton<IAuthorizationPolicyProvider, NexusPolicyProvider>
 builder.Services.AddSingleton<IAuthorizationHandler, MinimumRoleHandler>();
 builder.Services.AddSingleton<IAuthorizationHandler, DepartmentHandler>();
 builder.Services.AddSingleton<IAuthorizationHandler, PermissionHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, AnyDepartmentHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, AnyPermissionHandler>();
 builder.Services.AddAuthorization();
 
 // Matches routes/auth.js's express-rate-limit config exactly: 10 attempts /

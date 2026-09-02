@@ -33,19 +33,37 @@ public sealed class NexusPolicyProvider(IOptions<AuthorizationOptions> options) 
                     .AddRequirements(new MinimumRoleRequirement(policyName[RolePrefix.Length..]))
                     .Build(),
 
+            // A comma means "any of" (Node's requireAnyDepartment/requireAnyPermission)
+            // — e.g. "Dept:production,sales" for Production Schedule, shared
+            // between two departments. Single-code case (the common one)
+            // keeps using the plain DepartmentRequirement/PermissionRequirement.
             _ when policyName.StartsWith(DepartmentPrefix, StringComparison.Ordinal) =>
-                new AuthorizationPolicyBuilder()
-                    .AddRequirements(new DepartmentRequirement(policyName[DepartmentPrefix.Length..]))
-                    .Build(),
+                BuildDepartmentPolicy(policyName[DepartmentPrefix.Length..]),
 
             _ when policyName.StartsWith(PermissionPrefix, StringComparison.Ordinal) =>
-                new AuthorizationPolicyBuilder()
-                    .AddRequirements(new PermissionRequirement(policyName[PermissionPrefix.Length..]))
-                    .Build(),
+                BuildPermissionPolicy(policyName[PermissionPrefix.Length..]),
 
             _ => null,
         };
 
         return policy is not null ? Task.FromResult<AuthorizationPolicy?>(policy) : _fallback.GetPolicyAsync(policyName);
+    }
+
+    private static AuthorizationPolicy BuildDepartmentPolicy(string codes)
+    {
+        var parts = codes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var requirement = parts.Length > 1
+            ? (IAuthorizationRequirement)new AnyDepartmentRequirement(parts)
+            : new DepartmentRequirement(codes);
+        return new AuthorizationPolicyBuilder().AddRequirements(requirement).Build();
+    }
+
+    private static AuthorizationPolicy BuildPermissionPolicy(string codes)
+    {
+        var parts = codes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var requirement = parts.Length > 1
+            ? (IAuthorizationRequirement)new AnyPermissionRequirement(parts)
+            : new PermissionRequirement(codes);
+        return new AuthorizationPolicyBuilder().AddRequirements(requirement).Build();
     }
 }

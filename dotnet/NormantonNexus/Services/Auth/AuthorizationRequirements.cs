@@ -22,6 +22,25 @@ public sealed class PermissionRequirement(string permissionCode) : IAuthorizatio
     public string PermissionCode { get; } = permissionCode;
 }
 
+/// <summary>
+/// The "requireAnyDepartment"/"requireAnyPermission" shape — matches ANY one
+/// of several codes, not all. Genuinely needed (not just a legacy-code
+/// artifact) where Node deliberately shares one view across departments —
+/// e.g. Production Schedule, viewable by department "production" OR
+/// "sales". Kept as separate types from DepartmentRequirement/
+/// PermissionRequirement rather than refactoring those to always hold an
+/// array, since the single-code case is by far the common one.
+/// </summary>
+public sealed class AnyDepartmentRequirement(IReadOnlyCollection<string> departments) : IAuthorizationRequirement
+{
+    public IReadOnlyCollection<string> Departments { get; } = departments;
+}
+
+public sealed class AnyPermissionRequirement(IReadOnlyCollection<string> permissionCodes) : IAuthorizationRequirement
+{
+    public IReadOnlyCollection<string> PermissionCodes { get; } = permissionCodes;
+}
+
 public sealed class MinimumRoleHandler : AuthorizationHandler<MinimumRoleRequirement>
 {
     protected override Task HandleRequirementAsync(
@@ -77,6 +96,54 @@ public sealed class PermissionHandler : AuthorizationHandler<PermissionRequireme
             string.Equals(c.Value, requirement.PermissionCode, StringComparison.OrdinalIgnoreCase));
 
         if (hasPermission)
+        {
+            context.Succeed(requirement);
+        }
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class AnyDepartmentHandler : AuthorizationHandler<AnyDepartmentRequirement>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, AnyDepartmentRequirement requirement)
+    {
+        var role = context.User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+        if (role == NexusRoles.Superadmin)
+        {
+            context.Succeed(requirement);
+            return Task.CompletedTask;
+        }
+
+        var userDepartments = context.User.Claims
+            .Where(c => c.Type == NexusClaimTypes.Department)
+            .Select(c => c.Value);
+
+        if (userDepartments.Any(d => requirement.Departments.Contains(d, StringComparer.OrdinalIgnoreCase)))
+        {
+            context.Succeed(requirement);
+        }
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class AnyPermissionHandler : AuthorizationHandler<AnyPermissionRequirement>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, AnyPermissionRequirement requirement)
+    {
+        var role = context.User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+        if (role == NexusRoles.Superadmin)
+        {
+            context.Succeed(requirement);
+            return Task.CompletedTask;
+        }
+
+        var userPermissions = context.User.Claims
+            .Where(c => c.Type == NexusClaimTypes.Permission)
+            .Select(c => c.Value);
+
+        if (userPermissions.Any(p => requirement.PermissionCodes.Contains(p, StringComparer.OrdinalIgnoreCase)))
         {
             context.Succeed(requirement);
         }

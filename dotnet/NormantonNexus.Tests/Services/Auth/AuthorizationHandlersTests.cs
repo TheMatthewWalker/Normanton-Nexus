@@ -91,4 +91,49 @@ public class AuthorizationHandlersTests
 
         Assert.True(await Evaluate(new PermissionRequirement("WAREHOUSE_STOCK_ADJUST"), handler, principal));
     }
+
+    [Fact]
+    public async Task AnyDepartmentHandler_succeeds_when_the_user_holds_any_one_of_the_listed_departments()
+    {
+        var handler = new AnyDepartmentHandler();
+        var principal = PrincipalWith(NexusRoles.Operator, new Claim(NexusClaimTypes.Department, NexusDepartments.Sales));
+
+        Assert.True(await Evaluate(new AnyDepartmentRequirement([NexusDepartments.Production, NexusDepartments.Sales]), handler, principal));
+    }
+
+    [Fact]
+    public async Task AnyDepartmentHandler_fails_when_the_user_holds_none_of_the_listed_departments()
+    {
+        var handler = new AnyDepartmentHandler();
+        var principal = PrincipalWith(NexusRoles.Operator, new Claim(NexusClaimTypes.Department, NexusDepartments.Quality));
+
+        Assert.False(await Evaluate(new AnyDepartmentRequirement([NexusDepartments.Production, NexusDepartments.Sales]), handler, principal));
+    }
+
+    [Fact]
+    public async Task AnyDepartmentHandler_superadmin_bypasses_the_check()
+    {
+        var handler = new AnyDepartmentHandler();
+        var principal = PrincipalWith(NexusRoles.Superadmin);
+
+        Assert.True(await Evaluate(new AnyDepartmentRequirement([NexusDepartments.Production, NexusDepartments.Sales]), handler, principal));
+    }
+
+    [Fact]
+    public async Task AnyPermissionHandler_succeeds_when_the_user_holds_any_one_of_the_listed_codes()
+    {
+        var handler = new AnyPermissionHandler();
+        var principal = PrincipalWith(NexusRoles.Operator, new Claim(NexusClaimTypes.Permission, "SALES_SUPERVISOR"));
+
+        Assert.True(await Evaluate(new AnyPermissionRequirement(["PROD_SUPERVISOR", "SALES_SUPERVISOR"]), handler, principal));
+    }
+
+    [Fact]
+    public async Task AnyPermissionHandler_fails_when_the_user_holds_none_of_the_listed_codes()
+    {
+        var handler = new AnyPermissionHandler();
+        var principal = PrincipalWith(NexusRoles.Operator);
+
+        Assert.False(await Evaluate(new AnyPermissionRequirement(["PROD_SUPERVISOR", "SALES_SUPERVISOR"]), handler, principal));
+    }
 }
