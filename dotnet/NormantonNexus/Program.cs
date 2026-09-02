@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using NormantonNexus.Data;
 using NormantonNexus.Middleware;
+using NormantonNexus.Services;
 using NormantonNexus.Services.Admin;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
@@ -37,6 +38,9 @@ builder.Services.AddScoped<IPermissionResolver, PermissionResolver>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminService>();
+
+builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(SapServerOptions.SectionName));
+builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();
 
 builder.Services.AddAuthentication(NexusAuthScheme.Name)
     .AddCookie(NexusAuthScheme.Name, options =>

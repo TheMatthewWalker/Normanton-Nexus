@@ -1,31 +1,246 @@
-html {
-  font-size: 14px;
+/* Foundation-phase styling — functional and clean, not a pixel-accurate port
+   of the Node app's CSS (logistics.css/nexus-common.css weren't captured in
+   full). Revisit for visual parity once the design is worth polishing. */
+
+* {
+  box-sizing: border-box;
 }
 
-@media (min-width: 768px) {
-  html {
-    font-size: 16px;
-  }
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  color: #1a1a1a;
+  background: #f5f6f8;
 }
 
-.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus {
-  box-shadow: 0 0 0 0.1rem white, 0 0 0 0.25rem #258cfb;
+a {
+  color: #2563eb;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
 }
 
-html {
-  position: relative;
-  min-height: 100%;
+/* Header */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e4e9;
 }
 
-body {
-  margin-bottom: 60px;
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
 }
 
-.form-floating > .form-control-plaintext::placeholder, .form-floating > .form-control::placeholder {
-  color: var(--bs-secondary-color);
-  text-align: end;
+.back-link {
+  font-weight: 600;
+  color: #1a1a1a;
 }
 
-.form-floating > .form-control-plaintext:focus::placeholder, .form-floating > .form-control:focus::placeholder {
-  text-align: start;
+.brand-sep {
+  width: 1px;
+  height: 1.25rem;
+  background: #d8dae0;
 }
+
+.brand-name {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
+.user-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+
+.btn-logout {
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  background: #f3f4f6;
+  color: #1a1a1a;
+  font-size: 0.85rem;
+}
+.btn-logout:hover {
+  background: #e5e7eb;
+  text-decoration: none;
+}
+
+/* Page title bar */
+
+.page-title-bar {
+  background: #ffffff;
+  border-bottom: 1px solid #e2e4e9;
+  padding: 1.25rem;
+}
+
+.page-title-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.page-subtitle {
+  margin: 0.25rem 0 0;
+  color: #6b7280;
+  font-size: 0.95rem;
+}
+
+.page-content {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+}
+
+/* Tile grid (department landing pages) */
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.tile {
+  display: block;
+  padding: 1.25rem;
+  background: #ffffff;
+  border: 1px solid #e2e4e9;
+  border-radius: 10px;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.tile:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
+.tile-title {
+  font-weight: 700;
+  margin: 0 0 0.35rem;
+  color: #1a1a1a;
+}
+
+.tile-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+/* Forms */
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-width: 480px;
+}
+
+label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+button[type="submit"], .btn {
+  align-self: flex-start;
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+button[type="submit"]:hover, .btn:hover {
+  background: #1d4ed8;
+}
+
+button.secondary {
+  background: #f3f4f6;
+  color: #1a1a1a;
+}
+button.secondary:hover {
+  background: #e5e7eb;
+}
+
+/* Tables */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 0.9rem;
+}
+
+th {
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+/* Login page (Layout = null, standalone) */
+
+.login-page {
+  max-width: 360px;
+  margin: 4rem auto;
+  padding: 2rem;
+  background: #ffffff;
+  border: 1px solid #e2e4e9;
+  border-radius: 10px;
+}
+
+.login-error {
+  background: #fef2f2;
+  color: #b91c1c;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+/* Result rows (success/failure per-item feedback, e.g. mass-update output) */
+
+.result-ok { color: #15803d; font-weight: 600; }
+.result-fail { color: #b91c1c; font-weight: 600; }

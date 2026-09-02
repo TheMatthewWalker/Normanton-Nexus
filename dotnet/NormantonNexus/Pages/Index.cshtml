@@ -1,10 +1,22 @@
-﻿@page
-@model IndexModel
+@page
+@model NormantonNexus.Pages.IndexModel
 @{
-    ViewData["Title"] = "Home page";
+    ViewData["Title"] = "Hub";
+    ViewData["Department"] = "Normanton Nexus";
+    ViewData["PageTitle"] = "Hub";
+    ViewData["PageSubtitle"] = "Select a department to begin";
 }
 
-<div class="text-center">
-    <h1 class="display-4">Welcome</h1>
-    <p>Learn about <a href="https://learn.microsoft.com/aspnet/core">building Web apps with ASP.NET Core</a>.</p>
+<div class="tile-grid">
+    @foreach (var department in Model.AccessibleDepartments)
+    {
+        <a class="tile" href="@department.Route">
+            <p class="tile-title">@department.DisplayName</p>
+        </a>
+    }
 </div>
+
+@if (Model.AccessibleDepartments.Count == 0)
+{
+    <p>You don't have access to any departments yet. Contact an administrator.</p>
+}

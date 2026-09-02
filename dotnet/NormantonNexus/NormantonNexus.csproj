@@ -45,6 +45,11 @@
     </PackageReference>
 
     <PackageReference Include="BCrypt.Net-Next" Version="4.*" />
+
+    <!-- Signs the short-lived JWT SapServerClient sends to SapServer on every
+         proxied call — C# equivalent of Node's jsonwebtoken (sap.js's
+         makeSapToken). Same shared secret as SapServer's own Auth:JwtSecret. -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
   </ItemGroup>
 
 </Project>
