@@ -37,6 +37,41 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return StatusCode(201, ApiResponse<MixingEntryResult>.Ok(result));
     }
 
+    [HttpGet("mixing/staging/queue")]
+    public async Task<IActionResult> BilletStagingQueue(CancellationToken ct)
+    {
+        var rows = await BilletStagingHelper.GetQueueAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<BilletStagingQueueRow>>.Ok(rows));
+    }
+
+    [HttpPatch("mixing/tubs/{tubId:int}/stage")]
+    public async Task<IActionResult> StageTub(int tubId, CancellationToken ct)
+    {
+        var result = await BilletStagingHelper.StageAsync(nexusOperationsDb, tubId, GetUserId(), ct);
+        return Ok(ApiResponse<StageTubResult>.Ok(result));
+    }
+
+    [HttpPatch("mixing/tubs/stage-by-ref")]
+    public async Task<IActionResult> StageTubByRef([FromBody] StageByRefRequest body, CancellationToken ct)
+    {
+        var result = await BilletStagingHelper.StageByRefAsync(nexusOperationsDb, body, GetUserId(), ct);
+        return Ok(ApiResponse<StageTubResult>.Ok(result));
+    }
+
+    [HttpPost("mixing/tubs/{tubId:int}/return-to-conditioning")]
+    public async Task<IActionResult> ReturnToConditioning(int tubId, [FromBody] ReturnToConditioningRequest body, CancellationToken ct)
+    {
+        var result = await BilletStagingHelper.ReturnToConditioningAsync(nexusOperationsDb, tubId, body, GetUserId(), ct);
+        return Ok(ApiResponse<ReturnToConditioningResult>.Ok(result));
+    }
+
+    [HttpGet("mixing/tubs/search")]
+    public async Task<IActionResult> SearchTubs([FromQuery] string? q, CancellationToken ct)
+    {
+        var rows = await BilletStagingHelper.SearchTubsAsync(nexusOperationsDb, q, ct);
+        return Ok(ApiResponse<IReadOnlyList<TubSearchRow>>.Ok(rows));
+    }
+
     [HttpGet("reports/output")]
     [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
     public async Task<IActionResult> ReportOutput([FromQuery] ReportFilterQuery query, CancellationToken ct)

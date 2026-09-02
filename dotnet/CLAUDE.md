@@ -117,6 +117,16 @@ The first real piece of 6b — `POST /mixing/entry`, backend + frontend, port of
 - Label printing (`labelPrint()` in Node, fired after a successful post) is deliberately not wired into the frontend yet — the whole PDF/barcode/raw-TCP-printer subsystem (`routes/labels.js`) is its own not-yet-built piece of Sub-phase 6b, tracked separately.
 - 6 new Helper tests (`MixingHelperTests` — every validation-failure path, since `EnterAsync` validates before ever opening a connection) + 1 new Controller test. Real HTTP smoke test confirms the new page (302 unauthenticated) and API route (401 unauthenticated) behave correctly.
 
+### Sub-phase 6b, second slice: Billet Staging
+
+`GET/PATCH/POST /mixing/staging/*` + `/mixing/tubs/*` — mix-tub lifecycle (stage into Billet, scan-to-stage, return to Conditioning, search), backend + frontend, port of the corresponding section of `routes/productionnexus.js`.
+
+- **Purely a Normanton-Nexus-only concept with no SAP counterpart** — mix materials aren't batch-managed in SAP, so staging status/Conditioning Time/Billet balance all live only in `prod.MixingTubs`/`prod.MixingTubReturns`. No SapServer calls anywhere in this cluster.
+- **Reached in Node via the Extrusion entry wizard's parent-picker "chooser," not a top-level HTML tile of its own** — built here as a real standalone page anyway (Index → Billet Staging), since it's genuinely useful on its own and the Extrusion wizard that would otherwise surface it doesn't exist yet (that's a later slice of 6b). The wizard can link into this same page/JS once it lands, rather than duplicating the staging logic.
+- **`BilletStagingHelper.StageTubAsync` (private) is the single shared guard path for both the manual stage button and the scan-to-stage ticket parser** — mirrors Node's own single `stageTub()` helper exactly (24h-minimum/96h-maximum conditioning window, scrapped/reversed/already-staged checks, all in one place) — the two public entry points (`StageAsync`/`StageByRefAsync`) both delegate to it rather than re-implementing the guards.
+- The scan-to-stage ticket format (`MX-{8-digit MixingID}-T{TubSeq}`) is parsed with the same regex Node uses, via a `[GeneratedRegex]`-sourced partial method (compile-time-generated, not `Regex.Match` with a runtime-compiled pattern).
+- 4 new Helper tests (the two validation-before-DB paths: `StageByRefAsync`'s ticket-format rejection, `ReturnToConditioningAsync`'s non-positive-quantity rejection). Real HTTP smoke test confirms the new page and all 5 new API routes behave correctly.
+
 ## Build & Test
 
 ```bash
