@@ -72,6 +72,32 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return Ok(ApiResponse<IReadOnlyList<TubSearchRow>>.Ok(rows));
     }
 
+    [HttpGet("failed-backflush")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> FailedBackflushQueue(CancellationToken ct)
+    {
+        var rows = await FailedBackflushHelper.GetQueueAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<FailedBackflushRow>>.Ok(rows));
+    }
+
+    [HttpPatch("failed-backflush/{processCode}/{recordId:int}/retry")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> FailedBackflushRetry(string processCode, int recordId, [FromBody] FailedBackflushRetryRequest body, CancellationToken ct)
+    {
+        var result = await FailedBackflushHelper.RetryAsync(processCode, recordId, nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return result.Status == "BLOCKED"
+            ? StatusCode(409, new ApiResponse<FailedBackflushRetryResult>(false, result, new ApiError("BLOCKED", result.Warning ?? "Blocked.")))
+            : Ok(ApiResponse<FailedBackflushRetryResult>.Ok(result));
+    }
+
+    [HttpPatch("failed-backflush/{processCode}/{recordId:int}/cancel")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> FailedBackflushCancel(string processCode, int recordId, CancellationToken ct)
+    {
+        await FailedBackflushHelper.CancelAsync(nexusOperationsDb, processCode, recordId, GetUserId(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
     [HttpPost("process/{processCode}/entry")]
     public async Task<IActionResult> MetreProcessEntry(string processCode, [FromBody] MetreProcessEntryRequest body, CancellationToken ct)
     {

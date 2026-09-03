@@ -54,8 +54,8 @@ internal static class DrummingHelper
         }
     }
 
-    /// <summary>Mirrors Node's resolveTraceabilityMaterials — the real Material each linked traceability parent's own record carries, for SapServer's drumming-backflush BOM-mismatch check (which has no access to prod.ProductionTrace itself).</summary>
-    private static async Task<List<string>> ResolveTraceabilityMaterialsAsync(SqlConnection connection, IReadOnlyList<ParentBatchRef> parentBatches, CancellationToken ct)
+    /// <summary>Mirrors Node's resolveTraceabilityMaterials — the real Material each linked traceability parent's own record carries, for SapServer's drumming-backflush BOM-mismatch check (which has no access to prod.ProductionTrace itself). Also reused directly by FailedBackflushHelper's DR retry branch.</summary>
+    internal static async Task<List<string>> ResolveTraceabilityMaterialsAsync(SqlConnection connection, IReadOnlyList<ParentBatchRef> parentBatches, CancellationToken ct)
     {
         var materials = new HashSet<string>();
         foreach (var pb in parentBatches)

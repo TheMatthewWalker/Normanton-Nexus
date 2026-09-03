@@ -619,9 +619,11 @@ internal static class MetreProcessHelper
     /// and must additionally be staged into Billet and not scrapped — checks
     /// with no equivalent for the other processes' plain parent-record
     /// links. Never throws — a BOM lookup failure becomes a single problem
-    /// entry, matching Node's own internal catch exactly.
+    /// entry, matching Node's own internal catch exactly. Also reused
+    /// directly by FailedBackflushHelper's EX retry branch — Node's own
+    /// /failed-backflush/:pc/:id/retry route re-invokes this exact function.
     /// </summary>
-    private static async Task<IReadOnlyList<TraceabilityProblem>> ValidateMxTubLinksAsync(
+    internal static async Task<IReadOnlyList<TraceabilityProblem>> ValidateMxTubLinksAsync(
         Microsoft.Data.SqlClient.SqlConnection connection, ISapServerClient sap, string extrudedMaterial, IReadOnlyList<ParentBatchRef> mxParents, int userId, CancellationToken ct)
     {
         if (mxParents.Count == 0) return [];
@@ -690,9 +692,10 @@ internal static class MetreProcessHelper
     /// swallowed-exception handling). When multiple linked tubs share the
     /// same component material, that material's BOM-derived total is split
     /// EQUALLY across them. Mirrors Node's apportionMxExpectedConsumption
-    /// exactly.
+    /// exactly. Also reused directly by FailedBackflushHelper's EX retry
+    /// branch, same reasoning as ValidateMxTubLinksAsync above.
     /// </summary>
-    private static async Task ApportionMxExpectedConsumptionAsync(
+    internal static async Task ApportionMxExpectedConsumptionAsync(
         Microsoft.Data.SqlClient.SqlConnection connection, ISapServerClient sap, string code, int recordId, string extrudedMaterial, decimal lengthMetres, int userId, CancellationToken ct)
     {
         var traceRows = (await connection.QueryAsync<(int TraceId, string Material)>(new CommandDefinition("""
