@@ -40,3 +40,15 @@ public sealed record DrummingSubmitResult(
 
 /// <summary>One braided (BR) traceability parent's on-demand consumption backflush — see DrummingHelper.BackflushBraidedComponentsAsync.</summary>
 internal sealed record BraidConsumptionResult(int BraidingId, string BraidRef, string Material, decimal Quantity, string DocumentNumber);
+
+public sealed record DrummingCoilRow(int CoilId, int CoilSeq, decimal LengthM);
+
+public sealed record DrummingReversalStatusResult(bool IsReversed);
+
+public sealed record DrummingDataQuery(string? Material, string? DateFrom, string? DateTo, string? CustomerId, string? SalesOrderSap);
+
+public sealed record DrummingDataRow(
+    int DrummingId, string DrumRef, int? ShiftId, string? ShiftName,
+    string Material, decimal LengthMetres, string? PackagingType, decimal? TestPressurePsi,
+    string? SalesOrderSap, string? CustomerId, string? CustomerOrderNo,
+    int Status, bool IsReversed, string? StatusName, DateTime? StartedAt, DateTime? CompletedAt, string? Notes, string? CreatedBy);

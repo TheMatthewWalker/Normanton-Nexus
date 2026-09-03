@@ -139,6 +139,50 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
                 : ApiResponse<DrummingSubmitResult>.Ok(result));
     }
 
+    [HttpGet("drumming/data")]
+    public async Task<IActionResult> DrummingData([FromQuery] DrummingDataQuery query, CancellationToken ct)
+    {
+        var rows = await DrummingHelper.GetDataAsync(nexusOperationsDb, query, ct);
+        return Ok(ApiResponse<IReadOnlyList<DrummingDataRow>>.Ok(rows));
+    }
+
+    [HttpGet("drumming/{drummingId:int}/coils")]
+    public async Task<IActionResult> DrummingCoils(int drummingId, CancellationToken ct)
+    {
+        var rows = await DrummingHelper.GetCoilsAsync(nexusOperationsDb, drummingId, ct);
+        return Ok(ApiResponse<IReadOnlyList<DrummingCoilRow>>.Ok(rows));
+    }
+
+    [HttpGet("drumming/{drummingId:int}/reversal-status")]
+    public async Task<IActionResult> DrummingReversalStatus(int drummingId, CancellationToken ct)
+    {
+        var result = await DrummingHelper.GetReversalStatusAsync(nexusOperationsDb, drummingId, ct);
+        return Ok(ApiResponse<DrummingReversalStatusResult>.Ok(result));
+    }
+
+    [HttpGet("order-lookup")]
+    public async Task<IActionResult> OrderLookup([FromQuery] string? material, [FromQuery] string? customer, CancellationToken ct)
+    {
+        var rows = await OrderLookupHelper.SearchAsync(nexusOperationsDb, material, customer, ct);
+        return Ok(ApiResponse<IReadOnlyList<AgreementLookupRow>>.Ok(rows));
+    }
+
+    [HttpGet("order-lookup/by-order/{orderNumber}")]
+    public async Task<IActionResult> OrderLookupByOrder(string orderNumber, CancellationToken ct)
+    {
+        var rows = await OrderLookupHelper.GetByOrderAsync(nexusOperationsDb, orderNumber, ct);
+        return Ok(ApiResponse<IReadOnlyList<AgreementLookupRow>>.Ok(rows));
+    }
+
+    [HttpGet("drumming/ticket/{referenceDocument}/{item}/print")]
+    public async Task<IActionResult> DrummingTicketPrint(string referenceDocument, string item, CancellationToken ct)
+    {
+        var data = await OrderLookupHelper.LoadTicketDataAsync(nexusOperationsDb, sapServerClient, referenceDocument.Trim(), item.Trim(), GetUserId(), ct);
+        var html = DrummingTicketHtmlHelper.RenderPage(data);
+        Response.Headers.CacheControl = "no-store";
+        return Content(html, "text/html; charset=utf-8");
+    }
+
     [HttpGet("process/{processCode}/open-entries")]
     public async Task<IActionResult> MetreProcessOpenEntries(string processCode, CancellationToken ct)
     {

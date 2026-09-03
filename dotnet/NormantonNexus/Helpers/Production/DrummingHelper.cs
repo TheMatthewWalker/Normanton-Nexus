@@ -488,4 +488,55 @@ internal static class DrummingHelper
                 false, "Record saved but SAP backflush failed. See failed backflush queue.", errMsg);
         }
     }
+
+    internal static async Task<IReadOnlyList<DrummingCoilRow>> GetCoilsAsync(INexusOperationsDb db, int drummingId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<DrummingCoilRow>(new CommandDefinition(
+            "SELECT CoilID AS CoilId, CoilSeq, LengthM FROM prod.DrummingCoils WHERE DrummingID = @drummingId ORDER BY CoilSeq",
+            new { drummingId }, cancellationToken: ct));
+        return rows.ToArray();
+    }
+
+    /// <summary>Quick check for the traceability safeguard's instant client-side feedback — the authoritative server-side check is AssertParentBatchesReversedAsync above, applied at submission time.</summary>
+    internal static async Task<DrummingReversalStatusResult> GetReversalStatusAsync(INexusOperationsDb db, int drummingId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var isReversed = await connection.QuerySingleOrDefaultAsync<bool?>(new CommandDefinition(
+            "SELECT IsReversed FROM prod.Drumming WHERE DrummingID = @drummingId", new { drummingId }, cancellationToken: ct));
+
+        if (isReversed is null) throw new NexusNotFoundException("Drumming record not found.");
+        return new DrummingReversalStatusResult(isReversed.Value);
+    }
+
+    /// <summary>GET drumming/data — filtered query for analysts, same shape/precedent as MetreProcessHelper.GetDataAsync.</summary>
+    internal static async Task<IReadOnlyList<DrummingDataRow>> GetDataAsync(INexusOperationsDb db, DrummingDataQuery query, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<DrummingDataRow>(new CommandDefinition("""
+            SELECT d.DrummingID AS DrummingId, d.DrumRef, d.ShiftID AS ShiftId, s.ShiftName,
+                   d.Material, d.LengthMetres, d.PackagingType, d.TestPressurePSI AS TestPressurePsi,
+                   d.SalesOrderSAP AS SalesOrderSap, d.CustomerID AS CustomerId, d.CustomerOrderNo,
+                   d.Status, d.IsReversed, sc.StatusName, d.StartedAt, d.CompletedAt, d.Notes,
+                   pu.Username AS CreatedBy
+            FROM prod.Drumming d
+            LEFT JOIN prod.Shifts s ON s.ShiftID = d.ShiftID
+            LEFT JOIN prod.StatusCodes sc ON sc.StatusID = d.Status
+            LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = d.CreatedByUserID
+            WHERE (@mat IS NULL OR d.Material LIKE @mat)
+              AND (@from IS NULL OR d.StartedAt >= @from)
+              AND (@to IS NULL OR d.StartedAt <= @to)
+              AND (@cust IS NULL OR d.CustomerID LIKE @cust)
+              AND (@so IS NULL OR d.SalesOrderSAP LIKE @so)
+            ORDER BY d.StartedAt DESC
+            """, new
+        {
+            mat = string.IsNullOrWhiteSpace(query.Material) ? null : $"%{query.Material}%",
+            from = DateTime.TryParse(query.DateFrom, out var from) ? from : (DateTime?)null,
+            to = DateTime.TryParse(query.DateTo, out var to) ? to : (DateTime?)null,
+            cust = string.IsNullOrWhiteSpace(query.CustomerId) ? null : $"%{query.CustomerId}%",
+            so = string.IsNullOrWhiteSpace(query.SalesOrderSap) ? null : $"%{query.SalesOrderSap}%",
+        }, cancellationToken: ct));
+        return rows.ToArray();
+    }
 }
