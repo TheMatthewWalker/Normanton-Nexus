@@ -50,6 +50,16 @@
          proxied call — C# equivalent of Node's jsonwebtoken (sap.js's
          makeSapToken). Same shared secret as SapServer's own Auth:JwtSecret. -->
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
+
+    <!-- Production label barcode generation (LabelBarcodeHelper) — C# equivalent
+         of Node's bwip-js. ZXing.Net's BarcodeWriterPixelData produces raw BGRA32
+         pixel bytes (pure managed, no OS-level graphics dependency), which
+         ImageSharp then encodes to a real PNG — deliberately NOT
+         System.Drawing.Common, which needs libgdiplus on Linux and is
+         discouraged there post-.NET 6; this combination is genuinely testable
+         in this sandbox and works identically once deployed to Windows/IIS. -->
+    <PackageReference Include="ZXing.Net" Version="0.16.9" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
 
 </Project>

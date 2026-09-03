@@ -2,9 +2,11 @@
 // Each tub posts its own independent SAP backflush; a submission can
 // partially succeed (some tubs post, others fail) — the response's
 // `status` field ("COMPLETE" vs "SAP_FAILED") reflects that, matching the
-// backend exactly. Label printing (labelPrint() in Node) is deliberately
-// not wired up yet — the label/PDF/barcode/TCP-printer subsystem is its
-// own not-yet-ported piece of Sub-phase 6b.
+// backend exactly. Label printing (labelPrint() in Node) only has its
+// browser-preview half built so far (LabelsController — one ticket per
+// tub, printed via window.print()) — server-side PDF/raw-TCP direct-to-
+// printer printing is still a separate, not-yet-ported piece of Sub-phase
+// 6b.
 (function () {
   const MAX_TUB_WEIGHT_KG = 38;
   let tubs = [{ weightKg: "" }];
@@ -95,7 +97,17 @@
 
   function setResult(text, color) {
     resultEl.style.color = color;
-    resultEl.textContent = text;
+    resultEl.textContent = text; // clears any previously appended Print Labels link too
+  }
+
+  function appendPrintLabelsLink(recordId) {
+    const link = document.createElement("a");
+    link.href = `/api/labels/process/MX/${recordId}`;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "🖨 Print Labels";
+    link.style.cssText = "display:inline-block;margin-left:0.75rem;";
+    resultEl.appendChild(link);
   }
 
   submitBtn.addEventListener("click", async () => {
@@ -158,6 +170,7 @@
         }
         renderTubs();
       }
+      appendPrintLabelsLink(data.recordId);
     } catch (err) {
       setResult(err.message, "#b91c1c");
     } finally {

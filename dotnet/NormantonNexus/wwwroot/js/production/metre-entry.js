@@ -30,7 +30,17 @@
 
   function setResult(text, color) {
     resultEl.style.color = color;
-    resultEl.textContent = text;
+    resultEl.textContent = text; // clears any previously appended Print Label link too
+  }
+
+  function appendPrintLabelLink(recordId) {
+    const link = document.createElement("a");
+    link.href = `/api/labels/process/${processCode}/${recordId}`;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "🖨 Print Label";
+    link.style.cssText = "display:inline-block;margin-left:0.75rem;";
+    resultEl.appendChild(link);
   }
 
   submitBtn.addEventListener("click", async () => {
@@ -69,6 +79,7 @@
         lengthInput.value = "";
         notesInput.value = "";
       }
+      appendPrintLabelLink(data.recordId);
     } catch (err) {
       setResult(err.message, "#b91c1c");
     } finally {

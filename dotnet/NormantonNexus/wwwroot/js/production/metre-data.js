@@ -2,9 +2,10 @@
 // historical record listing. Port of runMeterProcessData in
 // production-nexus.js. The row-click detail modal in Node (SAP postings +
 // scrap entries + reprint-label button) is simplified here to an inline
-// expand showing SAP postings + scrap entries only — no reprint-label
-// button, since label printing isn't built in this port yet, and no shared
-// modal component exists (same precedent as posted-scrap.js's drilldown).
+// expand — no shared modal component exists (same precedent as
+// posted-scrap.js's drilldown) — but the Print Label link is real, opening
+// the browser-preview label page (LabelsController) in a new tab, same as
+// Node's reprint button.
 (function () {
   const container = document.querySelector("[data-process-code]");
   const processCode = container.dataset.processCode;
@@ -121,6 +122,15 @@
         api(`/scrap/entries?processCode=${encodeURIComponent(processCode)}&processRecordId=${recordId}`),
       ]);
       td.innerHTML = "";
+
+      const printLink = document.createElement("a");
+      printLink.href = `/api/labels/process/${encodeURIComponent(processCode)}/${recordId}`;
+      printLink.target = "_blank";
+      printLink.rel = "noopener";
+      printLink.textContent = "🖨 Print Label";
+      printLink.style.cssText = "display:inline-block;margin-bottom:0.5rem;";
+      td.appendChild(printLink);
+
       td.appendChild(buildSubTable("SAP Postings", postingsRes.data, ["postingType", "materialDocumentSap", "quantity", "unitOfMeasure", "isReversed"]));
       td.appendChild(buildSubTable("Scrap Entries", scrapRes.data, ["reasonDescription", "quantity", "unitOfMeasure", "isApproved", "sapPosted"]));
     } catch (err) {
