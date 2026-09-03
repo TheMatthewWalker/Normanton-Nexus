@@ -79,6 +79,20 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return StatusCode(201, ApiResponse<MetreProcessEntryResult>.Ok(result));
     }
 
+    [HttpPost("process/{processCode}/draft")]
+    public async Task<IActionResult> MetreProcessDraft(string processCode, [FromBody] MetreDraftRequest body, CancellationToken ct)
+    {
+        var result = await MetreProcessHelper.DraftAsync(processCode, nexusOperationsDb, sapServerClient, body, GetUserId(), ct);
+        return StatusCode(201, ApiResponse<MetreDraftResult>.Ok(result));
+    }
+
+    [HttpPost("process/{processCode}/complete/{recordId:int}")]
+    public async Task<IActionResult> MetreProcessComplete(string processCode, int recordId, [FromBody] MetreCompleteRequest body, CancellationToken ct)
+    {
+        var result = await MetreProcessHelper.CompleteAsync(processCode, recordId, nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<MetreCompleteResult>.Ok(result));
+    }
+
     [HttpGet("process/{processCode}/open-entries")]
     public async Task<IActionResult> MetreProcessOpenEntries(string processCode, CancellationToken ct)
     {

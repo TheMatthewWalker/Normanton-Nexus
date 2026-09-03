@@ -92,4 +92,53 @@ public class MetreProcessHelperTests
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    [Fact]
+    public async Task DraftAsync_rejects_a_non_metre_process_code_without_opening_a_connection()
+    {
+        var db = UnreachableDb();
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            MetreProcessHelper.DraftAsync("DR", db.Object, Mock.Of<ISapServerClient>(), new MetreDraftRequest("MAT1", null, null, null, null), 1, CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task DraftAsync_rejects_a_missing_material_without_opening_a_connection()
+    {
+        var db = UnreachableDb();
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            MetreProcessHelper.DraftAsync("CO", db.Object, Mock.Of<ISapServerClient>(), new MetreDraftRequest(null, null, null, null, null), 1, CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_rejects_a_non_metre_process_code_without_opening_a_connection()
+    {
+        var db = UnreachableDb();
+        var body = new MetreCompleteRequest(10m, null, null, false, null, null, null);
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            MetreProcessHelper.CompleteAsync("DR", 1, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    public async Task CompleteAsync_rejects_a_non_positive_lengthMetres_without_opening_a_connection(double? length)
+    {
+        var db = UnreachableDb();
+        var body = new MetreCompleteRequest(length.HasValue ? (decimal)length.Value : null, null, null, false, null, null, null);
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            MetreProcessHelper.CompleteAsync("CL", 1, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

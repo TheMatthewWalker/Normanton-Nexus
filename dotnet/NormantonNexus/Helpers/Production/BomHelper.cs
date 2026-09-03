@@ -289,7 +289,7 @@ internal static class BomHelper
         return await GetParentBatchLinksAsync(connection, code, recordId, ct);
     }
 
-    private static async Task<IReadOnlyList<ParentBatchLink>> GetParentBatchLinksAsync(SqlConnection connection, string code, int recordId, CancellationToken ct)
+    internal static async Task<IReadOnlyList<ParentBatchLink>> GetParentBatchLinksAsync(SqlConnection connection, string code, int recordId, CancellationToken ct)
     {
         var rows = await connection.QueryAsync<ParentBatchLink>(new CommandDefinition(
             "SELECT ParentProcessCode AS ProcessCode, ParentRecordID AS RecordId FROM prod.ProductionTrace WHERE ChildProcessCode = @code AND ChildRecordID = @recordId",

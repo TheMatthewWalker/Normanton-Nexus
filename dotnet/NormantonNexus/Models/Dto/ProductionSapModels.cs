@@ -47,3 +47,22 @@ public sealed record SapProfitCentresRequest(List<string> Materials);
 
 /// <summary>Mirrors SapServer's ProfitCentreRow (Models/Bapi/PerformanceModels.cs there, reused by the Production controller).</summary>
 public sealed record SapProfitCentreRow(string Material, string ProfitCentre);
+
+/// <summary>Mirrors SapServer's SapReturnMessage (Models/Bapi/SapModels.cs there).</summary>
+public sealed record SapReturnMessage(string Type, string Message);
+
+/// <summary>Mirrors SapServer's GoodsMovementComponent field-for-field.</summary>
+public sealed record SapGoodsMovementComponent(string Material, decimal Quantity, string Unit, string? StorageLocation);
+
+/// <summary>
+/// Mirrors SapServer's GoodsMovementRequest (POST /api/production/
+/// goods-movement-backflush, BAPI_GOODSMVT_CREATE) — Normanton-Nexus's
+/// concession path: when a job's traceability was approved to proceed
+/// despite not matching this material's BOM, this posts every component
+/// explicitly (correct ones included, not just the substituted one)
+/// instead of the normal automatic ZF40N backflush.
+/// </summary>
+public sealed record SapGoodsMovementRequest(string Material, string Header, List<SapGoodsMovementComponent> Components);
+
+/// <summary>Mirrors SapServer's GoodsMovementResponse exactly.</summary>
+public sealed record SapGoodsMovementResponse(string MaterialDocument, string MaterialDocumentYear, bool Success, List<SapReturnMessage> Messages);
