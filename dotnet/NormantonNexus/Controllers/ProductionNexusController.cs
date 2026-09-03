@@ -303,4 +303,38 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         var results = await ReversalHelper.BulkReverseAsync(nexusOperationsDb, sapServerClient, auditLogger, body.MaterialDocuments, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return Ok(ApiResponse<IReadOnlyList<ReversalBulkItemResult>>.Ok(results));
     }
+
+    [HttpGet("scrap-reversal/missed")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapReversalMissed(CancellationToken ct)
+    {
+        var rows = await ScrapReversalHelper.GetMissedAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapDocSearchRow>>.Ok(rows));
+    }
+
+    [HttpGet("scrap-reversal/search")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapReversalSearch([FromQuery] ScrapReversalSearchQuery query, CancellationToken ct)
+    {
+        var rows = await ScrapReversalHelper.SearchAsync(nexusOperationsDb, query, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapDocSearchRow>>.Ok(rows));
+    }
+
+    [HttpPost("scrap-reversal/reverse")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapReversalReverse([FromBody] ScrapReversalReverseRequest body, CancellationToken ct)
+    {
+        var result = await ScrapReversalHelper.ReverseAsync(nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<ScrapReversalReverseResult>.Ok(result));
+    }
+
+    [HttpPost("scrap-reversal/reverse/bulk")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapReversalReverseBulk([FromBody] ScrapReversalBulkRequest body, CancellationToken ct)
+    {
+        if (body.Items is not { Length: > 0 })
+            throw new NexusValidationException("items array required.");
+        var results = await ScrapReversalHelper.BulkReverseAsync(nexusOperationsDb, sapServerClient, auditLogger, body.Items, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapReversalBulkItemResult>>.Ok(results));
+    }
 }
