@@ -13,20 +13,7 @@ namespace NormantonNexus.Helpers.Production;
 /// </summary>
 internal static class ProductionHelper
 {
-    /// <summary>Every process code's table/PK/ref/qty-column metadata — mirrors the Node PROCESS config map exactly (same 10 codes, same table names).</summary>
-    private static readonly Dictionary<string, (string Table, string Pk, string Ref, string Uom, string QtyCol)> Process = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["MX"] = ("prod.Mixing", "MixingID", "MixRef", "KG", "TotalWeightKG"),
-        ["EX"] = ("prod.Extrusion", "ExtrusionID", "ExtRef", "M", "LengthMetres"),
-        ["CO"] = ("prod.Convoluting", "ConvolutingID", "ConvRef", "M", "LengthMetres"),
-        ["BR"] = ("prod.Braiding", "BraidingID", "BraidRef", "M", "LengthMetres"),
-        ["CL"] = ("prod.Coverline", "CoverlineID", "CovRef", "M", "LengthMetres"),
-        ["TW"] = ("prod.TapeWrap", "TapeWrapID", "TWRef", "M", "LengthMetres"),
-        ["DR"] = ("prod.Drumming", "DrummingID", "DrumRef", "M", "LengthMetres"),
-        ["EW"] = ("prod.Ewald", "EwaldID", "EwaldRef", "EA", "TotalPiecesEA"),
-        ["FW"] = ("prod.Firewall", "FirewallID", "FWRef", "EA", "TotalInspectedEA"),
-        ["HA"] = ("prod.HoseAssembly", "HoseAssemblyID", "HARef", "EA", "QuantityEA"),
-    };
+    private static readonly Dictionary<string, (string Table, string Pk, string Ref, string Uom, string QtyCol)> Process = ProductionSapHelpers.Process;
 
     internal static async Task<IReadOnlyList<BatchHistoryRow>> GetHistoryAsync(INexusOperationsDb db, BatchHistoryQuery query, CancellationToken ct)
     {

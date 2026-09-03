@@ -14,6 +14,24 @@ namespace NormantonNexus.Helpers.Production;
 /// </summary>
 internal static class ProductionSapHelpers
 {
+    /// <summary>Every process code's table/PK/ref/qty-column metadata — mirrors Node's PROCESS config map exactly (same 10 codes, same table names). Shared across every Production Helper that needs to build process-generic SQL.</summary>
+    internal static readonly Dictionary<string, (string Table, string Pk, string Ref, string Uom, string QtyCol)> Process = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["MX"] = ("prod.Mixing", "MixingID", "MixRef", "KG", "TotalWeightKG"),
+        ["EX"] = ("prod.Extrusion", "ExtrusionID", "ExtRef", "M", "LengthMetres"),
+        ["CO"] = ("prod.Convoluting", "ConvolutingID", "ConvRef", "M", "LengthMetres"),
+        ["BR"] = ("prod.Braiding", "BraidingID", "BraidRef", "M", "LengthMetres"),
+        ["CL"] = ("prod.Coverline", "CoverlineID", "CovRef", "M", "LengthMetres"),
+        ["TW"] = ("prod.TapeWrap", "TapeWrapID", "TWRef", "M", "LengthMetres"),
+        ["DR"] = ("prod.Drumming", "DrummingID", "DrumRef", "M", "LengthMetres"),
+        ["EW"] = ("prod.Ewald", "EwaldID", "EwaldRef", "EA", "TotalPiecesEA"),
+        ["FW"] = ("prod.Firewall", "FirewallID", "FWRef", "EA", "TotalInspectedEA"),
+        ["HA"] = ("prod.HoseAssembly", "HoseAssemblyID", "HARef", "EA", "QuantityEA"),
+    };
+
+    /// <summary>The 5 linear-metre processes sharing the generic entry/completion engine — mirrors Node's METRE_PROCESSES Set exactly.</summary>
+    internal static readonly HashSet<string> MetreProcesses = new(StringComparer.OrdinalIgnoreCase) { "EX", "CO", "BR", "CL", "TW" };
+
     /// <summary>Each process may only post materials belonging to its own SAP profit centre(s) — mirrors Node's PROFIT_CENTRES table exactly. FW has no material of its own (inspects an Ewald batch), so it's deliberately absent, same as Node.</summary>
     private static readonly Dictionary<string, string[]> ProfitCentres = new(StringComparer.OrdinalIgnoreCase)
     {

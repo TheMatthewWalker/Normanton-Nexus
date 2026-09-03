@@ -72,6 +72,43 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return Ok(ApiResponse<IReadOnlyList<TubSearchRow>>.Ok(rows));
     }
 
+    [HttpPost("process/{processCode}/entry")]
+    public async Task<IActionResult> MetreProcessEntry(string processCode, [FromBody] MetreProcessEntryRequest body, CancellationToken ct)
+    {
+        var result = await MetreProcessHelper.EnterAsync(processCode, nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return StatusCode(201, ApiResponse<MetreProcessEntryResult>.Ok(result));
+    }
+
+    [HttpGet("process/{processCode}/open-entries")]
+    public async Task<IActionResult> MetreProcessOpenEntries(string processCode, CancellationToken ct)
+    {
+        var rows = await MetreProcessHelper.GetOpenEntriesAsync(processCode, nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<OpenEntryRow>>.Ok(rows));
+    }
+
+    [HttpGet("process/{processCode}/data")]
+    public async Task<IActionResult> MetreProcessData(string processCode, [FromQuery] MetreProcessDataQuery query, CancellationToken ct)
+    {
+        var rows = await MetreProcessHelper.GetDataAsync(processCode, nexusOperationsDb, query, ct);
+        return Ok(ApiResponse<IReadOnlyList<MetreProcessDataRow>>.Ok(rows));
+    }
+
+    [HttpGet("open-runs")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> OpenRuns(CancellationToken ct)
+    {
+        var rows = await MetreProcessHelper.GetOpenRunsAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<OpenRunRow>>.Ok(rows));
+    }
+
+    [HttpPatch("open-runs/{processCode}/{recordId:int}/cancel")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> CancelOpenRun(string processCode, int recordId, [FromBody] CancelOpenRunRequest body, CancellationToken ct)
+    {
+        await MetreProcessHelper.CancelOpenRunAsync(processCode, recordId, nexusOperationsDb, body, GetUserId(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
     [HttpGet("reports/output")]
     [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
     public async Task<IActionResult> ReportOutput([FromQuery] ReportFilterQuery query, CancellationToken ct)
