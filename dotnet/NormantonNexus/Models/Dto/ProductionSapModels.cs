@@ -35,3 +35,15 @@ public sealed record BdcWrapper(List<BdcResponse> Responses);
 
 /// <summary>Mirrors SapServer's Mf41Request (Models/Bapi/ProductionModels.cs) — the shared request shape for both POST /api/production/reverse-backflush (MF41, backflush reversal) and POST /api/production/scrap/reverse (MBST, scrap-posting reversal). Both return a BdcResponse.</summary>
 public sealed record Mf41Request(string MaterialDocument);
+
+/// <summary>Mirrors SapServer's BomQuery — GET (with a JSON body) /api/production/bom.</summary>
+public sealed record SapBomQuery(string Material);
+
+/// <summary>Mirrors SapServer's BomRow field-for-field (raw SAP shape, before profit-centre enrichment — see BomHelper.FetchBomAsync).</summary>
+public sealed record SapBomRow(string Material, string Plant, string Component, string Item, decimal ComponentQty, string ComponentUnit, string StorageLocation);
+
+/// <summary>Mirrors SapServer's ProfitCentresRequest — GET (with a JSON body) /api/production/check-profit-centres (bulk).</summary>
+public sealed record SapProfitCentresRequest(List<string> Materials);
+
+/// <summary>Mirrors SapServer's ProfitCentreRow (Models/Bapi/PerformanceModels.cs there, reused by the Production controller).</summary>
+public sealed record SapProfitCentreRow(string Material, string ProfitCentre);

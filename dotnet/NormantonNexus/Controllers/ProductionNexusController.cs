@@ -337,4 +337,61 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         var results = await ScrapReversalHelper.BulkReverseAsync(nexusOperationsDb, sapServerClient, auditLogger, body.Items, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return Ok(ApiResponse<IReadOnlyList<ScrapReversalBulkItemResult>>.Ok(results));
     }
+
+    [HttpGet("process/{processCode}/bom-preview")]
+    public async Task<IActionResult> BomPreview(string processCode, [FromQuery] string? material, CancellationToken ct)
+    {
+        var rows = await BomHelper.GetBomPreviewAsync(sapServerClient, processCode.ToUpperInvariant(), material, GetUserId(), ct);
+        return Ok(ApiResponse<IReadOnlyList<BomRow>>.Ok(rows));
+    }
+
+    [HttpGet("process/{processCode}/{recordId:int}/bom")]
+    public async Task<IActionResult> GetBom(string processCode, int recordId, CancellationToken ct)
+    {
+        var rows = await BomHelper.GetLatestBomAsync(nexusOperationsDb, processCode.ToUpperInvariant(), recordId, ct);
+        return Ok(ApiResponse<IReadOnlyList<BomRow>>.Ok(rows));
+    }
+
+    [HttpPost("process/{processCode}/{recordId:int}/bom/refresh")]
+    public async Task<IActionResult> RefreshBom(string processCode, int recordId, CancellationToken ct)
+    {
+        var result = await BomHelper.RefreshBomAsync(nexusOperationsDb, sapServerClient, processCode.ToUpperInvariant(), recordId, GetUserId(), ct);
+        return Ok(ApiResponse<BomRefreshResult>.Ok(result));
+    }
+
+    [HttpGet("process/{processCode}/{recordId:int}/trace")]
+    public async Task<IActionResult> GetParentBatchLinks(string processCode, int recordId, CancellationToken ct)
+    {
+        var rows = await BomHelper.GetParentBatchLinksAsync(nexusOperationsDb, processCode.ToUpperInvariant(), recordId, ct);
+        return Ok(ApiResponse<IReadOnlyList<ParentBatchLink>>.Ok(rows));
+    }
+
+    [HttpGet("process/{processCode}/{recordId:int}/raw-material-batches")]
+    public async Task<IActionResult> GetRawMaterialBatches(string processCode, int recordId, CancellationToken ct)
+    {
+        var rows = await BomHelper.GetRawMaterialBatchesAsync(nexusOperationsDb, processCode.ToUpperInvariant(), recordId, ct);
+        return Ok(ApiResponse<IReadOnlyList<RawMaterialBatchRow>>.Ok(rows));
+    }
+
+    [HttpPost("process/{processCode}/{recordId:int}/raw-material-batch")]
+    public async Task<IActionResult> AddRawMaterialBatch(string processCode, int recordId, [FromBody] AddRawMaterialBatchRequest body, CancellationToken ct)
+    {
+        await BomHelper.AddRawMaterialBatchAsync(nexusOperationsDb, processCode.ToUpperInvariant(), recordId, body, GetUserId(), ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("process/{processCode}/{recordId:int}/raw-material-batch/{batchId:int}")]
+    public async Task<IActionResult> DeleteRawMaterialBatch(string processCode, int recordId, int batchId, CancellationToken ct)
+    {
+        var affected = await BomHelper.DeleteRawMaterialBatchAsync(nexusOperationsDb, batchId, ct);
+        if (affected == 0) throw new NexusNotFoundException("Batch entry not found.");
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPost("process/{processCode}/{recordId:int}/concession")]
+    public async Task<IActionResult> RaiseConcession(string processCode, int recordId, [FromBody] RaiseConcessionRequest body, CancellationToken ct)
+    {
+        var result = await BomHelper.RaiseConcessionAsync(nexusOperationsDb, processCode.ToUpperInvariant(), recordId, body, GetUserId(), ct);
+        return StatusCode(201, ApiResponse<RaiseConcessionResult>.Ok(result));
+    }
 }

@@ -1,4 +1,5 @@
 using Dapper;
+using NormantonNexus.Helpers.Production;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
@@ -203,30 +204,30 @@ internal static class QualityHelper
     }
 
     /// <summary>
-    /// Approve/reject a concession. Deliberately does NOT (yet) write the
-    /// production-batch event-log entry (writeEvent in Node) or send the
-    /// raiser an in-app notification (notify() in Node) — both depend on
-    /// systems not built yet in this migration (Production's own event log,
-    /// and the Notifications feature deferred in Phase 1's CLAUDE.md notes).
-    /// The core review action (status/reviewer/notes) is fully functional;
-    /// come back and wire those two side effects in once their systems exist.
+    /// Approve/reject a concession. Now writes the production-batch event-
+    /// log entry (writeEvent in Node) since ProductionEventLogHelper exists
+    /// (built in Sub-phase 6b) — this closes the gap this method's own
+    /// comment originally flagged. Still deliberately does NOT send the
+    /// raiser an in-app notification (notify() in Node) — the Notifications
+    /// feature itself remains deferred, per Phase 1's CLAUDE.md notes.
     /// </summary>
     internal static async Task<ConcessionRow> ReviewConcessionAsync(
         INexusOperationsDb db, int concessionId, string newStatus, string? notes, int reviewerUserId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
 
-        var currentStatus = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
-            "SELECT Status FROM prod.TraceabilityConcessions WHERE ConcessionID = @concessionId",
-            new { concessionId }, cancellationToken: ct));
+        var current = await connection.QuerySingleOrDefaultAsync<(string Status, string ProcessCode, int RecordId, string ParentProcessCode, int ParentRecordId, string Component, string ActualMaterial)?>(
+            new CommandDefinition(
+                "SELECT Status, ProcessCode, RecordID AS RecordId, ParentProcessCode, ParentRecordID AS ParentRecordId, Component, ActualMaterial FROM prod.TraceabilityConcessions WHERE ConcessionID = @concessionId",
+                new { concessionId }, cancellationToken: ct));
 
-        if (currentStatus is null)
+        if (current is null)
         {
             throw new NexusNotFoundException($"Concession {concessionId} not found.");
         }
-        if (currentStatus != "PENDING")
+        if (current.Value.Status != "PENDING")
         {
-            throw new NexusValidationException($"This concession is already {currentStatus}.");
+            throw new NexusValidationException($"This concession is already {current.Value.Status}.");
         }
 
         await connection.ExecuteAsync(new CommandDefinition("""
@@ -235,7 +236,13 @@ internal static class QualityHelper
             WHERE ConcessionID = @concessionId
             """, new { newStatus, reviewerUserId, notes, concessionId }, cancellationToken: ct));
 
+        var concession = current.Value;
+        var parentLabel = $"{concession.ParentProcessCode}{concession.ParentRecordId:D8}";
+        await ProductionEventLogHelper.WriteEventAsync(connection, concession.ProcessCode, concession.RecordId, "NOTE",
+            $"Traceability concession for {parentLabel} ({concession.Component} → {concession.ActualMaterial}) {newStatus.ToLowerInvariant()} by reviewer #{reviewerUserId}" +
+            (string.IsNullOrWhiteSpace(notes) ? "." : $": {notes.Trim()}"), newStatus == "REJECTED" ? 1 : 0, reviewerUserId, ct);
+
         var updated = await ListConcessionsAsync(db, newStatus, ct);
-        return updated.First(c => c.ConcessionId == concessionId);
+        return updated.First(row => row.ConcessionId == concessionId);
     }
 }
