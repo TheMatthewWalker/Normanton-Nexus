@@ -8,8 +8,8 @@
 }
 
 <p style="color:#6b7280; font-size:0.85rem;">
-    Most Entry/Data and Supervisor tiles for Extrusion/Convoluting/Drumming/etc. are being ported in a later slice of
-    this department — only Mixing, Reports, Batch History, and Traceability are available so far.
+    Drumming's full entry wizard, Open Entries/Complete Run, Scrap Reversal, and label printing are being ported in a
+    later slice of this department.
 </p>
 
 <h3>Production Entry</h3>
@@ -105,5 +105,25 @@
     <a class="tile" asp-page="BatchHistory">
         <p class="tile-title">Batch History</p>
         <p class="tile-hint">Search completed/cancelled batches</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="EX">
+        <p class="tile-title">Extrusion Data</p>
+        <p class="tile-hint">Search completed/cancelled Extrusion records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="CO">
+        <p class="tile-title">Convoluting Data</p>
+        <p class="tile-hint">Search completed/cancelled Convoluting records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="BR">
+        <p class="tile-title">Braiding Data</p>
+        <p class="tile-hint">Search completed/cancelled Braiding records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="CL">
+        <p class="tile-title">Coverline Data</p>
+        <p class="tile-hint">Search completed/cancelled Coverline records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="TW">
+        <p class="tile-title">Tape Wrap Data</p>
+        <p class="tile-hint">Search completed/cancelled Tape Wrap records</p>
     </a>
 </div>

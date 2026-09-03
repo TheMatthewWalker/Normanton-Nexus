@@ -1,0 +1,34 @@
+@page "{code}"
+@model NormantonNexus.Pages.Production.MetreProcessDataModel
+@{
+    ViewData["Title"] = Model.ProcessLabel + " Data";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = Model.ProcessLabel + " Data";
+    ViewData["PageSubtitle"] = "Search completed/cancelled " + Model.ProcessLabel + " records";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div data-process-code="@Model.Code">
+    <div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:flex-end; margin-bottom:0.75rem;">
+        <div>
+            <label for="mpd-material">Material</label>
+            <input type="text" id="mpd-material" placeholder="e.g. K-NBR%" />
+        </div>
+        <div>
+            <label for="mpd-from">From</label>
+            <input type="date" id="mpd-from" />
+        </div>
+        <div>
+            <label for="mpd-to">To</label>
+            <input type="date" id="mpd-to" />
+        </div>
+        <button type="button" id="mpd-search">Search</button>
+    </div>
+    <div id="mpd-results">Enter filters above and click Search.</div>
+</div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/metre-data.js"></script>
+}

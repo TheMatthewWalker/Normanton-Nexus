@@ -6,18 +6,19 @@ using NormantonNexus.Services.Auth;
 namespace NormantonNexus.Pages.Production;
 
 /// <summary>
-/// The shared metre-process (EX/CO/BR/CL/TW) entry tile — one Razor Page
-/// parameterized by process code (`@page "{code}"`) rather than 5 near-
-/// duplicate page files, mirroring Node's own single runMeterProcessEntry()
-/// engine backing all 5 tiles. SCOPE NOTE: only the direct one-step entry
-/// is built here — Data (MetreProcessData.cshtml) is a separate later
-/// slice. Open Entries has no standalone frontend at all, deliberately —
-/// it only exists in Node as the picker step of the draft→complete
-/// two-step wizard (Complete Run), out of scope until Sub-phase 6c — see
-/// dotnet/CLAUDE.md's Phase 6 notes.
+/// The shared metre-process (EX/CO/BR/CL/TW) Data tile — filterable
+/// historical record listing, one Razor Page parameterized by process code
+/// (`@page "{code}"`), same pattern as MetreEntry.cshtml. Distinct from
+/// Open Entries, which is deliberately NOT given a standalone page — Open
+/// Entries only exists in Node as the picker step of the draft→complete
+/// two-step wizard (Complete Run), which is out of scope until Sub-phase
+/// 6c; a standalone "view open entries" list with nothing to do once you
+/// see one would be a page to nowhere. Data, by contrast, is a genuinely
+/// self-contained filterable report in Node too (runMeterProcessData),
+/// independent of the completion workflow — real, buildable scope now.
 /// </summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-public class MetreEntryModel : PageModel
+public class MetreProcessDataModel : PageModel
 {
     private static readonly Dictionary<string, string> Labels = new(StringComparer.OrdinalIgnoreCase)
     {
