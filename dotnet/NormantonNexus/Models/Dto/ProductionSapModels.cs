@@ -18,3 +18,17 @@ public sealed record BdcResponse(string Type, string MessageClass, string Messag
 
 /// <summary>Mirrors SapServer's ProfitCentreRequest — GET (with a JSON body) /api/production/check-profit-centre.</summary>
 public sealed record ProfitCentreRequest(string Material);
+
+/// <summary>
+/// Mirrors SapServer's BomScrapRequest (Models/Bapi/ProductionModels.cs) —
+/// POST /api/production/scrap/post. Material/Quantity/Header here are the
+/// *finished good* being scrapped, not a BOM component — SapServer itself
+/// explodes the material's BOM server-side and posts one MB11/BDC per
+/// component, returning one BdcResponse per component in the BdcWrapper
+/// below. ScrapReason is only sent when non-null/4 chars, matching Node's
+/// `if (reasonCode?.length === 4) sapPayload.ScrapReason = reasonCode;`.
+/// </summary>
+public sealed record ScrapPostRequest(string Material, decimal Quantity, string Header, string MovementType, string? ScrapReason);
+
+/// <summary>SapServer's BdcWrapper — the array-of-BdcResponse envelope returned by /api/production/scrap/post, one entry per BOM component posted. Mirrors Node's parseBomScrapResponse's `sapRaw.data.responses` unwrap.</summary>
+public sealed record BdcWrapper(List<BdcResponse> Responses);

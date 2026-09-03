@@ -187,4 +187,74 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         var result = await ProductionHelper.GetTraceChainAsync(nexusOperationsDb, processCode, recordId, ct);
         return Ok(ApiResponse<TraceChainResult>.Ok(result));
     }
+
+    [HttpGet("scrap-reasons")]
+    public async Task<IActionResult> ScrapReasons([FromQuery] string? pc, CancellationToken ct)
+    {
+        var rows = await ScrapHelper.GetReasonsAsync(nexusOperationsDb, pc, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapReasonRow>>.Ok(rows));
+    }
+
+    [HttpGet("scrap/summary")]
+    public async Task<IActionResult> ScrapSummary(CancellationToken ct)
+    {
+        var rows = await ScrapHelper.GetSummaryAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapSummaryRow>>.Ok(rows));
+    }
+
+    [HttpGet("scrap/failed")]
+    public async Task<IActionResult> ScrapFailed(CancellationToken ct)
+    {
+        var rows = await ScrapHelper.GetFailedAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapFailedRow>>.Ok(rows));
+    }
+
+    [HttpGet("scrap/pending")]
+    public async Task<IActionResult> ScrapPending(CancellationToken ct)
+    {
+        var rows = await ScrapHelper.GetPendingAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapPendingRow>>.Ok(rows));
+    }
+
+    [HttpGet("scrap/entries")]
+    public async Task<IActionResult> ScrapEntries([FromQuery] string? processCode, [FromQuery] int? processRecordId, [FromQuery] string? reasonCode, CancellationToken ct)
+    {
+        var rows = await ScrapHelper.GetEntriesAsync(nexusOperationsDb, processCode, processRecordId, reasonCode, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapEntryRow>>.Ok(rows));
+    }
+
+    [HttpPatch("scrap/{scrapId:int}/retry")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapRetry(int scrapId, [FromBody] ScrapRetryRequest body, CancellationToken ct)
+    {
+        var result = await ScrapHelper.RetryAsync(nexusOperationsDb, sapServerClient, auditLogger, scrapId, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<ScrapRetryResult>.Ok(result));
+    }
+
+    [HttpPost("scrap/approve")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapApprove([FromBody] ScrapBulkRequest body, CancellationToken ct)
+    {
+        if (body.ScrapIds is not { Length: > 0 })
+            throw new NexusValidationException("scrapIds array required.");
+        var results = await ScrapHelper.ApproveAsync(nexusOperationsDb, sapServerClient, auditLogger, body.ScrapIds, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapBulkItemResult>>.Ok(results));
+    }
+
+    [HttpPost("scrap/reject")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ScrapReject([FromBody] ScrapBulkRequest body, CancellationToken ct)
+    {
+        if (body.ScrapIds is not { Length: > 0 })
+            throw new NexusValidationException("scrapIds array required.");
+        var results = await ScrapHelper.RejectAsync(nexusOperationsDb, auditLogger, body.ScrapIds, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapBulkItemResult>>.Ok(results));
+    }
+
+    [HttpGet("scrap/{scrapId:int}/documents")]
+    public async Task<IActionResult> ScrapDocuments(int scrapId, CancellationToken ct)
+    {
+        var rows = await ScrapHelper.GetDocumentsAsync(nexusOperationsDb, scrapId, ct);
+        return Ok(ApiResponse<IReadOnlyList<ScrapDocumentRow>>.Ok(rows));
+    }
 }
