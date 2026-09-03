@@ -3,15 +3,30 @@
 // production-nexus.js. The row-click detail modal in Node (SAP postings +
 // scrap entries + reprint-label button) is simplified here to an inline
 // expand — no shared modal component exists (same precedent as
-// posted-scrap.js's drilldown) — but the Print Label link is real, opening
-// the browser-preview label page (LabelsController) in a new tab, same as
-// Node's reprint button.
+// posted-scrap.js's drilldown) — but both halves of Node's reprint button
+// are real: "Print Label" opens the browser-preview page in a new tab,
+// and "Send to Printer…" picks a configured network printer and posts to
+// LabelsController's server-side PDF/raw-TCP print route.
 (function () {
   const container = document.querySelector("[data-process-code]");
   const processCode = container.dataset.processCode;
   const resultsEl = document.getElementById("mpd-results");
 
   const { api, downloadCsv } = window.ProductionReports;
+
+  async function labelsApi(path, opts) {
+    const r = await fetch("/api/labels" + path, opts);
+    let json = null;
+    try {
+      json = await r.json();
+    } catch {
+      /* non-JSON body */
+    }
+    if (json?.success === false || !r.ok) {
+      throw new Error(json?.error?.message || `Request failed (HTTP ${r.status})`);
+    }
+    return json;
+  }
 
   function fmtDate(dt) {
     return dt ? new Date(dt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -128,14 +143,86 @@
       printLink.target = "_blank";
       printLink.rel = "noopener";
       printLink.textContent = "🖨 Print Label";
-      printLink.style.cssText = "display:inline-block;margin-bottom:0.5rem;";
+      printLink.style.cssText = "display:inline-block;margin-bottom:0.5rem;margin-right:0.75rem;";
       td.appendChild(printLink);
+
+      td.appendChild(buildSendToPrinterControl(recordId));
 
       td.appendChild(buildSubTable("SAP Postings", postingsRes.data, ["postingType", "materialDocumentSap", "quantity", "unitOfMeasure", "isReversed"]));
       td.appendChild(buildSubTable("Scrap Entries", scrapRes.data, ["reasonDescription", "quantity", "unitOfMeasure", "isApproved", "sapPosted"]));
     } catch (err) {
       td.textContent = err.message;
     }
+  }
+
+  // Server-side print to a configured network printer — port of the
+  // printer-select + POST .../print half of Node's reprint button. Lazily
+  // loads the printer list on first use (most records are only ever
+  // previewed, not sent to a physical printer, so no need to fetch it
+  // unconditionally for every row).
+  function buildSendToPrinterControl(recordId) {
+    const wrap = document.createElement("span");
+    wrap.style.display = "inline-block";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary";
+    btn.textContent = "🖨 Send to Printer…";
+    wrap.appendChild(btn);
+
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const { data } = await labelsApi("/printers");
+        if (!data.printers.length) {
+          alert("No printers configured. Add a \"Printers\" array under LabelPrinters in appsettings.json.");
+          return;
+        }
+
+        const select = document.createElement("select");
+        for (const p of data.printers) {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = p.name;
+          if (p.id === data.userDefault) opt.selected = true;
+          select.appendChild(opt);
+        }
+        const sendBtn = document.createElement("button");
+        sendBtn.type = "button";
+        sendBtn.textContent = "Send";
+        const msg = document.createElement("span");
+        msg.style.marginLeft = "0.5rem";
+
+        wrap.innerHTML = "";
+        wrap.append(select, sendBtn, msg);
+
+        sendBtn.addEventListener("click", async () => {
+          sendBtn.disabled = true;
+          msg.style.color = "#6b7280";
+          msg.textContent = "Sending…";
+          try {
+            const res = await labelsApi(`/process/${encodeURIComponent(processCode)}/${recordId}/print`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ printerId: select.value }),
+            });
+            msg.style.color = "#059669";
+            msg.textContent = `✓ ${res.data.message}`;
+          } catch (err) {
+            msg.style.color = "#b91c1c";
+            msg.textContent = err.message;
+          } finally {
+            sendBtn.disabled = false;
+          }
+        });
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    return wrap;
   }
 
   function buildSubTable(title, rows, columns) {

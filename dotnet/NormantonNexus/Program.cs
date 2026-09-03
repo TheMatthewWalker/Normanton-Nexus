@@ -11,6 +11,11 @@ using NormantonNexus.Services.Admin;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
+// Required since QuestPDF 2023's licensing change, or Document.GeneratePdf()
+// throws — see Helpers/Production/LabelPdfHelper.cs / NormantonNexus.csproj's
+// QuestPDF comment. Community is free for this app's use case.
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddRazorPages()
@@ -42,6 +47,8 @@ builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminSer
 
 builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(SapServerOptions.SectionName));
 builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();
+
+builder.Services.Configure<LabelPrinterOptions>(builder.Configuration.GetSection(LabelPrinterOptions.SectionName));
 
 builder.Services.Configure<SapCredentialOptions>(builder.Configuration.GetSection(SapCredentialOptions.SectionName));
 builder.Services.AddSingleton<ISapCredentialCipher, SapCredentialCipher>();

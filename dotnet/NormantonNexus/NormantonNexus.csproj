@@ -46,6 +46,19 @@
 
     <PackageReference Include="BCrypt.Net-Next" Version="4.*" />
 
+    <!-- Server-side label PDF generation (LabelPdfHelper) — C# equivalent of
+         Node's pdfkit. QuestPDF's declarative Row/Column/Text/Image layout is
+         used to reproduce the same content and grouping as Node's imperative
+         PDFKit drawing (header bar, two-column batch-ref/SAP-doc + material/
+         operators, footer) — NOT a pixel-for-pixel port of PDFKit's absolute
+         x/y coordinate math, which doesn't map cleanly onto QuestPDF's layout
+         model and can't be visually verified in this sandbox anyway (no PDF
+         viewer, no real printer). Requires QuestPDF.Settings.License =
+         Community at startup (Program.cs) since QuestPDF 2023's licensing
+         change — free for this app's use case (see QuestPDF's own docs), but
+         the line must be set or every Document.GeneratePdf() throws. -->
+    <PackageReference Include="QuestPDF" Version="2024.10.3" />
+
     <!-- Signs the short-lived JWT SapServerClient sends to SapServer on every
          proxied call — C# equivalent of Node's jsonwebtoken (sap.js's
          makeSapToken). Same shared secret as SapServer's own Auth:JwtSecret. -->
