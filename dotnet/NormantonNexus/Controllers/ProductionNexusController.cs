@@ -93,6 +93,26 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return Ok(ApiResponse<MetreCompleteResult>.Ok(result));
     }
 
+    [HttpPost("drumming/stock")]
+    public async Task<IActionResult> DrummingStock([FromBody] DrummingSubmitRequest body, CancellationToken ct)
+    {
+        var result = await DrummingHelper.SubmitAsync(nexusOperationsDb, sapServerClient, auditLogger, "stock", body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return StatusCode(result.Status == "BLOCKED" ? 409 : 201,
+            result.Status == "BLOCKED"
+                ? new ApiResponse<DrummingSubmitResult>(false, result, new ApiError("BLOCKED", result.Error ?? "Blocked."))
+                : ApiResponse<DrummingSubmitResult>.Ok(result));
+    }
+
+    [HttpPost("drumming/customer")]
+    public async Task<IActionResult> DrummingCustomer([FromBody] DrummingSubmitRequest body, CancellationToken ct)
+    {
+        var result = await DrummingHelper.SubmitAsync(nexusOperationsDb, sapServerClient, auditLogger, "customer", body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return StatusCode(result.Status == "BLOCKED" ? 409 : 201,
+            result.Status == "BLOCKED"
+                ? new ApiResponse<DrummingSubmitResult>(false, result, new ApiError("BLOCKED", result.Error ?? "Blocked."))
+                : ApiResponse<DrummingSubmitResult>.Ok(result));
+    }
+
     [HttpGet("process/{processCode}/open-entries")]
     public async Task<IActionResult> MetreProcessOpenEntries(string processCode, CancellationToken ct)
     {

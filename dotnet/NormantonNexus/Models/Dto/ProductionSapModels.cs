@@ -36,8 +36,8 @@ public sealed record BdcWrapper(List<BdcResponse> Responses);
 /// <summary>Mirrors SapServer's Mf41Request (Models/Bapi/ProductionModels.cs) — the shared request shape for both POST /api/production/reverse-backflush (MF41, backflush reversal) and POST /api/production/scrap/reverse (MBST, scrap-posting reversal). Both return a BdcResponse.</summary>
 public sealed record Mf41Request(string MaterialDocument);
 
-/// <summary>Mirrors SapServer's BomQuery — GET (with a JSON body) /api/production/bom.</summary>
-public sealed record SapBomQuery(string Material);
+/// <summary>Mirrors SapServer's BomQuery — GET (with a JSON body) /api/production/bom. Component is an optional server-side filter down to a single BOM line — used by DrummingHelper's braid-consumption backflush to look up just one component's ratio instead of the whole BOM.</summary>
+public sealed record SapBomQuery(string Material, string? Component = null);
 
 /// <summary>Mirrors SapServer's BomRow field-for-field (raw SAP shape, before profit-centre enrichment — see BomHelper.FetchBomAsync).</summary>
 public sealed record SapBomRow(string Material, string Plant, string Component, string Item, decimal ComponentQty, string ComponentUnit, string StorageLocation);
@@ -66,3 +66,19 @@ public sealed record SapGoodsMovementRequest(string Material, string Header, Lis
 
 /// <summary>Mirrors SapServer's GoodsMovementResponse exactly.</summary>
 public sealed record SapGoodsMovementResponse(string MaterialDocument, string MaterialDocumentYear, bool Success, List<SapReturnMessage> Messages);
+
+/// <summary>
+/// Mirrors SapServer's DrumBackflushRequest (POST /api/production/
+/// drumming-backflush) field-for-field — Drumming's one point of difference
+/// from every other production process: the finished drum also needs a row
+/// in two custom SAP tables (ZPRODBATCH_TBL/ZBATCHPACK_TBL) via
+/// Z_ZPRODBATCH_MAINT, chained on server-side after the plain ZF40N
+/// backflush. TraceabilityMaterials are the *materials* of the operator's
+/// linked traceability parents (resolved portal-side — SapServer has no
+/// access to prod.ProductionTrace), checked against this material's BOM for
+/// the informational bomMismatch flag below.
+/// </summary>
+public sealed record SapDrumBackflushRequest(string Material, decimal Quantity, string Header, string Customer, string PackCode, decimal WeightKg, List<string> TraceabilityMaterials);
+
+/// <summary>Mirrors SapServer's DrumBackflushResponse field-for-field. Backflush carries the same Type/MessageClass/MessageNumber the plain ZF40N backflush does (validated the same way as ProductionSapHelpers.ParseSapBackflush, just nested one level deeper) — everything else is only populated once the backflush itself produced a material document.</summary>
+public sealed record SapDrumBackflushResponse(BdcResponse Backflush, string MaterialDocument, string Batch, string RcBatch, string RcPack, bool BomMismatch, string[] ExpectedComponents, string[] ActualComponents);

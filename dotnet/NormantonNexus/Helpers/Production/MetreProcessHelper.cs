@@ -147,8 +147,11 @@ internal static class MetreProcessHelper
     /// and CompleteAsync's (draft→complete wizard) scrap step — Node itself
     /// duplicates this logic inline in both routes; consolidated here into
     /// one method rather than mechanically re-duplicating it a third time.
+    /// Also reused directly by DrummingHelper.SubmitAsync (Drumming is never
+    /// "EX", so it always takes the proportional-share branch — the same
+    /// math Node's own submitDrumming duplicates inline a third time).
     /// </summary>
-    private static async Task RecordScrapAsync(Microsoft.Data.SqlClient.SqlConnection connection, string code, int recordId, decimal? scrapTotalKg, IReadOnlyList<ScrapReasonInput> reasons, int userId, CancellationToken ct)
+    internal static async Task RecordScrapAsync(Microsoft.Data.SqlClient.SqlConnection connection, string code, int recordId, decimal? scrapTotalKg, IReadOnlyList<ScrapReasonInput> reasons, int userId, CancellationToken ct)
     {
         if (code == "EX")
         {
