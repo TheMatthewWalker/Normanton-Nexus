@@ -257,4 +257,50 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         var rows = await ScrapHelper.GetDocumentsAsync(nexusOperationsDb, scrapId, ct);
         return Ok(ApiResponse<IReadOnlyList<ScrapDocumentRow>>.Ok(rows));
     }
+
+    [HttpGet("reversal/search")]
+    public async Task<IActionResult> ReversalSearch([FromQuery] string? materialDocument, CancellationToken ct)
+    {
+        var rows = await ReversalHelper.SearchAsync(nexusOperationsDb, materialDocument, ct);
+        return Ok(ApiResponse<IReadOnlyList<SapPostingRow>>.Ok(rows));
+    }
+
+    [HttpGet("reversal/by-batch/{processCode}/{recordId:int}")]
+    public async Task<IActionResult> ReversalByBatch(string processCode, int recordId, CancellationToken ct)
+    {
+        var rows = await ReversalHelper.GetByBatchAsync(nexusOperationsDb, processCode, recordId, ct);
+        return Ok(ApiResponse<IReadOnlyList<SapPostingByBatchRow>>.Ok(rows));
+    }
+
+    [HttpGet("reversal/find")]
+    public async Task<IActionResult> ReversalFind([FromQuery] ReversalFindQuery query, CancellationToken ct)
+    {
+        var rows = await ReversalHelper.FindAsync(nexusOperationsDb, query, ct);
+        return Ok(ApiResponse<IReadOnlyList<SapPostingFindRow>>.Ok(rows));
+    }
+
+    [HttpPatch("reversal/{sapPostingId:int}")]
+    public async Task<IActionResult> ReversalMark(int sapPostingId, [FromBody] ReversalMarkRequest body, CancellationToken ct)
+    {
+        await ReversalHelper.MarkReversedAsync(nexusOperationsDb, sapServerClient, sapPostingId, body, GetUserId(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPost("reversal/execute")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ReversalExecute([FromBody] ReversalExecuteRequest body, CancellationToken ct)
+    {
+        var result = await ReversalHelper.ExecuteAsync(sapServerClient, auditLogger, body.MaterialDocument, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<ReversalExecuteResult>.Ok(result));
+    }
+
+    [HttpPost("reversal/bulk")]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    public async Task<IActionResult> ReversalBulk([FromBody] ReversalBulkRequest body, CancellationToken ct)
+    {
+        if (body.MaterialDocuments is not { Length: > 0 })
+            throw new NexusValidationException("materialDocuments array required.");
+        var results = await ReversalHelper.BulkReverseAsync(nexusOperationsDb, sapServerClient, auditLogger, body.MaterialDocuments, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<IReadOnlyList<ReversalBulkItemResult>>.Ok(results));
+    }
 }

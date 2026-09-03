@@ -82,4 +82,16 @@ public class ProductionNexusControllerTests
         await Assert.ThrowsAsync<NexusValidationException>(() =>
             controller.ScrapDocuments(0, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task ReversalBulk_rejects_an_empty_materialDocuments_array_without_opening_a_connection()
+    {
+        var db = new Mock<INexusOperationsDb>();
+        db.Setup(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("should not be called"));
+        var controller = CreateController(nexusOperationsDb: db);
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            controller.ReversalBulk(new ReversalBulkRequest([]), CancellationToken.None));
+    }
 }

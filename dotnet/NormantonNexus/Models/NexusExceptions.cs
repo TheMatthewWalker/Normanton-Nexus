@@ -41,3 +41,9 @@ public sealed class NexusBadGatewayException(string message) : NexusApiException
 {
     public override int StatusCode => StatusCodes.Status502BadGateway;
 }
+
+/// <summary>The request was well-formed but SAP rejected it for a reason the caller must act on differently (e.g. reversal/execute's "must be reversed via MBST" — matches Node's res.status(422) for that exact case).</summary>
+public sealed class NexusUnprocessableEntityException(string message) : NexusApiException("UNPROCESSABLE_ENTITY", message)
+{
+    public override int StatusCode => StatusCodes.Status422UnprocessableEntity;
+}

@@ -32,3 +32,6 @@ public sealed record ScrapPostRequest(string Material, decimal Quantity, string 
 
 /// <summary>SapServer's BdcWrapper — the array-of-BdcResponse envelope returned by /api/production/scrap/post, one entry per BOM component posted. Mirrors Node's parseBomScrapResponse's `sapRaw.data.responses` unwrap.</summary>
 public sealed record BdcWrapper(List<BdcResponse> Responses);
+
+/// <summary>Mirrors SapServer's Mf41Request (Models/Bapi/ProductionModels.cs) — the shared request shape for both POST /api/production/reverse-backflush (MF41, backflush reversal) and POST /api/production/scrap/reverse (MBST, scrap-posting reversal). Both return a BdcResponse.</summary>
+public sealed record Mf41Request(string MaterialDocument);

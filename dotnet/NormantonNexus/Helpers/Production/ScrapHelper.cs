@@ -459,6 +459,56 @@ internal static class ScrapHelper
         return rows.AsList();
     }
 
+    // ── Scrap cleanup triggered by a backflush reversal ─────────────────────
+
+    /// <summary>
+    /// Void all non-posted scrap for a job and reverse any already-SAP-posted
+    /// scrap documents — called whenever that job's backflush is reversed
+    /// (both the single PATCH /reversal/:id and bulk /reversal/bulk paths
+    /// in ReversalHelper). Mirrors Node's reverseJobScrap exactly, including
+    /// never propagating a failure to reverse one scrap document in SAP —
+    /// logged only, since the parent backflush reversal that triggered this
+    /// cleanup must still succeed regardless.
+    /// </summary>
+    internal static async Task ReverseJobScrapAsync(SqlConnection connection, ISapServerClient sap, string processCode, int recordId, int userId, CancellationToken ct)
+    {
+        await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE prod.ScrapEntries
+            SET IsVoided = 1
+            WHERE ProcessCode = @processCode AND ProcessRecordID = @recordId AND SAPPosted = 0
+            """, new { processCode, recordId }, cancellationToken: ct));
+
+        var docs = await connection.QueryAsync<(int ScrapDocumentId, string MaterialDocument)>(new CommandDefinition("""
+            SELECT smd.ScrapDocumentID, smd.MaterialDocument
+            FROM   prod.ScrapMaterialDocuments smd
+            JOIN   prod.ScrapEntries se ON se.ScrapID = smd.ScrapID
+            WHERE  se.ProcessCode = @processCode AND se.ProcessRecordID = @recordId
+              AND  smd.IsReversed = 0
+              AND  smd.MaterialDocument IS NOT NULL
+            """, new { processCode, recordId }, cancellationToken: ct));
+
+        foreach (var doc in docs)
+        {
+            string? reversalDoc = null;
+            try
+            {
+                var response = await sap.PostAsync<BdcResponse>("api/production/scrap/reverse", new Mf41Request(doc.MaterialDocument), userId, ct: ct);
+                reversalDoc = response?.DocumentNumber;
+            }
+            catch
+            {
+                // Matches Node's console.error-and-continue exactly.
+            }
+
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE prod.ScrapMaterialDocuments
+                SET IsReversed = 1, ReversalDocument = @reversalDoc,
+                    ReversedAt = GETDATE(), ReversedByUserID = @userId
+                WHERE ScrapDocumentID = @scrapDocumentId
+                """, new { reversalDoc, userId, scrapDocumentId = doc.ScrapDocumentId }, cancellationToken: ct));
+        }
+    }
+
     // ── Shared SAP-response helpers ─────────────────────────────────────────
 
     /// <summary>
