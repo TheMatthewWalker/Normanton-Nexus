@@ -46,8 +46,10 @@ builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
+builder.Services.AddScoped<IDataChangeLogService, DataChangeLogService>();
 
 builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(SapServerOptions.SectionName));
+builder.Services.Configure<LogisticsOptions>(builder.Configuration.GetSection(LogisticsOptions.SectionName));
 builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();
 
 builder.Services.Configure<LabelPrinterOptions>(builder.Configuration.GetSection(LabelPrinterOptions.SectionName));
