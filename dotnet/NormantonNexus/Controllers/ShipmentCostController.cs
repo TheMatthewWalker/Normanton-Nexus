@@ -3,19 +3,24 @@ using Microsoft.AspNetCore.Mvc;
 using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
+using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
 
 /// <summary>
-/// Freight cost lines — Logistics Sub-phase 8a.5a. Port of the CRUD/read
-/// subset of routes/shipmentcost.js — see ShipmentCostHelper's own header
-/// comment for what's deliberately excluded (POST /post-migo, POST
-/// /:costId/reverse, GET /analytics). Mounted at api/shipmentcost,
+/// Freight cost lines — Logistics Sub-phase 8a.5a (CRUD/read) + 8a.5b (real
+/// SAP PO/goods-receipt posting and reversal). Port of routes/
+/// shipmentcost.js — see ShipmentCostHelper's and
+/// ShipmentCostSapPostingHelper's own header comments for what's still
+/// deliberately excluded (GET /analytics — needs the same not-yet-ported
+/// inbound leg as the rest of this controller). Mounted at api/shipmentcost,
 /// matching Node's own separate router mount exactly (not api/shipmentmain).
 /// </summary>
 [Route("api/shipmentcost")]
-public sealed class ShipmentCostController(INexusOperationsDb nexusOperationsDb) : NexusControllerBase
+public sealed class ShipmentCostController(
+    INexusOperationsDb nexusOperationsDb, INexusDb nexusDb, ISapServerClient sapServerClient, ISapCredentialCipher sapCredentialCipher) : NexusControllerBase
 {
     [HttpGet("")]
     public async Task<IActionResult> GetAll(CancellationToken ct)
@@ -104,5 +109,25 @@ public sealed class ShipmentCostController(INexusOperationsDb nexusOperationsDb)
     {
         var rows = await ShipmentCostHelper.GetProcessedAsync(nexusOperationsDb, ct);
         return Ok(ApiResponse<IReadOnlyList<ShipmentCostListRow>>.Ok(rows));
+    }
+
+    // ── Sub-phase 8a.5b: real SAP PO/goods-receipt posting + reversal ──
+
+    [HttpPost("post-migo")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> PostMigo([FromBody] PostMigoRequest body, CancellationToken ct)
+    {
+        var result = await ShipmentCostSapPostingHelper.PostMigoAsync(nexusOperationsDb, nexusDb, sapServerClient, sapCredentialCipher, body.CostIds, GetUserId(), ct);
+        if (result.Error is not null)
+            return StatusCode(400, new ApiResponse<PostMigoResult>(false, result, new ApiError("VALIDATION_ERROR", result.Error)));
+        return Ok(ApiResponse<PostMigoResult>.Ok(result));
+    }
+
+    [HttpPost("{costId:long}/reverse")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> Reverse(long costId, CancellationToken ct)
+    {
+        var result = await ShipmentCostSapPostingHelper.ReverseAsync(nexusOperationsDb, sapServerClient, costId, GetUserId(), ct);
+        return Ok(ApiResponse<ReverseShipmentCostResult>.Ok(result));
     }
 }

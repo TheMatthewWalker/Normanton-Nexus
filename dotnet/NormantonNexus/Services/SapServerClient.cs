@@ -13,10 +13,24 @@ namespace NormantonNexus.Services;
 /// carries SapServer's own status code straight through, same as sap.js's
 /// makeSapToken-based routes throwing an Error with `.status` set from the
 /// upstream response.
+///
+/// <see cref="ResponseData"/> is the envelope's own `data` field on the failure
+/// response, typed as whatever `T` the call site asked for — SapServer's
+/// `ApiResponse&lt;T&gt;.Fail()` puts the generic error under
+/// `error.message` but the real SAP diagnostic (e.g. the RETURN-table
+/// messages from a rejected PO) under `data` (see
+/// PurchasingController.CreatePurchaseOrderAndReceipt's `PoMessages`
+/// field, always present on both its success AND failure response — both
+/// are the same `CreatePoAndReceiptResponse` shape). Previously discarded
+/// entirely — every caller only ever saw the generic wrapper text — until
+/// Sub-phase 8a.5b's post-migo port needed the real detail, matching
+/// Node's own `extractSapErrorMessage` (routes/shipmentcost.js). Cast back
+/// to the expected `T` at the catch site.
 /// </summary>
-public sealed class SapProxyException(int statusCode, string code, string message) : NexusApiException(code, message)
+public sealed class SapProxyException(int statusCode, string code, string message, object? data = null) : NexusApiException(code, message)
 {
     public override int StatusCode { get; } = statusCode;
+    public object? ResponseData { get; } = data;
 }
 
 /// <summary>
@@ -98,7 +112,8 @@ internal sealed class SapServerClient(HttpClient httpClient, IOptions<SapServerO
             throw new SapProxyException(
                 (int)response.StatusCode,
                 error?.Code ?? "SAP_ERROR",
-                error?.Message ?? $"SapServer returned {(int)response.StatusCode} with no error body.");
+                error?.Message ?? $"SapServer returned {(int)response.StatusCode} with no error body.",
+                envelope is null ? null : (object?)envelope.Data);
         }
 
         return envelope.Data;
