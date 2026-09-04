@@ -97,3 +97,27 @@ public sealed record ReassignmentSplit(long DeliveryId, decimal Qty);
 public sealed record ReassignmentPlanItem(long DeclarationLineId, long DeclarationId, string Material, long CancelledDeliveryId, decimal TotalQty, IReadOnlyList<ReassignmentSplit> Splits, decimal Shortfall);
 
 public sealed record ReassignmentApplyResult(IReadOnlyList<ReassignmentPlanItem> Applied, IReadOnlyList<ReassignmentPlanItem> Skipped);
+
+// ── Sub-phase 8e.2: SAP sync + PDF ──────────────────────────────────────────
+
+/// <summary>SapServer's ConsignmentGrRow (api/consignment/gr) — mirrored field-for-field.</summary>
+public sealed record ConsignmentGrRow(
+    string Material, string MaterialDocument, string MaterialDocItem, decimal Quantity, string Uom, string Vendor,
+    string DocumentDate, string PostingDate, string InvoiceNumber, string ReversalOfMaterialDocument, string ReversalOfMaterialDocItem);
+
+/// <summary>Already-parsed (SAP dd.mm.yyyy -> DateTime) GR row, ready for ConsignmentTrackerHelper.UpsertDeliveriesFromSapAsync.</summary>
+public sealed record SapDeliveryRow(
+    string Material, string MaterialDocument, string MaterialDocItem, decimal Quantity, string? Uom, string? InvoiceNumber,
+    DateTime? DocumentDate, DateTime? PostingDate, string? ReversalOfMaterialDocument, string? ReversalOfMaterialDocItem);
+
+public sealed record ConsignmentSyncResult(int Pulled, int Inserted, int CancellationsZeroed, IReadOnlyList<ReversalCancellationReviewRow> NeedsReview);
+
+/// <summary>One vendor's outcome within the daily sync entry point (RunDailySyncAsync) — Skipped covers Node's "inactive or no SapVendorNumber" case; Error covers a per-vendor sync failure that must not abort the rest of the batch.</summary>
+public sealed record VendorSyncOutcome(string VendorName, bool Skipped, int? Pulled, int? Inserted, int? CancellationsZeroed, int? NeedsReviewCount, string? Error);
+
+public sealed record StockSnapshotSyncOutcome(int? MaterialCount, string? Error);
+
+public sealed record DailySyncResult(IReadOnlyList<VendorSyncOutcome> Vendors, StockSnapshotSyncOutcome StockSnapshot);
+
+/// <summary>Per-material Starting Stock/Deliveries/Consumption/Ending Stock for one declaration's printable header — see ConsignmentDeclarationPdfHelper.</summary>
+public sealed record DeclarationMaterialSummary(string Material, decimal StartingStock, decimal Deliveries, decimal Consumption, decimal EndingStock);

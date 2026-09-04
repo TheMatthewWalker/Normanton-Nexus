@@ -24,14 +24,16 @@ namespace NormantonNexus.Helpers.Logistics;
 /// IDENTITY mismatch). Ported against the real `log.*` schema, not the
 /// stale draft.
 ///
-/// Deliberately excludes (Sub-phase 8e.2): the SAP GR sync
-/// (fetchSapVendorGr/mapGrRows, POST /vendors/:id/sync + the daily cron
-/// entry point), the live-stock refresh (fetchSapConsignmentStock, POST
-/// /stock/refresh — this Helper only reads the already-populated
-/// snapshot cache, not writes it), and the declaration PDF (GET
-/// /declarations/:id/pdf) — all genuinely external-integration/PDF work,
-/// same "core DB/algorithm logic first, external I/O second" split this
-/// migration already used for Shipping's own Sub-phase 8a.5 breakdown.
+/// This class originally excluded the SAP-write/PDF pieces, split out per
+/// the "core DB/algorithm logic first, external I/O second" precedent
+/// Shipping's own Sub-phase 8a.5 breakdown used — that gap is closed as of
+/// Sub-phase 8e.2 (see Helpers/Logistics/ConsignmentSapSyncHelper.cs for
+/// the SAP GR sync/stock refresh, and ConsignmentDeclarationDocumentHelper.cs
+/// for the PDF route). This class still owns ReplaceStockSnapshotAsync/
+/// UpsertDeliveriesFromSapAsync (added in 8e.2) since both are plain
+/// log.ConsignmentDelivery/ConsignmentStockSnapshot writes, not SAP calls
+/// themselves — ConsignmentSapSyncHelper calls into them after its own SAP
+/// fetch, matching Node's own consignmentsql.js/consignment.js split.
 ///
 /// `BuildReassignmentPlanForVendorAsync`/`ApplyReassignmentPlanAsync` are
 /// ported faithfully even though **no route in Node calls them at all** —
@@ -344,7 +346,124 @@ internal static class ConsignmentTrackerHelper
         return result;
     }
 
-    // ── Stock snapshot cache (read side — see Sub-phase 8e.2 for the write side) ──
+    // ── Stock snapshot cache (SAP MKOL SLABS, plant-wide) ────────────────
+    //
+    // Overwrite-only cache (TRUNCATE + re-insert every run) — refreshed by
+    // ConsignmentSapSyncHelper's daily sync entry point plus an optional
+    // manual "Refresh Now" (Sub-phase 8e.2), so the balance dashboard is an
+    // instant SQL read instead of a live SAP call that could legitimately
+    // take minutes (the unfiltered plant-wide MKOL scan).
+    internal static async Task<ConsignmentStockSnapshotMeta> ReplaceStockSnapshotAsync(INexusOperationsDb db, IReadOnlyDictionary<string, decimal> stockByMaterial, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var syncedAt = DateTime.UtcNow;
+
+        await connection.ExecuteAsync(new CommandDefinition("TRUNCATE TABLE log.ConsignmentStockSnapshot", cancellationToken: ct));
+        if (stockByMaterial.Count == 0) return new ConsignmentStockSnapshotMeta(0, syncedAt);
+
+        const int batchSize = 600; // 3 params/row — comfortably under SQL Server's 2100-param limit
+        var entries = stockByMaterial.ToList();
+        for (var i = 0; i < entries.Count; i += batchSize)
+        {
+            var batch = entries.Skip(i).Take(batchSize).ToList();
+            var parameters = new DynamicParameters();
+            var selectClauses = new List<string>();
+            for (var idx = 0; idx < batch.Count; idx++)
+            {
+                parameters.Add($"m{idx}", batch[idx].Key);
+                parameters.Add($"q{idx}", batch[idx].Value);
+                parameters.Add($"t{idx}", syncedAt);
+                selectClauses.Add($"SELECT @m{idx} AS Material, @q{idx} AS Qty, @t{idx} AS SnapshotAtUtc");
+            }
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"INSERT INTO log.ConsignmentStockSnapshot (Material, Qty, SnapshotAtUtc)\n{string.Join("\nUNION ALL\n", selectClauses)}",
+                parameters, cancellationToken: ct));
+        }
+
+        return new ConsignmentStockSnapshotMeta(entries.Count, syncedAt);
+    }
+
+    /// <summary>
+    /// SAP-sync upsert: insert-if-missing by (MaterialDocument,
+    /// MaterialDocItem), so a re-run of the daily sync never creates
+    /// duplicates or disturbs an existing row's RemainingQty. Also
+    /// backfills InvoiceNumber/ReversalOfMaterialDocument/Item onto an
+    /// ALREADY-EXISTING row whenever the fresh SAP pull has a value the
+    /// stored row is still missing (COALESCE-guarded — never overwrites a
+    /// non-blank stored value, only fills a gap).
+    /// </summary>
+    internal static async Task<int> UpsertDeliveriesFromSapAsync(INexusOperationsDb db, long vendorId, IReadOnlyList<SapDeliveryRow> rows, CancellationToken ct)
+    {
+        if (rows.Count == 0) return 0;
+
+        var seen = new HashSet<string>();
+        var deduped = rows.Where(r => seen.Add($"{r.MaterialDocument}||{r.MaterialDocItem}")).ToList();
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var inserted = 0;
+        const int batchSize = 200;
+        for (var i = 0; i < deduped.Count; i += batchSize)
+        {
+            var batch = deduped.Skip(i).Take(batchSize).ToList();
+            using var transaction = connection.BeginTransaction();
+            try
+            {
+                foreach (var r in batch)
+                {
+                    var parameters = new
+                    {
+                        vendorId,
+                        material = r.Material,
+                        materialDocument = r.MaterialDocument,
+                        materialDocItem = r.MaterialDocItem,
+                        quantity = r.Quantity,
+                        uom = r.Uom,
+                        invoiceNumber = r.InvoiceNumber,
+                        documentDate = r.DocumentDate,
+                        postingDate = r.PostingDate,
+                        reversalOfMaterialDocument = r.ReversalOfMaterialDocument,
+                        reversalOfMaterialDocItem = r.ReversalOfMaterialDocItem,
+                    };
+
+                    inserted += await connection.ExecuteAsync(new CommandDefinition("""
+                        INSERT INTO log.ConsignmentDelivery
+                            (VendorId, Material, MaterialDocument, MaterialDocItem, Quantity, Uom,
+                             InvoiceNumber, DocumentDate, PostingDate, RemainingQty, Source,
+                             ReversalOfMaterialDocument, ReversalOfMaterialDocItem)
+                        SELECT @vendorId, @material, @materialDocument, @materialDocItem, @quantity, @uom,
+                               @invoiceNumber, @documentDate, @postingDate, @quantity, 'SAP',
+                               @reversalOfMaterialDocument, @reversalOfMaterialDocItem
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM log.ConsignmentDelivery
+                            WHERE MaterialDocument = @materialDocument AND MaterialDocItem = @materialDocItem
+                        )
+                        """, parameters, transaction, cancellationToken: ct));
+
+                    await connection.ExecuteAsync(new CommandDefinition("""
+                        UPDATE log.ConsignmentDelivery SET
+                            InvoiceNumber = COALESCE(NULLIF(InvoiceNumber, ''), @invoiceNumber),
+                            ReversalOfMaterialDocument = COALESCE(ReversalOfMaterialDocument, @reversalOfMaterialDocument),
+                            ReversalOfMaterialDocItem = COALESCE(ReversalOfMaterialDocItem, @reversalOfMaterialDocItem)
+                        WHERE MaterialDocument = @materialDocument AND MaterialDocItem = @materialDocItem
+                            AND (
+                                ((InvoiceNumber IS NULL OR InvoiceNumber = '') AND @invoiceNumber IS NOT NULL)
+                                OR (ReversalOfMaterialDocument IS NULL AND @reversalOfMaterialDocument IS NOT NULL)
+                            )
+                        """, parameters, transaction, cancellationToken: ct));
+                }
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+
+        return inserted;
+    }
+
+    // ── Stock snapshot cache (read side) ─────────────────────────────────
 
     internal static async Task<IReadOnlyDictionary<string, decimal>> GetStockSnapshotAsync(INexusOperationsDb db, CancellationToken ct)
     {

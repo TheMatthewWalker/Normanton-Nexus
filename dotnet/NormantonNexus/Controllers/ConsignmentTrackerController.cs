@@ -3,21 +3,20 @@ using Microsoft.AspNetCore.Mvc;
 using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
 
 /// <summary>
 /// Vendor Consignment Tracker — Logistics Sub-phase 8e.1 (DB/algorithm
-/// core). Port of the non-SAP/non-PDF subset of routes/consignment.js —
-/// see ConsignmentTrackerHelper's own header comment for what's
-/// deliberately excluded (SAP GR sync, stock-snapshot refresh, declaration
-/// PDF — all Sub-phase 8e.2) and for the reassignment-plan functions that
-/// exist but have no route here, matching Node exactly. Mounted at
-/// api/consignment, matching Node's own mount.
+/// core) + 8e.2 (SAP sync + PDF). Port of routes/consignment.js — see
+/// ConsignmentTrackerHelper's own header comment for the reassignment-plan
+/// functions that exist but have no route here, matching Node exactly.
+/// Mounted at api/consignment, matching Node's own mount.
 /// </summary>
 [Route("api/consignment")]
-public sealed class ConsignmentTrackerController(INexusOperationsDb nexusOperationsDb) : NexusControllerBase
+public sealed class ConsignmentTrackerController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient) : NexusControllerBase
 {
     [HttpGet("vendors")]
     [Authorize(Policy = "Perm:LOG_MRP")]
@@ -142,5 +141,31 @@ public sealed class ConsignmentTrackerController(INexusOperationsDb nexusOperati
     {
         await ConsignmentTrackerHelper.CancelDeclarationAsync(nexusOperationsDb, declarationId, ct);
         return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    // ── Sub-phase 8e.2: SAP sync + PDF ──────────────────────────────────
+
+    [HttpPost("stock/refresh")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> RefreshStock(CancellationToken ct)
+    {
+        var result = await ConsignmentSapSyncHelper.RefreshStockSnapshotAsync(nexusOperationsDb, sapServerClient, GetUserId(), ct);
+        return Ok(ApiResponse<ConsignmentStockSnapshotMeta>.Ok(result));
+    }
+
+    [HttpPost("vendors/{vendorId:long}/sync")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> SyncVendor(long vendorId, CancellationToken ct)
+    {
+        var result = await ConsignmentSapSyncHelper.SyncVendorAsync(nexusOperationsDb, sapServerClient, vendorId, GetUserId(), ct);
+        return Ok(ApiResponse<ConsignmentSyncResult>.Ok(result));
+    }
+
+    [HttpGet("declarations/{declarationId:long}/pdf")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> GetDeclarationPdf(long declarationId, CancellationToken ct)
+    {
+        var pdf = await ConsignmentDeclarationDocumentHelper.GeneratePdfAsync(nexusOperationsDb, declarationId, ct);
+        return File(pdf, "application/pdf", $"Consignment-Declaration-{declarationId}.pdf");
     }
 }
