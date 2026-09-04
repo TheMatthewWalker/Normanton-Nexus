@@ -9,6 +9,7 @@ using NormantonNexus.Middleware;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Admin;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 // Required since QuestPDF 2023's licensing change, or Document.GeneratePdf()
@@ -44,6 +45,7 @@ builder.Services.AddScoped<IPermissionResolver, PermissionResolver>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminService>();
+builder.Services.AddScoped<INotificationService, NotificationService>();
 
 builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(SapServerOptions.SectionName));
 builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();

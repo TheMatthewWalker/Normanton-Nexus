@@ -105,3 +105,17 @@ public sealed record CreateTransferOrderRequest(
     string? Batch = null, string? StockCategory = null, string? SpecialStockIndicator = null, string? SpecialStockNumber = null);
 
 public sealed record CreateTransferOrderResponse(string TransferOrderNumber, bool Success, List<SapReturnMessage> Messages);
+
+/// <summary>Mirrors SapServer's ConsignmentMb1bRequest field-for-field — POST /api/warehouse/consignment-mb1b (MB1B + LT01 non-consign/consign pair). Used when consignment stock (LQUA-SOBKZ 'K') moves into a production bin — needs a real goods-issue-from-consignment posting, not just a bin-to-bin transfer order.</summary>
+public sealed record ConsignmentMb1bRequest(
+    string Material, decimal Quantity, string Header, string SpecialStockNumber, string StorageLocation,
+    string SourceType, string SourceBin, string DestinationType, string DestinationBin, string DeliveryNote = "", bool TestRun = false);
+
+/// <summary>Mirrors SapServer's ConsignmentMb1bResponse — Success reflects whether all three legs (MB1B goods issue, then the two LT01 transfer postings) actually succeeded, not just that the RFC calls themselves didn't throw.</summary>
+public sealed record ConsignmentMb1bResponse(bool Success, string Mb1bMessage, string ToNonConsignMessage, string ToConsignMessage);
+
+/// <summary>Mirrors SapServer's StockQuery — [FromUri] query-string parameters for GET /api/warehouse/stock, sent as an actual query string (QueryHelpers.AddQueryString), not a JSON body — that endpoint model-binds from the URL, unlike find-cost-collector/check-profit-centre's [HttpGet]+[FromBody] pattern elsewhere in this port.</summary>
+public sealed record SapStockQuery(string? Material = null, string? StorageType = null, string? ExcludeStorageType = null, string? Bin = null, string? Batch = null, string? StorageLocation = null, string? StockCategory = null, string? ProfitCentre = null, int RowCount = 9999);
+
+/// <summary>Mirrors SapServer's StockRow field-for-field — one LQUA quant.</summary>
+public sealed record SapStockRow(string StorageLocation, string StorageType, string Bin, string Material, decimal AvailableQty, string Batch, string StockCategory, string SpecialStockInd, string SpecialStockNum, string GrDate, string ProfitCentre);
