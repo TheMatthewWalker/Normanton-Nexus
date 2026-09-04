@@ -84,6 +84,14 @@ internal static class IsoparHelper
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM log.IsoparMeterReading WHERE ReadingId = @readingId", new { readingId }, cancellationToken: ct));
     }
 
+    /// <summary>One call for the order-suggestion engine's buildSuggestionForRow/preview (8b.3) — the latest meter reading + current planning rate together, matching Node's getIsoparForecastContext.</summary>
+    internal static async Task<IsoparForecastContext> GetForecastContextAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        var latestReading = await GetLatestReadingAsync(db, ct);
+        var planningRate = await GetPlanningRateAsync(db, ct);
+        return new IsoparForecastContext(latestReading, planningRate);
+    }
+
     // ── Planning rate (log.IsoparPlanningRate — versioned, "current" = latest row) ──
 
     private static async Task<IsoparPlanningRateRow?> GetPlanningRateAsync(INexusOperationsDb db, CancellationToken ct)

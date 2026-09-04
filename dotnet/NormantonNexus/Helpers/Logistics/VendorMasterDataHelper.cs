@@ -154,6 +154,24 @@ internal static class VendorMasterDataHelper
         return rows.AsList();
     }
 
+    /// <summary>
+    /// The forecast-facing raw read (no MaterialText join) — used by the order-suggestion engine
+    /// (8b.3), which needs only the raw date/percent fields, potentially many times per request.
+    /// Optionally scoped to a material set; unfiltered when computing every suggestion in one pass.
+    /// </summary>
+    internal static async Task<IReadOnlyList<DemandAdjustmentRow>> ListDemandAdjustmentsAsync(INexusOperationsDb db, IReadOnlyList<string>? materials, CancellationToken ct)
+    {
+        var whereSql = materials is { Count: > 0 } ? "WHERE Material IN @materials" : "";
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<DemandAdjustmentRow>(new CommandDefinition($"""
+            SELECT AdjustmentId, Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy, CreatedAtUtc, UpdatedAtUtc, NULL AS MaterialText
+            FROM log.DemandAdjustment
+            {whereSql}
+            ORDER BY Material, StartDate
+            """, new { materials }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
     internal static async Task<long> CreateDemandAdjustmentAsync(INexusOperationsDb db, UpsertDemandAdjustmentRequest body, string? createdBy, CancellationToken ct)
     {
         ValidateDemandAdjustment(body);

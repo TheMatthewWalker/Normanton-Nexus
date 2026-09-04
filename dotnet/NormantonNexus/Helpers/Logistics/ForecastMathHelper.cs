@@ -212,9 +212,9 @@ internal static class ForecastMathHelper
     /// it does to the graph — used for the order-suggestion sizing calculation, which
     /// needs a demand total over an arbitrary day-count rather than the bucketed series.
     /// </summary>
-    internal static decimal DemandOverDays(IReadOnlyList<decimal> predictedMonthly, DateTime from, int days, IReadOnlyList<DemandAdjustmentWindow>? adjustments = null, Func<DateTime, decimal>? dailyUsageFnOverride = null)
+    internal static decimal DemandOverDays(IReadOnlyList<decimal> predictedMonthly, DateTime from, decimal days, IReadOnlyList<DemandAdjustmentWindow>? adjustments = null, Func<DateTime, decimal>? dailyUsageFnOverride = null)
     {
-        var rangeEnd = from.AddDays(days);
+        var rangeEnd = from.AddDays((double)days);
         var dailyUsage = dailyUsageFnOverride ?? MakeDailyUsageFn(predictedMonthly, from, adjustments ?? []);
         var total = 0m;
         for (var day = from; day < rangeEnd; day = day.AddDays(1))

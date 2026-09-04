@@ -225,4 +225,76 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
         var rateId = await IsoparHelper.UpdatePlanningRateAsync(nexusOperationsDb, body, GetUsername(), ct);
         return Ok(ApiResponse<object>.Ok(new { rateId }));
     }
+
+    // ── Sub-phase 8b.3: Order suggestion engine (log.PurchaseOrderSuggestion) ──
+    // create-po/regenerate-pdf (real SAP PO creation) are deferred to 8b.7.
+
+    [HttpGet("order-suggestions")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> ListOrderSuggestions(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<VendorSuggestionGroup>>.Ok(await PurchaseOrderSuggestionHelper.ComputeOrderSuggestionsGroupedAsync(nexusOperationsDb, ct)));
+
+    [HttpGet("order-suggestions/vendor/{vendorId:long}/build")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> GetVendorOrderBuild(long vendorId, CancellationToken ct) =>
+        Ok(ApiResponse<VendorOrderBuildResult>.Ok(await PurchaseOrderSuggestionHelper.ComputeVendorOrderBuildAsync(nexusOperationsDb, vendorId, ct)));
+
+    [HttpPost("order-suggestions/preview")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> PreviewOrderSuggestions([FromBody] OrderSuggestionPreviewRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<OrderSuggestionPreviewResult>>.Ok(await PurchaseOrderSuggestionHelper.PreviewAsync(nexusOperationsDb, body, ct)));
+
+    [HttpPost("order-suggestions/accept")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AcceptOrderSuggestion([FromBody] AcceptOrderSuggestionRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<AcceptOrderSuggestionResult>.Ok(await PurchaseOrderSuggestionHelper.AcceptAsync(nexusOperationsDb, body, ct)));
+
+    [HttpPost("order-suggestions/accept-batch")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AcceptOrderSuggestionBatch([FromBody] AcceptOrderSuggestionBatchRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<AcceptOrderSuggestionBatchResult>.Ok(await PurchaseOrderSuggestionHelper.AcceptBatchAsync(nexusOperationsDb, body, ct)));
+
+    [HttpPost("order-suggestions/manual")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AddManualOrder([FromBody] ManualOrderRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<ManualOrderResult>.Ok(await PurchaseOrderSuggestionHelper.ManualAsync(nexusOperationsDb, body, ct)));
+
+    [HttpPost("order-suggestions/manual/bulk")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AddManualOrdersBulk([FromBody] ManualOrderBulkRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<ManualOrderBulkResult>.Ok(await PurchaseOrderSuggestionHelper.ManualBulkAsync(nexusOperationsDb, body, ct)));
+
+    [HttpGet("order-suggestions/tracked")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> ListTrackedOrders(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<OrderSuggestionTrackedRow>>.Ok(await PurchaseOrderSuggestionHelper.ListTrackedAsync(nexusOperationsDb, ct)));
+
+    [HttpPost("order-suggestions/assign-schedule-agreement")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AssignScheduleAgreement([FromBody] AssignScheduleAgreementRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<AssignScheduleAgreementResult>.Ok(await PurchaseOrderSuggestionHelper.AssignScheduleAgreementAsync(nexusOperationsDb, body, ct)));
+
+    [HttpPut("order-suggestions/{suggestionId:long}")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> UpdateOrderSuggestion(long suggestionId, [FromBody] UpdateOrderSuggestionStatusRequest body, CancellationToken ct)
+    {
+        await PurchaseOrderSuggestionHelper.UpdateStatusAsync(nexusOperationsDb, suggestionId, body, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPatch("order-suggestions/{suggestionId:long}/po-item")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> UpdateOrderSuggestionPoItem(long suggestionId, [FromBody] UpdateOrderSuggestionPoItemRequest body, CancellationToken ct)
+    {
+        await PurchaseOrderSuggestionHelper.UpdatePoItemAsync(nexusOperationsDb, suggestionId, body, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("order-suggestions/{suggestionId:long}")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> DeleteOrderSuggestion(long suggestionId, CancellationToken ct)
+    {
+        await PurchaseOrderSuggestionHelper.DeleteAsync(nexusOperationsDb, suggestionId, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
 }
