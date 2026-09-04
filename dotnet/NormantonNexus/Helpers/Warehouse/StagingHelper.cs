@@ -1,6 +1,7 @@
 using Dapper;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Data.SqlClient;
+using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
