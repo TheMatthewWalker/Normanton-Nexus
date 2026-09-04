@@ -52,6 +52,9 @@ builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(Sa
 builder.Services.Configure<LogisticsOptions>(builder.Configuration.GetSection(LogisticsOptions.SectionName));
 builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();
 
+builder.Services.Configure<ClearPortOptions>(builder.Configuration.GetSection(ClearPortOptions.SectionName));
+builder.Services.AddHttpClient<IClearPortClient, ClearPortClient>();
+
 builder.Services.Configure<LabelPrinterOptions>(builder.Configuration.GetSection(LabelPrinterOptions.SectionName));
 
 builder.Services.Configure<SapCredentialOptions>(builder.Configuration.GetSection(SapCredentialOptions.SectionName));

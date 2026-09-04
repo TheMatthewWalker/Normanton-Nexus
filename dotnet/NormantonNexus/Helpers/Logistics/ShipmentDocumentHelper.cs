@@ -182,7 +182,7 @@ internal static class ShipmentDocumentHelper
         return null;
     }
 
-    private static string SanitizeFileSegment(string? value)
+    internal static string SanitizeFileSegment(string? value)
     {
         var clean = System.Text.RegularExpressions.Regex.Replace(value ?? "", "[<>:\"/\\\\|?*]", "_");
         clean = System.Text.RegularExpressions.Regex.Replace(clean, @"\s+", "-");

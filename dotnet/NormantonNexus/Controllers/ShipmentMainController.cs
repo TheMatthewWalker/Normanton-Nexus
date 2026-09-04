@@ -21,7 +21,8 @@ namespace NormantonNexus.Controllers;
 /// </summary>
 [Route("api/shipmentmain")]
 public sealed class ShipmentMainController(
-    INexusOperationsDb nexusOperationsDb, INexusDb nexusDb, IOptions<LogisticsOptions> logisticsOptions, IDataChangeLogService dataChangeLog) : NexusControllerBase
+    INexusOperationsDb nexusOperationsDb, INexusDb nexusDb, IOptions<LogisticsOptions> logisticsOptions, IDataChangeLogService dataChangeLog,
+    ISapServerClient sapServerClient, IClearPortClient clearPortClient, IOptions<ClearPortOptions> clearPortOptions) : NexusControllerBase
 {
     [HttpGet("queue/{mode}")]
     public async Task<IActionResult> GetQueue(string mode, CancellationToken ct)
@@ -279,5 +280,18 @@ public sealed class ShipmentMainController(
     {
         var result = await ShipmentCollectionEmailHelper.SendAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct);
         return Ok(ApiResponse<SendCollectionEmailResult>.Ok(result));
+    }
+
+    // ── Sub-phase 8a.5c: ClearPort customs declaration submission ──────
+
+    [HttpPost("customs/create")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> CreateCustoms([FromBody] CustomsCreateBulkRequest body, CancellationToken ct)
+    {
+        var result = await ShipmentCustomsHelper.CreateAsync(
+            nexusOperationsDb, sapServerClient, clearPortClient, clearPortOptions, logisticsOptions, dataChangeLog, body.ShipmentIds, GetUserId(), GetUsername(), ct);
+        if (result.Completed.Count == 0)
+            return StatusCode(502, new ApiResponse<CustomsCreateResult>(false, result, new ApiError("BAD_GATEWAY", "No customs entries were completed.")));
+        return Ok(ApiResponse<CustomsCreateResult>.Ok(result));
     }
 }
