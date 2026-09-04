@@ -88,4 +88,68 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
             ? Ok(ApiResponse<object?>.Ok(null))
             : StatusCode(result.StatusCode, new ApiResponse<object?>(false, null, new ApiError(result.StatusCode == 422 ? "UNPROCESSABLE_ENTITY" : "CONFLICT", result.Error ?? "Sync failed.")));
     }
+
+    [HttpGet("zdelflag/warnings")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> GetZdelflagWarnings(CancellationToken ct)
+    {
+        var rows = await DeliveryCompletionHelper.GetZdelflagWarningsAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<DeliveryRunWarningRow>>.Ok(rows));
+    }
+
+    [HttpGet("{deliveryId:long}/zdelflag/status")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> GetZdelflagStatus(long deliveryId, CancellationToken ct)
+    {
+        var result = await DeliveryCompletionHelper.GetZdelflagStatusAsync(nexusOperationsDb, deliveryId, ct);
+        return Ok(ApiResponse<DeliveryRunStatusResult>.Ok(result));
+    }
+
+    [HttpPost("{deliveryId:long}/zdelflag/reprocess")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> ReprocessZdelflag(long deliveryId, CancellationToken ct)
+    {
+        var result = await DeliveryCompletionHelper.ReprocessZdelflagAsync(nexusOperationsDb, sapServerClient, deliveryId, ct);
+        return Ok(ApiResponse<ZdelflagRunResult>.Ok(result));
+    }
+
+    [HttpPost("{deliveryId:long}/zdelflag/resolve")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> ResolveZdelflag(long deliveryId, [FromBody] ResolveRunRequest body, CancellationToken ct)
+    {
+        await DeliveryCompletionHelper.ResolveZdelflagAsync(nexusOperationsDb, deliveryId, body, GetUsername(), GetUserId(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpGet("goods-issue/warnings")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> GetGoodsIssueWarnings(CancellationToken ct)
+    {
+        var rows = await DeliveryCompletionHelper.GetGoodsIssueWarningsAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<DeliveryRunWarningRow>>.Ok(rows));
+    }
+
+    [HttpGet("{deliveryId:long}/goods-issue/status")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> GetGoodsIssueStatus(long deliveryId, CancellationToken ct)
+    {
+        var result = await DeliveryCompletionHelper.GetGoodsIssueStatusAsync(nexusOperationsDb, deliveryId, ct);
+        return Ok(ApiResponse<DeliveryRunStatusResult>.Ok(result));
+    }
+
+    [HttpPost("{deliveryId:long}/goods-issue/reprocess")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> ReprocessGoodsIssue(long deliveryId, CancellationToken ct)
+    {
+        var result = await DeliveryCompletionHelper.ReprocessGoodsIssueAsync(nexusOperationsDb, sapServerClient, deliveryId, GetUserId(), ct);
+        return Ok(ApiResponse<GoodsIssueRunResult>.Ok(result));
+    }
+
+    [HttpPost("{deliveryId:long}/goods-issue/resolve")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> ResolveGoodsIssue(long deliveryId, [FromBody] ResolveRunRequest body, CancellationToken ct)
+    {
+        await DeliveryCompletionHelper.ResolveGoodsIssueAsync(nexusOperationsDb, deliveryId, body, GetUsername(), GetUserId(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
 }

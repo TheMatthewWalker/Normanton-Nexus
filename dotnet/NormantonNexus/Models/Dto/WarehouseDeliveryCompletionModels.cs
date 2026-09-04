@@ -35,3 +35,11 @@ public sealed record CompleteDeliveryGroupResult(
 
 /// <summary>Same "Helper returns a result" pattern for sync-delivery-quantities — Success:false covers both 409 outcomes (an item now exceeds tolerance, or nothing needs correcting) and the 422 (SAP rejected the change); Error/FailedDeliveryId are only populated for the 422 case, matching Node's own per-delivery-in-group error message.</summary>
 public sealed record SyncDeliveryQuantitiesResult(bool Success, int StatusCode, string? Error);
+
+// ── ZDELFLAG/Goods Issue warning-log queues ─────────────────────────────
+
+public sealed record DeliveryRunWarningRow(string DeliveryId, string Status, List<SapReturnMessage> Messages, DateTime RanAtUtc);
+
+public sealed record DeliveryRunStatusResult(string? Status, List<SapReturnMessage> Messages, DateTime? RanAtUtc);
+
+public sealed record ResolveRunRequest(string? Note);

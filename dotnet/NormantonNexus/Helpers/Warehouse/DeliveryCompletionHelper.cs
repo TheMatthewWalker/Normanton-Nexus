@@ -1,5 +1,7 @@
+using System.Text.Json;
 using Dapper;
 using Microsoft.Data.SqlClient;
+using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
@@ -10,9 +12,10 @@ namespace NormantonNexus.Helpers.Warehouse;
 /// <summary>
 /// Delivery completion pipeline — port of routes/deliverymain.js's
 /// PATCH /:deliveryId/complete, POST /:deliveryId/sync-delivery-quantities,
-/// completeOneDelivery, runZdelflagMaintenance, and runGoodsIssueApproval.
-/// See WarehouseSapModels.cs's header comment for the SAP-facing DTOs this
-/// calls, and its SapGoodsIssueRequest/SapDeliveryChangeRequest doc
+/// completeOneDelivery, runZdelflagMaintenance, runGoodsIssueApproval, and
+/// the ZDELFLAG/Goods Issue warning-log queues (warnings/status/reprocess/
+/// resolve). See WarehouseSapModels.cs's header comment for the SAP-facing
+/// DTOs this calls, and its SapGoodsIssueRequest/SapDeliveryChangeRequest
 /// comments for the real, confirmed-vs-unconfirmed state of each BAPI
 /// contract this depends on.
 /// </summary>
@@ -20,6 +23,19 @@ internal static class DeliveryCompletionHelper
 {
     private const decimal Epsilon = 0.001m;   // absorbs float rounding noise -> counts as an exact match
     private const decimal Tolerance = 0.10m;  // 10% either way, per the user's explicit instruction
+
+    /// <summary>
+    /// log.DeliveryZdelflagRun/log.DeliveryGoodsIssueRun's `messages` column
+    /// is a plain NVARCHAR(MAX) JSON array, written by Node as
+    /// JSON.stringify(messages) — lowercase `type`/`message` keys, since
+    /// that's just how a JS object serializes. Must be read/written with
+    /// the same camelCase policy here (SapReturnMessage's real C# property
+    /// names are PascalCase Type/Message) or this app would neither read
+    /// back rows Node already wrote, nor write rows the still-running Node
+    /// app's own JSON.parse(messages || '[]') could read during any
+    /// transition period.
+    /// </summary>
+    private static readonly JsonSerializerOptions MessagesJsonOptions = new(JsonSerializerDefaults.Web);
 
     private sealed record ZdelflagPalletRow(int PalletId, string? PalletType, decimal? GrossWeight, decimal? PackagingWeight, bool IsOwned);
     private sealed record ZdelflagPackageRow(int PalletId, string? SapMaterial, decimal? SapQuantity, string? SapBatch, string? SapDeliveryItem, string? SapPackagingInstruction);
@@ -91,7 +107,7 @@ internal static class DeliveryCompletionHelper
                 {
                     deliveryId = deliveryId.ToString(),
                     status,
-                    messages = System.Text.Json.JsonSerializer.Serialize(messages),
+                    messages = JsonSerializer.Serialize(messages, MessagesJsonOptions),
                     ranByUserId = userId
                 }, cancellationToken: ct));
             }
@@ -308,7 +324,7 @@ internal static class DeliveryCompletionHelper
                 await connection.ExecuteAsync(new CommandDefinition("""
                     INSERT INTO log.DeliveryGoodsIssueRun (deliveryID, status, messages)
                     VALUES (@deliveryId, @status, @messages)
-                    """, new { deliveryId = deliveryId.ToString(), status, messages = System.Text.Json.JsonSerializer.Serialize(messages) }, cancellationToken: ct));
+                    """, new { deliveryId = deliveryId.ToString(), status, messages = JsonSerializer.Serialize(messages, MessagesJsonOptions) }, cancellationToken: ct));
             }
             catch (Exception err)
             {
@@ -565,5 +581,119 @@ internal static class DeliveryCompletionHelper
         }
 
         return new SyncDeliveryQuantitiesResult(true, 200, null);
+    }
+
+    // ── ZDELFLAG/Goods Issue warning-log queues ─────────────────────────
+
+    internal static async Task<IReadOnlyList<DeliveryRunWarningRow>> GetZdelflagWarningsAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await GetWarningsAsync(connection, "log.DeliveryZdelflagRun", ["Failed", "Warning"], ct);
+    }
+
+    internal static async Task<IReadOnlyList<DeliveryRunWarningRow>> GetGoodsIssueWarningsAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await GetWarningsAsync(connection, "log.DeliveryGoodsIssueRun", ["Failed"], ct);
+    }
+
+    private static async Task<IReadOnlyList<DeliveryRunWarningRow>> GetWarningsAsync(SqlConnection connection, string table, string[] statuses, CancellationToken ct)
+    {
+        var rows = await connection.QueryAsync<(string DeliveryId, string Status, string Messages, DateTime RanAtUtc)>(new CommandDefinition($"""
+            SELECT r.deliveryID AS DeliveryId, r.status AS Status, r.messages AS Messages, r.ranAtUtc AS RanAtUtc
+            FROM {table} r
+            INNER JOIN (
+                SELECT deliveryID, MAX(ranAtUtc) AS latestRun FROM {table} GROUP BY deliveryID
+            ) latest ON latest.deliveryID = r.deliveryID AND latest.latestRun = r.ranAtUtc
+            WHERE r.status IN @statuses
+            ORDER BY r.ranAtUtc DESC
+            """, new { statuses }, cancellationToken: ct));
+        return rows.Select(r => new DeliveryRunWarningRow(r.DeliveryId, r.Status, DeserializeMessages(r.Messages), r.RanAtUtc)).ToArray();
+    }
+
+    private static List<SapReturnMessage> DeserializeMessages(string? json) =>
+        string.IsNullOrEmpty(json) ? [] : JsonSerializer.Deserialize<List<SapReturnMessage>>(json, MessagesJsonOptions) ?? [];
+
+    internal static async Task<DeliveryRunStatusResult> GetZdelflagStatusAsync(INexusOperationsDb db, long deliveryId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await GetStatusAsync(connection, "log.DeliveryZdelflagRun", deliveryId, ct);
+    }
+
+    internal static async Task<DeliveryRunStatusResult> GetGoodsIssueStatusAsync(INexusOperationsDb db, long deliveryId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await GetStatusAsync(connection, "log.DeliveryGoodsIssueRun", deliveryId, ct);
+    }
+
+    private static async Task<DeliveryRunStatusResult> GetStatusAsync(SqlConnection connection, string table, long deliveryId, CancellationToken ct)
+    {
+        var row = await connection.QuerySingleOrDefaultAsync<(string Status, string Messages, DateTime RanAtUtc)?>(new CommandDefinition($"""
+            SELECT TOP 1 status AS Status, messages AS Messages, ranAtUtc AS RanAtUtc FROM {table} WHERE deliveryID = @deliveryId ORDER BY ranAtUtc DESC
+            """, new { deliveryId = deliveryId.ToString() }, cancellationToken: ct));
+        return row is null
+            ? new DeliveryRunStatusResult(null, [], null)
+            : new DeliveryRunStatusResult(row.Value.Status, DeserializeMessages(row.Value.Messages), row.Value.RanAtUtc);
+    }
+
+    internal static async Task<ZdelflagRunResult> ReprocessZdelflagAsync(INexusOperationsDb db, ISapServerClient sap, long deliveryId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var latestStatus = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 status FROM log.DeliveryZdelflagRun WHERE deliveryID = @deliveryId ORDER BY ranAtUtc DESC", new { deliveryId = deliveryId.ToString() }, cancellationToken: ct));
+        if (latestStatus == "Success")
+            throw new NexusConflictException("This delivery already has a successful ZDELFLAG/ZDELPACK run and cannot be reprocessed.");
+
+        return await RunZdelflagMaintenanceAsync(connection, sap, deliveryId, null, ct);
+    }
+
+    internal static async Task<GoodsIssueRunResult> ReprocessGoodsIssueAsync(INexusOperationsDb db, ISapServerClient sap, long deliveryId, int userId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var zdelflagStatus = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 status FROM log.DeliveryZdelflagRun WHERE deliveryID = @deliveryId ORDER BY ranAtUtc DESC", new { deliveryId = deliveryId.ToString() }, cancellationToken: ct));
+        if (zdelflagStatus != "Success")
+            throw new NexusConflictException("This delivery's ZDELFLAG/ZDELPACK maintenance has not succeeded — Goods Issue cannot be posted yet.");
+
+        var latestStatus = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 status FROM log.DeliveryGoodsIssueRun WHERE deliveryID = @deliveryId ORDER BY ranAtUtc DESC", new { deliveryId = deliveryId.ToString() }, cancellationToken: ct));
+        if (latestStatus == "Success")
+            throw new NexusConflictException("This delivery already has a successful Goods Issue posting and cannot be reprocessed.");
+
+        return await RunGoodsIssueApprovalAsync(connection, sap, deliveryId, userId, ct);
+    }
+
+    internal static async Task ResolveZdelflagAsync(INexusOperationsDb db, long deliveryId, ResolveRunRequest body, string? username, int userId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var latestStatus = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 status FROM log.DeliveryZdelflagRun WHERE deliveryID = @deliveryId ORDER BY ranAtUtc DESC", new { deliveryId = deliveryId.ToString() }, cancellationToken: ct));
+        if (latestStatus is not ("Failed" or "Warning"))
+            throw new NexusConflictException("This delivery has no outstanding ZDELFLAG/ZDELPACK warning to resolve.");
+
+        var note = (body.Note ?? "").Trim();
+        var messages = new List<SapReturnMessage> { new("I", note.Length > 0 ? note : $"Manually marked resolved by {username}.") };
+
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO log.DeliveryZdelflagRun (deliveryID, status, messages, ranByUserID)
+            VALUES (@deliveryId, 'Resolved', @messages, @userId)
+            """, new { deliveryId = deliveryId.ToString(), messages = JsonSerializer.Serialize(messages, MessagesJsonOptions), userId }, cancellationToken: ct));
+    }
+
+    internal static async Task ResolveGoodsIssueAsync(INexusOperationsDb db, long deliveryId, ResolveRunRequest body, string? username, int userId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var latestStatus = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 status FROM log.DeliveryGoodsIssueRun WHERE deliveryID = @deliveryId ORDER BY ranAtUtc DESC", new { deliveryId = deliveryId.ToString() }, cancellationToken: ct));
+        if (latestStatus != "Failed")
+            throw new NexusConflictException("This delivery has no outstanding Goods Issue failure to resolve.");
+
+        var note = (body.Note ?? "").Trim();
+        var messages = new List<SapReturnMessage> { new("I", note.Length > 0 ? note : $"Manually marked resolved by {username}.") };
+
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO log.DeliveryGoodsIssueRun (deliveryID, status, messages, ranByUserID)
+            VALUES (@deliveryId, 'Resolved', @messages, @userId)
+            """, new { deliveryId = deliveryId.ToString(), messages = JsonSerializer.Serialize(messages, MessagesJsonOptions), userId }, cancellationToken: ct));
     }
 }
