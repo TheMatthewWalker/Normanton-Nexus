@@ -649,10 +649,18 @@ describe('POST /:deliveryId/goods-issue/reprocess', () => {
     expect(axiosMock.post).not.toHaveBeenCalled();
   });
 
-  test('posts Goods Issue and records Success when both guards pass', async () => {
+  // Regression test: BAPI_OUTB_DELIVERY_CONFIRM_DEC (confirmed live
+  // 2026-08-28) rejects with "Delivery has not yet been put away / picked
+  // (completely)" unless ITEM_DATA_SPL also carries each real delivery
+  // item's picked quantity — POST_GI_FLG alone isn't enough. This asserts
+  // runGoodsIssueApproval actually builds and sends that Items array from
+  // log.PalletPackages, not just the bare DeliveryNumber the earlier
+  // BAPI_DELIVERYPROCESSING_EXEC attempt needed.
+  test('posts Goods Issue with each delivery item\'s picked quantity and records Success when both guards pass', async () => {
     queueResults(
       { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
       { recordset: [{ status: 'Failed' }] },  // GoodsIssueRun check — eligible for retry
+      { recordset: [{ sapDeliveryItem: '000010', pickedQty: 100 }] }, // items fetch for Goods Issue
       { recordset: [] },                      // the INSERT into DeliveryGoodsIssueRun
     );
     axiosMock.post.mockResolvedValueOnce({
@@ -664,6 +672,11 @@ describe('POST /:deliveryId/goods-issue/reprocess', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('Success');
     expect(dbRequest.input).toHaveBeenCalledWith('status', expect.anything(), 'Success');
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.any(String),
+      { DeliveryNumber: '1', Items: [{ ItemNumber: '000010', Quantity: 100 }] },
+      expect.anything(),
+    );
   });
 
   // Regression test: a real live delivery hit this exact scenario — the
@@ -677,6 +690,7 @@ describe('POST /:deliveryId/goods-issue/reprocess', () => {
     queueResults(
       { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
       { recordset: [{ status: 'Failed' }] },  // GoodsIssueRun check — eligible for retry
+      { recordset: [{ sapDeliveryItem: '000010', pickedQty: 100 }] }, // items fetch for Goods Issue
     );
     dbRequest.query.mockRejectedValueOnce(new Error("Invalid object name 'log.DeliveryGoodsIssueRun'."));
     axiosMock.post.mockResolvedValueOnce({
@@ -694,6 +708,7 @@ describe('POST /:deliveryId/goods-issue/reprocess', () => {
     queueResults(
       { recordset: [{ status: 'Success' }] }, // ZDELFLAG check
       { recordset: [] },                      // GoodsIssueRun check — no prior run
+      { recordset: [] },                      // items fetch for Goods Issue — no packages
       { recordset: [] },                      // the INSERT into DeliveryGoodsIssueRun
     );
     axiosMock.post.mockRejectedValueOnce({
