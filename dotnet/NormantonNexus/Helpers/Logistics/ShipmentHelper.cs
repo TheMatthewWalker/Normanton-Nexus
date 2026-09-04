@@ -820,24 +820,71 @@ internal static class ShipmentHelper
     }
 
     /// <summary>
+    /// Full shipment + linked deliveries/pallets (or, for a Manual Outbound
+    /// Shipment, ManualCargo instead) — mirrors Node's getShipmentContext
+    /// exactly. Needed by PDF generation (8a.3), which is the first real
+    /// caller — 8a.1/8a.2's own callers only ever needed the plain
+    /// shipment row (GetShipmentByIdAsync) or discarded
+    /// SyncShipmentAggregateDataAsync's return value entirely.
+    /// </summary>
+    internal static async Task<ShipmentContext> GetShipmentContextAsync(SqlConnection connection, long shipmentId, CancellationToken ct)
+    {
+        var shipment = await GetShipmentByIdAsync(connection, shipmentId, ct) ?? throw new NexusNotFoundException($"Shipment {shipmentId} not found.");
+
+        if (shipment.IsManual)
+        {
+            var manualCargo = await connection.QueryAsync<ManualCargoItemRow>(new CommandDefinition("""
+                SELECT CargoID AS CargoId, ShipmentID AS ShipmentId, Description, PackageCount, Weight, Length, Width, Height, Volume, CreatedAtUtc, CreatedBy
+                FROM log.ManualCargoItem WHERE ShipmentID = @shipmentId AND Removed = 0 ORDER BY CargoID ASC
+                """, new { shipmentId }, cancellationToken: ct));
+            return new ShipmentContext(shipment, [], [], manualCargo.AsList());
+        }
+
+        var deliveries = await connection.QueryAsync<ShipmentContextDeliveryRow>(new CommandDefinition("""
+            SELECT dm.deliveryID AS DeliveryId, dm.customerID AS CustomerId, dm.dispatchDate AS DispatchDate, dm.completionDate AS CompletionDate,
+                dm.deliveryService AS DeliveryService, dm.picksheetComment AS PicksheetComment,
+                CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS NetWeight, CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS GrossWeight,
+                CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS PalletCount, CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS DeliveryVolume,
+                d.destinationName AS DestinationName, d.destinationStreet AS DestinationStreet, d.destinationCity AS DestinationCity,
+                d.destinationPostCode AS DestinationPostCode, d.destinationCountry AS DestinationCountry,
+                STUFF((SELECT '; ' + e.address FROM log.Email e WHERE e.ID = dm.customerID FOR XML PATH('')), 1, 2, '') AS DestinationEmail
+            FROM log.ShipmentLink sl
+            INNER JOIN log.DeliveryMain dm ON dm.deliveryID = sl.deliveryID
+            LEFT JOIN log.Destinations d ON dm.customerID = d.destinationID
+            WHERE sl.shipmentID = @shipmentId ORDER BY dm.deliveryID ASC
+            """, new { shipmentId }, cancellationToken: ct));
+
+        var pallets = await connection.QueryAsync<ShipmentContextPalletRow>(new CommandDefinition("""
+            SELECT sl.deliveryID AS DeliveryId, pm.palletID AS PalletId, pm.palletType AS PalletType, pm.palletFinish AS PalletFinish,
+                CAST(ISNULL(pm.packagingWeight, 0) AS decimal(18,3)) AS PackagingWeight, CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS GrossWeight,
+                CAST(ISNULL(pm.palletVolume, 0) AS decimal(18,3)) AS PalletVolume, pm.palletLength AS PalletLength, pm.palletWidth AS PalletWidth,
+                pm.palletHeight AS PalletHeight, pm.palletLocation AS PalletLocation
+            FROM log.ShipmentLink sl
+            INNER JOIN log.DeliveryLink dl ON dl.deliveryID = sl.deliveryID
+            INNER JOIN log.PalletMain pm ON pm.palletID = dl.palletID
+            WHERE sl.shipmentID = @shipmentId AND ISNULL(pm.palletRemoved, 0) = 0
+            ORDER BY sl.deliveryID ASC, pm.palletID ASC
+            """, new { shipmentId }, cancellationToken: ct));
+
+        return new ShipmentContext(shipment, deliveries.AsList(), pallets.AsList(), []);
+    }
+
+    /// <summary>
     /// Recomputes ShipmentMain's (and each linked DeliveryMain's) stored
     /// aggregate weight/pallet-count/volume columns from PalletMain — or,
     /// for a Manual Outbound Shipment, from ManualCargoItem instead (see
-    /// RecalcManualShipmentTotalsAsync). Return value intentionally
-    /// discarded by every current 8a.1 caller (delivery add/remove),
-    /// matching Node's own call sites — the full getShipmentContext-shaped
-    /// return Node's version produces (pallets/manualCargo included) is
-    /// PDF-generation-slice (8a.3) territory; add it back here if/when a
-    /// caller actually needs it.
+    /// RecalcManualShipmentTotalsAsync). Returns the freshly-synced context
+    /// (matching Node's own return-getShipmentContext-at-the-end shape) —
+    /// 8a.1's own two callers (delivery add/remove) still just discard it.
     /// </summary>
-    internal static async Task SyncShipmentAggregateDataAsync(SqlConnection connection, long shipmentId, CancellationToken ct)
+    internal static async Task<ShipmentContext> SyncShipmentAggregateDataAsync(SqlConnection connection, long shipmentId, CancellationToken ct)
     {
         var isManual = await connection.QuerySingleOrDefaultAsync<bool?>(new CommandDefinition(
             "SELECT IsManual FROM log.ShipmentMain WHERE shipmentID = @shipmentId", new { shipmentId }, cancellationToken: ct));
         if (isManual == true)
         {
             await RecalcManualShipmentTotalsAsync(connection, shipmentId, ct);
-            return;
+            return await GetShipmentContextAsync(connection, shipmentId, ct);
         }
 
         using var transaction = connection.BeginTransaction();
@@ -895,6 +942,8 @@ internal static class ShipmentHelper
             transaction.Rollback();
             throw;
         }
+
+        return await GetShipmentContextAsync(connection, shipmentId, ct);
     }
 
     /// <summary>netWeight is set equal to grossWeight for manual cargo — entry only asks for one weight per line, there's no separate tare/net concept the way SAP delivery data has.</summary>

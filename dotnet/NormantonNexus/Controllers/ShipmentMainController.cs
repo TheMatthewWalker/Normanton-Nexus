@@ -21,7 +21,7 @@ namespace NormantonNexus.Controllers;
 /// </summary>
 [Route("api/shipmentmain")]
 public sealed class ShipmentMainController(
-    INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions, IDataChangeLogService dataChangeLog) : NexusControllerBase
+    INexusOperationsDb nexusOperationsDb, INexusDb nexusDb, IOptions<LogisticsOptions> logisticsOptions, IDataChangeLogService dataChangeLog) : NexusControllerBase
 {
     [HttpGet("queue/{mode}")]
     public async Task<IActionResult> GetQueue(string mode, CancellationToken ct)
@@ -218,5 +218,49 @@ public sealed class ShipmentMainController(
     {
         var result = await ShipmentManualCargoHelper.CreateFolderAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct);
         return Ok(ApiResponse<CreateShipmentFolderResult>.Ok(result));
+    }
+
+    // ── Sub-phase 8a.3: PDF generation ─────────────────────────────────
+
+    [HttpPost("{shipmentId:long}/generate-packing-list")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> GeneratePackingList(long shipmentId, CancellationToken ct)
+    {
+        var result = await ShipmentDocumentHelper.GeneratePackingListAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct);
+        return Ok(ApiResponse<GenerateDocumentResult>.Ok(result));
+    }
+
+    [HttpPost("{shipmentId:long}/generate-packaging-declaration")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> GeneratePackagingDeclaration(long shipmentId, [FromBody] GeneratePackagingDeclarationRequest body, CancellationToken ct)
+    {
+        var result = await ShipmentDocumentHelper.GeneratePackagingDeclarationAsync(nexusOperationsDb, nexusDb, logisticsOptions, shipmentId, body, GetUserId(), GetUsername(), ct);
+        return Ok(ApiResponse<GenerateDocumentResult>.Ok(result));
+    }
+
+    [HttpGet("{shipmentId:long}/documents/folder")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> GetDocumentFolder(long shipmentId, CancellationToken ct)
+    {
+        var result = await ShipmentDocumentHelper.GetDocumentFolderAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct);
+        return Ok(ApiResponse<ShipmentDocumentFolderResult>.Ok(result));
+    }
+
+    [HttpGet("{shipmentId:long}/documents/{fileName}")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> GetDocument(long shipmentId, string fileName, CancellationToken ct)
+    {
+        var path = await ShipmentDocumentHelper.ResolveDocumentPathAsync(nexusOperationsDb, logisticsOptions, shipmentId, fileName, ct);
+        return PhysicalFile(path, "application/pdf", Path.GetFileName(path));
+    }
+
+    [HttpPost("{shipmentId:long}/documents/upload")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> UploadDocument(long shipmentId, [FromQuery] string? fileName, CancellationToken ct)
+    {
+        using var buffer = new MemoryStream();
+        await Request.Body.CopyToAsync(buffer, ct);
+        var result = await ShipmentDocumentHelper.UploadDocumentAsync(nexusOperationsDb, logisticsOptions, shipmentId, buffer.ToArray(), fileName, ct);
+        return StatusCode(201, ApiResponse<UploadedDocumentResult>.Ok(result));
     }
 }
