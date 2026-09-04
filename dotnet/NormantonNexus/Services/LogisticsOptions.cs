@@ -1,15 +1,14 @@
 namespace NormantonNexus.Services;
 
 /// <summary>
-/// C# equivalent of shipmentmain.js's getLogisticsSettings() — this port
-/// only covers the fields Sub-phase 8a.1/8a.2/8a.3 need (the fixed
-/// "origin" address stamped onto every outbound shipment, and the
-/// export-folder root used to build a shipment's on-disk path). The
-/// SMTP/ClearPort settings live in Node's same function but are deferred
-/// to whichever later sub-slice (8a.4 email, 8a.5 customs) actually needs
-/// them — added to this same options class when that slice lands, not
-/// speculatively now. Defaults mirror Node's own hardcoded fallbacks
-/// exactly (Kongsberg Actuation System Ltd's real registered address).
+/// C# equivalent of shipmentmain.js's getLogisticsSettings() — covers the
+/// fields Sub-phases 8a.1-8a.4 need (the fixed "origin" address stamped
+/// onto every outbound shipment, the export-folder root used to build a
+/// shipment's on-disk path, and the SMTP relay settings for the collection
+/// email). ClearPort settings live in Node's separate getClearPortSettings()
+/// and are deferred to 8a.5, added to their own options class when that
+/// slice lands. Defaults mirror Node's own hardcoded fallbacks exactly
+/// (Kongsberg Actuation System Ltd's real registered address).
 /// </summary>
 public sealed class LogisticsOptions
 {
@@ -34,4 +33,24 @@ public sealed class LogisticsOptions
     public string OriginCity { get; set; } = "Normanton";
     public string OriginPostCode { get; set; } = "WF6 1TN";
     public string OriginCountry { get; set; } = "GB";
+
+    // ── SMTP (Sub-phase 8a.4) — mirrors getLogisticsSettings()'s `email`
+    // block exactly, including the permissive smtpAllowInvalidCert default
+    // (Node defaults it to `true`, not `false` — a self-signed/internal
+    // relay cert is the expected case here, not the exception). Blank
+    // SmtpHost/MailFrom is a valid, expected default (matches Node's own
+    // `''` fallback) — ShipmentCollectionEmailHelper throws a 503
+    // NexusBadGatewayException at send time if either is still unset,
+    // rather than failing app startup over it.
+    public string SmtpHost { get; set; } = "";
+    public int SmtpPort { get; set; } = 25;
+    public bool SmtpSecure { get; set; }
+    public string SmtpUser { get; set; } = "";
+    public string SmtpPass { get; set; } = "";
+    public string SmtpHelloName { get; set; } = "localhost";
+    public int SmtpConnectionTimeoutMs { get; set; } = 15000;
+    public bool SmtpAllowInvalidCert { get; set; } = true;
+    public string MailFrom { get; set; } = "";
+    public List<string> MailCc { get; set; } = [];
+    public List<string> MailBcc { get; set; } = [];
 }

@@ -270,4 +270,14 @@ public sealed class ShipmentMainController(
         var result = await ShipmentDocumentHelper.UploadDocumentAsync(nexusOperationsDb, logisticsOptions, shipmentId, buffer.ToArray(), fileName, ct);
         return StatusCode(201, ApiResponse<UploadedDocumentResult>.Ok(result));
     }
+
+    // ── Sub-phase 8a.4: collection email ────────────────────────────────
+
+    [HttpPost("{shipmentId:long}/send-collection-email")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> SendCollectionEmail(long shipmentId, CancellationToken ct)
+    {
+        var result = await ShipmentCollectionEmailHelper.SendAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct);
+        return Ok(ApiResponse<SendCollectionEmailResult>.Ok(result));
+    }
 }

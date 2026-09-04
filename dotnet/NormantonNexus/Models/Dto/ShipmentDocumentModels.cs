@@ -34,3 +34,6 @@ public sealed record ShipmentDocumentFileInfo(string FileName, long SizeBytes, D
 public sealed record ShipmentDocumentFolderResult(string ShipmentRef, bool CustomsRequired, bool CustomsComplete, IReadOnlyList<ShipmentDocumentFileInfo> Files);
 
 public sealed record UploadedDocumentResult(string FileName, long SizeBytes, string GuessedCategory, string DownloadUrl);
+
+/// <summary>Sub-phase 8a.4 — result of POST :shipmentId/send-collection-email, mirrors Node's `{shipmentRef, sentTo, cc, bcc, attachments}` response shape exactly.</summary>
+public sealed record SendCollectionEmailResult(string ShipmentRef, string SentTo, IReadOnlyList<string> Cc, IReadOnlyList<string> Bcc, IReadOnlyList<string> Attachments);
