@@ -82,3 +82,9 @@ public sealed record SapDrumBackflushRequest(string Material, decimal Quantity, 
 
 /// <summary>Mirrors SapServer's DrumBackflushResponse field-for-field. Backflush carries the same Type/MessageClass/MessageNumber the plain ZF40N backflush does (validated the same way as ProductionSapHelpers.ParseSapBackflush, just nested one level deeper) — everything else is only populated once the backflush itself produced a material document.</summary>
 public sealed record SapDrumBackflushResponse(BdcResponse Backflush, string MaterialDocument, string Batch, string RcBatch, string RcPack, bool BomMismatch, string[] ExpectedComponents, string[] ActualComponents);
+
+/// <summary>Mirrors SapServer's FindBackflushDocumentRequest — POST /api/production/find-backflush-document (MSEG, movement 131). Looks up the original backflush material document for a batch — used by the re-drum reversal chain (RedrumReversalHelper) to find what to reverse via MF41 before a batch-managed product is returned into stock.</summary>
+public sealed record FindBackflushDocumentRequest(string Batch);
+
+/// <summary>Mirrors SapServer's BackflushDocumentRow field-for-field — the original 131 (backflush) movement for a batch, found via MSEG. SapServer returns HTTP 400 (not a 200 with an empty row) when no matching movement exists — see RedrumReversalHelper's catch on SapProxyException.StatusCode == 400 for the normal, non-redrum case.</summary>
+public sealed record BackflushDocumentRow(string MaterialDocument, string Material, decimal Quantity, string StorageLocation);

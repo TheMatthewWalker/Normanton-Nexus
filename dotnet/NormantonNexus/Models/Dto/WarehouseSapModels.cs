@@ -98,3 +98,10 @@ public sealed record SapDeliveryChangeRequest(string DeliveryNumber, List<SapDel
 public sealed record SapDeliveryChangeItem(string ItemNumber, string? Material, decimal Quantity);
 
 public sealed record SapDeliveryChangeResponse(string DeliveryNumber, bool Success, List<SapReturnMessage> Messages);
+
+/// <summary>Mirrors SapServer's CreateTransferOrderRequest field-for-field — POST /api/warehouse/transfer-order (LT01/LT04). Used both by the picksheet-stage-batch flow (a later slice) and RedrumReversalHelper's WM tidy-up leg (SA/PTFE -> the outside-WM holding bin).</summary>
+public sealed record CreateTransferOrderRequest(
+    string StorageLocation, string Material, decimal Quantity, string SourceType, string SourceBin, string DestinationType, string DestinationBin,
+    string? Batch = null, string? StockCategory = null, string? SpecialStockIndicator = null, string? SpecialStockNumber = null);
+
+public sealed record CreateTransferOrderResponse(string TransferOrderNumber, bool Success, List<SapReturnMessage> Messages);
