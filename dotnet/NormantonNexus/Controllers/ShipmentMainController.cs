@@ -177,4 +177,46 @@ public sealed class ShipmentMainController(
         var rows = await ShipmentHelper.GetEventsAsync(nexusOperationsDb, shipmentId, ct);
         return Ok(ApiResponse<IReadOnlyList<ShipmentEventRow>>.Ok(rows));
     }
+
+    // ── Sub-phase 8a.2: manual cargo lines + create-folder ────────────
+
+    [HttpGet("{shipmentId:long}/manual-cargo")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> GetManualCargo(long shipmentId, CancellationToken ct)
+    {
+        var rows = await ShipmentManualCargoHelper.GetCargoAsync(nexusOperationsDb, shipmentId, ct);
+        return Ok(ApiResponse<IReadOnlyList<ManualCargoItemRow>>.Ok(rows));
+    }
+
+    [HttpPost("{shipmentId:long}/manual-cargo")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> CreateManualCargo(long shipmentId, [FromBody] CreateManualCargoItemRequest body, CancellationToken ct)
+    {
+        await ShipmentManualCargoHelper.CreateAsync(nexusOperationsDb, shipmentId, body, GetUsername(), ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPatch("manual-cargo/{cargoId:int}")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> UpdateManualCargo(int cargoId, [FromBody] UpdateManualCargoItemRequest body, CancellationToken ct)
+    {
+        await ShipmentManualCargoHelper.UpdateAsync(nexusOperationsDb, cargoId, body, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("manual-cargo/{cargoId:int}")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> DeleteManualCargo(int cargoId, CancellationToken ct)
+    {
+        await ShipmentManualCargoHelper.DeleteAsync(nexusOperationsDb, cargoId, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPost("{shipmentId:long}/create-folder")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> CreateFolder(long shipmentId, CancellationToken ct)
+    {
+        var result = await ShipmentManualCargoHelper.CreateFolderAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct);
+        return Ok(ApiResponse<CreateShipmentFolderResult>.Ok(result));
+    }
 }
