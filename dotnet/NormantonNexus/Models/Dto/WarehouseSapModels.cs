@@ -34,3 +34,67 @@ public sealed record StagedPackageInfo(int PalletItemId, string? SapMaterial, st
 
 /// <summary>Attempted:false means the row was never staged (no SAP fields recorded — e.g. a manually-typed batch with no SAP match) — nothing to do. Attempted:true/Success:false means SAP rejected the reversal; the caller must not proceed with deleting/removing.</summary>
 public sealed record StagedPackageReversalResult(bool Attempted, bool Success, string? Error);
+
+// ── Delivery completion pipeline (Sub-phase 7c) ─────────────────────────
+// Mirrors SapServer's own DTOs field-for-field, confirmed by reading
+// WarehouseHelpers.cs/ZdelflagHelpers.cs/GoodsIssueHelper.cs/
+// DeliveryChangeHelper.cs directly.
+
+/// <summary>POST /api/warehouse/set-delivery-weight — pushes the real picked/packed gross weight, net weight, and pallet count onto LIKP (transaction ZDEL) once a delivery is marked complete.</summary>
+public sealed record SapSetDeliveryWeightRequest(string DeliveryNumber, decimal GrossWeight, decimal NetWeight, int PalletCount);
+
+public sealed record SapSetDeliveryWeightResponse(string Message);
+
+public sealed record SapZdelflagLipsItemRow(string ItemNumber, string Description, string CustomerMaterial, string SalesUnit);
+
+public sealed record SapZbomInfoRequest(List<string> PackagingInstructions);
+
+public sealed record SapZbomInfoRow(string PackagingInstruction, string ComponentMaterial);
+
+/// <summary>One T_DELFLAG row — one per log.PalletPackages row (VHART "SMBX") plus one combined header row per pallet (VHART "PALL"). See DeliveryCompletionHelper.BuildDelflagRows for the full field-by-field construction, mirrored from Node's runZdelflagMaintenance exactly.</summary>
+public sealed record SapDelflagRowRequest(
+    string Vbeln, string Posnr, string Charg, string Kunnr, string Empst, string Werks,
+    decimal Ntgew, decimal Brgew, string Kdmat, decimal Lfimg, string Eikto, string Arktx, string Matnr,
+    string Budat, string Packid, string Boxes, string Pallet, string Vhart, string SmbxMatnr, string PallMatnr,
+    string Mtart, string Smbxhu, string Done, bool PrintPalletLabel, bool PrintBoxLabel);
+
+/// <summary>One T_DELPACK row per (package, ZBOM_INFO~IDNRK) pair.</summary>
+public sealed record SapDelpackRowRequest(string Packid, string PallMatnr, decimal Menge, string Meins, decimal Tarewei, string Gewei);
+
+public sealed record SapMaintainZdelflagRequest(List<SapDelflagRowRequest> DelflagRows, List<SapDelpackRowRequest> DelpackRows);
+
+public sealed record SapMaintainZdelflagResponse(string Rc, List<SapReturnMessage> Messages);
+
+/// <summary>
+/// POST /api/warehouse/goods-issue (BAPI_OUTB_DELIVERY_CONFIRM_DEC).
+/// Confirmed live (2026-08-28) that POST_GI_FLG alone isn't enough — SAP
+/// rejects with "Delivery has not yet been put away / picked (completely)"
+/// unless Items also carries each real delivery item's picked quantity.
+/// </summary>
+public sealed record SapGoodsIssueRequest(string DeliveryNumber, List<SapGoodsIssueItem> Items, bool TestRun = false);
+
+public sealed record SapGoodsIssueItem(string ItemNumber, decimal Quantity, string? BaseUom = null);
+
+public sealed record SapGoodsIssueResponse(string DeliveryNumber, bool Success, List<SapReturnMessage> Messages);
+
+/// <summary>
+/// POST /api/warehouse/delivery-change (BAPI_OUTB_DELIVERY_CHANGE) — brings
+/// SAP's own delivery quantity in line with what was actually picked, for
+/// an item within 10% but not an exact match. UNVERIFIED for this specific
+/// call site: SapServer's own DeliveryChangeItem.BaseUom has no fallback
+/// default (SapServer's BuildDeliveryChangeRequest does `item.BaseUom ?? ""`
+/// — a genuinely blank BASE_UOM if never supplied), and SapServer's own
+/// live diagnosis notes confirm BASE_UOM alone was insufficient without
+/// SalesUnit/FactUnitNom/FactUnitDenom also being right — none of which
+/// Node's own sync-delivery-quantities route currently sends (it only ever
+/// sent ItemNumber/Material/Quantity). Unlike the Goods Issue fix above,
+/// this was NOT confirmed working via a live curl test, so it's ported
+/// exactly matching Node's current (possibly still-incomplete) behavior
+/// rather than guessed at — flagged here for the same kind of deliberate
+/// verification the Goods Issue contract just got.
+/// </summary>
+public sealed record SapDeliveryChangeRequest(string DeliveryNumber, List<SapDeliveryChangeItem> Items, bool TestRun = false);
+
+public sealed record SapDeliveryChangeItem(string ItemNumber, string? Material, decimal Quantity);
+
+public sealed record SapDeliveryChangeResponse(string DeliveryNumber, bool Success, List<SapReturnMessage> Messages);

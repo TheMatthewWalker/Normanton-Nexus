@@ -4,22 +4,22 @@ using NormantonNexus.Helpers.Warehouse;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
+using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
 
 /// <summary>
 /// Open Picksheets, Packaging Holding, the picksheet materials/stock
-/// panel, linked picksheets, and link-search — the read-only half of
-/// routes/deliverymain.js, matching Node's own `api/deliverymain` mount.
-/// The write half (link/unlink, stage-batch, comment, cancel-picksheet,
-/// completion pipeline) is Sub-phases 7b/7c. No Dept:warehouse policy —
-/// Node's own mount is requireLogin-only (server.js); WAREHOUSE_OP gates
-/// the specific actions that need it, matching Node's per-route
-/// requirePermission calls exactly.
+/// panel, linked picksheets, link-search, and the delivery completion
+/// pipeline — matching Node's own `api/deliverymain` mount. The remaining
+/// write half (link/unlink, stage-batch, comment, cancel-picksheet) is a
+/// later slice. No Dept:warehouse policy — Node's own mount is
+/// requireLogin-only (server.js); WAREHOUSE_OP gates the specific actions
+/// that need it, matching Node's per-route requirePermission calls exactly.
 /// </summary>
 [Route("api/deliverymain")]
-public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient) : NexusControllerBase
+public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient, IAuditLogger auditLogger) : NexusControllerBase
 {
     [HttpGet("id/{deliveryId:long}")]
     public async Task<IActionResult> GetById(long deliveryId, CancellationToken ct)
@@ -65,5 +65,27 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
     {
         var rows = await WarehousePicksheetHelper.LinkSearchAsync(nexusOperationsDb, excludeDeliveryId, q, ct);
         return Ok(ApiResponse<IReadOnlyList<LinkSearchRow>>.Ok(rows));
+    }
+
+    [HttpPatch("{deliveryId:long}/complete")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> Complete(long deliveryId, CancellationToken ct)
+    {
+        var result = await DeliveryCompletionHelper.CompleteGroupAsync(nexusOperationsDb, sapServerClient, deliveryId, GetUserId(), ct);
+        if (result.Status == "BLOCKED")
+        {
+            return StatusCode(409, new ApiResponse<CompleteDeliveryGroupResult>(false, result, new ApiError(result.MismatchType ?? "BLOCKED", result.Error ?? "Blocked.")));
+        }
+        return Ok(ApiResponse<CompleteDeliveryGroupResult>.Ok(result));
+    }
+
+    [HttpPost("{deliveryId:long}/sync-delivery-quantities")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> SyncDeliveryQuantities(long deliveryId, CancellationToken ct)
+    {
+        var result = await DeliveryCompletionHelper.SyncDeliveryQuantitiesAsync(nexusOperationsDb, sapServerClient, auditLogger, deliveryId, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return result.Success
+            ? Ok(ApiResponse<object?>.Ok(null))
+            : StatusCode(result.StatusCode, new ApiResponse<object?>(false, null, new ApiError(result.StatusCode == 422 ? "UNPROCESSABLE_ENTITY" : "CONFLICT", result.Error ?? "Sync failed.")));
     }
 }
