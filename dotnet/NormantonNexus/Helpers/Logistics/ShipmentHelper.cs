@@ -854,6 +854,14 @@ internal static class ShipmentHelper
             WHERE sl.shipmentID = @shipmentId ORDER BY dm.deliveryID ASC
             """, new { shipmentId }, cancellationToken: ct));
 
+        var pallets = await GetPalletsAsync(connection, shipmentId, ct);
+
+        return new ShipmentContext(shipment, deliveries.AsList(), pallets, []);
+    }
+
+    /// <summary>Extracted so GetShipmentContextAsync and the loading-list PDF's per-shipment pallet fetch (Sub-phase 8a.3) share one query rather than duplicating it.</summary>
+    private static async Task<List<ShipmentContextPalletRow>> GetPalletsAsync(SqlConnection connection, long shipmentId, CancellationToken ct)
+    {
         var pallets = await connection.QueryAsync<ShipmentContextPalletRow>(new CommandDefinition("""
             SELECT sl.deliveryID AS DeliveryId, pm.palletID AS PalletId, pm.palletType AS PalletType, pm.palletFinish AS PalletFinish,
                 CAST(ISNULL(pm.packagingWeight, 0) AS decimal(18,3)) AS PackagingWeight, CAST(ISNULL(pm.grossWeight, 0) AS decimal(18,3)) AS GrossWeight,
@@ -865,8 +873,27 @@ internal static class ShipmentHelper
             WHERE sl.shipmentID = @shipmentId AND ISNULL(pm.palletRemoved, 0) = 0
             ORDER BY sl.deliveryID ASC, pm.palletID ASC
             """, new { shipmentId }, cancellationToken: ct));
+        return pallets.AsList();
+    }
 
-        return new ShipmentContext(shipment, deliveries.AsList(), pallets.AsList(), []);
+    /// <summary>
+    /// Loading list (multi-shipment) — Sub-phase 8a.3. Port of
+    /// routes/shipmentmain.js's POST /loading-list: fetches each requested
+    /// shipment (silently skipping any that don't exist or are cancelled,
+    /// matching Node's own `continue`) plus its linked pallets, for
+    /// ShipmentPackingListPdfHelper.BuildLoadingListPdf to render.
+    /// </summary>
+    internal static async Task<List<(ShipmentRow Shipment, IReadOnlyList<ShipmentContextPalletRow> Pallets)>> GetShipmentsForLoadingListAsync(
+        SqlConnection connection, IReadOnlyList<long> shipmentIds, CancellationToken ct)
+    {
+        var result = new List<(ShipmentRow, IReadOnlyList<ShipmentContextPalletRow>)>();
+        foreach (var shipmentId in shipmentIds)
+        {
+            var shipment = await GetShipmentByIdAsync(connection, shipmentId, ct);
+            if (shipment is null || shipment.ShipmentCancelled) continue;
+            result.Add((shipment, await GetPalletsAsync(connection, shipmentId, ct)));
+        }
+        return result;
     }
 
     /// <summary>

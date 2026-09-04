@@ -17,6 +17,22 @@ namespace NormantonNexus.Helpers.Logistics;
 /// </summary>
 internal static class ShipmentDocumentHelper
 {
+    /// <summary>Loading list (multi-shipment) — port of routes/shipmentmain.js's POST /loading-list. Unlike the single-shipment packing list/packaging declaration, this is a pure download: nothing is written into any shipment's export folder, the PDF bytes go straight back to the caller.</summary>
+    internal static async Task<(byte[] Pdf, string FileName)> GenerateLoadingListAsync(INexusOperationsDb db, IReadOnlyList<long> shipmentIds, CancellationToken ct)
+    {
+        if (shipmentIds.Count == 0)
+            throw new NexusValidationException("No shipments selected.");
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var shipmentsData = await ShipmentHelper.GetShipmentsForLoadingListAsync(connection, shipmentIds, ct);
+        if (shipmentsData.Count == 0)
+            throw new NexusNotFoundException("No valid shipments found.");
+
+        var pdf = ShipmentPackingListPdfHelper.BuildLoadingListPdf(shipmentsData);
+        var fileName = $"loading-list-{DateTime.UtcNow:yyyy-MM-dd}.pdf";
+        return (pdf, fileName);
+    }
+
     internal static async Task<GenerateDocumentResult> GeneratePackingListAsync(INexusOperationsDb db, IOptions<LogisticsOptions> options, long shipmentId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);

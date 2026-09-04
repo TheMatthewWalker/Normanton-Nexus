@@ -222,6 +222,13 @@ public sealed class ShipmentMainController(
 
     // ── Sub-phase 8a.3: PDF generation ─────────────────────────────────
 
+    [HttpPost("loading-list")]
+    public async Task<IActionResult> LoadingList([FromBody] BulkShipmentIdsRequest body, CancellationToken ct)
+    {
+        var (pdf, fileName) = await ShipmentDocumentHelper.GenerateLoadingListAsync(nexusOperationsDb, body.ShipmentIds, ct);
+        return File(pdf, "application/pdf", fileName);
+    }
+
     [HttpPost("{shipmentId:long}/generate-packing-list")]
     [Authorize(Policy = "Perm:LOG_PLANNING")]
     public async Task<IActionResult> GeneratePackingList(long shipmentId, CancellationToken ct)
