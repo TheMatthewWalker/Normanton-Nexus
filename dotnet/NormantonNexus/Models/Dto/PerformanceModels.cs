@@ -73,3 +73,14 @@ public sealed record ConsumptionByYearRow(string Material, string? MaterialText,
 public sealed record ReceiptHistoryByVendorRow(string Material, string? MaterialText, long? VendorId, string? VendorName, string? SapVendorNumber, int FiscalYear, decimal? ReceivedQty, string? Uom);
 
 public sealed record MrpTrendsResult(IReadOnlyList<ConsumptionByYearRow> Consumption, IReadOnlyList<ReceiptHistoryByVendorRow> Receipts);
+
+// ── Logistics Sub-phase 8b.6: consignment customers + production-plan print ──
+
+public sealed record ConsignmentCustomerRow(string Customer, string? CustomerName, DateTime LastUpdatedUtc, string? UpdatedByUsername);
+
+public sealed record UpsertConsignmentCustomerRequest(string? CustomerName);
+
+/// <summary>log.OrderBookLineNotes, one row per (ReferenceDocument, Material) — the manual Month End Breakdown columns (Risk/Reason, Won't Get, Last Day/Time, Bring Forward, a Planned Production Qty override). Risk is read but never round-tripped from an upload any more (calculated on the Data sheet now) — kept here only because Node's own listOrderBookLineNotes still returns it.</summary>
+public sealed record OrderBookLineNote(string? Risk, string? Reason, string? WontGet, string? LastDay, string? LastDayTime, string? BringForward, decimal? PlannedProductionQty);
+
+public sealed record ProductionPlanLine(string Time, string Customer, string Material, string? MaterialText, decimal Quantity, decimal Value);

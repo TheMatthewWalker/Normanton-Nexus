@@ -5,6 +5,7 @@ using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
+using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
@@ -21,7 +22,7 @@ namespace NormantonNexus.Controllers;
 /// additionally carries its own real Node permission gate.
 /// </summary>
 [Route("api/performance")]
-public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions) : NexusControllerBase
+public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions, IAuditLogger audit) : NexusControllerBase
 {
     [HttpGet("refresh-log")]
     public async Task<IActionResult> GetRefreshLog(CancellationToken ct) =>
@@ -393,5 +394,47 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
         await Request.Body.CopyToAsync(buffer, ct);
         var result = await InboundShipmentHelper.UploadDocumentAsync(nexusOperationsDb, logisticsOptions, shipmentId, buffer.ToArray(), fileName, ct);
         return StatusCode(201, ApiResponse<UploadedInboundDocumentResult>.Ok(result));
+    }
+
+    // ── Consignment customers — Sub-phase 8b.6 ───────────────────────────
+    // Read: any logged-in user (no further policy — matches Node's loose
+    // gating on the rest of this router's orderbook-breakdown routes).
+    // Write: LOG_ADMIN, already used elsewhere in this router as the
+    // admin-tier permission code (/turns-valclass/aggregates, /value-by-price).
+
+    [HttpGet("consignment-customers")]
+    public async Task<IActionResult> ListConsignmentCustomers(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<ConsignmentCustomerRow>>.Ok(await PerformanceDashboardHelper.ListConsignmentCustomersAsync(nexusOperationsDb, ct)));
+
+    [HttpPut("consignment-customers/{customer}")]
+    [Authorize(Policy = "Perm:LOG_ADMIN")]
+    public async Task<IActionResult> UpsertConsignmentCustomer(string customer, [FromBody] UpsertConsignmentCustomerRequest body, CancellationToken ct)
+    {
+        await PerformanceDashboardHelper.UpsertConsignmentCustomerAsync(nexusOperationsDb, customer.Trim(), body, GetUsername(), ct);
+        await audit.LogAsync("CONSIGNMENT_CUSTOMER_SAVE", GetUsername(), $"Flagged customer '{customer.Trim()}' as consignment", GetIpAddress(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("consignment-customers/{customer}")]
+    [Authorize(Policy = "Perm:LOG_ADMIN")]
+    public async Task<IActionResult> DeleteConsignmentCustomer(string customer, CancellationToken ct)
+    {
+        await PerformanceDashboardHelper.DeleteConsignmentCustomerAsync(nexusOperationsDb, customer.Trim(), ct);
+        await audit.LogAsync("CONSIGNMENT_CUSTOMER_DELETE", GetUsername(), $"Un-flagged customer '{customer.Trim()}' as consignment", GetIpAddress(), ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    // ── Printable Production Plan — Sub-phase 8b.6 ───────────────────────
+    // Bare standalone HTML report, same convention as Production's
+    // DrummingTicketHtmlHelper/LabelHtmlHelper — no further policy beyond
+    // this controller's base [Authorize], matching Node exactly.
+
+    [HttpGet("orderbook-breakdown/production-plan/print")]
+    public async Task<IActionResult> PrintProductionPlan(CancellationToken ct)
+    {
+        var plan = await ProductionPlanHelper.BuildPlanAsync(nexusOperationsDb, ct);
+        var html = ProductionPlanHelper.BuildHtml(plan);
+        Response.Headers.CacheControl = "no-store";
+        return Content(html, "text/html; charset=utf-8");
     }
 }

@@ -1,4 +1,5 @@
 using Dapper;
+using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services.Sql;
 
@@ -391,5 +392,75 @@ internal static class PerformanceDashboardHelper
             ORDER BY ValuationClass
             """, new { materialType }, cancellationToken: ct));
         return rows.AsList();
+    }
+
+    // ── Consignment customers (log.ConsignmentCustomer) — Sub-phase 8b.6 ────
+    // Customers on a consignment stock agreement, excluded from
+    // GetOrderBookSummaryAsync/GetOrderBookBreakdownAsync above (see those
+    // methods' own LEFT JOIN comments) so they stop inflating the Month End
+    // Order Book export and the Management page's KPI cards. Read: any
+    // logged-in user. Write: LOG_ADMIN (enforced by the controller).
+
+    internal static async Task<IReadOnlyList<ConsignmentCustomerRow>> ListConsignmentCustomersAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<ConsignmentCustomerRow>(new CommandDefinition("""
+            SELECT Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername
+            FROM log.ConsignmentCustomer
+            ORDER BY Customer
+            """, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    internal static async Task UpsertConsignmentCustomerAsync(INexusOperationsDb db, string customer, UpsertConsignmentCustomerRequest body, string? username, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(customer)) throw new NexusValidationException("Customer number is required.");
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var exists = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
+            "SELECT 1 FROM log.ConsignmentCustomer WHERE Customer = @customer", new { customer }, cancellationToken: ct));
+
+        if (exists is not null)
+        {
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE log.ConsignmentCustomer
+                SET CustomerName = @CustomerName, LastUpdatedUtc = GETUTCDATE(), UpdatedByUsername = @username
+                WHERE Customer = @customer
+                """, new { body.CustomerName, username, customer }, cancellationToken: ct));
+        }
+        else
+        {
+            await connection.ExecuteAsync(new CommandDefinition("""
+                INSERT INTO log.ConsignmentCustomer (Customer, CustomerName, LastUpdatedUtc, UpdatedByUsername)
+                VALUES (@customer, @CustomerName, GETUTCDATE(), @username)
+                """, new { customer, body.CustomerName, username }, cancellationToken: ct));
+        }
+    }
+
+    internal static async Task DeleteConsignmentCustomerAsync(INexusOperationsDb db, string customer, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log.ConsignmentCustomer WHERE Customer = @customer", new { customer }, cancellationToken: ct));
+    }
+
+    // ── Order book line notes (log.OrderBookLineNotes) — Sub-phase 8b.6 ─────
+    // Keyed by "${ReferenceDocument}||${Material}" — same grain as a
+    // getOrderBookBreakdown() row — feeding both the Month End Breakdown
+    // export prefill (deferred to 8b.6's Excel-export slice) and the
+    // Production Plan print report below.
+
+    internal static async Task<IReadOnlyDictionary<string, OrderBookLineNote>> ListOrderBookLineNotesAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<(string ReferenceDocument, string Material, string? Risk, string? Reason, string? WontGet, string? LastDay, string? LastDayTime, string? BringForward, decimal? PlannedProductionQty)>(
+            new CommandDefinition("""
+                SELECT ReferenceDocument, Material, Risk, Reason, WontGet, LastDay, LastDayTime, BringForward, PlannedProductionQty
+                FROM log.OrderBookLineNotes
+                """, cancellationToken: ct));
+
+        return rows.ToDictionary(
+            r => $"{r.ReferenceDocument}||{r.Material}",
+            r => new OrderBookLineNote(r.Risk, r.Reason, r.WontGet, r.LastDay, r.LastDayTime, r.BringForward, r.PlannedProductionQty));
     }
 }

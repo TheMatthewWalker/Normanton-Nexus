@@ -1,5 +1,8 @@
+using Moq;
 using NormantonNexus.Helpers.Logistics;
+using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Logistics;
 
@@ -160,5 +163,21 @@ public class PerformanceDashboardHelperTests
         Assert.Null(result.LastRefreshUtc);
         Assert.Single(result.Failures);
         Assert.Equal("Otif", result.Failures[0].Name);
+    }
+
+    // ── UpsertConsignmentCustomerAsync ───────────────────────────────────
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task UpsertConsignmentCustomerAsync_rejects_a_blank_customer_without_opening_a_connection(string? customer)
+    {
+        var db = new Mock<INexusOperationsDb>();
+        db.Setup(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("should not be called"));
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            PerformanceDashboardHelper.UpsertConsignmentCustomerAsync(db.Object, customer!, new UpsertConsignmentCustomerRequest("Acme Ltd"), "alice", CancellationToken.None));
     }
 }
