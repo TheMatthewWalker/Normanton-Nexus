@@ -62,7 +62,8 @@ public class ChangePasswordModel(IAuthService authService) : PageModel
                 ErrorMessage = failure.Reason switch
                 {
                     ChangePasswordFailureReason.IncorrectCurrentPassword => "Current password is incorrect.",
-                    ChangePasswordFailureReason.NewPasswordTooShort => "New password must be at least 8 characters.",
+                    ChangePasswordFailureReason.NewPasswordTooWeak => "New password must be at least 10 characters with one uppercase letter and one number.",
+                    ChangePasswordFailureReason.NewPasswordSameAsCurrent => "New password must be different from your current password.",
                     _ => "Could not change password.",
                 };
                 return Page();

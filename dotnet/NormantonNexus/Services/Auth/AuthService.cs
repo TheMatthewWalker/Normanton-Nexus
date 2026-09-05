@@ -24,7 +24,8 @@ public abstract record LoginResult
 public enum ChangePasswordFailureReason
 {
     IncorrectCurrentPassword,
-    NewPasswordTooShort,
+    NewPasswordTooWeak,
+    NewPasswordSameAsCurrent,
 }
 
 public abstract record ChangePasswordResult
@@ -193,11 +194,19 @@ internal sealed class AuthService(
         return new LoginResult.Success(principal, properties);
     }
 
-    // Minimum length only — NOT yet confirmed against Node's real password
-    // policy (no routes/profile.js change-password endpoint has been read in
-    // this session). Revisit once that's researched; this is a reasonable
-    // floor, not a confirmed port.
-    private const int MinimumNewPasswordLength = 8;
+    /// <summary>
+    /// Matches routes/profile.js's POST /change-password exactly: at least 10
+    /// characters, one uppercase letter, one digit — the same rule
+    /// UserAdminHelper.IsStrongEnoughPassword enforces for bulk-created
+    /// accounts (routes/useradmin.js's POST /users/bulk-create uses the
+    /// identical regex), kept as its own small copy here rather than a
+    /// cross-feature reference, matching this migration's own established
+    /// "each file owns its small validators" precedent (e.g.
+    /// CustomsReportHelper's ReadCellText/BuildHeaderMap vs.
+    /// OrderBookNotesUploadHelper's own copies).
+    /// </summary>
+    internal static bool IsStrongEnoughPassword(string password) =>
+        password.Length >= 10 && password.Any(char.IsUpper) && password.Any(char.IsDigit);
 
     public async Task<ChangePasswordResult> ChangePasswordAsync(
         int userId, string currentPassword, string newPassword, string? ipAddress, CancellationToken ct = default)
@@ -213,9 +222,17 @@ internal sealed class AuthService(
             return new ChangePasswordResult.Failure(ChangePasswordFailureReason.IncorrectCurrentPassword);
         }
 
-        if (newPassword.Length < MinimumNewPasswordLength)
+        if (!IsStrongEnoughPassword(newPassword))
         {
-            return new ChangePasswordResult.Failure(ChangePasswordFailureReason.NewPasswordTooShort);
+            return new ChangePasswordResult.Failure(ChangePasswordFailureReason.NewPasswordTooWeak);
+        }
+
+        // Matches Node's own `newPassword === currentPassword` check exactly — compared as
+        // plaintext (both are the raw values off this same request), not via bcrypt, since
+        // Node's own check is a plain string comparison too, not a re-verify against the hash.
+        if (newPassword == currentPassword)
+        {
+            return new ChangePasswordResult.Failure(ChangePasswordFailureReason.NewPasswordSameAsCurrent);
         }
 
         var newHash = BCrypt.Net.BCrypt.HashPassword(newPassword, workFactor: 12);
