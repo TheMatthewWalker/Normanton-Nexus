@@ -1,0 +1,18 @@
+@page
+@model NormantonNexus.Pages.Finance.StockAdjustmentsModel
+@{
+    ViewData["Title"] = "Stock Adjustments";
+    ViewData["Department"] = "Finance";
+    ViewData["PageTitle"] = "Stock Adjustments";
+    ViewData["PageSubtitle"] = "Stock Count Results — counts pending finance approval";
+}
+
+<p><a asp-page="Index">&larr; Finance</a></p>
+
+<button type="button" id="scf-reports-btn" class="secondary">View Gains/Losses Report</button>
+
+<div id="scf-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/finance/stock-adjustments.js"></script>
+}

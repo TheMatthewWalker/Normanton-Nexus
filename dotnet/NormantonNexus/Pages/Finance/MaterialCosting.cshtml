@@ -1,0 +1,28 @@
+@page
+@model NormantonNexus.Pages.Finance.MaterialCostingModel
+@{
+    ViewData["Title"] = "Material Costing";
+    ViewData["Department"] = "Finance";
+    ViewData["PageTitle"] = "Material Costing";
+    ViewData["PageSubtitle"] = "SAP standard cost sheet via costing BAPI";
+}
+
+<p><a asp-page="Index">&larr; Finance</a></p>
+
+<div>
+    <label for="mc-date">Costing Date</label>
+    <input type="text" id="mc-date" value="31.12.2026" placeholder="dd.MM.yyyy" style="max-width:160px;" />
+
+    <label for="mc-materials">Materials (one per line)</label>
+    <textarea id="mc-materials" rows="6" style="width:100%; box-sizing:border-box; font-family:monospace;" placeholder="000000000100012345"></textarea>
+
+    <button type="button" id="mc-run">Run</button>
+
+    <p id="mc-msg" style="color:#b91c1c;"></p>
+
+    <div id="mc-result"></div>
+</div>
+
+@section Scripts {
+    <script src="~/js/finance/material-costing.js"></script>
+}

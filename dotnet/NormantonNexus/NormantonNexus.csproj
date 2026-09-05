@@ -1,0 +1,100 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NormantonNexus</RootNamespace>
+    <AssemblyName>NormantonNexus</AssemblyName>
+    <UserSecretsId>normanton-nexus-dotnet</UserSecretsId>
+  </PropertyGroup>
+
+  <!--
+    Microsoft.NET.Sdk.Web (unlike SapServer's plain Microsoft.NET.Sdk — see
+    that repo's CLAUDE.md "Critical Platform Constraints") already produces a
+    proper IIS-ready publish layout out of the box: web.config with the ANCM
+    <aspNetCore> handler pointing at this app's own executable, no bin\
+    relocation MSBuild target needed. Confirmed by ASP.NET Core's documented
+    IIS-hosting support — worth a one-time real `dotnet publish` + local IIS
+    smoke test once Phase 0 is otherwise done, rather than just assuming.
+  -->
+
+  <!--
+    Lets NormantonNexus.Tests unit-test the internal Helpers/* request
+    builders and response parsers directly without making them public —
+    same InternalsVisibleTo pattern SapServer.csproj uses.
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="NormantonNexus.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Runtime SQL access: Dapper over Microsoft.Data.SqlClient, matching the
+         existing app's 100%-raw-parameterized-SQL style (see dotnet/CLAUDE.md /
+         the migration plan's Architecture section) — no runtime ORM. -->
+    <PackageReference Include="Dapper" Version="2.*" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.*" />
+
+    <!-- MRP Analysis's Sales Breakdown export/upload (Sub-phase 8b.5) — C# equivalent of
+         Node's ExcelJS. ClosedXML wraps OpenXML SDK with a much simpler workbook-building
+         API; used here for both directions (writeMaterialsSheet's export, the upload
+         side's header-matched read). The far larger, live-formula orderbook Excel export
+         (8b.6) is a separate, dedicated-time item — this is the simpler of the two round
+         trips per the Sub-phase 8b research. -->
+    <PackageReference Include="ClosedXML" Version="0.105.1" />
+
+    <!-- EF Core is schema-migration tooling ONLY here (raw-SQL migrationBuilder.Sql()
+         calls, not fluent model-first) — runtime queries stay on Dapper above. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <PackageReference Include="BCrypt.Net-Next" Version="4.*" />
+
+    <!-- Phase 10 cross-cutting closeout — replaces node-cron's in-process schedule
+         registration (server.js's cron.schedule(...) calls) for the genuine business-
+         schedule jobs (30-min perf refresh, daily TurnsValClass/consignment/Isopar
+         checks, weekly MRP history). AddQuartzHostedService (Program.cs) runs the
+         scheduler as an IHostedService inside this same IIS-hosted process — no
+         separate Windows Service/Task Scheduler needed, unlike SapServer's own
+         Task-Scheduler-based background work. -->
+    <PackageReference Include="Quartz.Extensions.Hosting" Version="3.20.1" />
+
+    <!-- Server-side label PDF generation (LabelPdfHelper) — C# equivalent of
+         Node's pdfkit. QuestPDF's declarative Row/Column/Text/Image layout is
+         used to reproduce the same content and grouping as Node's imperative
+         PDFKit drawing (header bar, two-column batch-ref/SAP-doc + material/
+         operators, footer) — NOT a pixel-for-pixel port of PDFKit's absolute
+         x/y coordinate math, which doesn't map cleanly onto QuestPDF's layout
+         model and can't be visually verified in this sandbox anyway (no PDF
+         viewer, no real printer). Requires QuestPDF.Settings.License =
+         Community at startup (Program.cs) since QuestPDF 2023's licensing
+         change — free for this app's use case (see QuestPDF's own docs), but
+         the line must be set or every Document.GeneratePdf() throws. -->
+    <PackageReference Include="QuestPDF" Version="2024.10.3" />
+
+    <!-- Signs the short-lived JWT SapServerClient sends to SapServer on every
+         proxied call — C# equivalent of Node's jsonwebtoken (sap.js's
+         makeSapToken). Same shared secret as SapServer's own Auth:JwtSecret. -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
+
+    <!-- Validates the Month End Breakdown Excel macro's bearer token (Sub-phase 8b.6's
+         OrderbookBearerScheme) — unlike Cookies, JwtBearer ships as its own NuGet package
+         rather than being part of the ASP.NET Core shared framework. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.*" />
+
+    <!-- Production label barcode generation (LabelBarcodeHelper) — C# equivalent
+         of Node's bwip-js. ZXing.Net's BarcodeWriterPixelData produces raw BGRA32
+         pixel bytes (pure managed, no OS-level graphics dependency), which
+         ImageSharp then encodes to a real PNG — deliberately NOT
+         System.Drawing.Common, which needs libgdiplus on Linux and is
+         discouraged there post-.NET 6; this combination is genuinely testable
+         in this sandbox and works identically once deployed to Windows/IIS. -->
+    <PackageReference Include="ZXing.Net" Version="0.16.9" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+  </ItemGroup>
+
+</Project>

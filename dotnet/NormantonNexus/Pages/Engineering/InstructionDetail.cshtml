@@ -1,0 +1,56 @@
+@page
+@model NormantonNexus.Pages.Engineering.InstructionDetailModel
+@{
+    ViewData["Title"] = "Packaging Instruction Detail";
+    ViewData["Department"] = "Engineering";
+    ViewData["PageTitle"] = "Packaging Instruction Detail";
+    ViewData["PageSubtitle"] = "Detailed changes to a material's packaging instruction";
+}
+
+<p><a asp-page="Index">&larr; Engineering</a></p>
+
+<label for="pi-material">Material</label>
+<div style="display:flex; gap:0.5rem; max-width:480px;">
+    <input type="text" id="pi-material" placeholder="Material number" style="flex:1;" />
+    <button type="button" id="pi-load">Load</button>
+</div>
+
+<div id="pi-scope-section" hidden style="margin-top:1rem;">
+    <p id="pi-description" style="color:#374151;"></p>
+    <label for="pi-scope">Scope</label>
+    <select id="pi-scope" style="max-width:480px;"></select>
+</div>
+
+<div id="pi-form-section" hidden style="margin-top:1rem;">
+    <p id="pi-banner" style="color:#b45309; background:#fffbeb; padding:0.5rem 0.75rem; border-radius:6px;"></p>
+
+    <label for="pi-packmat">Packaging Material</label>
+    <input type="text" id="pi-packmat" />
+
+    <label for="pi-pallqty">Qty per Pallet / Handling Unit</label>
+    <input type="number" id="pi-pallqty" step="0.001" />
+
+    <label for="pi-sbqty">Qty per Small Box</label>
+    <input type="number" id="pi-sbqty" step="0.001" />
+
+    <label><input type="checkbox" id="pi-packprod" /> Packed in Production</label>
+    <label><input type="checkbox" id="pi-partmix" /> Allow mixed pallets</label>
+    <label><input type="checkbox" id="pi-batchspread" /> Allow batch spread</label>
+    <label><input type="checkbox" id="pi-boxgen" /> Generate boxes within batch</label>
+
+    <p id="pi-trace-note" style="color:#6b7280; font-size:0.85rem;">These only take effect when saved against the plant default (no customer selected) — SAP ignores them on a customer-specific row.</p>
+    <label><input type="checkbox" id="pi-chargereq" /> Trace Charge ID Required (needed for material customisation)</label>
+    <label><input type="checkbox" id="pi-techstatreq" /> Tech Status Required</label>
+    <label><input type="checkbox" id="pi-pnumreq" /> Trace P-Number</label>
+
+    <div style="display:flex; gap:0.5rem; margin-top:0.75rem;">
+        <button type="button" id="pi-save">Save</button>
+        <button type="button" id="pi-delete" class="secondary" hidden>Delete</button>
+    </div>
+
+    <p id="pi-msg" style="color:#b91c1c;"></p>
+</div>
+
+@section Scripts {
+    <script src="~/js/engineering/instruction-detail.js"></script>
+}

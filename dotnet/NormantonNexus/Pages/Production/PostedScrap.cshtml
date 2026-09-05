@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Production.PostedScrapModel
+@{
+    ViewData["Title"] = "Posted Scrap";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Posted Scrap";
+    ViewData["PageSubtitle"] = "Approved and SAP-posted scrap summary by work centre and reason";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div id="ps-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/production/posted-scrap.js"></script>
+}

@@ -1,0 +1,27 @@
+@page
+@model NormantonNexus.Pages.Quality.IndexModel
+@{
+    ViewData["Title"] = "Quality";
+    ViewData["Department"] = "Quality";
+    ViewData["PageTitle"] = "Quality";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<div class="tile-grid">
+    <a class="tile" asp-page="Stock">
+        <p class="tile-title">Display Stock</p>
+        <p class="tile-hint">View warehouse stock &middot; block or unblock a row directly from the table</p>
+    </a>
+    <a class="tile" asp-page="BlockStock">
+        <p class="tile-title">Block Stock</p>
+        <p class="tile-hint">Move stock to quality inspection via MB1B movement 344</p>
+    </a>
+    <a class="tile" asp-page="UnblockStock">
+        <p class="tile-title">Unblock Stock</p>
+        <p class="tile-hint">Release stock from quality inspection via MB1B movement 343</p>
+    </a>
+    <a class="tile" asp-page="Concessions">
+        <p class="tile-title">Traceability Concessions</p>
+        <p class="tile-hint">Approve or reject Production's requests to proceed with a BOM traceability mismatch</p>
+    </a>
+</div>

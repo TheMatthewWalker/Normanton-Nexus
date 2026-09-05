@@ -1,0 +1,31 @@
+@page
+@model NormantonNexus.Pages.Production.BilletStagingModel
+@{
+    ViewData["Title"] = "Billet Staging";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Billet Staging";
+    ViewData["PageSubtitle"] = "Stage conditioned mix tubs into Billet, or return staged material to Conditioning";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+    <input type="text" id="bs-scan-ref" placeholder="Scan ticket ref e.g. MX-00000064-T1" style="max-width:260px;" />
+    <button type="button" id="bs-scan-btn" class="secondary">Stage by Scan</button>
+</div>
+
+<p id="bs-msg" style="color:#b91c1c;"></p>
+
+<h3>Ready to Stage</h3>
+<div id="bs-queue">Loading…</div>
+
+<h3>Search / Return to Conditioning</h3>
+<div style="display:flex; gap:0.5rem; margin-bottom:0.5rem;">
+    <input type="text" id="bs-search" placeholder="Mix ref, mix code, material or supplier tub…" style="max-width:280px;" />
+    <button type="button" id="bs-search-btn">Search</button>
+</div>
+<div id="bs-search-results"></div>
+
+@section Scripts {
+    <script src="~/js/production/billet-staging.js"></script>
+}

@@ -1,0 +1,17 @@
+@page
+@model NormantonNexus.Pages.Production.OpenRunsModel
+@{
+    ViewData["Title"] = "Open Runs";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Open Runs";
+    ViewData["PageSubtitle"] = "View and cancel open runs across all processes";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<p id="or-msg" style="color:#b91c1c;"></p>
+<div id="or-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/production/open-runs.js"></script>
+}

@@ -1,0 +1,29 @@
+@page "{code}"
+@model NormantonNexus.Pages.Production.MetreEntryModel
+@{
+    ViewData["Title"] = Model.ProcessLabel;
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = Model.ProcessLabel;
+    ViewData["PageSubtitle"] = "Enter a completed run and post directly to SAP";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div style="max-width:600px;" data-process-code="@Model.Code">
+    <label for="mp-material">Material</label>
+    <input type="text" id="mp-material" placeholder="Material number" />
+
+    <label for="mp-length">Length (Metres)</label>
+    <input type="number" id="mp-length" step="0.001" min="0.001" />
+
+    <label for="mp-notes">Notes (optional)</label>
+    <input type="text" id="mp-notes" placeholder="Any comments…" />
+
+    <p id="mp-result" style="margin:0.5rem 0;"></p>
+
+    <button type="button" id="mp-submit-btn">Post to SAP</button>
+</div>
+
+@section Scripts {
+    <script src="~/js/production/metre-entry.js"></script>
+}

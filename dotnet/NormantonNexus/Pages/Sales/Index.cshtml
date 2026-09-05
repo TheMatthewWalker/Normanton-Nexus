@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Sales.IndexModel
+@{
+    ViewData["Title"] = "Sales";
+    ViewData["Department"] = "Sales";
+    ViewData["PageTitle"] = "Sales";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<div class="tile-grid">
+    <a class="tile" asp-page="CustomerInstructions">
+        <p class="tile-title">Customer Standard Instructions</p>
+        <p class="tile-hint">Standing instructions printed on every Drumming Ticket for a customer</p>
+    </a>
+    <a class="tile" asp-page="ProductionSchedule">
+        <p class="tile-title">Production Schedule</p>
+        <p class="tile-hint">Open PTFE order lines due in the next 5 working days — comments, ETA and OTIF KPI</p>
+    </a>
+    <a class="tile" asp-page="ScheduleWaterfall">
+        <p class="tile-title">Schedule Agreement Waterfall</p>
+        <p class="tile-hint">History of past schedule agreement releases — compare cumulative totals release-over-release</p>
+    </a>
+</div>

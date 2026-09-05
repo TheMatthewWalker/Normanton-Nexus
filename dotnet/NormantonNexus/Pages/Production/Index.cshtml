@@ -1,0 +1,133 @@
+@page
+@model NormantonNexus.Pages.Production.IndexModel
+@{
+    ViewData["Title"] = "Production";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Production";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<p style="color:#6b7280; font-size:0.85rem;">
+    Drumming's full entry wizard, Open Entries/Complete Run, Scrap Reversal, and label printing are being ported in a
+    later slice of this department.
+</p>
+
+<h3>Production Entry</h3>
+<div class="tile-grid">
+    <a class="tile" asp-page="MixingEntry">
+        <p class="tile-title">Mixing</p>
+        <p class="tile-hint">Enter a completed mixing batch and post directly to SAP</p>
+    </a>
+    <a class="tile" asp-page="BilletStaging">
+        <p class="tile-title">Billet Staging</p>
+        <p class="tile-hint">Stage conditioned mix tubs into Billet, or return staged material to Conditioning</p>
+    </a>
+    <a class="tile" asp-page="MetreEntry" asp-route-code="EX">
+        <p class="tile-title">Extrusion</p>
+        <p class="tile-hint">Enter a completed extrusion run and post to SAP</p>
+    </a>
+    <a class="tile" asp-page="MetreEntry" asp-route-code="CO">
+        <p class="tile-title">Convoluting</p>
+        <p class="tile-hint">Enter a completed convoluting run and post to SAP</p>
+    </a>
+    <a class="tile" asp-page="MetreEntry" asp-route-code="BR">
+        <p class="tile-title">Braiding</p>
+        <p class="tile-hint">Enter a completed braiding run and post to SAP</p>
+    </a>
+    <a class="tile" asp-page="MetreEntry" asp-route-code="CL">
+        <p class="tile-title">Coverline</p>
+        <p class="tile-hint">Enter a completed coverline run and post to SAP</p>
+    </a>
+    <a class="tile" asp-page="MetreEntry" asp-route-code="TW">
+        <p class="tile-title">Tape Wrap</p>
+        <p class="tile-hint">Enter a completed tape wrap run and post to SAP</p>
+    </a>
+</div>
+
+<h3>Supervisor</h3>
+<div class="tile-grid">
+    <a class="tile" asp-page="OpenRuns">
+        <p class="tile-title">Open Runs</p>
+        <p class="tile-hint">View and cancel open runs across all processes</p>
+    </a>
+    <a class="tile" asp-page="ApproveScrap">
+        <p class="tile-title">Approve Scrap</p>
+        <p class="tile-hint">Supervisor approval queue — review and post operator scrap entries to SAP</p>
+    </a>
+    <a class="tile" asp-page="PostedScrap">
+        <p class="tile-title">Posted Scrap</p>
+        <p class="tile-hint">Approved and SAP-posted scrap summary by work centre and reason</p>
+    </a>
+    <a class="tile" asp-page="SapReversals">
+        <p class="tile-title">SAP Reversals</p>
+        <p class="tile-hint">Search SAP postings and reverse selected backflush documents</p>
+    </a>
+    <a class="tile" asp-page="ScrapReversal">
+        <p class="tile-title">Scrap Reversal</p>
+        <p class="tile-hint">Search and reverse SAP scrap documents · alerts on missed reversals</p>
+    </a>
+</div>
+
+<h3>Supervisor Reports</h3>
+<div class="tile-grid">
+    <a class="tile" asp-page="Reports/Output">
+        <p class="tile-title">Production Output</p>
+        <p class="tile-hint">Metres/KG produced by process over time</p>
+    </a>
+    <a class="tile" asp-page="Reports/Scrap">
+        <p class="tile-title">Scrap Analysis</p>
+        <p class="tile-hint">Scrap KG by reason, process and trend</p>
+    </a>
+    <a class="tile" asp-page="Reports/SapPerformance">
+        <p class="tile-title">SAP Performance</p>
+        <p class="tile-hint">Backflush success rate, failures, and alerts</p>
+    </a>
+    <a class="tile" asp-page="Reports/Batches">
+        <p class="tile-title">Batch Summary</p>
+        <p class="tile-hint">Batch counts by status</p>
+    </a>
+    <a class="tile" asp-page="Reports/ShiftComparison">
+        <p class="tile-title">Shift Performance</p>
+        <p class="tile-hint">Days/Afters/Nights comparison</p>
+    </a>
+    <a class="tile" asp-page="Reports/OperatorOutput">
+        <p class="tile-title">Operator Output</p>
+        <p class="tile-hint">Output ranked by primary operator</p>
+    </a>
+    <a class="tile" asp-page="Reports/MaterialOutput">
+        <p class="tile-title">Material Throughput</p>
+        <p class="tile-hint">Output ranked by material</p>
+    </a>
+</div>
+
+<h3>Production Data</h3>
+<div class="tile-grid">
+    <a class="tile" asp-page="Traceability">
+        <p class="tile-title">Traceability</p>
+        <p class="tile-hint">Trace a batch through the full production chain</p>
+    </a>
+    <a class="tile" asp-page="BatchHistory">
+        <p class="tile-title">Batch History</p>
+        <p class="tile-hint">Search completed/cancelled batches</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="EX">
+        <p class="tile-title">Extrusion Data</p>
+        <p class="tile-hint">Search completed/cancelled Extrusion records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="CO">
+        <p class="tile-title">Convoluting Data</p>
+        <p class="tile-hint">Search completed/cancelled Convoluting records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="BR">
+        <p class="tile-title">Braiding Data</p>
+        <p class="tile-hint">Search completed/cancelled Braiding records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="CL">
+        <p class="tile-title">Coverline Data</p>
+        <p class="tile-hint">Search completed/cancelled Coverline records</p>
+    </a>
+    <a class="tile" asp-page="MetreProcessData" asp-route-code="TW">
+        <p class="tile-title">Tape Wrap Data</p>
+        <p class="tile-hint">Search completed/cancelled Tape Wrap records</p>
+    </a>
+</div>

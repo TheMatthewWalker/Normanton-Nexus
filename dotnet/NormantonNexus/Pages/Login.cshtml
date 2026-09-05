@@ -1,0 +1,42 @@
+@page
+@model NormantonNexus.Pages.LoginModel
+@{
+    ViewData["Title"] = "Log in";
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Normanton Nexus — Log in</title>
+    <link rel="stylesheet" href="~/css/site.css" />
+</head>
+<body>
+    <main class="login-page">
+        <h1>Normanton Nexus</h1>
+
+        @if (Model.ErrorCode is not null)
+        {
+            <p class="login-error" role="alert">
+                @(Model.ErrorCode switch
+                {
+                    "pending_approval" => "Your account is pending approval.",
+                    "account_locked" => "Your account is locked. Contact an administrator.",
+                    "too_many_attempts" => "Too many login attempts. Please try again later.",
+                    _ => "Invalid username or password.",
+                })
+            </p>
+        }
+
+        <form method="post" asp-page="./Login">
+            <label for="Username">Username</label>
+            <input type="text" id="Username" name="Username" autocomplete="username" required />
+
+            <label for="Password">Password</label>
+            <input type="password" id="Password" name="Password" autocomplete="current-password" required />
+
+            <button type="submit">Log in</button>
+        </form>
+    </main>
+</body>
+</html>

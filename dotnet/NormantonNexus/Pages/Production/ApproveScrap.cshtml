@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Production.ApproveScrapModel
+@{
+    ViewData["Title"] = "Approve Scrap";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Approve Scrap";
+    ViewData["PageSubtitle"] = "Supervisor approval queue — review and post operator scrap entries to SAP";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div id="as-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/production/approve-scrap.js"></script>
+}

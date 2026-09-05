@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Engineering.IndexModel
+@{
+    ViewData["Title"] = "Engineering";
+    ViewData["Department"] = "Engineering";
+    ViewData["PageTitle"] = "Engineering";
+    ViewData["PageSubtitle"] = "Packaging Data — select a function to begin";
+}
+
+<div class="tile-grid">
+    <a class="tile" asp-page="MassUpdate">
+        <p class="tile-title">Mass Packaging Update</p>
+        <p class="tile-hint">Bulk-update the default (plant-level) packaging instruction assignment for a list of part numbers</p>
+    </a>
+    <a class="tile" asp-page="NewPackaging">
+        <p class="tile-title">New Customer Packaging Creation</p>
+        <p class="tile-hint">Create the material masters &amp; BOMs needed for a customer's packaging set-up</p>
+    </a>
+    <a class="tile" asp-page="InstructionDetail">
+        <p class="tile-title">Packaging Instruction Detail</p>
+        <p class="tile-hint">Detailed changes to a material's packaging instruction</p>
+    </a>
+</div>

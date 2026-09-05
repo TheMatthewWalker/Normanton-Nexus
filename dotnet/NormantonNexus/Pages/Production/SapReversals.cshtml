@@ -1,0 +1,18 @@
+@page
+@model NormantonNexus.Pages.Production.SapReversalsModel
+@{
+    ViewData["Title"] = "SAP Reversals";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "SAP Reversals";
+    ViewData["PageSubtitle"] = "Search SAP postings and reverse selected backflush documents";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div id="rev-search-inputs"></div>
+<p id="rev-msg" style="color:#b91c1c;"></p>
+<div id="rev-results"></div>
+
+@section Scripts {
+    <script src="~/js/production/sap-reversals.js"></script>
+}
