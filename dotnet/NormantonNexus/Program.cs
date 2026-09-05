@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -27,6 +28,30 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorPages()
     .AddMvcOptions(options => options.Filters.Add<MustChangePasswordPageFilter>());
 builder.Services.AddControllers();
+
+// Persist Data Protection keys to a fixed folder instead of the framework's
+// default (%LOCALAPPDATA%\ASP.NET\DataProtection-Keys under the current
+// user's profile). Every cookie-auth ticket this app issues (PortalSessionStore
+// encrypts what it hands back to the browser via IDataProtector) and the
+// antiforgery system both depend on these keys — without a persisted, stable
+// location, ApplicationPoolIdentity's virtual account (no real Windows user
+// profile — see the SapServer sibling rebuild's own "loadUserProfile" IIS
+// gotcha, same underlying identity quirk) either can't reliably persist keys
+// at all or persists them somewhere that doesn't survive an app-pool
+// recycle/worker replacement, silently invalidating every logged-in user's
+// session cookie the moment it happens — a real correctness gap this app has
+// never been tested against, since nothing in this sandbox can simulate an
+// IIS app-pool recycle. Fixed here rather than left to be discovered the way
+// SapServer's own IIS gotchas were (see that repo's CLAUDE.md's "Critical
+// Platform Constraints" for the general pattern of ApplicationPoolIdentity
+// surprises). SetApplicationName pins the key-ring discriminator explicitly
+// (defaults to ContentRootPath otherwise, which is fine today but would
+// silently rotate every key — logging every session out — if this app is
+// ever republished to a different path). install.ps1 grants the app pool
+// identity Modify access to this folder, same as logs\.
+builder.Services.AddDataProtection()
+    .SetApplicationName("NormantonNexus")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "keys")));
 
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 
