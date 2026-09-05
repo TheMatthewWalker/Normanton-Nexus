@@ -23,5 +23,8 @@ public abstract class NexusControllerBase : ControllerBase
 
     protected string? GetUsername() => User.Identity?.Name;
 
+    /// <summary>The three fixed role values (NexusRoles.Operator/Admin/Superadmin) — first needed by Phase 9's user-admin endpoints, which do their own in-handler role-hierarchy comparisons on top of the [Authorize(Policy = "Role:x")] gate (matching Node's inline ROLE_LEVEL checks in routes/useradmin.js).</summary>
+    protected string? GetRole() => User.FindFirstValue(ClaimTypes.Role);
+
     protected string? GetIpAddress() => HttpContext.Connection.RemoteIpAddress?.ToString();
 }
