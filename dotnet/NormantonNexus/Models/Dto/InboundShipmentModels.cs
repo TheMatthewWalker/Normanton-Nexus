@@ -58,3 +58,20 @@ public sealed record InboundShipmentDocumentFileInfo(string FileName, long SizeB
 public sealed record InboundShipmentDocumentFolderResult(string? SupplierName, IReadOnlyList<InboundShipmentDocumentFileInfo> Files, string FolderPath);
 
 public sealed record UploadedInboundDocumentResult(string FileName, long SizeBytes, string DownloadUrl);
+
+// ── Sub-phase 8b.7: real SAP goods-receipt writes (Mark Received / Undo Received) ──
+
+/// <summary>Mirrors SapServer's GoodsReceiptRequest field-for-field — POST /api/purchasing/post-goods-receipt (MB01 BDC).</summary>
+public sealed record GoodsReceiptRequest(string PurchaseOrder, int LineNumber, string Reference, string TrackingNumber, string AddressCode, string ShipmentCompletionDate, string? PostingDate, decimal? Quantity);
+
+/// <summary>ReceivedQuantities/SupplierReferences are optional {suggestionId: value} maps — a line omitted from either falls back to its OrderQty / already-on-file SupplierReference.</summary>
+public sealed record MarkShipmentReceivedRequest(DateTime? ReceivedAt, Dictionary<long, decimal>? ReceivedQuantities, Dictionary<long, string>? SupplierReferences, bool SkipSap = false);
+
+/// <summary>One order line's SAP goods-receipt (or reversal) outcome — Success is true for both a real success and a deliberate skip (no-PO/zero-qty/skipSap), matching what's actually persisted (SapGrError is only ever set when Success is false).</summary>
+public sealed record SapGrOutcome(long SuggestionId, string Material, bool Success, string? DocumentNumber, string? Error, bool Skipped);
+
+public sealed record MarkShipmentReceivedResult(int OrderCount, IReadOnlyList<SapGrOutcome> SapResults);
+
+public sealed record UndoShipmentReceivedRequest(bool SkipSap = false);
+
+public sealed record UndoShipmentReceivedResult(int ReversedCount, int StillPostedCount, bool ShipmentUndone, IReadOnlyList<SapGrOutcome> SapResults);

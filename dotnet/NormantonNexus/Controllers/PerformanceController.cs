@@ -405,6 +405,26 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
     public async Task<IActionResult> CancelOrderShipment(long shipmentId, CancellationToken ct) =>
         Ok(ApiResponse<CancelOrderShipmentResult>.Ok(await InboundShipmentHelper.CancelShipmentAsync(nexusOperationsDb, shipmentId, GetUsername(), ct)));
 
+    // Also reachable by WAREHOUSE_OP — the actual "GR feature" a warehouse operator uses to mark
+    // a shipment arrived and post its goods receipt (see InboundShipmentHelper.MarkReceivedAsync's
+    // own comment).
+    [HttpPost("order-suggestions/shipments/{shipmentId:long}/receive")]
+    [Authorize(Policy = "Perm:LOG_MRP,WAREHOUSE_OP")]
+    public async Task<IActionResult> MarkOrderShipmentReceived(long shipmentId, [FromBody] MarkShipmentReceivedRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<MarkShipmentReceivedResult>.Ok(await InboundShipmentHelper.MarkReceivedAsync(nexusOperationsDb, sapServerClient, shipmentId, body, GetUsername(), GetUserId(), ct)));
+
+    [HttpPost("order-suggestions/shipments/{shipmentId:long}/undo-receive")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> UndoOrderShipmentReceived(long shipmentId, [FromBody] UndoShipmentReceivedRequest body, CancellationToken ct)
+    {
+        var result = await InboundShipmentHelper.UndoReceivedAsync(nexusOperationsDb, sapServerClient, shipmentId, body, GetUserId(), ct);
+        await audit.LogAsync("INBOUND_SHIPMENT_UNDO_RECEIVE", GetUsername(),
+            $"Undid Mark Received on shipment #{shipmentId} — {result.ReversedCount} line(s) reversed" +
+                (result.StillPostedCount > 0 ? $", {result.StillPostedCount} still SAP-posted (reversal failed, retry needed)" : ""),
+            GetIpAddress(), ct);
+        return Ok(ApiResponse<UndoShipmentReceivedResult>.Ok(result));
+    }
+
     [HttpGet("order-suggestions/shipments/{shipmentId:long}/manual-items")]
     [Authorize(Policy = "Perm:LOG_MRP")]
     public async Task<IActionResult> ListManualInboundItems(long shipmentId, CancellationToken ct) =>

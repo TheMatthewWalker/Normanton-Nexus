@@ -288,6 +288,234 @@ internal static class InboundShipmentHelper
         return new CancelOrderShipmentResult(unlinked.Count());
     }
 
+    // ── Mark Received / Undo Received (Sub-phase 8b.7 — real SAP goods-receipt writes) ──
+    // Non-elevated: these run on SapServer's shared service-worker pool (MB01/MBST BDCs, checked
+    // against a valid JWT only), unlike Create PO in SAP's per-user-elevated session — see
+    // SapServer's PurchasingController.PostGoodsReceipt/ReverseGoodsReceipt.
+
+    internal sealed record ReceivableOrderRow(long SuggestionId, string Material, decimal OrderQty, string? PoNumber, string? PoItemNumber, string? SupplierReference, string? OrderMoqUom, string? MaterialUom);
+
+    /// <summary>
+    /// Only attempted for a line with a real SAP PO on file — a manually-entered order line with
+    /// no PO, or a confirmed-zero received quantity, has nothing to post and is reported back
+    /// skipped rather than attempted (SAP's own XFULL default would otherwise book whatever SAP
+    /// currently thinks is outstanding, which is never what a confirmed 0 means).
+    /// </summary>
+    internal static async Task<SapGrOutcome> PostGoodsReceiptToSapAsync(
+        ISapServerClient sap, ReceivableOrderRow order, decimal receivedQty, string shipmentReference, string? trackingNumber, DateTime shipmentReceivedAtUtc, int userId, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(order.PoNumber))
+            return new SapGrOutcome(order.SuggestionId, order.Material, true, null, "No SAP PO number on file for this order line — nothing to post.", Skipped: true);
+        if (string.IsNullOrEmpty(order.PoItemNumber))
+            return new SapGrOutcome(order.SuggestionId, order.Material, true, null, "PO number is set but the PO item number is missing — enter it below, then Undo Received and Mark Received again to post the goods receipt.", Skipped: true);
+        if (receivedQty <= 0)
+            return new SapGrOutcome(order.SuggestionId, order.Material, true, null, "Confirmed received quantity is 0 — nothing to post.", Skipped: true);
+
+        // PoItemNumber is the padded SAP item string ("00010", "00020", ...) — divide by 10 to
+        // recover the 1-based LineNumber GoodsReceiptRequest expects.
+        var lineNumber = (int)Math.Round(decimal.Parse(order.PoItemNumber) / 10);
+        var baseUnit = order.MaterialUom ?? "KG";
+        var orderUnit = order.OrderMoqUom ?? baseUnit;
+
+        var body = new GoodsReceiptRequest(
+            PurchaseOrder: order.PoNumber,
+            LineNumber: lineNumber,
+            Reference: order.SupplierReference ?? "",
+            TrackingNumber: trackingNumber ?? "",
+            AddressCode: shipmentReference,
+            ShipmentCompletionDate: shipmentReceivedAtUtc.ToString("yyyy-MM-dd"),
+            PostingDate: DateTime.UtcNow.ToString("yyyy-MM-dd"),
+            // ReceivedQty is always stored in the material's SAP base unit — SAP's own goods-
+            // receipt posting is against a specific PO line, so it needs the quantity expressed
+            // in that PO's own order unit (log.Vendor.OrderMoqUom), the same unit the PO itself
+            // was created in. A no-op when the vendor's unit is already the base unit.
+            Quantity: UnitConversionHelper.ConvertQty(receivedQty, baseUnit, orderUnit));
+
+        try
+        {
+            var bdc = await sap.PostAsync<BdcResponse>("api/purchasing/post-goods-receipt", body, userId, ct: ct)
+                ?? throw new NexusBadGatewayException("SapServer returned an empty response.");
+
+            // Type "E"/"A" (error/abort) means the BDC itself ran but SAP rejected the posting —
+            // a 200-with-success:true response can still carry one of these.
+            if (bdc.Type is "E" or "A")
+                return new SapGrOutcome(order.SuggestionId, order.Material, false, null, string.IsNullOrEmpty(bdc.Message) ? "Goods receipt failed." : bdc.Message, Skipped: false);
+
+            return new SapGrOutcome(order.SuggestionId, order.Material, true, string.IsNullOrEmpty(bdc.DocumentNumber) ? null : bdc.DocumentNumber, null, Skipped: false);
+        }
+        catch (SapProxyException ex)
+        {
+            return new SapGrOutcome(order.SuggestionId, order.Material, false, null, ex.Message, Skipped: false);
+        }
+    }
+
+    /// <summary>
+    /// Inbound Log's "Mark Received" action — stamps the shipment received, bulk-flips every
+    /// linked non-cancelled order to 'Received', and posts each line's goods receipt to SAP. A
+    /// single line's SAP failure does NOT stop the others or stop the shipment being marked
+    /// received — 'Received' means "physically arrived and logged as received", independent of
+    /// whether SAP posting itself succeeded; the per-line outcome is stamped onto the order row
+    /// and returned so a failure can be seen and retried without blocking the rest of the
+    /// shipment. Also reachable by WAREHOUSE_OP (enforced by the controller) — this is the
+    /// actual "GR feature" a warehouse operator uses to mark a shipment arrived; skipSap stays
+    /// planner-only in practice, though nothing here restricts who may pass it.
+    /// </summary>
+    internal static async Task<MarkShipmentReceivedResult> MarkReceivedAsync(INexusOperationsDb db, ISapServerClient sap, long shipmentId, MarkShipmentReceivedRequest body, string? receivedBy, int callerUserId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var shipment = await connection.QuerySingleOrDefaultAsync<(string? ShipmentReference, string? TrackingNumber, DateTime? ReceivedAtUtc)?>(new CommandDefinition(
+            "SELECT ShipmentReference, TrackingNumber, ReceivedAtUtc FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId", new { shipmentId }, cancellationToken: ct));
+        if (shipment is null) throw new NexusNotFoundException("Shipment not found.");
+        if (shipment.Value.ReceivedAtUtc is not null) throw new NexusValidationException("This shipment has already been marked received.");
+
+        var receivedDate = body.ReceivedAt ?? DateTime.UtcNow;
+
+        var orders = (await connection.QueryAsync<ReceivableOrderRow>(new CommandDefinition("""
+            SELECT p.SuggestionId, p.Material, p.OrderQty, p.PoNumber, p.PoItemNumber, p.SupplierReference,
+                   v.OrderMoqUom, t.Uom AS MaterialUom
+            FROM log.PurchaseOrderSuggestion p
+            JOIN log.Vendor v ON v.VendorId = p.VendorId
+            LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
+            WHERE p.ShipmentId = @shipmentId AND p.Status <> 'Cancelled'
+            """, new { shipmentId }, cancellationToken: ct))).ToList();
+
+        // A freshly-typed confirmation is entered off the supplier's own delivery paperwork, in
+        // the vendor's actual order unit — convert it back to the material's base unit (what
+        // ReceivedQty is always stored in, matching OrderQty) once, here. The no-input default
+        // (whole order assumed received) is already in the base unit — nothing to convert.
+        var resolved = new List<(ReceivableOrderRow Order, decimal ReceivedQty, string SupplierReference)>();
+        foreach (var order in orders)
+        {
+            var orderUnit = order.OrderMoqUom ?? order.MaterialUom ?? "KG";
+            var qty = body.ReceivedQuantities is not null && body.ReceivedQuantities.TryGetValue(order.SuggestionId, out var raw)
+                ? UnitConversionHelper.ConvertQty(raw, orderUnit, order.MaterialUom ?? "KG")
+                : order.OrderQty;
+            if (qty < 0) throw new NexusValidationException($"Invalid received quantity for material {order.Material}.");
+
+            var freshRef = body.SupplierReferences is not null && body.SupplierReferences.TryGetValue(order.SuggestionId, out var r) ? r?.Trim() : null;
+            var supplierReference = !string.IsNullOrWhiteSpace(order.SupplierReference) ? order.SupplierReference!.Trim() : (freshRef ?? "");
+            if (supplierReference.Length == 0)
+                throw new NexusValidationException($"Enter the supplier's delivery paperwork reference for material {order.Material} before marking this shipment received.");
+
+            resolved.Add((order, qty, supplierReference));
+        }
+
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE log.PurchaseOrderShipment SET ReceivedAtUtc = @receivedDate, ReceivedBy = @receivedBy, UpdatedAtUtc = GETUTCDATE() WHERE ShipmentId = @shipmentId",
+            new { shipmentId, receivedDate, receivedBy }, cancellationToken: ct));
+
+        var sapResults = new List<SapGrOutcome>();
+        foreach (var (order, receivedQty, supplierReference) in resolved)
+        {
+            var sapResult = body.SkipSap
+                ? new SapGrOutcome(order.SuggestionId, order.Material, true, null, null, Skipped: true)
+                : await PostGoodsReceiptToSapAsync(sap, order, receivedQty, shipment.Value.ShipmentReference ?? "", shipment.Value.TrackingNumber, receivedDate, callerUserId, ct);
+            sapResults.Add(sapResult);
+
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE log.PurchaseOrderSuggestion SET
+                  Status = 'Received', ReceivedQty = @receivedQty, SupplierReference = @supplierReference,
+                  SapMaterialDocument = @sapMaterialDocument, SapGrError = @sapGrError, SapGrSkipped = @sapGrSkipped,
+                  UpdatedAtUtc = GETUTCDATE()
+                WHERE SuggestionId = @suggestionId
+                """, new
+            {
+                suggestionId = order.SuggestionId,
+                receivedQty,
+                supplierReference,
+                sapMaterialDocument = sapResult.DocumentNumber,
+                sapGrError = sapResult.Success ? null : sapResult.Error,
+                sapGrSkipped = sapResult.Skipped,
+            }, cancellationToken: ct));
+        }
+
+        return new MarkShipmentReceivedResult(resolved.Count, sapResults);
+    }
+
+    /// <summary>
+    /// Inbound Log's "Undo Received" action — reverses Mark Received: reverses each order line's
+    /// posted SAP material document, clears ReceivedQty/SapMaterialDocument/SapGrError/
+    /// SapGrSkipped, and reverts Status back to 'Ordered'. A line whose SAP reversal fails is
+    /// deliberately left completely alone — still Booked/Received, only SapGrError updated —
+    /// rather than force-clearing the portal's record of something still actually posted in SAP;
+    /// safe to call again later, since an already-cleared line has no SapMaterialDocument and is
+    /// skipped straight to the "nothing to reverse" path. The shipment only drops out of
+    /// "Completed" back into its ETA-based buckets (ReceivedAtUtc/ReceivedBy cleared) once every
+    /// line is confirmed clear.
+    /// </summary>
+    internal static async Task<UndoShipmentReceivedResult> UndoReceivedAsync(INexusOperationsDb db, ISapServerClient sap, long shipmentId, UndoShipmentReceivedRequest body, int callerUserId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var shipment = await connection.QuerySingleOrDefaultAsync<(DateTime? ReceivedAtUtc, DateTime? CancelledAtUtc)?>(new CommandDefinition(
+            "SELECT ReceivedAtUtc, CancelledAtUtc FROM log.PurchaseOrderShipment WHERE ShipmentId = @shipmentId", new { shipmentId }, cancellationToken: ct));
+        if (shipment is null) throw new NexusNotFoundException("Shipment not found.");
+        if (shipment.Value.ReceivedAtUtc is null) throw new NexusValidationException("This shipment has not been marked received.");
+        if (shipment.Value.CancelledAtUtc is not null) throw new NexusValidationException("This shipment has been cancelled — its orders were already unlinked, so there is nothing to undo here.");
+
+        var orders = await connection.QueryAsync<(long SuggestionId, string Material, string? SapMaterialDocument)>(new CommandDefinition(
+            "SELECT SuggestionId, Material, SapMaterialDocument FROM log.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status IN ('Booked', 'Received')",
+            new { shipmentId }, cancellationToken: ct));
+
+        var sapResults = new List<SapGrOutcome>();
+        var reversedCount = 0;
+        var stillPostedCount = 0;
+
+        foreach (var order in orders)
+        {
+            SapGrOutcome reverseResult;
+            if (string.IsNullOrEmpty(order.SapMaterialDocument) || body.SkipSap)
+            {
+                reverseResult = new SapGrOutcome(order.SuggestionId, order.Material, true, null, null, Skipped: true);
+            }
+            else
+            {
+                try
+                {
+                    var bdc = await sap.PostAsync<BdcResponse>("api/purchasing/reverse-goods-receipt", new Mf41Request(order.SapMaterialDocument), callerUserId, ct: ct)
+                        ?? throw new NexusBadGatewayException("SapServer returned an empty response.");
+                    reverseResult = bdc.Type is "E" or "A"
+                        ? new SapGrOutcome(order.SuggestionId, order.Material, false, null, string.IsNullOrEmpty(bdc.Message) ? "Goods receipt reversal failed." : bdc.Message, Skipped: false)
+                        : new SapGrOutcome(order.SuggestionId, order.Material, true, null, null, Skipped: false);
+                }
+                catch (SapProxyException ex)
+                {
+                    reverseResult = new SapGrOutcome(order.SuggestionId, order.Material, false, null, ex.Message, Skipped: false);
+                }
+            }
+            sapResults.Add(reverseResult);
+
+            if (!reverseResult.Success)
+            {
+                stillPostedCount++;
+                await connection.ExecuteAsync(new CommandDefinition(
+                    "UPDATE log.PurchaseOrderSuggestion SET SapGrError = @sapGrError, UpdatedAtUtc = GETUTCDATE() WHERE SuggestionId = @suggestionId",
+                    new { suggestionId = order.SuggestionId, sapGrError = reverseResult.Error ?? "Goods receipt reversal failed." }, cancellationToken: ct));
+                continue;
+            }
+
+            reversedCount++;
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE log.PurchaseOrderSuggestion SET
+                  Status = 'Ordered', ReceivedQty = NULL,
+                  SapMaterialDocument = NULL, SapGrError = NULL, SapGrSkipped = NULL,
+                  UpdatedAtUtc = GETUTCDATE()
+                WHERE SuggestionId = @suggestionId
+                """, new { suggestionId = order.SuggestionId }, cancellationToken: ct));
+        }
+
+        var shipmentUndone = stillPostedCount == 0;
+        if (shipmentUndone)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE log.PurchaseOrderShipment SET ReceivedAtUtc = NULL, ReceivedBy = NULL, UpdatedAtUtc = GETUTCDATE() WHERE ShipmentId = @shipmentId",
+                new { shipmentId }, cancellationToken: ct));
+        }
+
+        return new UndoShipmentReceivedResult(reversedCount, stillPostedCount, shipmentUndone, sapResults);
+    }
+
     // ── Supplier invoice documents (filesystem) ──────────────────────────
 
     /// <summary>Throws if the configured root doesn't look like a real Windows/UNC path — same "misconfigured LOGISTICS_IMPORT_ROOT/LOGISTICS_PO_ROOT" guard Node has, catching a stray machine environment variable shadowing the real config.</summary>
