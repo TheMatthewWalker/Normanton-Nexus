@@ -58,6 +58,7 @@ builder.Services.AddHttpClient<ISapServerClient, SapServerClient>();
 
 builder.Services.Configure<ClearPortOptions>(builder.Configuration.GetSection(ClearPortOptions.SectionName));
 builder.Services.AddHttpClient<IClearPortClient, ClearPortClient>();
+builder.Services.AddHttpClient<IClearPortExportProxyClient, ClearPortExportProxyClient>();
 
 builder.Services.Configure<KuehneNagelOptions>(builder.Configuration.GetSection(KuehneNagelOptions.SectionName));
 builder.Services.AddHttpClient<IKuehneNagelClient, KuehneNagelClient>();
