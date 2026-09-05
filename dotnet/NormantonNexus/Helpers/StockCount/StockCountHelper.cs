@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Data.SqlClient;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
@@ -73,6 +74,96 @@ internal static class StockCountHelper
             r.Material, r.MaterialText, r.Uom, r.CountedQty,
             SapQty: r.CountedQty - (r.VarianceQty ?? 0),
             VarianceQty: r.VarianceQty, VarianceValue: r.VarianceValue)).ToArray();
+    }
+
+    // ── Weekly PTFE Cycle Count ─────────────────────────────────────────
+    // Port of routes/stockcount.js's mostRecentMonday/getOrCreatePtfeCountForWeek
+    // orchestration + GET /counts/current-ptfe — the last of the three
+    // cron-backed features Phase 10 Slice 1 flagged as missing. Node treats
+    // the Monday 05:56 cron (server.js's checkWeeklyPtfeCycleCountDue) as a
+    // convenience pre-warm only; GET /counts/current-ptfe's lazy
+    // getOrCreatePtfeCountForWeek call is the actual source of truth, so a
+    // missed cron tick self-heals the moment anyone opens the tile — both
+    // paths call the same GetOrCreatePtfeCountForWeekAsync below.
+
+    /// <summary>This week's Monday, date-only (UTC) — matches WeekStartDate's DATE column. Direct port of Node's mostRecentMonday: (dayOfWeek + 6) % 7 days back from `now`, where Sunday=0.</summary>
+    internal static DateTime MostRecentMonday(DateTime now)
+    {
+        var today = now.Date;
+        var diffToMonday = ((int)today.DayOfWeek + 6) % 7;
+        return today.AddDays(-diffToMonday);
+    }
+
+    internal sealed record PtfeCountCreationResult(int CountId, bool Created);
+
+    /// <summary>Node's checkWeeklyPtfeCycleCountDue — the cron entry point. createdBy/createdByUserId are always null here, matching Node's cron call exactly (a scheduled job has no real portal-user context).</summary>
+    internal static Task<PtfeCountCreationResult> CheckWeeklyPtfeCycleCountDueAsync(INexusOperationsDb db, CancellationToken ct) =>
+        GetOrCreatePtfeCountForWeekAsync(db, MostRecentMonday(DateTime.UtcNow), createdBy: null, createdByUserId: null, ct);
+
+    /// <summary>GET /counts/current-ptfe — lazily creates this week's PTFE count if the cron hasn't fired yet (or was missed), then returns it with its lines. Registered ahead of any future GET /counts/{id} route, same reasoning as Node's own route-ordering comment (not applicable yet — no such route exists in this port).</summary>
+    internal static async Task<CurrentPtfeCountResult> GetCurrentPtfeCountAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        var (countId, _) = await GetOrCreatePtfeCountForWeekAsync(db, MostRecentMonday(DateTime.UtcNow), createdBy: null, createdByUserId: null, ct);
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var doc = await connection.QuerySingleAsync<StockCountDocumentRow>(new CommandDefinition(
+            "SELECT CountId, CountType, StorageLocation, Status, WeekStartDate, CreatedBy, CreatedAtUtc, SubmittedBy, SubmittedAtUtc, ApprovedBy, ApprovedAtUtc, RejectedBy, RejectedAtUtc, RejectionReason, PostedAtUtc FROM log.StockCountDocument WHERE CountId = @countId",
+            new { countId }, cancellationToken: ct));
+        var lines = await connection.QueryAsync<CountLineRow>(new CommandDefinition(
+            "SELECT LineId, CountId, Material, MaterialText, Uom, NamedLocation, StorageType, Bin, TicketNumber, CountedQty, SapQty, VarianceQty, UnitPrice, VarianceValue, IsInvalidMaterial, IsBatchManaged, BinCompletedBy, BinCompletedAtUtc, EnteredBy, EnteredAtUtc, UpdatedAtUtc FROM log.StockCountLine WHERE CountId = @countId ORDER BY LineId",
+            new { countId }, cancellationToken: ct));
+
+        return new CurrentPtfeCountResult(doc, lines.ToArray());
+    }
+
+    /// <summary>
+    /// Idempotent PTFE-week creation, matching Node's getOrCreatePtfeCountForWeek
+    /// exactly: check-then-insert is only the common path — the real
+    /// guarantee against a race between the cron and a near-simultaneous
+    /// page load is the filtered unique index (UQ_StockCountDocument_PtfeWeek
+    /// on WeekStartDate WHERE CountType = 'PTFE_WEEKLY'), caught here as a
+    /// unique-violation and resolved by re-fetching whichever caller won.
+    /// </summary>
+    private static async Task<PtfeCountCreationResult> GetOrCreatePtfeCountForWeekAsync(INexusOperationsDb db, DateTime weekStartDate, string? createdBy, int? createdByUserId, CancellationToken ct)
+    {
+        var existing = await GetPtfeCountForWeekAsync(db, weekStartDate, ct);
+        if (existing is not null)
+        {
+            return new PtfeCountCreationResult(existing.Value, false);
+        }
+
+        try
+        {
+            var countId = await CreateCountDocumentAsync(db, "PTFE_WEEKLY", storageLocation: null, weekStartDate, createdBy, createdByUserId, ct);
+            return new PtfeCountCreationResult(countId, true);
+        }
+        catch (SqlException ex) when (ex.Number is 2627 or 2601)
+        {
+            var winner = await GetPtfeCountForWeekAsync(db, weekStartDate, ct);
+            if (winner is not null)
+            {
+                return new PtfeCountCreationResult(winner.Value, false);
+            }
+            throw;
+        }
+    }
+
+    private static async Task<int?> GetPtfeCountForWeekAsync(INexusOperationsDb db, DateTime weekStartDate, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
+            "SELECT CountId FROM log.StockCountDocument WHERE CountType = 'PTFE_WEEKLY' AND WeekStartDate = @weekStartDate",
+            new { weekStartDate }, cancellationToken: ct));
+    }
+
+    private static async Task<int> CreateCountDocumentAsync(INexusOperationsDb db, string countType, string? storageLocation, DateTime? weekStartDate, string? createdBy, int? createdByUserId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await connection.QuerySingleAsync<int>(new CommandDefinition("""
+            INSERT INTO log.StockCountDocument (CountType, StorageLocation, WeekStartDate, CreatedBy, CreatedByUserId, Status)
+            OUTPUT INSERTED.CountId
+            VALUES (@countType, @storageLocation, @weekStartDate, @createdBy, @createdByUserId, 'Open')
+            """, new { countType, storageLocation, weekStartDate, createdBy, createdByUserId }, cancellationToken: ct));
     }
 
     private sealed record ApprovalLine(int LineId, string Material, string? StorageType, string? Bin, decimal VarianceQty, string? Uom);

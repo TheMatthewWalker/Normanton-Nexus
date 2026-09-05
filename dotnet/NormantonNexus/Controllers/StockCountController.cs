@@ -30,6 +30,22 @@ public sealed class StockCountController(INexusOperationsDb nexusOperationsDb, I
         return Ok(ApiResponse<IReadOnlyList<StockCountDocumentRow>>.Ok(rows));
     }
 
+    /// <summary>
+    /// Lazily creates this week's PTFE Cycle Count if the Monday-morning
+    /// Quartz job hasn't fired yet (or was missed), then returns it with
+    /// its lines — the actual source of truth per Node's own comment, the
+    /// cron is only a pre-warm. No extra permission gate beyond the class-
+    /// level department check, matching Node's ungated route exactly.
+    /// Registered ahead of any future GET /counts/{id} route so "current-
+    /// ptfe" is never captured as an :id segment.
+    /// </summary>
+    [HttpGet("counts/current-ptfe")]
+    public async Task<IActionResult> GetCurrentPtfeCount(CancellationToken ct)
+    {
+        var result = await StockCountHelper.GetCurrentPtfeCountAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<CurrentPtfeCountResult>.Ok(result));
+    }
+
     [HttpGet("counts/{id:int}/report")]
     public async Task<IActionResult> GetCountReport(int id, [FromQuery] string groupBy = "material", CancellationToken ct = default)
     {

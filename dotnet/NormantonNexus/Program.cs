@@ -189,12 +189,15 @@ builder.Services.AddScoped<ISessionCleanupService, SessionCleanupService>();
 // exactly what this does. WarehouseSapSyncHelper.RunSapSyncAsync is a
 // genuinely new Phase 10 addition — routes/deliverymain.js's runSapSync had
 // no C# port at all until now (see that Helper's own header comment).
+// StockCountHelper.CheckWeeklyPtfeCycleCountDueAsync (routes/stockcount.js's
+// checkWeeklyPtfeCycleCountDue) closes out the third and final originally-
+// missing job — a pre-warm only, since GET /counts/current-ptfe's own lazy
+// getOrCreatePtfeCountForWeek-equivalent call is the real source of truth
+// (see StockCountHelper's own doc comment).
 //
-// STILL NOT ported (genuinely missing Helper functionality, not a
-// Quartz-specific gap — see dotnet/CLAUDE.md's Phase 10 section): the
-// weekly PTFE Cycle Count creation (checkWeeklyPtfeCycleCountDue,
-// '56 5 * * 1'). The 2 deploy-cron workaround jobs (dbo.ScheduledDeployments'
-// 15-second checker and 5-minute stuck-deployment safety net) are
+// All three originally-flagged missing cron-backed features are now built
+// and scheduled. The 2 deploy-cron workaround jobs (dbo.ScheduledDeployments'
+// 15-second checker and 5-minute stuck-deployment safety net) remain
 // deliberately NOT ported at all — see dotnet/CLAUDE.md's "deploy.js — read,
 // deliberately deferred to Phase 10" section for why porting them as-is
 // would encode a Windows-Service-restart assumption this app's IIS/ANCM
@@ -228,6 +231,8 @@ builder.Services.AddQuartz(q =>
     Schedule<ProductionScheduleOtifDiffJob>("ProductionScheduleOtifDiff", "0 10 6 * * ?", "Daily Production Schedule OTIF diff");
     // Hourly at :55 (Node: '55 * * * *').
     Schedule<WarehouseSapSyncJob>("WarehouseSapSync", "0 55 * * * ?", "Hourly warehouse SAP sync (open picksheets -> DeliveryMain)");
+    // Weekly, Monday at 05:56 (Node: '56 5 * * 1').
+    Schedule<WeeklyPtfeCycleCountJob>("WeeklyPtfeCycleCount", "0 56 5 ? * MON", "Weekly PTFE Cycle Count creation pre-warm");
 });
 builder.Services.AddQuartzHostedService(opts => opts.WaitForJobsToComplete = true);
 

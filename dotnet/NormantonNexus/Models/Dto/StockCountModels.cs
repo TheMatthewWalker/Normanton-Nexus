@@ -26,6 +26,29 @@ public sealed record StockCountDocumentRow(
 /// <summary>One row per Material for GET /counts/{id}/report (the only groupBy this port implements — see scope note above; groupBy=bin is Warehouse-side).</summary>
 public sealed record CountReportRow(string Material, string? MaterialText, string? Uom, decimal CountedQty, decimal? SapQty, decimal? VarianceQty, decimal? VarianceValue);
 
+/// <summary>
+/// One row from log.StockCountLine — read-only here (line entry itself is
+/// real, unbuilt Warehouse scope per this file's header note). Exists only
+/// so GET /counts/current-ptfe can return whatever lines a count already
+/// has, matching Node's `{ ...doc, lines }` response shape.
+/// </summary>
+public sealed record CountLineRow(
+    int LineId, int CountId, string Material, string? MaterialText, string? Uom,
+    string? NamedLocation, string? StorageType, string? Bin, string? TicketNumber,
+    decimal CountedQty, decimal? SapQty, decimal? VarianceQty, decimal? UnitPrice, decimal? VarianceValue,
+    bool IsInvalidMaterial, bool IsBatchManaged,
+    string? BinCompletedBy, DateTime? BinCompletedAtUtc,
+    string EnteredBy, DateTime EnteredAtUtc, DateTime UpdatedAtUtc);
+
+/// <summary>
+/// GET /counts/current-ptfe's response — Node spreads the document's own
+/// fields alongside a `lines` array (`{ ...doc, lines }`); a flat spread
+/// doesn't translate to a strongly-typed C# record, so this keeps the two
+/// pieces as separate named fields instead (same convention already used by
+/// ApproveCountResult/FinanceReportResult for a multi-part response).
+/// </summary>
+public sealed record CurrentPtfeCountResult(StockCountDocumentRow Document, IReadOnlyList<CountLineRow> Lines);
+
 public sealed record RejectCountRequest(string? Reason);
 
 public sealed record ApproveResultLine(string Material, string? StorageType, string? Bin, bool Success, string? Error, string? MaterialDocument);

@@ -1,5 +1,6 @@
 using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Helpers.ProductionSchedule;
+using NormantonNexus.Helpers.StockCount;
 using NormantonNexus.Helpers.Warehouse;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Notifications;
@@ -157,6 +158,24 @@ public sealed class WarehouseSapSyncJob(INexusOperationsDb opsDb, ISapServerClie
         catch (Exception ex)
         {
             logger.LogError(ex, "Scheduled warehouse SAP sync failed");
+        }
+    }
+}
+
+/// <summary>Node's checkWeeklyPtfeCycleCountDue — a convenience pre-warm only; GET /counts/current-ptfe's own lazy call is the actual source of truth, so a missed/failed run here self-heals the moment anyone opens the Finance tile.</summary>
+[DisallowConcurrentExecution]
+public sealed class WeeklyPtfeCycleCountJob(INexusOperationsDb opsDb, ILogger<WeeklyPtfeCycleCountJob> logger) : IJob
+{
+    public async Task Execute(IJobExecutionContext context)
+    {
+        try
+        {
+            var result = await StockCountHelper.CheckWeeklyPtfeCycleCountDueAsync(opsDb, context.CancellationToken);
+            logger.LogInformation("Weekly PTFE Cycle Count check complete: CountId={CountId} Created={Created}", result.CountId, result.Created);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Weekly PTFE Cycle Count check failed");
         }
     }
 }
