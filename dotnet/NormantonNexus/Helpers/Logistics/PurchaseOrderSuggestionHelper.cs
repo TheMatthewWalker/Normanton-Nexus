@@ -698,6 +698,26 @@ internal static class PurchaseOrderSuggestionHelper
         return rows.AsList();
     }
 
+    /// <summary>Every line on a given real SAP PO, ordered by PO item — backs "Recreate PO PDF" (regenerate-pdf, 8b.7). A narrower query than ListTrackedAsync's own (no shipment/schedule-agreement columns) — the unmatched OrderSuggestionTrackedRow properties are simply left at their default by Dapper, which is fine since regenerate-pdf never reads them.</summary>
+    internal static async Task<IReadOnlyList<OrderSuggestionTrackedRow>> ListByPoNumberAsync(INexusOperationsDb db, string poNumber, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<OrderSuggestionTrackedRow>(new CommandDefinition("""
+            SELECT
+              p.SuggestionId, p.VendorId, v.VendorName, v.SapVendorNumber, v.Currency, v.OrderMoqUom, v.Incoterms, p.VendorMaterialId, p.Material,
+              t.MaterialText, t.Uom, p.Status, p.SuggestedQty, p.OrderQty, p.OrderDate,
+              p.LeadTimeDaysUsed, p.DeliveryDate, p.TransitTimeDaysUsed, p.ReadyToCollectDate,
+              p.IsSpotPo, p.PoNumber, p.PoItemNumber, p.Notes, p.SupplierReference,
+              p.CreatedAtUtc, p.UpdatedAtUtc, p.ReceivedAtUtc
+            FROM log.PurchaseOrderSuggestion p
+            JOIN log.Vendor v ON v.VendorId = p.VendorId
+            LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = p.Material
+            WHERE p.PoNumber = @poNumber
+            ORDER BY p.PoItemNumber
+            """, new { poNumber }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
     /// <summary>One PO per vendor's worth of Accepted, not-yet-ordered tracked orders — flips them straight to 'Ordered' using the material's own schedule agreement as the PO number, skipping the elevated real-SAP-PO-creation flow (8b.7) entirely for materials that already have one on file.</summary>
     internal static async Task<AssignScheduleAgreementResult> AssignScheduleAgreementAsync(INexusOperationsDb db, AssignScheduleAgreementRequest body, CancellationToken ct)
     {

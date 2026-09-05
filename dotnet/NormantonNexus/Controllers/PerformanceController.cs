@@ -22,7 +22,7 @@ namespace NormantonNexus.Controllers;
 /// additionally carries its own real Node permission gate.
 /// </summary>
 [Route("api/performance")]
-public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions, IAuditLogger audit, ISapServerClient sapServerClient) : NexusControllerBase
+public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions, IAuditLogger audit, ISapServerClient sapServerClient, ISapCredentialCipher sapCredentialCipher) : NexusControllerBase
 {
     // Manual trigger for the 30-min SAP refresh (Stock/Agreements/Invoicing/Otif) — no
     // permission gate beyond this controller's base [Authorize], matching Node's own
@@ -332,6 +332,19 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
     [Authorize(Policy = "Perm:LOG_MRP")]
     public async Task<IActionResult> AssignScheduleAgreement([FromBody] AssignScheduleAgreementRequest body, CancellationToken ct) =>
         Ok(ApiResponse<AssignScheduleAgreementResult>.Ok(await PurchaseOrderSuggestionHelper.AssignScheduleAgreementAsync(nexusOperationsDb, body, ct)));
+
+    // Elevated: runs under the calling user's own SAP credentials (My Account -> SAP
+    // Credentials), not the shared service account — see PurchaseOrderCreationHelper's own
+    // header comment for why. The single highest-scrutiny route in Sub-phase 8b.7.
+    [HttpPost("order-suggestions/create-po")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> CreatePo([FromBody] CreatePoRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<CreatePoResult>.Ok(await PurchaseOrderCreationHelper.CreatePoAsync(nexusOperationsDb, nexusDb, sapServerClient, sapCredentialCipher, logisticsOptions, body, GetUserId(), ct)));
+
+    [HttpPost("order-suggestions/regenerate-pdf")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> RegeneratePoPdf([FromBody] RegeneratePoPdfRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<RegeneratePoPdfResult>.Ok(await PurchaseOrderCreationHelper.RegeneratePdfAsync(nexusOperationsDb, nexusDb, sapServerClient, logisticsOptions, body, GetUserId(), ct)));
 
     [HttpPut("order-suggestions/{suggestionId:long}")]
     [Authorize(Policy = "Perm:LOG_MRP")]
