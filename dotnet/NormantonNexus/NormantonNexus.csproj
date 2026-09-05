@@ -72,6 +72,11 @@
          makeSapToken). Same shared secret as SapServer's own Auth:JwtSecret. -->
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.*" />
 
+    <!-- Validates the Month End Breakdown Excel macro's bearer token (Sub-phase 8b.6's
+         OrderbookBearerScheme) — unlike Cookies, JwtBearer ships as its own NuGet package
+         rather than being part of the ASP.NET Core shared framework. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.*" />
+
     <!-- Production label barcode generation (LabelBarcodeHelper) — C# equivalent
          of Node's bwip-js. ZXing.Net's BarcodeWriterPixelData produces raw BGRA32
          pixel bytes (pure managed, no OS-level graphics dependency), which

@@ -35,12 +35,36 @@ public abstract record ChangePasswordResult
     private ChangePasswordResult() { }
 }
 
+public enum OrderbookCredentialFailureReason
+{
+    InvalidCredentials,
+    AccountUnavailable,
+}
+
+public abstract record OrderbookCredentialResult
+{
+    public sealed record Success(int UserId, string Username) : OrderbookCredentialResult;
+    public sealed record Failure(OrderbookCredentialFailureReason Reason) : OrderbookCredentialResult;
+
+    private OrderbookCredentialResult() { }
+}
+
 public interface IAuthService
 {
     Task<LoginResult> LoginAsync(string username, string password, string? ipAddress, CancellationToken ct = default);
 
     /// <summary>Also clears PortalUsers.MustChangePassword — callers must re-issue the sign-in ticket afterward to drop the stale claim from the live session (see Pages/ChangePassword.cshtml.cs).</summary>
     Task<ChangePasswordResult> ChangePasswordAsync(int userId, string currentPassword, string newPassword, string? ipAddress, CancellationToken ct = default);
+
+    /// <summary>
+    /// Narrower credential check backing POST /api/auth/orderbook-token — deliberately
+    /// separate from LoginAsync: unlike a full login, this never increments
+    /// PortalUsers.FailedLogins/escalates a lockout on a bad password (matching Node's own
+    /// orderbook-token route exactly, which has no counter-increment logic at all), and
+    /// never resolves departments/permissions or issues a session ticket — just a yes/no
+    /// over username+password plus the account being usable.
+    /// </summary>
+    Task<OrderbookCredentialResult> VerifyOrderbookCredentialsAsync(string username, string password, string? ipAddress, CancellationToken ct = default);
 }
 
 internal sealed record PortalUserRow(
@@ -201,5 +225,39 @@ internal sealed class AuthService(
 
         await auditLogger.LogAsync("PASSWORD_CHANGE_OK", null, null, ipAddress, ct);
         return new ChangePasswordResult.Success();
+    }
+
+    private sealed record OrderbookCredentialUserRow(int UserID, string Username, string PasswordHash, bool IsActive, bool IsLocked);
+
+    public async Task<OrderbookCredentialResult> VerifyOrderbookCredentialsAsync(string username, string password, string? ipAddress, CancellationToken ct = default)
+    {
+        username = username.Trim();
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var user = await connection.QuerySingleOrDefaultAsync<OrderbookCredentialUserRow>(new CommandDefinition(
+            "SELECT UserID, Username, PasswordHash, IsActive, IsLocked FROM dbo.PortalUsers WHERE Username = @username",
+            new { username }, cancellationToken: ct));
+
+        if (user is null)
+        {
+            BCrypt.Net.BCrypt.Verify(password, DummyHash);
+            await auditLogger.LogAsync("ORDERBOOK_TOKEN_FAIL", username, "Unknown username", ipAddress, ct);
+            return new OrderbookCredentialResult.Failure(OrderbookCredentialFailureReason.InvalidCredentials);
+        }
+
+        if (!user.IsActive || user.IsLocked)
+        {
+            await auditLogger.LogAsync("ORDERBOOK_TOKEN_FAIL", username, !user.IsActive ? "Account pending approval" : "Account locked", ipAddress, ct);
+            return new OrderbookCredentialResult.Failure(OrderbookCredentialFailureReason.AccountUnavailable);
+        }
+
+        if (!BCrypt.Net.BCrypt.Verify(password, user.PasswordHash))
+        {
+            await auditLogger.LogAsync("ORDERBOOK_TOKEN_FAIL", username, "Bad password", ipAddress, ct);
+            return new OrderbookCredentialResult.Failure(OrderbookCredentialFailureReason.InvalidCredentials);
+        }
+
+        await auditLogger.LogAsync("ORDERBOOK_TOKEN_OK", username, null, ipAddress, ct);
+        return new OrderbookCredentialResult.Success(user.UserID, user.Username);
     }
 }

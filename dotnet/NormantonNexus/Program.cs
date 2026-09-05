@@ -1,9 +1,12 @@
+using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using NormantonNexus.Data;
 using NormantonNexus.Middleware;
 using NormantonNexus.Services;
@@ -47,6 +50,7 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IPermissionGroupAdminService, PermissionGroupAdminService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IDataChangeLogService, DataChangeLogService>();
+builder.Services.AddSingleton<IOrderbookTokenService, OrderbookTokenService>();
 
 builder.Services.Configure<SapServerOptions>(builder.Configuration.GetSection(SapServerOptions.SectionName));
 builder.Services.Configure<LogisticsOptions>(builder.Configuration.GetSection(LogisticsOptions.SectionName));
@@ -92,6 +96,30 @@ builder.Services.AddAuthentication(NexusAuthScheme.Name)
         options.SlidingExpiration = false;
 
         options.Events.OnValidatePrincipal = IdleTimeoutValidation.OnValidatePrincipal;
+    })
+    // Second scheme, checked only where a controller action explicitly opts in via
+    // [Authorize(AuthenticationSchemes = $"{NexusAuthScheme.Name},{OrderbookBearerScheme.Name}")]
+    // (multiple schemes on one [Authorize] is an OR in ASP.NET Core — either succeeding
+    // authenticates the request) — the C# equivalent of middleware/auth.js's
+    // requireSessionOrApiToken (session cookie OR this bearer token), backing the Month
+    // End Breakdown Excel macro's upload route (PerformanceController.UploadOrderBookLineNotes,
+    // Sub-phase 8b.6). Deliberately narrow: this scheme is registered but never added to
+    // the default challenge/forbid scheme, so it has zero effect on every other route in
+    // the app unless a controller action names it explicitly.
+    .AddJwtBearer(OrderbookBearerScheme.Name, options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = OrderbookTokenService.Issuer,
+            ValidAudience = OrderbookTokenService.Audience,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(
+                builder.Configuration.GetSection(SapServerOptions.SectionName)[nameof(SapServerOptions.JwtSecret)] ?? "")),
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ClockSkew = TimeSpan.FromSeconds(30),
+        };
     });
 
 // SessionStore must be wired via a post-configure so it can come from DI
@@ -113,6 +141,18 @@ builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(options =>
 {
     options.AddPolicy(RateLimitPolicies.Login, httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(15),
+            QueueLimit = 0,
+        }));
+
+    // Same 10/15min/IP shape, but a genuinely separate counter bucket — matches
+    // routes/auth.js registering its own independent rateLimit() instance for
+    // POST /api/auth/orderbook-token rather than reusing /login's.
+    options.AddPolicy(RateLimitPolicies.OrderbookToken, httpContext => RateLimitPartition.GetFixedWindowLimiter(
         partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         factory: _ => new FixedWindowRateLimiterOptions
         {
@@ -161,4 +201,33 @@ app.MapGet("/Logout", async (HttpContext httpContext, IAuditLogger auditLogger) 
     return Results.Redirect("/");
 });
 
+// C# port of POST /api/auth/orderbook-token in routes/auth.js — the Month End Breakdown
+// Excel macro's credential exchange (see Services/Auth/OrderbookTokenService.cs and
+// middleware/auth.js's requireSessionOrApiToken). Deliberately separate from the real
+// /Login page: a single stateless JSON request/response, no session/ticket issued at all.
+app.MapPost("/api/auth/orderbook-token", async (OrderbookTokenRequest body, IAuthService authService, IOrderbookTokenService tokenService, HttpContext httpContext) =>
+{
+    if (string.IsNullOrEmpty(body.Username) || string.IsNullOrEmpty(body.Password))
+        return Results.Json(new { success = false, error = "Username and password are required." }, statusCode: 400);
+
+    var ip = httpContext.Connection.RemoteIpAddress?.ToString();
+    var result = await authService.VerifyOrderbookCredentialsAsync(body.Username, body.Password, ip, httpContext.RequestAborted);
+
+    if (result is OrderbookCredentialResult.Failure failure)
+    {
+        var message = failure.Reason == OrderbookCredentialFailureReason.AccountUnavailable
+            ? "Account is not available for login."
+            : "Invalid username or password.";
+        return Results.Json(new { success = false, error = message }, statusCode: 401);
+    }
+
+    var success = (OrderbookCredentialResult.Success)result;
+    var token = tokenService.CreateToken(success.UserId, success.Username);
+    return Results.Json(new { success = true, token, expiresInMinutes = 20 });
+})
+.RequireRateLimiting(RateLimitPolicies.OrderbookToken)
+.AllowAnonymous();
+
 app.Run();
+
+internal sealed record OrderbookTokenRequest(string? Username, string? Password);

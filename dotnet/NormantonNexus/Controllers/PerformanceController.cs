@@ -55,6 +55,22 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
     public async Task<IActionResult> GetOrderBookBreakdown(CancellationToken ct) =>
         Ok(ApiResponse<IReadOnlyList<OrderBookBreakdownRow>>.Ok(await PerformanceDashboardHelper.GetOrderBookBreakdownAsync(nexusOperationsDb, ct)));
 
+    // Reached either from the logged-in web page (normal cookie session) or the standalone
+    // Month End Breakdown Excel macro (no cookie jar — authenticates once via
+    // POST /api/auth/orderbook-token, then sends the resulting bearer token here instead).
+    // C# equivalent of middleware/auth.js's requireSessionOrApiToken: listing both schemes
+    // on one [Authorize] is an OR in ASP.NET Core, overriding NexusControllerBase's
+    // cookie-only default for this action alone. No further permission gate, matching Node.
+    [HttpPost("orderbook-breakdown/upload-notes")]
+    [Authorize(AuthenticationSchemes = $"{NexusAuthScheme.Name},{OrderbookBearerScheme.Name}")]
+    public async Task<IActionResult> UploadOrderBookLineNotes(CancellationToken ct)
+    {
+        using var buffer = new MemoryStream();
+        await Request.Body.CopyToAsync(buffer, ct);
+        var rowsUpdated = await OrderBookNotesUploadHelper.UploadNotesAsync(nexusOperationsDb, audit, buffer.ToArray(), GetUsername(), GetIpAddress(), ct);
+        return Ok(ApiResponse<object>.Ok(new { rowsUpdated }));
+    }
+
     [HttpPost("turns-valclass/refresh")]
     [Authorize(Policy = "Perm:LOG_MRP")]
     public async Task<IActionResult> RefreshTurnsValClass(CancellationToken ct) =>
