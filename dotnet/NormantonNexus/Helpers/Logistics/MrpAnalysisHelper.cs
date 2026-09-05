@@ -5,13 +5,14 @@ using NormantonNexus.Services.Sql;
 namespace NormantonNexus.Helpers.Logistics;
 
 /// <summary>
-/// MRP Analysis — Logistics Sub-phase 8b.1 (Trends only; refresh/forecast/
-/// BOM-explosion routes deferred to 8b.5). Port of routes/mrpanalysis.js's
-/// GET /trends + its performancesql.js backing queries. Year-on-year
-/// consumption/goods-receipt trends per material, resolvable per vendor —
-/// consumption is vendor-agnostic (SAP doesn't attribute usage to whichever
-/// vendor happened to supply the material) so it's always returned
-/// unfiltered by vendor; receipts are the vendor-resolvable series.
+/// MRP Analysis — Logistics Sub-phase 8b.1 (Trends) + 8b.5 (refresh-status;
+/// the forecast/BOM-explosion routes themselves live in MrpForecastHelper).
+/// Port of routes/mrpanalysis.js's GET /trends + /refresh-status + their
+/// performancesql.js backing queries. Trends' year-on-year consumption/
+/// goods-receipt figures are resolvable per vendor — consumption is
+/// vendor-agnostic (SAP doesn't attribute usage to whichever vendor happened
+/// to supply the material) so it's always returned unfiltered by vendor;
+/// receipts are the vendor-resolvable series.
 /// </summary>
 internal static class MrpAnalysisHelper
 {
@@ -19,6 +20,23 @@ internal static class MrpAnalysisHelper
     // belt-and-braces read-side floor here too, so a stray old row can't resurface years of
     // "order quantity received" with no matching consumption figure next to it.
     private static int EarliestMrpHistoryYear() => DateTime.UtcNow.Year - 4;
+
+    /// <summary>
+    /// Just the single latest run (or null) — unlike performance.js's multi-dataset "no false
+    /// confidence" refresh-status routes (8b.1), this dataset is a single named row, so there's
+    /// no failures-array/lastRefreshUtc shape to compute here. runMrpHistoryRefresh itself (the
+    /// real SAP-pulling sync job) is deferred to 8b.6's refresh-orchestration slice.
+    /// </summary>
+    internal static async Task<MrpRefreshStatusRow?> GetRefreshStatusAsync(INexusDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<MrpRefreshStatusRow?>(new CommandDefinition("""
+            SELECT TOP 1 Status, CompletedAtUtc, ErrorMessage, RunId
+            FROM dbo.RefreshLog
+            WHERE DatasetName = 'MrpAnalysisHistory'
+            ORDER BY RunId DESC
+            """, cancellationToken: ct));
+    }
 
     internal static async Task<MrpTrendsResult> GetTrendsAsync(INexusOperationsDb db, IReadOnlyList<string>? materials, long? vendorId, CancellationToken ct)
     {
@@ -41,7 +59,14 @@ internal static class MrpAnalysisHelper
         return new MrpTrendsResult(consumption, receipts);
     }
 
-    private static async Task<IReadOnlyList<ConsumptionByYearRow>> GetConsumptionByYearAsync(System.Data.IDbConnection connection, IReadOnlyList<string>? materials, CancellationToken ct)
+    /// <summary>Standalone wrapper for callers with no already-open connection — Sub-phase 8b.5's percentage-forecast preview, which needs only this one query.</summary>
+    internal static async Task<IReadOnlyList<ConsumptionByYearRow>> GetConsumptionByYearAsync(INexusOperationsDb db, IReadOnlyList<string>? materials, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await GetConsumptionByYearAsync(connection, materials, ct);
+    }
+
+    internal static async Task<IReadOnlyList<ConsumptionByYearRow>> GetConsumptionByYearAsync(System.Data.IDbConnection connection, IReadOnlyList<string>? materials, CancellationToken ct)
     {
         var whereSql = materials is { Count: > 0 } ? "AND h.Material IN @materials" : "";
         var rows = await connection.QueryAsync<ConsumptionByYearRow>(new CommandDefinition($"""

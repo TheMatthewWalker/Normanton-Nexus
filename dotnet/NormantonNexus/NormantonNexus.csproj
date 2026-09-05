@@ -36,6 +36,14 @@
     <PackageReference Include="Dapper" Version="2.*" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.*" />
 
+    <!-- MRP Analysis's Sales Breakdown export/upload (Sub-phase 8b.5) — C# equivalent of
+         Node's ExcelJS. ClosedXML wraps OpenXML SDK with a much simpler workbook-building
+         API; used here for both directions (writeMaterialsSheet's export, the upload
+         side's header-matched read). The far larger, live-formula orderbook Excel export
+         (8b.6) is a separate, dedicated-time item — this is the simpler of the two round
+         trips per the Sub-phase 8b research. -->
+    <PackageReference Include="ClosedXML" Version="0.105.1" />
+
     <!-- EF Core is schema-migration tooling ONLY here (raw-SQL migrationBuilder.Sql()
          calls, not fluent model-first) — runtime queries stay on Dapper above. -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.*" />
