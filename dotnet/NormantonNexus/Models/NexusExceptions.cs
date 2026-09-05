@@ -47,3 +47,9 @@ public sealed class NexusUnprocessableEntityException(string message) : NexusApi
 {
     public override int StatusCode => StatusCodes.Status422UnprocessableEntity;
 }
+
+/// <summary>An uploaded file exceeds this endpoint's size limit — matches Node's res.status(413) for the same case (e.g. the Inbound Log document upload's 20MB cap).</summary>
+public sealed class NexusPayloadTooLargeException(string message) : NexusApiException("PAYLOAD_TOO_LARGE", message)
+{
+    public override int StatusCode => StatusCodes.Status413PayloadTooLarge;
+}

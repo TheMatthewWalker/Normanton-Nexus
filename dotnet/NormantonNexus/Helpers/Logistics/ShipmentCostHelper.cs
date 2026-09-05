@@ -215,15 +215,24 @@ internal static class ShipmentCostHelper
             throw new NexusValidationException("costType is required.");
     }
 
-    private static async Task<string> ResolveCostElementAsync(System.Data.IDbConnection connection, ManualShipmentCostRequest body, CancellationToken ct)
+    private static Task<string> ResolveCostElementAsync(System.Data.IDbConnection connection, ManualShipmentCostRequest body, CancellationToken ct) =>
+        ResolveCostElementAsync(connection, body.Direction, body.Tier, body.CostElement, ct);
+
+    /// <summary>
+    /// Looks up log.CostElements' GL account code for a direction/tier pair, honoring an explicit
+    /// override when the caller already knows it. Shared by the manual freight-cost-line flow above
+    /// and Inbound Costs' insertInboundCostLine (Sub-phase 8b.4, InboundCostHelper.cs) — the same
+    /// "standard vs premium GL code" lookup, not duplicated per feature.
+    /// </summary>
+    internal static async Task<string> ResolveCostElementAsync(System.Data.IDbConnection connection, string direction, string tier, string? explicitCostElement, CancellationToken ct)
     {
-        if (!string.IsNullOrWhiteSpace(body.CostElement)) return body.CostElement.Trim();
+        if (!string.IsNullOrWhiteSpace(explicitCostElement)) return explicitCostElement.Trim();
 
         var costElement = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
             "SELECT TOP 1 elementCode FROM log.CostElements WHERE direction = @direction AND tier = @tier",
-            new { direction = body.Direction, tier = body.Tier }, cancellationToken: ct));
+            new { direction, tier }, cancellationToken: ct));
 
-        return costElement ?? throw new NexusUnprocessableEntityException($"No {body.Direction} {body.Tier} cost element configured in log.CostElements.");
+        return costElement ?? throw new NexusUnprocessableEntityException($"No {direction} {tier} cost element configured in log.CostElements.");
     }
 
     private static DynamicParameters ManualParameters(ManualShipmentCostRequest body, string costElement)

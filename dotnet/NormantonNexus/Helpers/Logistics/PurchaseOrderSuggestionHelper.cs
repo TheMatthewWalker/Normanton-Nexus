@@ -741,8 +741,8 @@ internal static class PurchaseOrderSuggestionHelper
         await UpdateStatusInternalAsync(connection, suggestionId, body, ct);
     }
 
-    /// <summary>Locks a Tracked Orders row once it's Completed (Received/Booked) against status updates/delete — the only way back out is Undo Received on the order's shipment (8b.4).</summary>
-    private static async Task AssertOrderEditableAsync(IDbConnection connection, long suggestionId, CancellationToken ct)
+    /// <summary>Locks a Tracked Orders row once it's Completed (Received/Booked) against status updates/delete — the only way back out is Undo Received on the order's shipment (8b.7). Also reused by InboundShipmentHelper.AssignShipmentAsync (8b.4), which links/unlinks a tracked order to a shipment.</summary>
+    internal static async Task AssertOrderEditableAsync(IDbConnection connection, long suggestionId, CancellationToken ct)
     {
         var status = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
             "SELECT Status FROM log.PurchaseOrderSuggestion WHERE SuggestionId = @suggestionId", new { suggestionId }, cancellationToken: ct));

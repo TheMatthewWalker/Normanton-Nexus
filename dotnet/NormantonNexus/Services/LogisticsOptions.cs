@@ -53,4 +53,15 @@ public sealed class LogisticsOptions
     public string MailFrom { get; set; } = "";
     public List<string> MailCc { get; set; } = [];
     public List<string> MailBcc { get; set; } = [];
+
+    // ── Inbound (Sub-phase 8b.4) — mirrors LOGISTICS_IMPORT_ROOT/LOGISTICS_PO_ROOT.
+    // Same "must be a real absolute Windows/UNC path in production" contract as ExportRoot
+    // (enforced by InboundShipmentHelper.AssertValidRoot), and same AppContext.BaseDirectory-based
+    // default reasoning.
+
+    /// <summary>Supplier invoice/paperwork uploads land at {ImportRoot}\{Year}\{MM}. {MonthName}\{ShipmentReference} - {SupplierName}\.</summary>
+    public string ImportRoot { get; set; } = Path.Combine(AppContext.BaseDirectory, "imports", "inbound");
+
+    /// <summary>Auto-generated PO PDFs (written by Sub-phase 8b.7's Create PO in SAP) land flat at {PoRoot}\{VendorName}\{PoNumber}.pdf — read here only, to auto-file a copy into a new shipment's import folder.</summary>
+    public string PoRoot { get; set; } = Path.Combine(AppContext.BaseDirectory, "exports", "purchase-orders");
 }

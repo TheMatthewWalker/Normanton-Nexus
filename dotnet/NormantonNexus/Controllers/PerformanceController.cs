@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
@@ -10,15 +12,16 @@ namespace NormantonNexus.Controllers;
 /// <summary>
 /// Purchasing/Performance — Logistics Sub-phase 8b.1 (read-only dashboard
 /// routes) + 8b.2 (vendor master data, demand adjustments, Isopar readings/
-/// planning-rate/stock-risk). Order-suggestion engine/Inbound Costs/SAP-write
-/// routes are deferred to 8b.3 through 8b.7 — see dotnet/CLAUDE.md. Port of
+/// planning-rate/stock-risk) + 8b.3 (order suggestion engine) + 8b.4 (inbound
+/// shipment tracking — filesystem-only document handling; the real-SAP
+/// goods-receipt write is deferred to 8b.7 — see dotnet/CLAUDE.md). Port of
 /// the corresponding routes in routes/performance.js, mounted at
 /// api/performance matching Node's own mount. requireLogin-only at Node's
 /// mount point maps to this base class's [Authorize]; every route below
 /// additionally carries its own real Node permission gate.
 /// </summary>
 [Route("api/performance")]
-public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb) : NexusControllerBase
+public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions) : NexusControllerBase
 {
     [HttpGet("refresh-log")]
     public async Task<IActionResult> GetRefreshLog(CancellationToken ct) =>
@@ -296,5 +299,99 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
     {
         await PurchaseOrderSuggestionHelper.DeleteAsync(nexusOperationsDb, suggestionId, ct);
         return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    // ── Sub-phase 8b.4: Inbound shipment tracking (log.PurchaseOrderShipment) ──
+    // Mark Received/Undo Received (real SAP goods-receipt write) are deferred to 8b.7.
+
+    [HttpPatch("order-suggestions/{suggestionId:long}/shipment")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AssignOrderShipment(long suggestionId, [FromBody] AssignOrderShipmentRequest body, CancellationToken ct)
+    {
+        await InboundShipmentHelper.AssignShipmentAsync(nexusOperationsDb, suggestionId, body.ShipmentId, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpGet("order-suggestions/shipments")]
+    [Authorize(Policy = "Perm:LOG_MRP,WAREHOUSE_OP")]
+    public async Task<IActionResult> ListOrderShipments(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<OrderShipmentListRow>>.Ok(await InboundShipmentHelper.ListShipmentsAsync(nexusOperationsDb, ct)));
+
+    [HttpPost("order-suggestions/shipments")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> CreateOrderShipment([FromBody] CreateOrderShipmentRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<CreateOrderShipmentResult>.Ok(await InboundShipmentHelper.CreateShipmentAsync(nexusOperationsDb, logisticsOptions, body, ct)));
+
+    [HttpPost("order-suggestions/shipments/manual")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> CreateManualOrderShipment([FromBody] CreateManualOrderShipmentRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<CreateManualOrderShipmentResult>.Ok(await InboundShipmentHelper.CreateManualShipmentAsync(nexusOperationsDb, logisticsOptions, body, ct)));
+
+    [HttpGet("order-suggestions/shipments/{shipmentId:long}")]
+    [Authorize(Policy = "Perm:LOG_MRP,WAREHOUSE_OP")]
+    public async Task<IActionResult> GetOrderShipment(long shipmentId, CancellationToken ct)
+    {
+        var data = await InboundShipmentHelper.GetShipmentDetailAsync(nexusOperationsDb, shipmentId, ct);
+        if (data is null) return NotFound(ApiResponse<object?>.Fail("NOT_FOUND", "Shipment not found."));
+        return Ok(ApiResponse<OrderShipmentDetailResult>.Ok(data));
+    }
+
+    [HttpPut("order-suggestions/shipments/{shipmentId:long}")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> UpdateOrderShipment(long shipmentId, [FromBody] UpdateOrderShipmentRequest body, CancellationToken ct)
+    {
+        await InboundShipmentHelper.UpdateShipmentAsync(nexusOperationsDb, shipmentId, body, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPost("order-suggestions/shipments/{shipmentId:long}/cancel")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> CancelOrderShipment(long shipmentId, CancellationToken ct) =>
+        Ok(ApiResponse<CancelOrderShipmentResult>.Ok(await InboundShipmentHelper.CancelShipmentAsync(nexusOperationsDb, shipmentId, GetUsername(), ct)));
+
+    [HttpGet("order-suggestions/shipments/{shipmentId:long}/manual-items")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> ListManualInboundItems(long shipmentId, CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<ManualInboundItemRow>>.Ok(await InboundShipmentHelper.ListManualItemsAsync(nexusOperationsDb, shipmentId, ct)));
+
+    [HttpPost("order-suggestions/shipments/{shipmentId:long}/manual-items")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> AddManualInboundItem(long shipmentId, [FromBody] AddManualInboundItemRequest body, CancellationToken ct)
+    {
+        await InboundShipmentHelper.AddManualItemAsync(nexusOperationsDb, shipmentId, body, GetUsername(), ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("order-suggestions/manual-items/{itemId:long}")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> RemoveManualInboundItem(long itemId, CancellationToken ct)
+    {
+        await InboundShipmentHelper.RemoveManualItemAsync(nexusOperationsDb, itemId, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpGet("order-suggestions/shipments/{shipmentId:long}/documents/folder")]
+    [Authorize(Policy = "Perm:LOG_MRP,WAREHOUSE_OP")]
+    public async Task<IActionResult> GetShipmentDocumentFolder(long shipmentId, CancellationToken ct) =>
+        Ok(ApiResponse<InboundShipmentDocumentFolderResult>.Ok(await InboundShipmentHelper.GetDocumentFolderAsync(nexusOperationsDb, logisticsOptions, shipmentId, ct)));
+
+    [HttpGet("order-suggestions/shipments/{shipmentId:long}/documents/{fileName}")]
+    [Authorize(Policy = "Perm:LOG_MRP,WAREHOUSE_OP")]
+    public async Task<IActionResult> GetShipmentDocument(long shipmentId, string fileName, CancellationToken ct)
+    {
+        var path = await InboundShipmentHelper.ResolveDocumentPathAsync(nexusOperationsDb, logisticsOptions, shipmentId, fileName, ct);
+        var provider = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+        if (!provider.TryGetContentType(path, out var contentType)) contentType = "application/octet-stream";
+        return PhysicalFile(path, contentType, Path.GetFileName(path));
+    }
+
+    [HttpPost("order-suggestions/shipments/{shipmentId:long}/documents/upload")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> UploadShipmentDocument(long shipmentId, [FromQuery] string? fileName, CancellationToken ct)
+    {
+        using var buffer = new MemoryStream();
+        await Request.Body.CopyToAsync(buffer, ct);
+        var result = await InboundShipmentHelper.UploadDocumentAsync(nexusOperationsDb, logisticsOptions, shipmentId, buffer.ToArray(), fileName, ct);
+        return StatusCode(201, ApiResponse<UploadedInboundDocumentResult>.Ok(result));
     }
 }
