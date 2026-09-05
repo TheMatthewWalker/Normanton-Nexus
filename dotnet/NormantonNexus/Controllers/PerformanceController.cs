@@ -22,8 +22,15 @@ namespace NormantonNexus.Controllers;
 /// additionally carries its own real Node permission gate.
 /// </summary>
 [Route("api/performance")]
-public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions, IAuditLogger audit) : NexusControllerBase
+public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb nexusOperationsDb, IOptions<LogisticsOptions> logisticsOptions, IAuditLogger audit, ISapServerClient sapServerClient) : NexusControllerBase
 {
+    // Manual trigger for the 30-min SAP refresh (Stock/Agreements/Invoicing/Otif) — no
+    // permission gate beyond this controller's base [Authorize], matching Node's own
+    // requireLogin-only /refresh route exactly (routes/performance.js).
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<RefreshDatasetOutcome>>.Ok(await PerformanceSyncHelper.RunFullRefreshAsync(nexusDb, nexusOperationsDb, sapServerClient, GetUserId(), ct)));
+
     [HttpGet("refresh-log")]
     public async Task<IActionResult> GetRefreshLog(CancellationToken ct) =>
         Ok(ApiResponse<IReadOnlyList<RefreshLogRow>>.Ok(await PerformanceDashboardHelper.GetRefreshLogAsync(nexusDb, ct)));
@@ -50,10 +57,8 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
 
     [HttpPost("turns-valclass/refresh")]
     [Authorize(Policy = "Perm:LOG_MRP")]
-    public IActionResult RefreshTurnsValClass() =>
-        // runTurnsValClassRefresh (performancesync.js) is a SAP-pulling background job —
-        // deferred to 8b.6's refresh-orchestration slice alongside the rest of performancesync.js.
-        StatusCode(501, ApiResponse<object?>.Fail("NOT_IMPLEMENTED", "Turns/Valuation Class refresh is not yet ported — see Sub-phase 8b.6."));
+    public async Task<IActionResult> RefreshTurnsValClass(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<RefreshDatasetOutcome>>.Ok(await PerformanceSyncHelper.RunTurnsValClassRefreshAsync(nexusDb, nexusOperationsDb, sapServerClient, GetUserId(), ct)));
 
     [HttpGet("turns-valclass/refresh-status")]
     [Authorize(Policy = "Perm:LOG_ADMIN,LOG_MRP,LOG_REPORTS")]

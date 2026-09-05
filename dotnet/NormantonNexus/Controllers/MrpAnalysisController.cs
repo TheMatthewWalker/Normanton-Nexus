@@ -25,11 +25,8 @@ public sealed class MrpAnalysisController(INexusDb nexusDb, INexusOperationsDb n
         Ok(ApiResponse<MrpTrendsResult>.Ok(await MrpAnalysisHelper.GetTrendsAsync(nexusOperationsDb, materials, vendorId, ct)));
 
     [HttpPost("refresh")]
-    public IActionResult Refresh() =>
-        // runMrpHistoryRefresh (performancesync.js) is a SAP-pulling background job —
-        // deferred to 8b.6's refresh-orchestration slice, matching /turns-valclass/refresh's
-        // own 501 stub in PerformanceController.
-        StatusCode(501, ApiResponse<object?>.Fail("NOT_IMPLEMENTED", "MRP Analysis history refresh is not yet ported — see Sub-phase 8b.6."));
+    public async Task<IActionResult> Refresh(CancellationToken ct) =>
+        Ok(ApiResponse<RefreshDatasetOutcome>.Ok(await PerformanceSyncHelper.RunMrpHistoryRefreshAsync(nexusDb, nexusOperationsDb, sapServerClient, GetUserId(), ct)));
 
     [HttpGet("refresh-status")]
     public async Task<IActionResult> GetRefreshStatus(CancellationToken ct) =>
