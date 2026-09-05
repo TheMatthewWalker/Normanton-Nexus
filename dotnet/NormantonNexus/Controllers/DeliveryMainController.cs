@@ -36,6 +36,15 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
         return Ok(ApiResponse<IReadOnlyList<OpenPicksheetRow>>.Ok(rows));
     }
 
+    /// <summary>Manual trigger for the same SAP sync server.js's hourly xx:55 cron job runs (Services/BackgroundJobs's WarehouseSapSyncJob) — Phase 10 cross-cutting closeout, discovered missing while wiring Quartz.NET. Always calls SapServer with the shared service token, matching Node's own hardcoded makeSapToken() exactly, regardless of which caller (this button or the cron) triggered it.</summary>
+    [HttpPost("sap-sync")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> SapSync(CancellationToken ct)
+    {
+        var result = await WarehouseSapSyncHelper.RunSapSyncAsync(nexusOperationsDb, sapServerClient, WarehouseSapSyncHelper.ServiceUserId, ct);
+        return Ok(ApiResponse<SapSyncResult>.Ok(result));
+    }
+
     [HttpGet("packaging-holding")]
     [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
     public async Task<IActionResult> GetPackagingHolding(CancellationToken ct)

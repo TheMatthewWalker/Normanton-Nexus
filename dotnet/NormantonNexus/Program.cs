@@ -183,17 +183,22 @@ builder.Services.AddScoped<ISessionCleanupService, SessionCleanupService>();
 // original are deployed on the Normanton (UK) site itself, so no explicit
 // .InTimeZone(...) is needed to match Node's schedule times exactly.
 //
-// NOT yet ported (genuinely missing Helper functionality discovered while
-// wiring this up, not a Quartz-specific gap — see dotnet/CLAUDE.md's Phase
-// 10 section): the hourly warehouse SAP sync (server.js's runSapSync,
-// '55 * * * *'), the daily Production Schedule OTIF diff
-// (runProductionScheduleOtifDiff, '10 6 * * *'), and the weekly PTFE Cycle
-// Count creation (checkWeeklyPtfeCycleCountDue, '56 5 * * 1'). The 2
-// deploy-cron workaround jobs (dbo.ScheduledDeployments' 15-second checker
-// and 5-minute stuck-deployment safety net) are deliberately NOT ported at
-// all — see dotnet/CLAUDE.md's "deploy.js — read, deliberately deferred to
-// Phase 10" section for why porting them as-is would encode a Windows-
-// Service-restart assumption this app's IIS/ANCM hosting doesn't have.
+// ProductionScheduleHelper.DiffProductionScheduleOtifAsync was already ported
+// during Phase 4 (Sales) — its own doc comment flagged it as "callable now
+// so Phase 10 only needs to add the trigger, not write this logic", which is
+// exactly what this does. WarehouseSapSyncHelper.RunSapSyncAsync is a
+// genuinely new Phase 10 addition — routes/deliverymain.js's runSapSync had
+// no C# port at all until now (see that Helper's own header comment).
+//
+// STILL NOT ported (genuinely missing Helper functionality, not a
+// Quartz-specific gap — see dotnet/CLAUDE.md's Phase 10 section): the
+// weekly PTFE Cycle Count creation (checkWeeklyPtfeCycleCountDue,
+// '56 5 * * 1'). The 2 deploy-cron workaround jobs (dbo.ScheduledDeployments'
+// 15-second checker and 5-minute stuck-deployment safety net) are
+// deliberately NOT ported at all — see dotnet/CLAUDE.md's "deploy.js — read,
+// deliberately deferred to Phase 10" section for why porting them as-is
+// would encode a Windows-Service-restart assumption this app's IIS/ANCM
+// hosting doesn't have.
 builder.Services.AddQuartz(q =>
 {
     void Schedule<TJob>(string jobKeyName, string cronExpression, string description) where TJob : Quartz.IJob
@@ -219,6 +224,10 @@ builder.Services.AddQuartz(q =>
     Schedule<IsoparDeclarationDueCheckJob>("IsoparDeclarationDueCheck", "0 30 6 * * ?", "Daily Isopar Tied Oil declaration due-check");
     // Hourly at :20 (Node: '20 * * * *').
     Schedule<SessionCleanupJob>("SessionCleanup", "0 20 * * * ?", "Hourly expired session cleanup");
+    // Daily at 06:10 (Node: '10 6 * * *').
+    Schedule<ProductionScheduleOtifDiffJob>("ProductionScheduleOtifDiff", "0 10 6 * * ?", "Daily Production Schedule OTIF diff");
+    // Hourly at :55 (Node: '55 * * * *').
+    Schedule<WarehouseSapSyncJob>("WarehouseSapSync", "0 55 * * * ?", "Hourly warehouse SAP sync (open picksheets -> DeliveryMain)");
 });
 builder.Services.AddQuartzHostedService(opts => opts.WaitForJobsToComplete = true);
 

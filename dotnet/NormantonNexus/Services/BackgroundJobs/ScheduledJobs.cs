@@ -1,4 +1,6 @@
 using NormantonNexus.Helpers.Logistics;
+using NormantonNexus.Helpers.ProductionSchedule;
+using NormantonNexus.Helpers.Warehouse;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
@@ -121,6 +123,40 @@ public sealed class IsoparDeclarationDueCheckJob(INexusDb nexusDb, INexusOperati
         catch (Exception ex)
         {
             logger.LogError(ex, "Isopar declaration due check failed");
+        }
+    }
+}
+
+[DisallowConcurrentExecution]
+public sealed class ProductionScheduleOtifDiffJob(INexusOperationsDb opsDb, ILogger<ProductionScheduleOtifDiffJob> logger) : IJob
+{
+    public async Task Execute(IJobExecutionContext context)
+    {
+        try
+        {
+            var result = await ProductionScheduleHelper.DiffProductionScheduleOtifAsync(opsDb, context.CancellationToken);
+            logger.LogInformation("Production schedule OTIF diff complete: {@Result}", result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Production schedule OTIF diff failed");
+        }
+    }
+}
+
+[DisallowConcurrentExecution]
+public sealed class WarehouseSapSyncJob(INexusOperationsDb opsDb, ISapServerClient sap, ILogger<WarehouseSapSyncJob> logger) : IJob
+{
+    public async Task Execute(IJobExecutionContext context)
+    {
+        try
+        {
+            var result = await WarehouseSapSyncHelper.RunSapSyncAsync(opsDb, sap, WarehouseSapSyncHelper.ServiceUserId, context.CancellationToken);
+            logger.LogInformation("Scheduled warehouse SAP sync complete: {@Result}", result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Scheduled warehouse SAP sync failed");
         }
     }
 }
