@@ -27,3 +27,31 @@ public sealed record IsoparStockRiskResult(string? AsOfDate, decimal CurrentStoc
 
 /// <summary>log.PurchaseOrderSuggestion row (Accepted/Ordered, not yet Received/Cancelled) — "already incoming" quantity, shared by Isopar stock-risk here and the order-suggestion engine (8b.3).</summary>
 public sealed record OpenIncomingOrderRow(long SuggestionId, string Material, decimal OrderQty, DateTime? DeliveryDate, string Status, string? PoNumber);
+
+// ── Sub-phase 8b.6: HMRC Tied Oil declarations (log.IsoparDeclaration) ──────
+
+/// <summary>One Isopar delivery received within a declaration period — log.PurchaseOrderSuggestion joined to its log.PurchaseOrderShipment for whichever received-date is available.</summary>
+public sealed record IsoparReceivedDeliveryRow(long SuggestionId, decimal OrderQty, decimal? ReceivedQty, string? PoNumber, DateTime? ReceivedDate);
+
+/// <summary>Shared by both the live "outstanding period" preview and the frozen submit path, so the two can never drift apart. Complete:false (missing an opening or closing reading) must block submission.</summary>
+public sealed record IsoparPeriodFigures(
+    DateTime PeriodStart, DateTime PeriodEnd, IsoparReadingRow? OpeningReading, IsoparReadingRow? ClosingReading,
+    decimal? OpeningStockQty, decimal? ClosingStockQty, decimal ReceivedQty, decimal? ConsumedQty,
+    IReadOnlyList<IsoparReceivedDeliveryRow> Deliveries, bool Complete);
+
+public sealed record IsoparDeclarationRow(
+    long DeclarationId, DateTime PeriodStart, DateTime PeriodEnd, decimal OpeningStockQty, decimal ReceivedQty, decimal ClosingStockQty, decimal ConsumedQty,
+    long? OpeningReadingId, long? ClosingReadingId, string? Notes, int SubmittedByUserId, string? SubmittedByUsername, DateTime SubmittedAtUtc);
+
+/// <summary>One fully-ended period with no declaration yet, plus its live-computed figures — what the "Confirm & Submit" cards show.</summary>
+public sealed record IsoparOutstandingPeriod(int Index, DateTime Start, DateTime End, IsoparPeriodFigures Figures);
+
+public sealed record IsoparCurrentPeriodPreviewResult(DateTime Start, DateTime End, IsoparPeriodFigures Figures);
+
+/// <summary>Body only carries which period is being confirmed — the server never trusts client-submitted figures, it recomputes them fresh at submit time via the same IsoparDeclarationHelper.ComputePeriodFiguresAsync the preview uses.</summary>
+public sealed record CreateIsoparDeclarationRequest(DateTime? PeriodStart, DateTime? PeriodEnd, string? Notes);
+
+public sealed record CreateIsoparDeclarationResult(long DeclarationId);
+
+/// <summary>checkIsoparDeclarationDue's result — self-healing/idempotent rather than exact-day-gated (see IsoparDeclarationHelper.CheckDeclarationDueAsync).</summary>
+public sealed record IsoparDeclarationDueCheckResult(bool Notified, bool AlreadySent = false, string? PeriodEnd = null);

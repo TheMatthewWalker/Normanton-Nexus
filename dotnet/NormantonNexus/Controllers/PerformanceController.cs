@@ -235,6 +235,40 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
         return Ok(ApiResponse<object>.Ok(new { rateId }));
     }
 
+    // ── Sub-phase 8b.6: HMRC Tied Oil declarations (log.IsoparDeclaration) ──
+    // Gated ISOPAR_DECL, separate from the rest of Isopar planning's LOG_MRP gate above —
+    // only whoever actually files the HMRC return needs to see/confirm this.
+
+    [HttpGet("isopar/declarations")]
+    [Authorize(Policy = "Perm:ISOPAR_DECL")]
+    public async Task<IActionResult> ListIsoparDeclarations(CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<IsoparDeclarationRow>>.Ok(await IsoparDeclarationHelper.ListDeclarationsAsync(nexusOperationsDb, ct)));
+
+    [HttpGet("isopar/declarations/outstanding")]
+    [Authorize(Policy = "Perm:ISOPAR_DECL")]
+    public async Task<IActionResult> ListIsoparOutstandingDeclarations(CancellationToken ct)
+    {
+        var periods = await IsoparDeclarationHelper.ListOutstandingPeriodsAsync(nexusOperationsDb, DateTime.UtcNow, ct);
+        var data = new List<IsoparOutstandingPeriod>();
+        foreach (var p in periods)
+            data.Add(new IsoparOutstandingPeriod(p.Index, p.Start, p.End, await IsoparDeclarationHelper.ComputePeriodFiguresAsync(nexusOperationsDb, p.Start, p.End, ct)));
+        return Ok(ApiResponse<IReadOnlyList<IsoparOutstandingPeriod>>.Ok(data));
+    }
+
+    [HttpGet("isopar/declarations/current-period-preview")]
+    [Authorize(Policy = "Perm:ISOPAR_DECL")]
+    public async Task<IActionResult> GetIsoparCurrentPeriodPreview(CancellationToken ct)
+    {
+        var (start, end) = IsoparPeriodHelper.IsoparPeriodContaining(DateTime.UtcNow);
+        var figures = await IsoparDeclarationHelper.ComputePeriodFiguresAsync(nexusOperationsDb, start, end, ct);
+        return Ok(ApiResponse<IsoparCurrentPeriodPreviewResult>.Ok(new IsoparCurrentPeriodPreviewResult(start, end, figures)));
+    }
+
+    [HttpPost("isopar/declarations")]
+    [Authorize(Policy = "Perm:ISOPAR_DECL")]
+    public async Task<IActionResult> CreateIsoparDeclaration([FromBody] CreateIsoparDeclarationRequest body, CancellationToken ct) =>
+        Ok(ApiResponse<CreateIsoparDeclarationResult>.Ok(await IsoparDeclarationHelper.CreateDeclarationAsync(nexusOperationsDb, body, GetUserId(), GetUsername(), ct)));
+
     // ── Sub-phase 8b.3: Order suggestion engine (log.PurchaseOrderSuggestion) ──
     // create-po/regenerate-pdf (real SAP PO creation) are deferred to 8b.7.
 
