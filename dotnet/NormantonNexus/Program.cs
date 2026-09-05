@@ -12,8 +12,10 @@ using NormantonNexus.Middleware;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Admin;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.BackgroundJobs;
 using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
+using Quartz;
 
 // Required since QuestPDF 2023's licensing change, or Document.GeneratePdf()
 // throws — see Helpers/Production/LabelPdfHelper.cs / NormantonNexus.csproj's
@@ -165,6 +167,60 @@ builder.Services.AddRateLimiter(options =>
             QueueLimit = 0,
         }));
 });
+
+builder.Services.AddScoped<ISessionCleanupService, SessionCleanupService>();
+
+// Phase 10 cross-cutting closeout — replaces server.js's node-cron
+// cron.schedule(...) registrations for the genuine business-schedule jobs
+// this app has a ported Helper method for so far. Cron expressions below
+// are Node's own literal schedule strings, translated from node-cron's
+// 5-field (minute hour day month weekday) format into Quartz's 6-field
+// (SECOND minute hour day month weekday) format — a leading "0" seconds
+// field, and DayOfMonth/DayOfWeek using "?" on whichever of the two isn't
+// specified (Quartz, unlike Unix cron, rejects both being "*" together).
+// Quartz's CronScheduleBuilder runs in the host's local system time zone by
+// default, same as node-cron's own default — both this app and the Node
+// original are deployed on the Normanton (UK) site itself, so no explicit
+// .InTimeZone(...) is needed to match Node's schedule times exactly.
+//
+// NOT yet ported (genuinely missing Helper functionality discovered while
+// wiring this up, not a Quartz-specific gap — see dotnet/CLAUDE.md's Phase
+// 10 section): the hourly warehouse SAP sync (server.js's runSapSync,
+// '55 * * * *'), the daily Production Schedule OTIF diff
+// (runProductionScheduleOtifDiff, '10 6 * * *'), and the weekly PTFE Cycle
+// Count creation (checkWeeklyPtfeCycleCountDue, '56 5 * * 1'). The 2
+// deploy-cron workaround jobs (dbo.ScheduledDeployments' 15-second checker
+// and 5-minute stuck-deployment safety net) are deliberately NOT ported at
+// all — see dotnet/CLAUDE.md's "deploy.js — read, deliberately deferred to
+// Phase 10" section for why porting them as-is would encode a Windows-
+// Service-restart assumption this app's IIS/ANCM hosting doesn't have.
+builder.Services.AddQuartz(q =>
+{
+    void Schedule<TJob>(string jobKeyName, string cronExpression, string description) where TJob : Quartz.IJob
+    {
+        var jobKey = new JobKey(jobKeyName);
+        q.AddJob<TJob>(opts => opts.WithIdentity(jobKey));
+        q.AddTrigger(opts => opts
+            .ForJob(jobKey)
+            .WithIdentity($"{jobKeyName}-trigger")
+            .WithCronSchedule(cronExpression)
+            .WithDescription(description));
+    }
+
+    // Every 30 minutes (Node: '0,30 * * * *') — Stock/Agreements/Invoicing/Otif.
+    Schedule<FullRefreshJob>("FullRefresh", "0 0,30 * * * ?", "30-min performance refresh");
+    // Daily at 05:45 (Node: '45 5 * * *').
+    Schedule<TurnsValClassRefreshJob>("TurnsValClassRefresh", "0 45 5 * * ?", "Daily MM Turns/Valuation Class refresh");
+    // Weekly, Sunday at 04:30 (Node: '30 4 * * 0').
+    Schedule<MrpHistoryRefreshJob>("MrpHistoryRefresh", "0 30 4 ? * SUN", "Weekly MRP Analysis history refresh");
+    // Daily at 06:20 (Node: '20 6 * * *').
+    Schedule<ConsignmentSyncJob>("ConsignmentSync", "0 20 6 * * ?", "Daily consignment GR + stock sync");
+    // Daily at 06:30 (Node: '30 6 * * *').
+    Schedule<IsoparDeclarationDueCheckJob>("IsoparDeclarationDueCheck", "0 30 6 * * ?", "Daily Isopar Tied Oil declaration due-check");
+    // Hourly at :20 (Node: '20 * * * *').
+    Schedule<SessionCleanupJob>("SessionCleanup", "0 20 * * * ?", "Hourly expired session cleanup");
+});
+builder.Services.AddQuartzHostedService(opts => opts.WaitForJobsToComplete = true);
 
 var app = builder.Build();
 

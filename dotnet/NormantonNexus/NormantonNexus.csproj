@@ -54,6 +54,15 @@
 
     <PackageReference Include="BCrypt.Net-Next" Version="4.*" />
 
+    <!-- Phase 10 cross-cutting closeout — replaces node-cron's in-process schedule
+         registration (server.js's cron.schedule(...) calls) for the genuine business-
+         schedule jobs (30-min perf refresh, daily TurnsValClass/consignment/Isopar
+         checks, weekly MRP history). AddQuartzHostedService (Program.cs) runs the
+         scheduler as an IHostedService inside this same IIS-hosted process — no
+         separate Windows Service/Task Scheduler needed, unlike SapServer's own
+         Task-Scheduler-based background work. -->
+    <PackageReference Include="Quartz.Extensions.Hosting" Version="3.20.1" />
+
     <!-- Server-side label PDF generation (LabelPdfHelper) — C# equivalent of
          Node's pdfkit. QuestPDF's declarative Row/Column/Text/Image layout is
          used to reproduce the same content and grouping as Node's imperative
