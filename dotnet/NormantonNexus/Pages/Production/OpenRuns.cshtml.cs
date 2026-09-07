@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production;
 
 /// <summary>Open Runs tile — port of the cross-process Open Runs supervisor view/cancel action.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnOpenRuns)]
 public class OpenRunsModel : PageModel
 {
     public void OnGet()

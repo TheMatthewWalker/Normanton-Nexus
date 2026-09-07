@@ -20,11 +20,21 @@ namespace NormantonNexus.Controllers;
 /// Class-level Dept:production tightens Node's complete absence of a
 /// department gate on this router (requireLogin only) — same precedent
 /// every earlier phase set. GetHistory/GetTraceChain additionally require
-/// Perm:PROD_SUPERVISOR — Node's own HTML places both the Traceability and
-/// Batch History tiles inside its PROD_SUPERVISOR-gated Supervisor section,
-/// but neither route actually checks it server-side (a real gap research
+/// a permission — Node's own HTML places both the Traceability and Batch
+/// History tiles inside its PROD_SUPERVISOR-gated Supervisor section, but
+/// neither route actually checked it server-side (a real gap research
 /// found); closing it matches the UI's own evident intent and the "API's
 /// 403 is the real gate either way" principle already established.
+///
+/// Phase 10 cross-cutting closeout split the once-monolithic PROD_SUPERVISOR
+/// (which gated every action in this controller, plus Open Runs/SAP
+/// Reversals/Approve Scrap/Scrap Reversal/Failed Backflush) into one
+/// fine-grained code per tile — see Helpers/Production/
+/// ProductionReportsHelper.cs's Fn* constants and Data/Migrations/
+/// SeedProductionPermissions for the default group reproducing the old
+/// blanket access. GetHistory's own gate is "Perm:PROD_BATCH_HISTORY,
+/// PROD_TRACEABILITY" (any-of) rather than a single new code, since the
+/// Traceability tile also calls this same route as its own first step.
 /// </summary>
 [Route("api/productionnexus")]
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
@@ -73,7 +83,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("failed-backflush")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnFailedBackflush)]
     public async Task<IActionResult> FailedBackflushQueue(CancellationToken ct)
     {
         var rows = await FailedBackflushHelper.GetQueueAsync(nexusOperationsDb, ct);
@@ -81,7 +91,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPatch("failed-backflush/{processCode}/{recordId:int}/retry")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnFailedBackflush)]
     public async Task<IActionResult> FailedBackflushRetry(string processCode, int recordId, [FromBody] FailedBackflushRetryRequest body, CancellationToken ct)
     {
         var result = await FailedBackflushHelper.RetryAsync(processCode, recordId, nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
@@ -91,7 +101,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPatch("failed-backflush/{processCode}/{recordId:int}/cancel")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnFailedBackflush)]
     public async Task<IActionResult> FailedBackflushCancel(string processCode, int recordId, CancellationToken ct)
     {
         await FailedBackflushHelper.CancelAsync(nexusOperationsDb, processCode, recordId, GetUserId(), ct);
@@ -198,7 +208,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("open-runs")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnOpenRuns)]
     public async Task<IActionResult> OpenRuns(CancellationToken ct)
     {
         var rows = await MetreProcessHelper.GetOpenRunsAsync(nexusOperationsDb, ct);
@@ -206,7 +216,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPatch("open-runs/{processCode}/{recordId:int}/cancel")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnOpenRuns)]
     public async Task<IActionResult> CancelOpenRun(string processCode, int recordId, [FromBody] CancelOpenRunRequest body, CancellationToken ct)
     {
         await MetreProcessHelper.CancelOpenRunAsync(processCode, recordId, nexusOperationsDb, body, GetUserId(), ct);
@@ -214,7 +224,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/output")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportOutput([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var result = await ProductionReportsHelper.GetOutputAsync(nexusOperationsDb, query, ct);
@@ -222,7 +232,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/scrap")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportScrap([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var result = await ProductionReportsHelper.GetScrapAsync(nexusOperationsDb, query, ct);
@@ -230,7 +240,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/sap-performance")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportSapPerformance([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var result = await ProductionReportsHelper.GetSapPerformanceAsync(nexusOperationsDb, query, ct);
@@ -238,7 +248,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/batches")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportBatches([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var rows = await ProductionReportsHelper.GetBatchesAsync(nexusOperationsDb, query, ct);
@@ -246,7 +256,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/shift-comparison")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportShiftComparison([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var result = await ProductionReportsHelper.GetShiftComparisonAsync(nexusOperationsDb, query, ct);
@@ -254,7 +264,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/operator-output")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportOperatorOutput([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var rows = await ProductionReportsHelper.GetOperatorOutputAsync(nexusOperationsDb, query, ct);
@@ -262,7 +272,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("reports/material-output")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
     public async Task<IActionResult> ReportMaterialOutput([FromQuery] ReportFilterQuery query, CancellationToken ct)
     {
         var rows = await ProductionReportsHelper.GetMaterialOutputAsync(nexusOperationsDb, query, ct);
@@ -270,7 +280,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("history")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:PROD_BATCH_HISTORY,PROD_TRACEABILITY")]
     public async Task<IActionResult> GetHistory([FromQuery] BatchHistoryQuery query, CancellationToken ct)
     {
         var rows = await ProductionHelper.GetHistoryAsync(nexusOperationsDb, query, ct);
@@ -285,7 +295,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("trace/{processCode}/{recordId:int}")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnTraceability)]
     public async Task<IActionResult> GetTraceChain(string processCode, int recordId, CancellationToken ct)
     {
         var result = await ProductionHelper.GetTraceChainAsync(nexusOperationsDb, processCode, recordId, ct);
@@ -328,7 +338,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPatch("scrap/{scrapId:int}/retry")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapRetry)]
     public async Task<IActionResult> ScrapRetry(int scrapId, [FromBody] ScrapRetryRequest body, CancellationToken ct)
     {
         var result = await ScrapHelper.RetryAsync(nexusOperationsDb, sapServerClient, auditLogger, scrapId, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
@@ -336,7 +346,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPost("scrap/approve")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapApprove)]
     public async Task<IActionResult> ScrapApprove([FromBody] ScrapBulkRequest body, CancellationToken ct)
     {
         if (body.ScrapIds is not { Length: > 0 })
@@ -346,7 +356,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPost("scrap/reject")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapApprove)]
     public async Task<IActionResult> ScrapReject([FromBody] ScrapBulkRequest body, CancellationToken ct)
     {
         if (body.ScrapIds is not { Length: > 0 })
@@ -391,7 +401,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPost("reversal/execute")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSapReversal)]
     public async Task<IActionResult> ReversalExecute([FromBody] ReversalExecuteRequest body, CancellationToken ct)
     {
         var result = await ReversalHelper.ExecuteAsync(sapServerClient, auditLogger, body.MaterialDocument, GetUsername(), GetIpAddress(), GetUserId(), ct);
@@ -399,7 +409,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPost("reversal/bulk")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSapReversal)]
     public async Task<IActionResult> ReversalBulk([FromBody] ReversalBulkRequest body, CancellationToken ct)
     {
         if (body.MaterialDocuments is not { Length: > 0 })
@@ -409,7 +419,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("scrap-reversal/missed")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapReversal)]
     public async Task<IActionResult> ScrapReversalMissed(CancellationToken ct)
     {
         var rows = await ScrapReversalHelper.GetMissedAsync(nexusOperationsDb, ct);
@@ -417,7 +427,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpGet("scrap-reversal/search")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapReversal)]
     public async Task<IActionResult> ScrapReversalSearch([FromQuery] ScrapReversalSearchQuery query, CancellationToken ct)
     {
         var rows = await ScrapReversalHelper.SearchAsync(nexusOperationsDb, query, ct);
@@ -425,7 +435,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPost("scrap-reversal/reverse")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapReversal)]
     public async Task<IActionResult> ScrapReversalReverse([FromBody] ScrapReversalReverseRequest body, CancellationToken ct)
     {
         var result = await ScrapReversalHelper.ReverseAsync(nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
@@ -433,7 +443,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     }
 
     [HttpPost("scrap-reversal/reverse/bulk")]
-    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+    [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapReversal)]
     public async Task<IActionResult> ScrapReversalReverseBulk([FromBody] ScrapReversalBulkRequest body, CancellationToken ct)
     {
         if (body.Items is not { Length: > 0 })

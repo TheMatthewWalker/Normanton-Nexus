@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production.Reports;
 
 /// <summary>Production Output report — see ProductionReportsHelper.GetOutputAsync. Entirely PROD_SUPERVISOR-gated in Node (whole Reports section), so the page itself requires the permission too, not just the API.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
 public class OutputModel : PageModel
 {
     public void OnGet()

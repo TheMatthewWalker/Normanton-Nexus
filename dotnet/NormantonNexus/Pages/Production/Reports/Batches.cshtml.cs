@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production.Reports;
 
 /// <summary>Batch Summary report — see ProductionReportsHelper.GetBatchesAsync.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
 public class BatchesModel : PageModel
 {
     public void OnGet()

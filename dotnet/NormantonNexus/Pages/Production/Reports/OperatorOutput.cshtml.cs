@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production.Reports;
 
 /// <summary>Operator Output report — see ProductionReportsHelper.GetOperatorOutputAsync.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
 public class OperatorOutputModel : PageModel
 {
     public void OnGet()

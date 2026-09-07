@@ -12,7 +12,7 @@ namespace NormantonNexus.Pages.Production;
 /// server-side — closed here (see ProductionNexusController's own comment).
 /// </summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnTraceability)]
 public class TraceabilityModel : PageModel
 {
     public void OnGet()

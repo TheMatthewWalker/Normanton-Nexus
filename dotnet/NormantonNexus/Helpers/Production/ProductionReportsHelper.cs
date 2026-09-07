@@ -17,13 +17,26 @@ namespace NormantonNexus.Helpers.Production;
 /// </summary>
 internal static class ProductionReportsHelper
 {
-    // Existing legacy code, not split — gates the widest tile spread of any
-    // code in this migration (26 routes across ~8 tiles per research). A
-    // genuine per-tile split (PROD_REPORTS_VIEW, PROD_REVERSAL, etc.) is a
-    // deliberate, deferred design decision — see dotnet/CLAUDE.md's Phase 6
-    // notes — not something to guess at ahead of the tiles it would gate
-    // actually existing.
-    internal const string FnSupervisor = "PROD_SUPERVISOR";
+    // Phase 10 cross-cutting closeout: PROD_SUPERVISOR (the widest-reaching
+    // legacy code in this migration — confirmed to genuinely sprawl across
+    // unrelated features, unlike e.g. WAREHOUSE_OP/FIN_STOCK_APPROVE, which
+    // stayed unsplit as already-coherent single capabilities) is now split
+    // into one code per tile — see Data/Migrations/SeedProductionPermissions
+    // for the default "Production Supervisor" group reproducing its old
+    // blanket access, and dotnet/CLAUDE.md's Phase 10 notes for the full
+    // reasoning. PROD_SUPERVISOR itself is intentionally left registered
+    // (not retired) — Helpers/Warehouse/StagingHelper.cs's low-stock alert
+    // still fans out to it directly as a notification target, unrelated to
+    // authorization.
+    internal const string FnReportsView = "PROD_REPORTS_VIEW";
+    internal const string FnOpenRuns = "PROD_OPEN_RUNS";
+    internal const string FnBatchHistory = "PROD_BATCH_HISTORY";
+    internal const string FnTraceability = "PROD_TRACEABILITY";
+    internal const string FnScrapApprove = "PROD_SCRAP_APPROVE";
+    internal const string FnScrapRetry = "PROD_SCRAP_RETRY";
+    internal const string FnSapReversal = "PROD_SAP_REVERSAL";
+    internal const string FnScrapReversal = "PROD_SCRAP_REVERSAL";
+    internal const string FnFailedBackflush = "PROD_FAILED_BACKFLUSH";
 
     private const string RptCompleted = """
         SELECT N'MX' AS ProcessCode, N'KG' AS UOM, TotalWeightKG AS Quantity, ShiftID, CompletedAt, Material FROM prod.Mixing WHERE Status=4 AND IsReversed=0

@@ -235,6 +235,14 @@ internal static class StagingHelper
 
                     // Each target notified independently — a failure fanning
                     // out to one permission code must never stop the other.
+                    // PROD_SUPERVISOR stays a valid notification target even
+                    // after Phase 10's per-tile permission split retired it
+                    // from every [Authorize] check — the new "Production
+                    // Supervisor" default group (Data/Migrations/
+                    // SeedProductionPermissions) bundles PROD_SUPERVISOR
+                    // itself alongside the new per-tile codes specifically so
+                    // this fan-out keeps reaching the same audience. LOG_SUPER
+                    // is Logistics-owned and untouched by that migration.
                     foreach (var permissionCode in new[] { "PROD_SUPERVISOR", "LOG_SUPER" })
                     {
                         try

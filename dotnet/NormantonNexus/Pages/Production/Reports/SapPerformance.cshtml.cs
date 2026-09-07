@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production.Reports;
 
 /// <summary>SAP Performance report — see ProductionReportsHelper.GetSapPerformanceAsync.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
 public class SapPerformanceModel : PageModel
 {
     public void OnGet()

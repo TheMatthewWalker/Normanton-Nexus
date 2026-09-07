@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production.Reports;
 
 /// <summary>Material Throughput report — see ProductionReportsHelper.GetMaterialOutputAsync.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnReportsView)]
 public class MaterialOutputModel : PageModel
 {
     public void OnGet()

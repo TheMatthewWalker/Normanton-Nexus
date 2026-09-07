@@ -13,10 +13,15 @@ namespace NormantonNexus.Helpers.Warehouse;
 /// materials/stock panel, linked picksheets, and link-search — port of
 /// the read-only half of routes/deliverymain.js's picksheet-building
 /// section. WAREHOUSE_OP is Warehouse's own widest-reaching legacy
-/// permission code, kept unsplit for now (same deferred-per-tile-split
-/// precedent Production's Sub-phase 6a set for PROD_SUPERVISOR) — a real
-/// per-tile split is a decision for whichever later Warehouse sub-phase
-/// actually needs it, not this one.
+/// permission code, deliberately kept unsplit — Phase 10's cross-cutting
+/// permission-code migration split Production's PROD_SUPERVISOR (which
+/// genuinely sprawled across unrelated reporting/approval/reversal
+/// features) but, on inspection, found WAREHOUSE_OP already represents one
+/// coherent capability (day-to-day picksheet/delivery-completion/ZDELFLAG/
+/// Goods-Issue processing) that Node itself never further distinguished —
+/// same reasoning Finance's FIN_STOCK_APPROVE was left unsplit for. No
+/// further action needed here; this determination is the resolution, not a
+/// remaining deferral.
 /// </summary>
 internal static partial class WarehousePicksheetHelper
 {

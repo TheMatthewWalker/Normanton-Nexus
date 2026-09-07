@@ -7,7 +7,7 @@ namespace NormantonNexus.Pages.Production;
 
 /// <summary>Approve Scrap — supervisor queue reviewing/posting operator scrap entries to SAP. Port of runApproveScrap in production-nexus.js.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnSupervisor)]
+[Authorize(Policy = "Perm:" + ProductionReportsHelper.FnScrapApprove)]
 public class ApproveScrapModel : PageModel
 {
     public void OnGet()
