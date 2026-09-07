@@ -36,6 +36,24 @@ public sealed record LinkedPicksheetRow(long DeliveryId, long? CustomerId, strin
 
 public sealed record LinkSearchRow(long DeliveryId, long? CustomerId, string? DestinationName, DateTime? DispatchDate);
 
+/// <summary>POST / (Add Picksheet tile) — manual single-delivery entry, port of deliverymain.js's own field list exactly (completionStatus/deliveryCancelled default to false, deliveryPriority to 0, matching Node's `?? 0`/`?? 0` coalesces).</summary>
+public sealed record CreateDeliveryMainRequest(
+    long DeliveryId, long? CustomerId, DateTime? DispatchDate, DateTime? DeliveryDate, DateTime? CompletionDate,
+    bool CompletionStatus, string? OperatorName, string? SupervisorName, decimal? NetWeight, decimal? GrossWeight,
+    decimal? PalletCount, decimal? DeliveryVolume, string? PicksheetComment, bool DeliveryCancelled, int DeliveryPriority,
+    string? DeliveryService, string? Incoterms);
+
+/// <summary>POST /bulk (Bulk CSV Import tile) — one row per record; a duplicate deliveryID is silently skipped (WHERE NOT EXISTS), not an error, matching Node's own inserted/skipped counters exactly.</summary>
+public sealed record BulkImportDeliveryRow(
+    long DeliveryId, long? CustomerId, DateTime? DispatchDate, DateTime? DeliveryDate,
+    string? DeliveryService, int DeliveryPriority, string? PicksheetComment, string? Incoterms);
+
+public sealed record BulkImportDeliveriesRequest(List<BulkImportDeliveryRow> Records);
+
+public sealed record BulkImportErrorRow(long DeliveryId, string Error);
+
+public sealed record BulkImportDeliveriesResult(int Inserted, int Skipped, List<BulkImportErrorRow> Errors);
+
 /// <summary>One SAP batch found for a required material, classified for the picking panel — allowed/group/reason mirror getRemainingRequiredMaterials's own allocation/packaging-mismatch precedence exactly.</summary>
 public sealed record PicksheetMaterialBatch(
     string Batch, string? StorageType, string? Bin, decimal TotalQty, decimal AvailableQty,

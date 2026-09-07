@@ -28,6 +28,29 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
         return Ok(ApiResponse<DeliveryMainRow?>.Ok(row));
     }
 
+    /// <summary>Add Picksheet tile — LOG_SUPER-gated in Node, matching every other manual-override write in this controller.</summary>
+    [HttpPost("")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> Create([FromBody] CreateDeliveryMainRequest body, CancellationToken ct)
+    {
+        await WarehousePicksheetHelper.CreateAsync(nexusOperationsDb, body, ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(new { deliveryId = body.DeliveryId }));
+    }
+
+    /// <summary>Bulk CSV Import tile — LOG_SUPER-gated in Node, same as Create above.</summary>
+    [HttpPost("bulk")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> BulkImport([FromBody] BulkImportDeliveriesRequest body, CancellationToken ct)
+    {
+        if (body.Records.Count == 0)
+        {
+            throw new NexusValidationException("records array is required and must not be empty");
+        }
+
+        var result = await WarehousePicksheetHelper.BulkImportAsync(nexusOperationsDb, body.Records, ct);
+        return Ok(ApiResponse<BulkImportDeliveriesResult>.Ok(result));
+    }
+
     [HttpGet("open-picksheets")]
     [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
     public async Task<IActionResult> GetOpenPicksheets(CancellationToken ct)

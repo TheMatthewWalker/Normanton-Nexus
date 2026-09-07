@@ -1,0 +1,20 @@
+@page
+@model NormantonNexus.Pages.Warehouse.CompletedRequestsModel
+@{
+    ViewData["Title"] = "Completed Requests";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Completed Requests";
+    ViewData["PageSubtitle"] = "History of fulfilled staging requests";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<form id="cr-filter">
+    <label>From<input type="date" id="cr-from"></label>
+    <label>To<input type="date" id="cr-to"></label>
+    <button type="submit" class="btn secondary">Filter</button>
+</form>
+<div id="cr-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/completed-requests.js"></script>
+}

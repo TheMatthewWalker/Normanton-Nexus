@@ -1,0 +1,42 @@
+@page
+@model NormantonNexus.Pages.Warehouse.StockManagementModel
+@{
+    ViewData["Title"] = "Stock Management";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Stock Management";
+    ViewData["PageSubtitle"] = "Search stock and create a Transfer Order";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<form id="sm-search-form">
+    <label>Material<input type="text" id="sm-material"></label>
+    <label>Storage Type<input type="text" id="sm-storage-type"></label>
+    <label>Bin<input type="text" id="sm-bin"></label>
+    <label>Batch<input type="text" id="sm-batch"></label>
+    <label>Storage Location<input type="text" id="sm-storage-location"></label>
+    <button type="submit" class="btn">Search</button>
+</form>
+
+<div id="sm-results" style="margin-top:1rem;"></div>
+
+<div id="sm-to-panel" style="display:none;margin-top:1rem;padding:1rem;background:#fff;border:1px solid #e2e4e9;border-radius:10px;max-width:520px;">
+    <h3 style="margin-top:0;">Create Transfer Order</h3>
+    <form id="sm-to-form">
+        <label>Material<input type="text" id="to-material" readonly></label>
+        <label>Batch<input type="text" id="to-batch" readonly></label>
+        <label>Quantity<input type="text" id="to-quantity"></label>
+        <label>Source Type<input type="text" id="to-source-type" readonly></label>
+        <label>Source Bin<input type="text" id="to-source-bin" readonly></label>
+        <label>Storage Location<input type="text" id="to-storage-location" readonly></label>
+        <label>Destination Type<input type="text" id="to-dest-type"></label>
+        <label>Destination Bin<input type="text" id="to-dest-bin"></label>
+        <button type="submit" class="btn">Create Transfer Order</button>
+        <button type="button" class="btn secondary" id="to-cancel">Cancel</button>
+    </form>
+    <p id="to-status"></p>
+</div>
+
+@section Scripts {
+    <script src="~/js/warehouse/stock-management.js"></script>
+}

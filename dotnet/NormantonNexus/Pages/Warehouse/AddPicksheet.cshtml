@@ -1,0 +1,26 @@
+@page
+@model NormantonNexus.Pages.Warehouse.AddPicksheetModel
+@{
+    ViewData["Title"] = "Add Picksheet";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Add Picksheet";
+    ViewData["PageSubtitle"] = "Manually add a single delivery";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<form id="ap-form">
+    <label>Delivery ID<input type="text" id="ap-delivery-id" required></label>
+    <label>Customer ID<input type="text" id="ap-customer-id"></label>
+    <label>Dispatch Date<input type="date" id="ap-dispatch-date"></label>
+    <label>Delivery Service<input type="text" id="ap-delivery-service"></label>
+    <label>Delivery Priority<input type="number" id="ap-delivery-priority" value="0"></label>
+    <label>Incoterms<input type="text" id="ap-incoterms" maxlength="3"></label>
+    <label>Picksheet Comment<input type="text" id="ap-comment"></label>
+    <button type="submit" class="btn">Add Picksheet</button>
+</form>
+<p id="ap-status"></p>
+
+@section Scripts {
+    <script src="~/js/warehouse/add-picksheet.js"></script>
+}

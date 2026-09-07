@@ -9,6 +9,12 @@
          comments (ported from private/js/session-guard.js, same load-order requirement in the Node app). -->
     <script src="~/js/shared/session-guard.js"></script>
 
+    <!-- Shared api()/esc() helpers (window.NexusApi) — see that file's own
+         comment for why this exists (Phase 10's frontend catch-up). Every
+         page script loaded via @@section Scripts below can assume this ran
+         first, since Scripts always renders after this block. -->
+    <script src="~/js/shared/api-helpers.js"></script>
+
     <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
 </head>
 <body>

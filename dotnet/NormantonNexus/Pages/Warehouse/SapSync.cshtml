@@ -1,0 +1,17 @@
+@page
+@model NormantonNexus.Pages.Warehouse.SapSyncModel
+@{
+    ViewData["Title"] = "SAP Sync";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "SAP Sync";
+    ViewData["PageSubtitle"] = "Pull open picksheets from SAP now";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<button type="button" class="btn" id="sync-run">Run SAP Sync Now</button>
+<div id="sync-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/sap-sync.js"></script>
+}

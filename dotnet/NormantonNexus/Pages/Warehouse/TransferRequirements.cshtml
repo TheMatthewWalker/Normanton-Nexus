@@ -1,0 +1,32 @@
+@page
+@model NormantonNexus.Pages.Warehouse.TransferRequirementsModel
+@{
+    ViewData["Title"] = "Transfer Requirements";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Transfer Requirements (LT04)";
+    ViewData["PageSubtitle"] = "Open TRs auto-created from production goods movements";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<button type="button" class="btn secondary" id="tr-refresh">Refresh</button>
+<div id="tr-body" style="margin-top:0.75rem;"></div>
+
+<div id="lt04-panel" style="display:none;margin-top:1rem;padding:1rem;background:#fff;border:1px solid #e2e4e9;border-radius:10px;max-width:520px;">
+    <h3 style="margin-top:0;">Confirm via LT04</h3>
+    <form id="lt04-form">
+        <label>TR Number<input type="text" id="lt04-tr" readonly></label>
+        <label>Material<input type="text" id="lt04-material" readonly></label>
+        <label>Quantity<input type="text" id="lt04-quantity"></label>
+        <label>Destination Type<input type="text" id="lt04-dest-type"></label>
+        <label>Destination Bin<input type="text" id="lt04-dest-bin"></label>
+        <label>Pallet/Batch<input type="text" id="lt04-pallet"></label>
+        <button type="submit" class="btn">Confirm LT04</button>
+        <button type="button" class="btn secondary" id="lt04-cancel">Cancel</button>
+    </form>
+    <p id="lt04-status"></p>
+</div>
+
+@section Scripts {
+    <script src="~/js/warehouse/transfer-requirements.js"></script>
+}

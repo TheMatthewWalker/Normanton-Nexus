@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Warehouse.OpenPicksheetsModel
+@{
+    ViewData["Title"] = "Open Picksheets";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Open Picksheets";
+    ViewData["PageSubtitle"] = "Active deliveries requiring picking";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<button type="button" class="btn secondary" id="op-refresh">Refresh</button>
+<div id="op-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/open-picksheets.js"></script>
+}

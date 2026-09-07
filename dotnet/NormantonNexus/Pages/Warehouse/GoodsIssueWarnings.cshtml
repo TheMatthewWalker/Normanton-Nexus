@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Warehouse.GoodsIssueWarningsModel
+@{
+    ViewData["Title"] = "Goods Issue Warnings";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Goods Issue Warnings";
+    ViewData["PageSubtitle"] = "Deliveries whose Goods Issue posting needs attention";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<button type="button" class="btn secondary" id="gw-refresh">Refresh</button>
+<div id="gw-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/goods-issue-warnings.js"></script>
+}

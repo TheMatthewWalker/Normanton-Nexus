@@ -22,6 +22,39 @@ internal static class StockCountHelper
     // needed, unlike Engineering/Quality/Sales's coarser legacy codes.
     internal const string FnStockApprove = "FIN_STOCK_APPROVE";
 
+    /// <summary>
+    /// Port of lib/stockCountGuard.js's assertTransfersAllowed — blocks
+    /// transfer-order/TR creation for a storage location while a Raw
+    /// Material/Production/Finished Goods count is active against it (a
+    /// stock movement mid-count would invalidate the count's quantity
+    /// comparison). Deliberately scoped per storage location, not global,
+    /// and deliberately excludes PTFE_WEEKLY (small enough not to warrant
+    /// blocking warehouse operations) — same exclusion Node's own guard
+    /// uses. No-ops (does not block) when storageLocation is null/blank,
+    /// matching Node's own "callers that can't determine a storage location
+    /// (e.g. LT04) skip the check" behavior rather than failing closed.
+    /// </summary>
+    internal static async Task AssertTransfersAllowedAsync(INexusOperationsDb db, string? storageLocation, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(storageLocation)) return;
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var active = await connection.QuerySingleOrDefaultAsync<(int CountId, string CountType, string Status)?>(new CommandDefinition("""
+            SELECT TOP 1 CountId, CountType, Status
+            FROM log.StockCountDocument
+            WHERE StorageLocation = @storageLocation
+              AND CountType <> 'PTFE_WEEKLY'
+              AND Status IN ('Open', 'PendingApproval', 'Approved')
+            ORDER BY CreatedAtUtc DESC
+            """, new { storageLocation }, cancellationToken: ct));
+
+        if (active is { } a)
+        {
+            throw new NexusConflictException(
+                $"Transfers are blocked for storage location {storageLocation} while {a.CountType} count #{a.CountId} is active (status: {a.Status}).");
+        }
+    }
+
     internal static async Task<IReadOnlyList<StockCountDocumentRow>> ListCountsAsync(INexusOperationsDb db, string? status, CancellationToken ct)
     {
         const string sql = """

@@ -401,6 +401,62 @@ internal static partial class WarehousePicksheetHelper
         return new PicksheetMaterialsResult(customerId, result);
     }
 
+    /// <summary>POST / (Add Picksheet tile) — manual single-delivery entry, direct port of deliverymain.js's own INSERT column list.</summary>
+    internal static async Task CreateAsync(INexusOperationsDb db, CreateDeliveryMainRequest body, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO log.DeliveryMain
+                (deliveryID, customerID, dispatchDate, deliveryDate, completionDate, completionStatus,
+                 operatorName, supervisorName, netWeight, grossWeight, palletCount,
+                 deliveryVolume, picksheetComment, deliveryCancelled, deliveryPriority,
+                 deliveryService, incoterms)
+            VALUES
+                (@DeliveryId, @CustomerId, @DispatchDate, @DeliveryDate, @CompletionDate, @CompletionStatus,
+                 @OperatorName, @SupervisorName, @NetWeight, @GrossWeight, @PalletCount,
+                 @DeliveryVolume, @PicksheetComment, @DeliveryCancelled, @DeliveryPriority,
+                 @DeliveryService, @Incoterms)
+            """, body, cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// POST /bulk (Bulk CSV Import tile) — port of deliverymain.js's own
+    /// row-by-row loop: each record gets its own try/catch (one bad row
+    /// must never abort the rest of the import), and a duplicate deliveryID
+    /// is silently skipped via WHERE NOT EXISTS, not reported as an error —
+    /// the same idempotent-insert convention WarehouseSapSyncHelper.
+    /// RunSapSyncAsync already uses for exactly this reason.
+    /// </summary>
+    internal static async Task<BulkImportDeliveriesResult> BulkImportAsync(INexusOperationsDb db, IReadOnlyList<BulkImportDeliveryRow> records, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        int inserted = 0, skipped = 0;
+        var errors = new List<BulkImportErrorRow>();
+
+        foreach (var r in records)
+        {
+            try
+            {
+                var rowsAffected = await connection.ExecuteAsync(new CommandDefinition("""
+                    INSERT INTO log.DeliveryMain
+                        (deliveryID, customerID, dispatchDate, deliveryDate, completionStatus, deliveryCancelled,
+                         deliveryService, deliveryPriority, picksheetComment, incoterms)
+                    SELECT @DeliveryId, @CustomerId, @DispatchDate, @DeliveryDate, 0, 0,
+                           @DeliveryService, @DeliveryPriority, @PicksheetComment, @Incoterms
+                    WHERE NOT EXISTS (SELECT 1 FROM log.DeliveryMain WHERE deliveryID = @DeliveryId)
+                    """, r, cancellationToken: ct));
+
+                if (rowsAffected > 0) inserted++; else skipped++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(new BulkImportErrorRow(r.DeliveryId, ex.Message));
+            }
+        }
+
+        return new BulkImportDeliveriesResult(inserted, skipped, errors);
+    }
+
     /// <summary>Mutable accumulator for one material's requiredQty/batches while GetPicksheetMaterialsAsync builds the result — mirrors Node's own byMaterial[mat] object being mutated in place across two separate forEach passes (lipsRows, then batchRows).</summary>
     private sealed class PicksheetRequiredMaterialBuilder(string material, string? deliveryItem)
     {
