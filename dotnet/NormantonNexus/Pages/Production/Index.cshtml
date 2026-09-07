@@ -7,11 +7,6 @@
     ViewData["PageSubtitle"] = "Select a function to begin";
 }
 
-<p style="color:#6b7280; font-size:0.85rem;">
-    Drumming's full entry wizard, Open Entries/Complete Run, Scrap Reversal, and label printing are being ported in a
-    later slice of this department.
-</p>
-
 <h3>Production Entry</h3>
 <div class="tile-grid">
     <a class="tile" asp-page="MixingEntry">
@@ -41,6 +36,14 @@
     <a class="tile" asp-page="MetreEntry" asp-route-code="TW">
         <p class="tile-title">Tape Wrap</p>
         <p class="tile-hint">Enter a completed tape wrap run and post to SAP</p>
+    </a>
+    <a class="tile" asp-page="DrummingEntry">
+        <p class="tile-title">Drumming</p>
+        <p class="tile-hint">Make-to-Stock/Make-to-Order drumming entry with traceability, coil lengths and scrap</p>
+    </a>
+    <a class="tile" asp-page="OrderLookup">
+        <p class="tile-title">Order Lookup</p>
+        <p class="tile-hint">Find an open order, check stock &amp; required, print a Drumming Ticket</p>
     </a>
 </div>
 

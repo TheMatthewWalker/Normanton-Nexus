@@ -80,6 +80,7 @@
         notesInput.value = "";
       }
       appendPrintLabelLink(data.recordId);
+      window.ProductionLabels.mount(document.getElementById("mp-print-widget"), { processCode, recordId: data.recordId, tubs: null });
     } catch (err) {
       setResult(err.message, "#b91c1c");
     } finally {

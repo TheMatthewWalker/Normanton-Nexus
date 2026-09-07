@@ -171,6 +171,9 @@
         renderTubs();
       }
       appendPrintLabelsLink(data.recordId);
+      window.ProductionLabels.mount(document.getElementById("mx-print-widget"), {
+        processCode: "MX", recordId: data.recordId, tubs: (data.tubs || []).map((t) => t.tubSeq),
+      });
     } catch (err) {
       setResult(err.message, "#b91c1c");
     } finally {

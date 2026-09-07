@@ -1,0 +1,73 @@
+@page
+@model NormantonNexus.Pages.Production.DrummingEntryModel
+@{
+    ViewData["Title"] = "Drumming";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Drumming";
+    ViewData["PageSubtitle"] = "Make-to-Stock or Make-to-Order drumming entry, with traceability, coil lengths and scrap";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+<p><a asp-page="OrderLookup">Looking for an existing order to drum instead? Order Lookup &rarr;</a></p>
+
+<div style="max-width:700px;">
+    <label>Type
+        <select id="dw-type">
+            <option value="stock">Make-to-Stock</option>
+            <option value="customer">Make-to-Order</option>
+        </select>
+    </label>
+
+    <label>Material<input type="text" id="dw-material"></label>
+    <label>Shift<select id="dw-shift">
+        <option value="1">Days (06:00–14:00)</option>
+        <option value="2">Afternoons (14:00–22:00)</option>
+        <option value="3">Nights (22:00–06:00)</option>
+    </select></label>
+    <label>Packaging<select id="dw-packaging"><option value="">Loading…</option></select></label>
+    <label>Weight (KG)<input type="number" id="dw-weight" step="0.001"></label>
+
+    <div id="dw-customer-fields" style="display:none;">
+        <label>Customer Number<input type="text" id="dw-customer"></label>
+        <label>Order Number<input type="text" id="dw-order"></label>
+        <label>Order Item<input type="text" id="dw-order-item"></label>
+    </div>
+
+    <fieldset>
+        <legend>Parent Batches (traceability)</legend>
+        <div id="dw-parent-list"></div>
+        <button type="button" class="secondary" id="dw-add-parent">+ Add Parent Batch</button>
+    </fieldset>
+
+    <fieldset>
+        <legend>Raw Material Batches</legend>
+        <div id="dw-rawmat-list"></div>
+        <button type="button" class="secondary" id="dw-add-rawmat">+ Add Raw Material Batch</button>
+    </fieldset>
+
+    <fieldset>
+        <legend>Coil Lengths (m)</legend>
+        <div id="dw-coil-list"></div>
+        <button type="button" class="secondary" id="dw-add-coil">+ Add Coil Length</button>
+    </fieldset>
+
+    <fieldset>
+        <legend>Scrap</legend>
+        <label><input type="checkbox" id="dw-has-scrap"> Has scrap</label>
+        <label>Total Scrap (KG)<input type="number" id="dw-scrap-total" step="0.001"></label>
+        <div id="dw-scrap-list"></div>
+        <button type="button" class="secondary" id="dw-add-scrap">+ Add Scrap Reason</button>
+    </fieldset>
+
+    <label>Comments<input type="text" id="dw-comments"></label>
+
+    <p id="dw-result" style="margin:0.5rem 0;"></p>
+    <div id="dw-print-widget"></div>
+
+    <button type="button" id="dw-submit-btn">Post to SAP</button>
+</div>
+
+@section Scripts {
+    <script src="~/js/production/label-print.js"></script>
+    <script src="~/js/production/drumming-entry.js"></script>
+}

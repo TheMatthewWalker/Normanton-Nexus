@@ -20,10 +20,14 @@
     <input type="text" id="mp-notes" placeholder="Any comments…" />
 
     <p id="mp-result" style="margin:0.5rem 0;"></p>
+    <div id="mp-print-widget"></div>
 
     <button type="button" id="mp-submit-btn">Post to SAP</button>
 </div>
 
+<p style="margin-top:1rem;"><a asp-page="CompleteRun" asp-route-code="@Model.Code">Complete a Draft Run (with traceability &amp; scrap) &rarr;</a></p>
+
 @section Scripts {
+    <script src="~/js/production/label-print.js"></script>
     <script src="~/js/production/metre-entry.js"></script>
 }

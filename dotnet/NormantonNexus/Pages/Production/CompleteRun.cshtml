@@ -1,0 +1,63 @@
+@page "{code}"
+@model NormantonNexus.Pages.Production.CompleteRunModel
+@{
+    ViewData["Title"] = "Complete Run — " + Model.ProcessLabel;
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = Model.ProcessLabel + " — Complete a Draft Run";
+    ViewData["PageSubtitle"] = "Start a new draft with traceability, or complete an existing open draft";
+}
+
+<p><a asp-page="MetreEntry" asp-route-code="@Model.Code">&larr; @Model.ProcessLabel Entry</a></p>
+
+<div data-process-code="@Model.Code">
+    <section class="card">
+        <h3>Open Drafts</h3>
+        <div id="cr-open-entries">Loading…</div>
+    </section>
+
+    <section class="card" style="margin-top:1rem;" id="cr-draft-section">
+        <h3>Start New Draft</h3>
+        <label>Material<input type="text" id="cr-material"></label>
+        <label>Machine ID<input type="number" id="cr-machine"></label>
+        <fieldset>
+            <legend>Parent Batches (traceability)</legend>
+            <div id="cr-parent-list"></div>
+            <button type="button" class="secondary" id="cr-add-parent">+ Add Parent Batch</button>
+        </fieldset>
+        <fieldset>
+            <legend>Raw Material Batches</legend>
+            <div id="cr-rawmat-list"></div>
+            <button type="button" class="secondary" id="cr-add-rawmat">+ Add Raw Material Batch</button>
+        </fieldset>
+        <label>Notes<input type="text" id="cr-draft-notes"></label>
+        <p id="cr-draft-result" style="margin:0.5rem 0;"></p>
+        <button type="button" id="cr-draft-submit">Create Draft</button>
+    </section>
+
+    <section class="card" style="margin-top:1rem; display:none;" id="cr-complete-section">
+        <h3>Complete Run <span id="cr-complete-ref"></span></h3>
+        <label>Length (Metres)<input type="number" id="cr-length" step="0.001" min="0.001"></label>
+        <label>Shift<select id="cr-shift">
+            <option value="1">Days (06:00–14:00)</option>
+            <option value="2">Afternoons (14:00–22:00)</option>
+            <option value="3">Nights (22:00–06:00)</option>
+        </select></label>
+        <label>Additional Operator IDs (comma-separated)<input type="text" id="cr-operators"></label>
+        <fieldset>
+            <legend>Scrap</legend>
+            <label><input type="checkbox" id="cr-has-scrap"> Has scrap</label>
+            <label>Total Scrap (KG)<input type="number" id="cr-scrap-total" step="0.001"></label>
+            <div id="cr-scrap-list"></div>
+            <button type="button" class="secondary" id="cr-add-scrap">+ Add Scrap Reason</button>
+        </fieldset>
+        <label>Notes<input type="text" id="cr-complete-notes"></label>
+        <p id="cr-complete-result" style="margin:0.5rem 0;"></p>
+        <div id="cr-print-widget"></div>
+        <button type="button" id="cr-complete-submit">Complete &amp; Post to SAP</button>
+    </section>
+</div>
+
+@section Scripts {
+    <script src="~/js/production/label-print.js"></script>
+    <script src="~/js/production/complete-run.js"></script>
+}

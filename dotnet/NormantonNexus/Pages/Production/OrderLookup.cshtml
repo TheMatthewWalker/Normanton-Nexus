@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Production.OrderLookupModel
+@{
+    ViewData["Title"] = "Order Lookup";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Order Lookup";
+    ViewData["PageSubtitle"] = "Find an open order, check stock & required, print a Drumming Ticket";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div style="display:flex; gap:0.5rem; align-items:end; flex-wrap:wrap;">
+    <label>Order Number<input type="text" id="ol-order"></label>
+    <label>Material<input type="text" id="ol-material"></label>
+    <label>Customer<input type="text" id="ol-customer"></label>
+    <button type="button" id="ol-search-btn">Search</button>
+</div>
+
+<div id="ol-results" style="margin-top:1rem;"></div>
+
+@section Scripts {
+    <script src="~/js/production/order-lookup.js"></script>
+}
