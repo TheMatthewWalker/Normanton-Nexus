@@ -1,0 +1,26 @@
+@page
+@model NormantonNexus.Pages.Logistics.CreateShipmentModel
+@{
+    ViewData["Title"] = "Create Outbound Shipment";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Create Outbound Shipment";
+    ViewData["PageSubtitle"] = "Build a shipment from open deliveries";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<form id="cs-form">
+    <label>Delivery IDs (comma-separated)<input type="text" id="cs-deliveries" required></label>
+    <label>Destination Name<input type="text" id="cs-dest-name"></label>
+    <label>Destination Country<input type="text" id="cs-dest-country"></label>
+    <label>Forwarder ID<input type="text" id="cs-forwarder-id"></label>
+    <label>Planned Collection<input type="date" id="cs-planned-collection"></label>
+    <label>Incoterms<input type="text" id="cs-incoterms" maxlength="3"></label>
+    <label><input type="checkbox" id="cs-customs-required"> Customs Required</label>
+    <button type="submit" class="btn">Create Shipment</button>
+</form>
+<p id="cs-status"></p>
+
+@section Scripts {
+    <script src="~/js/logistics/create-shipment.js"></script>
+}

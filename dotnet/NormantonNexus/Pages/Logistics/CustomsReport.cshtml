@@ -1,0 +1,37 @@
+@page
+@model NormantonNexus.Pages.Logistics.CustomsReportModel
+@{
+    ViewData["Title"] = "Monthly Customs Report";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Monthly Customs Report (French VAT)";
+    ViewData["PageSubtitle"] = "Generate the DDP customs report, and manage VAT overrides / HS descriptions";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<h3>Generate Report</h3>
+<p>Upload a Shipments-style .xlsx extract; get back a finished CUSTOMS-format .xlsx.</p>
+<input type="file" id="cr-file" accept=".xlsx">
+<button type="button" class="btn" id="cr-generate">Generate</button>
+<p id="cr-status"></p>
+
+<h3>VAT Overrides</h3>
+<form id="vo-form">
+    <label>Consignee Code<input type="text" id="vo-consignee" required></label>
+    <label>VAT Number<input type="text" id="vo-vat" required></label>
+    <label>Notes<input type="text" id="vo-notes"></label>
+    <button type="submit" class="btn secondary">Add</button>
+</form>
+<div id="vo-body"></div>
+
+<h3>HS Descriptions</h3>
+<form id="hs-form">
+    <label>Commodity Code<input type="text" id="hs-code" required></label>
+    <label>Description<input type="text" id="hs-desc" required></label>
+    <button type="submit" class="btn secondary">Add</button>
+</form>
+<div id="hs-body"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/customs-report.js"></script>
+}

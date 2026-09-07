@@ -364,4 +364,67 @@ public sealed class LogisticsReferenceController(INexusOperationsDb nexusOperati
         var result = await MaterialRequestUnitsHelper.BulkImportAsync(nexusOperationsDb, body.Records, GetUsername(), ct);
         return Ok(ApiResponse<BulkImportMaterialRequestUnitsResult>.Ok(result));
     }
+
+    // ── Destinations — port of routes/destinations.js. No write gate on Create
+    // in Node (matches CostTypes/Incoterms/etc.'s asymmetry above); every other
+    // write (Update, bulk delete/update, email replace) is LOG_ADMIN. ─────────
+
+    [HttpGet("destinations")]
+    public async Task<IActionResult> ListDestinations([FromQuery] string? search, CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<DestinationRow>>.Ok(await LogisticsReferenceHelper.ListDestinationsAsync(nexusOperationsDb, search, ct)));
+
+    [HttpGet("destinations/id/{destinationId:long}")]
+    public async Task<IActionResult> GetDestination(long destinationId, CancellationToken ct) =>
+        Ok(ApiResponse<DestinationRow?>.Ok(await LogisticsReferenceHelper.GetDestinationAsync(nexusOperationsDb, destinationId, ct)));
+
+    [HttpGet("destinations/country/{country}")]
+    public async Task<IActionResult> ListDestinationsByCountry(string country, CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<DestinationRow>>.Ok(await LogisticsReferenceHelper.ListDestinationsByCountryAsync(nexusOperationsDb, country, ct)));
+
+    [HttpGet("destinations/zone/{zone}")]
+    public async Task<IActionResult> ListDestinationsByZone(string zone, CancellationToken ct) =>
+        Ok(ApiResponse<IReadOnlyList<DestinationRow>>.Ok(await LogisticsReferenceHelper.ListDestinationsByZoneAsync(nexusOperationsDb, zone, ct)));
+
+    [HttpPost("destinations")]
+    public async Task<IActionResult> CreateDestination([FromBody] CreateDestinationRequest body, CancellationToken ct)
+    {
+        await LogisticsReferenceHelper.CreateDestinationAsync(nexusOperationsDb, body, ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpPut("destinations/{destinationId:long}")]
+    [Authorize(Policy = "Perm:LOG_ADMIN")]
+    public async Task<IActionResult> UpdateDestination(long destinationId, [FromBody] UpdateDestinationRequest body, CancellationToken ct)
+    {
+        await LogisticsReferenceHelper.UpdateDestinationAsync(nexusOperationsDb, destinationId, body, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("destinations/bulk")]
+    [Authorize(Policy = "Perm:LOG_ADMIN")]
+    public async Task<IActionResult> BulkDeleteDestinations([FromBody] BulkDeleteDestinationsRequest body, CancellationToken ct)
+    {
+        var deleted = await LogisticsReferenceHelper.BulkDeleteDestinationsAsync(nexusOperationsDb, body.Ids ?? [], ct);
+        return Ok(ApiResponse<object>.Ok(new { deleted }));
+    }
+
+    [HttpPatch("destinations/bulk")]
+    [Authorize(Policy = "Perm:LOG_ADMIN")]
+    public async Task<IActionResult> BulkUpdateDestinationField([FromBody] BulkUpdateDestinationFieldRequest body, CancellationToken ct)
+    {
+        var updated = await LogisticsReferenceHelper.BulkUpdateDestinationFieldAsync(nexusOperationsDb, body.Ids ?? [], body.Field, body.Value, ct);
+        return Ok(ApiResponse<object>.Ok(new { updated }));
+    }
+
+    [HttpGet("destinations/{destinationId:long}/emails")]
+    public async Task<IActionResult> GetDestinationEmails(long destinationId, CancellationToken ct) =>
+        Ok(ApiResponse<DestinationEmailsResult>.Ok(await LogisticsReferenceHelper.GetDestinationEmailsAsync(nexusOperationsDb, destinationId, ct)));
+
+    [HttpPut("destinations/{destinationId:long}/emails")]
+    [Authorize(Policy = "Perm:LOG_ADMIN")]
+    public async Task<IActionResult> UpdateDestinationEmails(long destinationId, [FromBody] UpdateDestinationEmailsRequest body, CancellationToken ct)
+    {
+        await LogisticsReferenceHelper.UpdateDestinationEmailsAsync(nexusOperationsDb, destinationId, body.Addresses ?? [], ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
 }

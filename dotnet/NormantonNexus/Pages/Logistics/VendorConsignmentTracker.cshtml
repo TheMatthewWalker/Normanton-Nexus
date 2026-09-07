@@ -1,0 +1,17 @@
+@page
+@model NormantonNexus.Pages.Logistics.VendorConsignmentTrackerModel
+@{
+    ViewData["Title"] = "Vendor Consignment Tracker";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Vendor Consignment Tracker";
+    ViewData["PageSubtitle"] = "Consignment balances, deliveries and declarations";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+<button type="button" class="btn secondary" id="vc-refresh-stock">Refresh Stock Snapshot</button>
+<div id="vc-vendors"></div>
+<div id="vc-detail" style="margin-top:1rem;"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/vendor-consignment-tracker.js"></script>
+}

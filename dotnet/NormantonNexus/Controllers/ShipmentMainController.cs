@@ -179,6 +179,15 @@ public sealed class ShipmentMainController(
         return Ok(ApiResponse<IReadOnlyList<ShipmentEventRow>>.Ok(rows));
     }
 
+    /// <summary>Haulier On-Time Performance report — Phase 10 frontend catch-up (genuinely missing until now). requireAnyPermission(['LOG_ADMIN','LOG_MRP','LOG_REPORTS']) in Node, ported as an any-of policy.</summary>
+    [HttpGet("otif-report")]
+    [Authorize(Policy = "Perm:LOG_ADMIN,LOG_MRP,LOG_REPORTS")]
+    public async Task<IActionResult> GetOtifReport([FromQuery] int? months, CancellationToken ct)
+    {
+        var result = await ShipmentHelper.GetOtifReportAsync(nexusOperationsDb, months, ct);
+        return Ok(ApiResponse<OtifReportResult>.Ok(result));
+    }
+
     // ── Sub-phase 8a.2: manual cargo lines + create-folder ────────────
 
     [HttpGet("{shipmentId:long}/manual-cargo")]

@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Logistics.TurnsValClassModel
+@{
+    ViewData["Title"] = "Stock Turns & Valuation";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Stock Turns & Valuation";
+    ViewData["PageSubtitle"] = "MM Turns / Valuation Class";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<h3>Totals</h3>
+<div id="tv-totals">Loading…</div>
+
+<h3>By Turnover Category</h3>
+<div id="tv-turnover"></div>
+
+<h3>Stock Value by Price Band</h3>
+<div id="tv-price-band"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/turns-valclass.js"></script>
+}

@@ -85,3 +85,22 @@ public sealed record ShipmentSearchRow(
 public sealed record ShipmentSearchQuery(
     string? ShipmentRef, string? DeliveryNumber, string? Forwarder, string? Customer, string? Tracking,
     string? DateField, DateTime? DateFrom, DateTime? DateTo);
+
+// ── Haulier On-Time Performance (GET /otif-report) ──────────────────────────
+// Combines outbound (ShipmentMain) and inbound (PurchaseOrderShipment) legs —
+// see ShipmentHelper.GetOtifReportAsync's own header comment, ported directly
+// from routes/shipmentmain.js's OTIF_OUTBOUND/OTIF_INBOUND/OTIF_COMBINED.
+
+public sealed record OtifTotals(int OnTime, int Total);
+
+public sealed record OtifHaulierRow(string Haulier, int OnTime, int Total);
+
+public sealed record OtifCountryRow(string? Country, int OnTime, int Total);
+
+public sealed record OtifDestinationRow(string? Destination, int OnTime, int Total);
+
+public sealed record OtifMonthRow(int Yr, int Mo, int OnTime, int Total);
+
+public sealed record OtifReportResult(
+    int Months, OtifTotals Totals, IReadOnlyList<OtifHaulierRow> ByHaulier, IReadOnlyList<OtifCountryRow> ByCountry,
+    IReadOnlyList<OtifDestinationRow> ByDestination, IReadOnlyList<OtifMonthRow> ByMonth);

@@ -744,6 +744,94 @@ internal static class ShipmentHelper
         return results;
     }
 
+    /// <summary>
+    /// Haulier On-Time Performance — Phase 10 frontend catch-up (genuinely
+    /// missing until now, not just unwired). Direct port of
+    /// routes/shipmentmain.js's GET /otif-report: combines outbound
+    /// (log.ShipmentMain, actualDelivery vs plannedDelivery) and inbound
+    /// (log.PurchaseOrderShipment, ReceivedAtUtc vs ExpectedEta) legs via a
+    /// UNION ALL, same reasoning as shipmentcost.js's own /analytics — a
+    /// haulier's on-time record should reflect both directions. "On time" is
+    /// actual/received date &lt;= planned/expected date, dates only
+    /// (DATEADD/DATEDIFF-to-midnight truncation, not CAST...AS DATE — this
+    /// codebase's schema predates SQL Server 2008's DATE type). Each
+    /// Forwarders lookup uses OUTER APPLY TOP 1, not a plain JOIN — Forwarders
+    /// has one row per (forwarderID, mode), so a plain JOIN would fan out and
+    /// inflate every count, the exact bug ShipmentCostController's own
+    /// COMBINED_COST_OUTBOUND/INBOUND queries were already fixed for
+    /// elsewhere in this codebase.
+    /// </summary>
+    internal static async Task<OtifReportResult> GetOtifReportAsync(INexusOperationsDb db, int? monthsRaw, CancellationToken ct)
+    {
+        var months = Math.Min(Math.Max(monthsRaw ?? 12, 1), 60);
+
+        const string otifOutbound = """
+            SELECT ISNULL(fa.forwarderName, 'Unassigned') AS Haulier,
+                   sm.destinationCountry AS Country,
+                   sm.destinationName    AS Destination,
+                   sm.actualDelivery     AS PeriodDate,
+                   CASE WHEN DATEADD(day, DATEDIFF(day, 0, sm.actualDelivery), 0) <= DATEADD(day, DATEDIFF(day, 0, sm.plannedDelivery), 0) THEN 1 ELSE 0 END AS IsOnTime
+            FROM log.ShipmentMain sm
+            OUTER APPLY (SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = sm.forwarderID) fa
+            WHERE sm.actualDelivery IS NOT NULL AND sm.plannedDelivery IS NOT NULL
+              AND ISNULL(sm.shipmentCancelled, 0) = 0
+            """;
+        const string otifInbound = """
+            SELECT ISNULL(fa.forwarderName, 'Unassigned') AS Haulier,
+                   d.destinationCountry AS Country,
+                   d.destinationName    AS Destination,
+                   ps.ReceivedAtUtc     AS PeriodDate,
+                   CASE WHEN DATEADD(day, DATEDIFF(day, 0, ps.ReceivedAtUtc), 0) <= DATEADD(day, DATEDIFF(day, 0, ps.ExpectedEta), 0) THEN 1 ELSE 0 END AS IsOnTime
+            FROM log.PurchaseOrderShipment ps
+            OUTER APPLY (SELECT TOP 1 f.forwarderName FROM log.Forwarders f WHERE f.forwarderID = ps.ForwarderID) fa
+            LEFT JOIN log.Destinations d ON d.destinationID = ps.OriginDestinationID
+            WHERE ps.ReceivedAtUtc IS NOT NULL AND ps.ExpectedEta IS NOT NULL AND ps.CancelledAtUtc IS NULL
+            """;
+        var otifCombined = $"(({otifOutbound}) UNION ALL ({otifInbound})) o";
+
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var byHaulier = (await connection.QueryAsync<OtifHaulierRow>(new CommandDefinition($"""
+            SELECT o.Haulier AS Haulier, SUM(o.IsOnTime) AS OnTime, COUNT(*) AS Total
+            FROM {otifCombined}
+            WHERE o.PeriodDate >= DATEADD(month, -@months, GETDATE())
+            GROUP BY o.Haulier
+            ORDER BY Total DESC
+            """, new { months }, cancellationToken: ct))).ToList();
+
+        var byCountry = (await connection.QueryAsync<OtifCountryRow>(new CommandDefinition($"""
+            SELECT o.Country AS Country, SUM(o.IsOnTime) AS OnTime, COUNT(*) AS Total
+            FROM {otifCombined}
+            WHERE o.PeriodDate >= DATEADD(month, -@months, GETDATE()) AND o.Country IS NOT NULL
+            GROUP BY o.Country
+            ORDER BY Total DESC
+            """, new { months }, cancellationToken: ct))).ToList();
+
+        var byDestination = (await connection.QueryAsync<OtifDestinationRow>(new CommandDefinition($"""
+            SELECT TOP 15 o.Destination AS Destination, SUM(o.IsOnTime) AS OnTime, COUNT(*) AS Total
+            FROM {otifCombined}
+            WHERE o.PeriodDate >= DATEADD(month, -@months, GETDATE()) AND o.Destination IS NOT NULL
+            GROUP BY o.Destination
+            ORDER BY Total DESC
+            """, new { months }, cancellationToken: ct))).ToList();
+
+        var byMonth = (await connection.QueryAsync<OtifMonthRow>(new CommandDefinition($"""
+            SELECT YEAR(o.PeriodDate) AS Yr, MONTH(o.PeriodDate) AS Mo, SUM(o.IsOnTime) AS OnTime, COUNT(*) AS Total
+            FROM {otifCombined}
+            WHERE o.PeriodDate >= DATEADD(month, -@months, GETDATE())
+            GROUP BY YEAR(o.PeriodDate), MONTH(o.PeriodDate)
+            ORDER BY Yr ASC, Mo ASC
+            """, new { months }, cancellationToken: ct))).ToList();
+
+        var totals = await connection.QuerySingleAsync<OtifTotals>(new CommandDefinition($"""
+            SELECT ISNULL(SUM(o.IsOnTime), 0) AS OnTime, COUNT(*) AS Total
+            FROM {otifCombined}
+            WHERE o.PeriodDate >= DATEADD(month, -@months, GETDATE())
+            """, new { months }, cancellationToken: ct));
+
+        return new OtifReportResult(months, totals, byHaulier, byCountry, byDestination, byMonth);
+    }
+
     // ── Shared helpers ────────────────────────────────────────────────
 
     internal static async Task<ShipmentRow?> GetShipmentByIdAsync(SqlConnection connection, long shipmentId, CancellationToken ct)

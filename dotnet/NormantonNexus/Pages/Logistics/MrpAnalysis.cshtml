@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Logistics.MrpAnalysisModel
+@{
+    ViewData["Title"] = "MRP Analysis";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "MRP Analysis";
+    ViewData["PageSubtitle"] = "Consumption/GR history and forecast runs";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+<button type="button" class="btn secondary" id="ma-refresh">Refresh History</button>
+<div id="ma-refresh-status"></div>
+
+<form id="ma-trends-form">
+    <label>Materials (comma-separated)<input type="text" id="ma-materials" required></label>
+    <button type="submit" class="btn secondary">Get Trends</button>
+</form>
+<div id="ma-trends"></div>
+
+<h3>Forecast Runs</h3>
+<div id="ma-runs">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/mrp-analysis.js"></script>
+}

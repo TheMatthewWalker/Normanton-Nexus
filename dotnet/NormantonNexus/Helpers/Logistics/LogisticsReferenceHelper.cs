@@ -537,6 +537,145 @@ internal static class LogisticsReferenceHelper
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM log.DeliveryRoutes WHERE routeID = @routeId", new { routeId }, cancellationToken: ct));
     }
 
+    // ── Destinations (log.Destinations) — LOG_ADMIN writes, port of routes/destinations.js ──
+
+    private const string DestinationColumns = """
+        destinationID AS DestinationId, destinationName AS DestinationName, destinationStreet AS DestinationStreet,
+        destinationCity AS DestinationCity, destinationPostCode AS DestinationPostCode, destinationCountry AS DestinationCountry,
+        defaultIncoterms AS DefaultIncoterms, destinationComment AS DestinationComment, destinationZone AS DestinationZone,
+        defaultDeliveryService AS DefaultDeliveryService, defaultForwarder AS DefaultForwarder
+        """;
+
+    /// <summary>search (optional) mirrors packaging.js's material typeahead — TOP 200, name/city LIKE-matched — used by the Manual Inbound Shipment origin combobox; omitted returns every row, unfiltered, for Update Destinations' own full-list view.</summary>
+    internal static async Task<IReadOnlyList<DestinationRow>> ListDestinationsAsync(INexusOperationsDb db, string? search, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            var all = await connection.QueryAsync<DestinationRow>(new CommandDefinition(
+                $"SELECT {DestinationColumns} FROM log.Destinations ORDER BY destinationName", cancellationToken: ct));
+            return all.AsList();
+        }
+
+        var like = $"%{search.Trim()}%";
+        var rows = await connection.QueryAsync<DestinationRow>(new CommandDefinition(
+            $"SELECT TOP 200 {DestinationColumns} FROM log.Destinations WHERE destinationName LIKE @like OR destinationCity LIKE @like ORDER BY destinationName",
+            new { like }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    internal static async Task<DestinationRow?> GetDestinationAsync(INexusOperationsDb db, long destinationId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<DestinationRow>(new CommandDefinition(
+            $"SELECT {DestinationColumns} FROM log.Destinations WHERE destinationID = @destinationId", new { destinationId }, cancellationToken: ct));
+    }
+
+    internal static async Task<IReadOnlyList<DestinationRow>> ListDestinationsByCountryAsync(INexusOperationsDb db, string country, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<DestinationRow>(new CommandDefinition(
+            $"SELECT {DestinationColumns} FROM log.Destinations WHERE destinationCountry = @country", new { country }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    internal static async Task<IReadOnlyList<DestinationRow>> ListDestinationsByZoneAsync(INexusOperationsDb db, string zone, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<DestinationRow>(new CommandDefinition(
+            $"SELECT {DestinationColumns} FROM log.Destinations WHERE destinationZone = @zone", new { zone }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    internal static async Task CreateDestinationAsync(INexusOperationsDb db, CreateDestinationRequest body, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO log.Destinations
+                (destinationID, destinationName, destinationStreet, destinationCity,
+                 destinationPostCode, destinationCountry, defaultIncoterms,
+                 destinationComment, destinationZone, defaultDeliveryService, defaultForwarder)
+            VALUES
+                (@DestinationId, @DestinationName, @DestinationStreet, @DestinationCity,
+                 @DestinationPostCode, @DestinationCountry, @DefaultIncoterms,
+                 @DestinationComment, @DestinationZone, @DefaultDeliveryService, @DefaultForwarder)
+            """, body, cancellationToken: ct));
+    }
+
+    internal static async Task UpdateDestinationAsync(INexusOperationsDb db, long destinationId, UpdateDestinationRequest body, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rowsAffected = await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE log.Destinations
+            SET destinationName = @DestinationName, destinationStreet = @DestinationStreet, destinationCity = @DestinationCity,
+                destinationPostCode = @DestinationPostCode, destinationCountry = @DestinationCountry, defaultIncoterms = @DefaultIncoterms,
+                destinationComment = @DestinationComment, destinationZone = @DestinationZone,
+                defaultDeliveryService = @DefaultDeliveryService, defaultForwarder = @DefaultForwarder
+            WHERE destinationID = @destinationId
+            """, new
+        {
+            destinationId, body.DestinationName, body.DestinationStreet, body.DestinationCity, body.DestinationPostCode,
+            body.DestinationCountry, body.DefaultIncoterms, body.DestinationComment, body.DestinationZone,
+            body.DefaultDeliveryService, body.DefaultForwarder
+        }, cancellationToken: ct));
+
+        if (rowsAffected == 0)
+            throw new NexusNotFoundException("Destination not found.");
+    }
+
+    internal static async Task<int> BulkDeleteDestinationsAsync(INexusOperationsDb db, IReadOnlyList<long> ids, CancellationToken ct)
+    {
+        if (ids.Count == 0)
+            throw new NexusValidationException("No IDs provided.");
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log.Destinations WHERE destinationID IN @ids", new { ids }, cancellationToken: ct));
+        return ids.Count;
+    }
+
+    private static readonly Dictionary<string, string> DestinationBulkFields = new(StringComparer.Ordinal)
+    {
+        ["defaultForwarder"] = "defaultForwarder",
+        ["defaultDeliveryService"] = "defaultDeliveryService",
+        ["destinationZone"] = "destinationZone",
+    };
+
+    internal static async Task<int> BulkUpdateDestinationFieldAsync(INexusOperationsDb db, IReadOnlyList<long> ids, string? field, string? value, CancellationToken ct)
+    {
+        if (field is null || !DestinationBulkFields.TryGetValue(field, out var column))
+            throw new NexusValidationException($"Field '{field}' is not permitted for bulk update.");
+        if (ids.Count == 0)
+            throw new NexusValidationException("No IDs provided.");
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE log.Destinations SET {column} = @value WHERE destinationID IN @ids", new { value, ids }, cancellationToken: ct));
+        return ids.Count;
+    }
+
+    internal static async Task<DestinationEmailsResult> GetDestinationEmailsAsync(INexusOperationsDb db, long destinationId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var addresses = await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT address FROM log.Email WHERE ID = @destinationId ORDER BY address", new { destinationId }, cancellationToken: ct));
+        return new DestinationEmailsResult(addresses.AsList());
+    }
+
+    internal static async Task UpdateDestinationEmailsAsync(INexusOperationsDb db, long destinationId, IReadOnlyList<string> addresses, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        using var transaction = connection.BeginTransaction();
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log.Email WHERE ID = @destinationId", new { destinationId }, transaction: transaction, cancellationToken: ct));
+        foreach (var address in addresses.Select(a => a.Trim()).Where(a => a.Length > 0))
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO log.Email (ID, address) VALUES (@destinationId, @address)", new { destinationId, address }, transaction: transaction, cancellationToken: ct));
+        }
+        transaction.Commit();
+    }
+
     private static void ValidateCodeAndDescription(string code, string codeField, string description, string descriptionField)
     {
         if (string.IsNullOrWhiteSpace(code))

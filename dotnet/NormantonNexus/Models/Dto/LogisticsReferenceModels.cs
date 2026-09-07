@@ -97,3 +97,29 @@ public sealed record BulkImportMaterialRequestUnitsRequest(List<MaterialRequestU
 public sealed record MaterialRequestUnitImportError(string? Material, string? Unit, string Error);
 
 public sealed record BulkImportMaterialRequestUnitsResult(int Inserted, int Updated, List<MaterialRequestUnitImportError> Errors);
+
+// ── Destinations (log.Destinations) — LOG_ADMIN writes, port of routes/destinations.js ──
+
+public sealed record DestinationRow(
+    long DestinationId, string? DestinationName, string? DestinationStreet, string? DestinationCity,
+    string? DestinationPostCode, string? DestinationCountry, string? DefaultIncoterms,
+    string? DestinationComment, string? DestinationZone, string? DefaultDeliveryService, string? DefaultForwarder);
+
+public sealed record CreateDestinationRequest(
+    long DestinationId, string? DestinationName, string? DestinationStreet, string? DestinationCity,
+    string? DestinationPostCode, string? DestinationCountry, string? DefaultIncoterms,
+    string? DestinationComment, string? DestinationZone, string? DefaultDeliveryService, string? DefaultForwarder);
+
+public sealed record UpdateDestinationRequest(
+    string? DestinationName, string? DestinationStreet, string? DestinationCity,
+    string? DestinationPostCode, string? DestinationCountry, string? DefaultIncoterms,
+    string? DestinationComment, string? DestinationZone, string? DefaultDeliveryService, string? DefaultForwarder);
+
+public sealed record BulkDeleteDestinationsRequest(List<long>? Ids);
+
+/// <summary>Field is one of the three Node whitelists: defaultForwarder, defaultDeliveryService, destinationZone — anything else is rejected server-side, matching Node's BULK_FIELDS map.</summary>
+public sealed record BulkUpdateDestinationFieldRequest(List<long>? Ids, string? Field, string? Value);
+
+public sealed record DestinationEmailsResult(IReadOnlyList<string> Addresses);
+
+public sealed record UpdateDestinationEmailsRequest(List<string>? Addresses);

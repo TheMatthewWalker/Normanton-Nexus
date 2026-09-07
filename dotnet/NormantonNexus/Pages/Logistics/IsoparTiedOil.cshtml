@@ -1,0 +1,51 @@
+@page
+@model NormantonNexus.Pages.Logistics.IsoparTiedOilModel
+@{
+    ViewData["Title"] = "Isopar Tied Oil";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Isopar Tied Oil";
+    ViewData["PageSubtitle"] = "Meter readings, stock risk, planning rate, HMRC declarations";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<section>
+    <h3>Meter Readings</h3>
+    <form id="iso-reading-form">
+        <label>Date<input type="date" id="iso-date" required></label>
+        <label>Reading (L)<input type="number" step="0.01" id="iso-qty" required></label>
+        <label>Notes<input type="text" id="iso-notes"></label>
+        <button type="submit" class="btn secondary">Add Reading</button>
+    </form>
+    <div id="iso-readings" style="margin-top:0.75rem;"></div>
+</section>
+
+<section style="margin-top:1.5rem;">
+    <h3>Stock Risk</h3>
+    <div id="iso-risk">Loading…</div>
+</section>
+
+<section style="margin-top:1.5rem;">
+    <h3>Planning Rate</h3>
+    <div id="iso-rate">Loading…</div>
+    <form id="iso-rate-form" style="margin-top:0.5rem;">
+        <label>Weekday (L/day)<input type="number" step="0.01" id="iso-rate-weekday" required></label>
+        <label>Weekend (L/day)<input type="number" step="0.01" id="iso-rate-weekend" required></label>
+        <label>Max Stock Capacity<input type="number" step="0.01" id="iso-rate-capacity"></label>
+        <label>Source<input type="text" id="iso-rate-source"></label>
+        <label>Notes<input type="text" id="iso-rate-notes"></label>
+        <button type="submit" class="btn secondary">Save Rate</button>
+        <button type="button" id="iso-rate-apply-recommended" class="btn">Apply Recommended</button>
+    </form>
+</section>
+
+<section id="iso-decl-section" style="margin-top:1.5rem; display:none;">
+    <h3>HMRC Declarations</h3>
+    <div id="iso-decl-outstanding"></div>
+    <h4 style="margin-top:1rem;">Submitted Declarations</h4>
+    <div id="iso-decl-history"></div>
+</section>
+
+@section Scripts {
+    <script src="~/js/logistics/isopar-tied-oil.js"></script>
+}

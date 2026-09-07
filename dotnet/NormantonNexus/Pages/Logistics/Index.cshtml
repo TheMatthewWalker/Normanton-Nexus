@@ -1,0 +1,26 @@
+@page
+@model NormantonNexus.Pages.Logistics.IndexModel
+@{
+    ViewData["Title"] = "Logistics";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Logistics";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<div class="tile-grid">
+    <a class="tile" asp-page="CreateShipment"><p class="tile-title">Create Outbound Shipment</p><p class="tile-hint">Build a shipment from open deliveries</p></a>
+    <a class="tile" asp-page="ShipmentQueue"><p class="tile-title">Shipment Queue</p><p class="tile-hint">Awaiting Booking / Awaiting Collection / In Transit</p></a>
+    <a class="tile" asp-page="ShipmentSearch"><p class="tile-title">Search</p><p class="tile-hint">Find a shipment by ref, forwarder, customer, tracking or date</p></a>
+    <a class="tile" asp-page="OtifReport"><p class="tile-title">Haulier On-Time Performance</p><p class="tile-hint">OTIF by haulier, country, destination and month</p></a>
+    <a class="tile" asp-page="CustomsReport"><p class="tile-title">Monthly Customs Report (French VAT)</p><p class="tile-hint">Generate the DDP customs report, plus VAT override / HS description admin</p></a>
+    <a class="tile" asp-page="Costs"><p class="tile-title">Freight Costs</p><p class="tile-hint">Unprocessed and processed freight cost lines</p></a>
+    <a class="tile" asp-page="VendorMasterData"><p class="tile-title">Vendor Master Data</p><p class="tile-hint">MRP vendor and vendor-material configuration</p></a>
+    <a class="tile" asp-page="VendorConsignmentTracker"><p class="tile-title">Vendor Consignment Tracker</p><p class="tile-hint">Consignment balances, deliveries and Isopar declarations</p></a>
+    <a class="tile" asp-page="OrderSuggestions"><p class="tile-title">MRP System</p><p class="tile-hint">Order suggestions and tracked orders</p></a>
+    <a class="tile" asp-page="TurnsValClass"><p class="tile-title">Stock Turns &amp; Valuation</p><p class="tile-hint">MM Turns / Valuation Class</p></a>
+    <a class="tile" asp-page="MrpAnalysis"><p class="tile-title">MRP Analysis</p><p class="tile-hint">Consumption/GR history and BOM explosion forecasting</p></a>
+    <a class="tile" asp-page="DemandAdjustments"><p class="tile-title">Demand Adjustments</p><p class="tile-hint">Manual overrides to forecast demand</p></a>
+    <a class="tile" asp-page="IsoparTiedOil"><p class="tile-title">Isopar Tied Oil</p><p class="tile-hint">Readings, planning rate, stock risk and HMRC declarations</p></a>
+    <a class="tile" asp-page="InboundLog"><p class="tile-title">Inbound Log</p><p class="tile-hint">Inbound shipment tracking</p></a>
+    <a class="tile" asp-page="ReferenceData"><p class="tile-title">Reference Data</p><p class="tile-hint">Pallet/packaging data, destinations, forwarders, cost centres, GL accounts, forwarder mode mapping, material request units</p></a>
+</div>

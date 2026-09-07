@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Logistics.DemandAdjustmentsModel
+@{
+    ViewData["Title"] = "Demand Adjustments";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Demand Adjustments";
+    ViewData["PageSubtitle"] = "Manual overrides to forecast demand";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+<form id="da-form">
+    <label>Material<input type="text" id="da-material" required></label>
+    <label>Start Date<input type="date" id="da-start"></label>
+    <label>End Date<input type="date" id="da-end"></label>
+    <label>Usage %<input type="number" id="da-usage" value="100" required></label>
+    <label>Reason<input type="text" id="da-reason"></label>
+    <button type="submit" class="btn secondary">Add</button>
+</form>
+<div id="da-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/demand-adjustments.js"></script>
+}

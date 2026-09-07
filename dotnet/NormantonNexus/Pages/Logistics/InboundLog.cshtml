@@ -1,0 +1,46 @@
+@page
+@model NormantonNexus.Pages.Logistics.InboundLogModel
+@{
+    ViewData["Title"] = "Inbound Log";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Inbound Log";
+    ViewData["PageSubtitle"] = "Inbound shipments created from tracked orders, plus manual shipments";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="lg-actions" style="margin-bottom:0.75rem; display:flex; gap:0.5rem; align-items:center;">
+    <input class="tf-input" id="il-search" type="text" placeholder="Search vendor, tracking, container, B/L, material, PO, supplier ref…" style="max-width:340px">
+    <span id="il-count"></span>
+    <span style="flex:1"></span>
+    <button type="button" class="btn secondary" id="il-manual-btn">+ Manual Shipment</button>
+</div>
+
+<div id="il-list">Loading…</div>
+
+<div id="il-manual-form-wrap" style="display:none; margin-top:1rem;" class="card">
+    <h3>New Manual Shipment</h3>
+    <form id="il-manual-form">
+        <label>Origin Destination ID<input type="number" id="ilm-origin"></label>
+        <label>Forwarder<select id="ilm-forwarder"><option value="">—</option></select></label>
+        <label>Mode of Transport<input type="text" id="ilm-mode"></label>
+        <label>Dispatch Date<input type="date" id="ilm-dispatch"></label>
+        <label>Expected ETA<input type="date" id="ilm-eta"></label>
+        <label>Tracking Number<input type="text" id="ilm-tracking"></label>
+        <label>Notes<input type="text" id="ilm-notes"></label>
+        <fieldset style="margin-top:0.5rem;">
+            <legend>Optional initial cost line</legend>
+            <label>Price<input type="number" step="0.01" id="ilm-price"></label>
+            <label>Cost Centre<input type="text" id="ilm-costcentre"></label>
+            <label>Tier<input type="text" id="ilm-tier"></label>
+        </fieldset>
+        <button type="submit" class="btn secondary">Create</button>
+        <button type="button" class="btn" id="ilm-cancel">Cancel</button>
+    </form>
+</div>
+
+<div id="il-detail" style="display:none; margin-top:1.5rem;"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/inbound-log.js"></script>
+}
