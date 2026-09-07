@@ -226,7 +226,14 @@ Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name processModel.loadUserProfile
 Write-Host ""
 Write-Host "Disabling app-pool recycling (protects in-flight Quartz.NET jobs)..."
 Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name recycling.periodicRestart.time -Value '00:00:00'
-Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name recycling.periodicRestart.schedule -Value @()
+# recycling.periodicRestart.schedule is a COLLECTION property (a list of
+# scheduled restart times), not a scalar - confirmed for real that
+# Set-ItemProperty -Value @() throws "Object reference not set to an
+# instance of an object" against it (a documented WebAdministration
+# provider gotcha: Set-ItemProperty's collection handling is broken for
+# this property). Clear-ItemProperty is the correct way to empty a
+# collection-type IIS config property through this provider.
+Clear-ItemProperty "IIS:\AppPools\$appPoolName" -Name recycling.periodicRestart.schedule
 Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name processModel.idleTimeout -Value '00:00:00'
 
 # ---- Site ---------------------------------------------------------------
