@@ -1,0 +1,108 @@
+@page
+@model NormantonNexus.Pages.Management.IndexModel
+@{
+    ViewData["Title"] = "Management";
+    ViewData["Department"] = "Management";
+    ViewData["PageTitle"] = "Management";
+    ViewData["PageSubtitle"] = "KPIs, overviews & cross-department insight";
+}
+
+<div style="display:flex; gap:1rem; flex-wrap:wrap;">
+    <div class="card" style="flex:2; min-width:320px;">
+        <h3>PTFE</h3>
+        <div class="mgmt-kpis" style="display:grid; grid-template-columns:repeat(6,1fr); gap:0.5rem;">
+            <div><div class="tile-hint">Invoiced MTD</div><div id="kpi-ptfe" style="font-weight:700;">£0</div></div>
+            <div><div class="tile-hint">Picked Only</div><div id="kpi-ptfe-picked-only" style="font-weight:700;">£0</div></div>
+            <div><div class="tile-hint">Picked &amp; Invoiced</div><div id="kpi-ptfe-picked" style="font-weight:700;">£0</div></div>
+            <div><div class="tile-hint">Available Stock</div><div id="kpi-ptfe-stock" style="font-weight:700;">£0</div></div>
+            <div><div class="tile-hint">Potential</div><div id="kpi-ptfe-potential" style="font-weight:700;">£0</div></div>
+            <div><div class="tile-hint">PTFE OTIF</div><div id="kpi-ptfe-otif" style="font-weight:700;">0%</div></div>
+        </div>
+    </div>
+    <div class="card" style="flex:1; min-width:180px;">
+        <h3>PV</h3>
+        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0.5rem;">
+            <div><div class="tile-hint">Invoiced MTD</div><div id="kpi-pv" style="font-weight:700;">£0</div></div>
+            <div><div class="tile-hint">PV OTIF</div><div id="kpi-pv-otif" style="font-weight:700;">0%</div></div>
+        </div>
+    </div>
+</div>
+
+<div style="display:flex; gap:0.75rem; align-items:end; flex-wrap:wrap; margin-top:1rem;">
+    <label>From<input type="date" id="dateFrom"></label>
+    <label>To<input type="date" id="dateTo"></label>
+    <button type="button" class="btn secondary" id="refreshBtn">Refresh Data</button>
+    <span id="refreshStatus"></span>
+    <span id="refreshSummary">Checking refresh status…</span>
+</div>
+
+<div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0.75rem; margin-top:1rem;">
+    <div class="card"><h4>PTFE Value Pipeline</h4><canvas id="ptfeValueExtendedChart"></canvas></div>
+    <div class="card"><h4>PV Value Pipeline</h4><canvas id="pvValueExtendedChart"></canvas></div>
+    <div class="card"><h4>PTFE OTIF</h4><canvas id="ptfeOtifCumulativeChart"></canvas></div>
+    <div class="card"><h4>PV OTIF</h4><canvas id="pvOtifCumulativeChart"></canvas></div>
+</div>
+
+<div style="display:flex; gap:0.75rem; margin-top:1rem; flex-wrap:wrap;">
+    <div class="card" style="flex:1; min-width:400px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3>Order Book with Saleable Stock &amp; Picked Stock</h3>
+            <div>
+                <button type="button" class="btn secondary" id="fullBreakdownBtn">Full Breakdown</button>
+                <button type="button" class="btn secondary" id="monthEndBreakdownBtn">Breakdown for Month End</button>
+                <button type="button" class="btn secondary" id="productionPlanBtn">Production Plan</button>
+            </div>
+        </div>
+        <div id="orderBookTable" style="margin-top:0.5rem;"></div>
+    </div>
+    <div class="card" style="flex:1; min-width:400px;">
+        <h3>Daily Performance Detail</h3>
+        <div style="max-height:400px; overflow-y:auto;">
+            <table id="dataTable"><thead></thead><tbody></tbody></table>
+        </div>
+    </div>
+</div>
+
+<div id="breakdownSection" class="card" style="margin-top:1rem; display:none;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 id="breakdownTitle">Order Book — Breakdown</h3>
+        <div>
+            <span id="uploadNotesStatus"></span>
+            <button type="button" class="btn secondary" id="uploadNotesBtn">Upload Updated Notes File</button>
+            <input type="file" id="uploadNotesInput" accept=".xlsx" hidden>
+            <button type="button" class="btn" id="closeBreakdownBtn">Close</button>
+        </div>
+    </div>
+    <p class="tile-hint">Live export/download of this breakdown to Excel is not yet available in this rebuild — upload of a previously-exported, edited notes file is still supported.</p>
+    <div id="breakdownTableContainer" style="max-height:500px; overflow:auto; margin-top:0.5rem;"></div>
+</div>
+
+<div class="card" style="margin-top:1rem;">
+    <h3>Consignment Customers</h3>
+    <p class="tile-hint">Customers on a consignment stock agreement — shipped but not invoiced until they consume the stock. Flagged customers are excluded from Invoiced/Order Book figures on this page.</p>
+    <table>
+        <thead><tr><th>Customer</th><th>Customer Name</th><th></th></tr></thead>
+        <tbody id="consignmentCustomersBody"><tr><td colspan="3">Loading…</td></tr></tbody>
+    </table>
+    <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+        <input type="text" id="ccAddCustomer" placeholder="Customer #" maxlength="10">
+        <input type="text" id="ccAddCustomerName" placeholder="Customer name (optional)" maxlength="35">
+        <button type="button" class="btn secondary" id="ccAddBtn">Add</button>
+    </div>
+    <span id="ccStatus"></span>
+</div>
+
+<details class="card" style="margin-top:1rem;">
+    <summary><strong>Additional Detail Charts</strong></summary>
+    <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0.75rem; margin-top:0.75rem;">
+        <div><h4>PTFE Daily Value</h4><canvas id="ptfeValueChart"></canvas></div>
+        <div><h4>PV Daily Value</h4><canvas id="pvValueChart"></canvas></div>
+        <div><h4>PTFE Daily OTIF</h4><canvas id="ptfeOtifChart"></canvas></div>
+        <div><h4>PV Daily OTIF</h4><canvas id="pvOtifChart"></canvas></div>
+    </div>
+</details>
+
+@section Scripts {
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="~/js/management/dashboard.js"></script>
+}
