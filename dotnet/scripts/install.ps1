@@ -106,8 +106,40 @@ try {
 # IIS-Core-Module-specific cause), so check for it explicitly and fail loudly
 # rather than let install.ps1 report success and leave that surprise for
 # deploy.ps1's warm-up request to hit instead.
-$ancmPath = "$env:windir\System32\inetsrv\aspnetcorev2.dll"
-if (-not (Test-Path $ancmPath)) {
+#
+# Confirmed for real: hardcoding "$env:windir\System32\inetsrv\aspnetcorev2.dll"
+# as the only place to look is wrong even on a genuinely correct install - a
+# real machine with "Microsoft ASP.NET Core Module V2" showing in
+# Get-Package (the Hosting Bundle installed after IIS, exactly as this
+# script's own ordering above ensures) still failed this Test-Path. IIS's own
+# applicationHost.config globalModules entry is the actual source of truth
+# for where the module loads from - not a guessed path - so read that
+# instead, falling back to the two real install locations Microsoft's
+# installer has used across versions only if the config entry itself is
+# missing (the one case that genuinely does mean "not installed").
+$ancmModule = $null
+try {
+    [xml]$appHostConfig = Get-Content "$env:windir\System32\inetsrv\config\applicationHost.config" -Raw
+    $ancmModule = $appHostConfig.configuration.'system.webServer'.globalModules.add |
+        Where-Object { $_.name -eq 'AspNetCoreModuleV2' } | Select-Object -First 1
+} catch {
+    Write-Host "Could not read applicationHost.config directly ($($_.Exception.Message)) - falling back to known install paths." -ForegroundColor Yellow
+}
+
+$ancmPath = $null
+if ($ancmModule -and $ancmModule.image) {
+    $candidate = [System.Environment]::ExpandEnvironmentVariables($ancmModule.image)
+    if (Test-Path $candidate) { $ancmPath = $candidate }
+}
+if (-not $ancmPath) {
+    $fallbackCandidates = @(
+        "$env:windir\System32\inetsrv\aspnetcorev2.dll",
+        "$env:ProgramFiles\IIS\Asp.Net Core Module\V2\aspnetcorev2.dll"
+    )
+    $ancmPath = $fallbackCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+if (-not $ancmPath) {
     Write-Host ""
     Write-Host "*** ASP.NET Core Module v2 is not installed ***" -ForegroundColor Red
     Write-Host "IIS is present, but the .NET Hosting Bundle (which installs" -ForegroundColor Red
@@ -115,8 +147,9 @@ if (-not (Test-Path $ancmPath)) {
     Write-Host "Hosting Bundle installer for .NET 10 from https://dotnet.microsoft.com/,"  -ForegroundColor Red
     Write-Host "then re-run this script (a fresh 'iisreset' may be needed for IIS to" -ForegroundColor Red
     Write-Host "notice the newly registered module)." -ForegroundColor Red
-    throw "ASP.NET Core Module v2 (aspnetcorev2.dll) not found under $env:windir\System32\inetsrv."
+    throw "ASP.NET Core Module v2 (AspNetCoreModuleV2) is not registered in IIS's applicationHost.config, and aspnetcorev2.dll wasn't found under either of its known install locations."
 }
+Write-Host "ASP.NET Core Module v2 found: $ancmPath" -ForegroundColor Green
 
 $siteName    = 'NormantonNexus'
 $appPoolName = 'NormantonNexus'
