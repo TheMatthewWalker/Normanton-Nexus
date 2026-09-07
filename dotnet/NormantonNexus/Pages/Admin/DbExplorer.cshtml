@@ -1,0 +1,27 @@
+@page
+@model NormantonNexus.Pages.Admin.DbExplorerModel
+@{
+    ViewData["Title"] = "DB Explorer";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "DB Explorer";
+    ViewData["PageSubtitle"] = "Superadmin — SSMS-lite schema browser";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<label>Database<select id="dbx-database"><option value="">Loading…</option></select></label>
+
+<div style="display:flex; gap:1rem; margin-top:0.75rem;">
+    <div style="flex:1;">
+        <h4>Tables</h4>
+        <input class="tf-input" id="dbx-table-search" type="text" placeholder="Filter tables…" style="max-width:220px;">
+        <div id="dbx-tables" style="margin-top:0.5rem; max-height:70vh; overflow-y:auto;"></div>
+    </div>
+    <div style="flex:3;">
+        <div id="dbx-table-detail"><p>Select a table.</p></div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="~/js/admin/db-explorer.js"></script>
+}

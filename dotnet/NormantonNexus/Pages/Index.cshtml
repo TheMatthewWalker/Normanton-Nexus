@@ -14,6 +14,13 @@
             <p class="tile-title">@department.DisplayName</p>
         </a>
     }
+    @if (Model.ShowAdminTile)
+    {
+        <a class="tile" href="/Admin/Index">
+            <p class="tile-title">Admin</p>
+            <p class="tile-hint">User management, permissions, audit log, DB Explorer, BAPI Inspector</p>
+        </a>
+    }
 </div>
 
 @if (Model.AccessibleDepartments.Count == 0)

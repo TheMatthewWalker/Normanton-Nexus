@@ -1,0 +1,77 @@
+@page
+@model NormantonNexus.Pages.Admin.UsersModel
+@{
+    ViewData["Title"] = "Users";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Users";
+    ViewData["PageSubtitle"] = "Pending approvals, user list, bulk operations, permissions";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<section>
+    <h3>Pending Approvals</h3>
+    <div id="ua-pending">Loading…</div>
+</section>
+
+<section style="margin-top:1.5rem;">
+    <h3>All Users</h3>
+    <input class="tf-input" id="ua-search" type="text" placeholder="Search username, name, email…" style="max-width:280px;">
+    <div id="ua-users" style="margin-top:0.5rem;"></div>
+</section>
+
+<section id="ua-detail" style="display:none; margin-top:1.5rem;"></section>
+
+<section style="margin-top:1.5rem;">
+    <h3>Bulk Operations</h3>
+
+    <div class="card">
+        <h4>Grant Departments</h4>
+        <form id="ua-bulk-dept-form">
+            <label>User IDs (comma-separated)<input type="text" id="ua-bd-ids" required></label>
+            <label>Departments (comma-separated)<input type="text" id="ua-bd-depts" required placeholder="warehouse,logistics"></label>
+            <button type="submit" class="btn secondary">Grant</button>
+        </form>
+        <div id="ua-bd-result"></div>
+    </div>
+
+    <div class="card" style="margin-top:0.75rem;">
+        <h4>Set Status</h4>
+        <form id="ua-bulk-status-form">
+            <label>User IDs (comma-separated)<input type="text" id="ua-bs-ids" required></label>
+            <label>Active <select id="ua-bs-active"><option value="">Unchanged</option><option value="true">Yes</option><option value="false">No</option></select></label>
+            <label>Locked <select id="ua-bs-locked"><option value="">Unchanged</option><option value="true">Yes</option><option value="false">No</option></select></label>
+            <label>Short Idle Timeout <select id="ua-bs-idle"><option value="">Unchanged</option><option value="true">Yes</option><option value="false">No</option></select></label>
+            <button type="submit" class="btn secondary">Apply</button>
+        </form>
+        <div id="ua-bs-result"></div>
+    </div>
+
+    <div class="card" style="margin-top:0.75rem;">
+        <h4>Grant Permission Codes</h4>
+        <form id="ua-bulk-perm-form">
+            <label>User IDs (comma-separated)<input type="text" id="ua-bp-ids" required></label>
+            <label>Permission Codes (comma-separated)<input type="text" id="ua-bp-codes" required></label>
+            <button type="submit" class="btn secondary">Grant</button>
+        </form>
+        <div id="ua-bp-result"></div>
+    </div>
+
+    @if (Model.IsSuperadmin)
+    {
+        <div class="card" style="margin-top:0.75rem;">
+            <h4>Bulk Create Users (Superadmin)</h4>
+            <p>One row per line: <code>role,username,email,firstName,lastName,password,approved,unlocked,permissionCode</code></p>
+            <form id="ua-bulk-create-form">
+                <label>Default Department<input type="text" id="ua-bc-dept" placeholder="warehouse"></label>
+                <label>Rows<textarea id="ua-bc-rows" rows="6" style="width:100%;" placeholder="operator,jsmith,jsmith@example.com,John,Smith,TempPass123,true,true,WAREHOUSE_OP"></textarea></label>
+                <button type="submit" class="btn secondary">Create</button>
+            </form>
+            <div id="ua-bc-result"></div>
+        </div>
+    }
+</section>
+
+@section Scripts {
+    <script src="~/js/admin/users.js"></script>
+}

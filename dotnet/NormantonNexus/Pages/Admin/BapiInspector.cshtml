@@ -1,0 +1,21 @@
+@page
+@model NormantonNexus.Pages.Admin.BapiInspectorModel
+@{
+    ViewData["Title"] = "BAPI Inspector";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "BAPI Inspector";
+    ViewData["PageSubtitle"] = "Superadmin — SAP RFC/BAPI function metadata lookup";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<form id="bi-form" style="display:flex; gap:0.5rem; align-items:end;">
+    <label>Function Name<input type="text" id="bi-function" required placeholder="e.g. BAPI_GOODSMVT_CREATE"></label>
+    <button type="submit" class="btn secondary">Lookup</button>
+</form>
+
+<div id="bi-result" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/admin/bapi-inspector.js"></script>
+}
