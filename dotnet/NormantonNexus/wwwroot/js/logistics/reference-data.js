@@ -221,7 +221,7 @@
       });
       el.querySelectorAll("button[data-delete]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Delete this mapping?")) return;
+          if (!(await NexusModal.confirm("Delete this mapping?", { danger: true, confirmLabel: "Delete" }))) return;
           try {
             await api(`/forwarder-mode-mapping/${btn.dataset.delete}`, { method: "DELETE" });
             await loadFmm();
@@ -292,7 +292,7 @@
       });
       el.querySelectorAll("button[data-delete]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Delete this cost centre?")) return;
+          if (!(await NexusModal.confirm("Delete this cost centre?", { danger: true, confirmLabel: "Delete" }))) return;
           try { await api(`/costcenters/${btn.dataset.delete}`, { method: "DELETE" }); await loadCostCenters(); } catch (err) { alert("Error: " + err.message); }
         });
       });
@@ -356,7 +356,7 @@
       });
       el.querySelectorAll("button[data-delete]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Delete this GL account?")) return;
+          if (!(await NexusModal.confirm("Delete this GL account?", { danger: true, confirmLabel: "Delete" }))) return;
           try { await api(`/costelements/${btn.dataset.delete}`, { method: "DELETE" }); await loadCostElements(); } catch (err) { alert("Error: " + err.message); }
         });
       });
@@ -424,7 +424,7 @@
       });
       el.querySelectorAll("button[data-delete]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Delete this request unit?")) return;
+          if (!(await NexusModal.confirm("Delete this request unit?", { danger: true, confirmLabel: "Delete" }))) return;
           try { await api(`/material-request-units/${btn.dataset.delete}`, { method: "DELETE" }); await loadMru(); } catch (err) { alert("Error: " + err.message); }
         });
       });

@@ -59,7 +59,7 @@ internal static class IsoparHelper
         if (existing is not null)
             throw new NexusValidationException($"A reading already exists for {body.ReadingDate:yyyy-MM-dd} — edit it instead of adding a second one.");
 
-        return await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        return await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.IsoparMeterReading (ReadingDate, ReadingQty, Notes, CreatedBy)
             OUTPUT INSERTED.ReadingId
             VALUES (@ReadingDate, @ReadingQty, @Notes, @createdBy)
@@ -174,7 +174,7 @@ internal static class IsoparHelper
         var maxCapacity = body.MaxStockCapacityQty ?? current?.MaxStockCapacityQty;
 
         using var connection = await db.CreateConnectionAsync(ct);
-        return await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        return await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.IsoparPlanningRate (WeekdayRateLPerDay, WeekendRateLPerDay, MaxStockCapacityQty, Source, Notes, CreatedBy)
             OUTPUT INSERTED.RateId
             VALUES (@weekdayRate, @weekendRate, @maxCapacity, @source, @notes, @createdBy)

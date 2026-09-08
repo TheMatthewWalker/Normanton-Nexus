@@ -9,7 +9,7 @@ namespace NormantonNexus.Models.Dto;
 
 /// <summary>One vendor+material assignment joined with everything the suggestion engine needs from TurnsValClassSnapshot. LEFT JOIN — a material can be assigned to a vendor without (yet) having synced into TurnsValClassSnapshot; those rows come back with null stock/usage and are skipped (nothing to compute without SAP data).</summary>
 public sealed record VendorMaterialForSuggestionRow(
-    long VendorMaterialId, long VendorId, string Material, decimal? MaterialMoqQty, decimal? MaterialMaxQty,
+    int VendorMaterialId, int VendorId, string Material, decimal? MaterialMoqQty, decimal? MaterialMaxQty,
     decimal? LeadTimeDaysOverride, decimal? MinSafetyStockQty, string? ScheduleAgreement,
     string VendorName, string? Incoterms, decimal? OrderMoqQty, decimal? OrderMaxQty, string? OrderMoqUom,
     decimal? DefaultLeadTimeDays, decimal? TransitTimeDays,
@@ -43,7 +43,7 @@ public sealed record OrderSuggestionPreviewRequest(DateTime? DeliveryDate, List<
 // Public mirror of ForecastMathHelper's internal WeeklyStockForecast/ForecastWeek/ForecastDelivery
 // shapes — needed because a public DTO can't expose a member whose type lives inside an internal
 // class (CS0053). PerformanceForecastMapper.ToDto maps one to the other at the API boundary.
-public sealed record ForecastDeliveryDto(long? Id, string? PoNumber, decimal Qty, string? Material);
+public sealed record ForecastDeliveryDto(long? Id, string? PoNumber, decimal Qty, string? Material, string? VendorName = null);
 
 public sealed record ForecastWeekDto(string WeekEnding, decimal WeeklyUsage, decimal IncomingQty, IReadOnlyList<ForecastDeliveryDto> Deliveries, decimal ExpectedStock);
 
@@ -83,12 +83,12 @@ public sealed record ManualOrderBulkResult(int Total, int Succeeded, int Failed,
 
 /// <summary>Everything except Cancelled — cancelled rows are kept for audit but excluded from this view.</summary>
 public sealed record OrderSuggestionTrackedRow(
-    long SuggestionId, long VendorId, string VendorName, string? SapVendorNumber, string? Currency, string? OrderMoqUom, string? Incoterms,
-    long VendorMaterialId, string Material, string? MaterialText, string? Uom, string Status, decimal? SuggestedQty, decimal OrderQty, DateTime OrderDate,
+    int SuggestionId, int VendorId, string VendorName, string? SapVendorNumber, string? Currency, string? OrderMoqUom, string? Incoterms,
+    int VendorMaterialId, string Material, string? MaterialText, string? Uom, string Status, decimal? SuggestedQty, decimal OrderQty, DateTime OrderDate,
     decimal? LeadTimeDaysUsed, DateTime? DeliveryDate, decimal? TransitTimeDaysUsed, DateTime? ReadyToCollectDate,
     bool IsSpotPo, string? PoNumber, string? PoItemNumber, string? Notes, string? SupplierReference,
     DateTime CreatedAtUtc, DateTime UpdatedAtUtc, DateTime? ReceivedAtUtc,
-    long? ShipmentId, string? ShipmentReference, string? Haulier, string? ModeOfTransport,
+    int? ShipmentId, string? ShipmentReference, string? Haulier, string? ModeOfTransport,
     string? ShipmentTrackingNumber, DateTime? ExpectedEta, DateTime? ShipmentReceivedAtUtc,
     string? ScheduleAgreement, string? ScheduleAgreementItem);
 

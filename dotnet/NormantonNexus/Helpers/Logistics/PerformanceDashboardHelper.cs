@@ -11,11 +11,12 @@ namespace NormantonNexus.Helpers.Logistics;
 /// value/OTIF metrics and order-book summary/breakdown (log.DailyPerformance/
 /// log.AgreementSnapshot, NexusOperations), and the Stock Value Overview
 /// (Turns/Valuation Class) tile's read side (log.TurnsValClassSnapshot/
-/// log.StockValuationHistory/log.ValuationClassCatalog). No SAP calls, no
-/// writes — port of the corresponding GET routes in routes/performance.js
-/// (see PerformanceController). Vendor/demand-adjustment/order-suggestion
-/// CRUD and the forecast-driven /turns-valclass/history route are deferred
-/// to 8b.2/8b.3, which build directly on ForecastMathHelper.
+/// log.StockValuationHistory/log.ValuationClassCatalog), and — added later,
+/// once ForecastMathHelper/the order-suggestion and demand-adjustment
+/// backends existed to build it on — GetTurnsValClassHistoryAsync, the
+/// Stock History &amp; Forecast tile's own data route
+/// (GET /turns-valclass/history). No SAP calls, no writes — port of the
+/// corresponding GET routes in routes/performance.js (see PerformanceController).
 /// </summary>
 internal static class PerformanceDashboardHelper
 {
@@ -379,6 +380,170 @@ internal static class PerformanceDashboardHelper
             ORDER BY MrpController
             """, cancellationToken: ct));
         return rows.AsList();
+    }
+
+    private sealed record TurnsValClassHistoryRawRow(
+        string Material, string? MaterialText, string Plant, string? Uom, decimal? StockQty, decimal? ConsignmentQty,
+        decimal? HistoryM12, decimal? HistoryM11, decimal? HistoryM10, decimal? HistoryM09, decimal? HistoryM08, decimal? HistoryM07,
+        decimal? HistoryM06, decimal? HistoryM05, decimal? HistoryM04, decimal? HistoryM03, decimal? HistoryM02, decimal? HistoryM01, decimal? HistoryM00,
+        decimal? ForecastM12, decimal? ForecastM11, decimal? ForecastM10, decimal? ForecastM09, decimal? ForecastM08, decimal? ForecastM07,
+        decimal? ForecastM06, decimal? ForecastM05, decimal? ForecastM04, decimal? ForecastM03, decimal? ForecastM02, decimal? ForecastM01, decimal? ForecastM00,
+        decimal? PredictedM12, decimal? PredictedM11, decimal? PredictedM10, decimal? PredictedM09, decimal? PredictedM08, decimal? PredictedM07,
+        decimal? PredictedM06, decimal? PredictedM05, decimal? PredictedM04, decimal? PredictedM03, decimal? PredictedM02, decimal? PredictedM01, decimal? PredictedM00);
+
+    /// <summary>
+    /// Stock History &amp; Forecast tile's data route — GET /turns-valclass/history in Node.
+    /// Every material's own weekly stock forecast is built separately then summed
+    /// (ForecastMathHelper.MergeWeeklyForecasts), not aggregated up front, since a demand
+    /// adjustment can apply to one material in a combined/MRP-controller view and not
+    /// another — matches Node's own comment on this exactly. onHandStock intentionally
+    /// includes ConsignmentQty here (the only place the two are summed anywhere in this
+    /// app) since what's physically available to consume is what matters for MRP/shipment
+    /// planning, unlike every valuation-facing reader of StockQty elsewhere on this tile.
+    /// </summary>
+    internal static async Task<TurnsValClassHistoryResult> GetTurnsValClassHistoryAsync(
+        INexusOperationsDb db, IReadOnlyList<string>? materials, string? mrpController,
+        IReadOnlyList<int>? excludeDeliveryIds, bool dailyBucketRequested, CancellationToken ct)
+    {
+        var conditions = new List<string>();
+        if (materials is { Count: > 0 }) conditions.Add("Material IN @materials");
+        if (!string.IsNullOrWhiteSpace(mrpController)) conditions.Add("MrpController = @mrpController");
+        var whereSql = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rawRows = (await connection.QueryAsync<TurnsValClassHistoryRawRow>(new CommandDefinition($"""
+            SELECT
+              Material, MaterialText, Plant, Uom, StockQty, ConsignmentQty,
+              HistoryM12, HistoryM11, HistoryM10, HistoryM09, HistoryM08, HistoryM07,
+              HistoryM06, HistoryM05, HistoryM04, HistoryM03, HistoryM02, HistoryM01, HistoryM00,
+              ForecastM12, ForecastM11, ForecastM10, ForecastM09, ForecastM08, ForecastM07,
+              ForecastM06, ForecastM05, ForecastM04, ForecastM03, ForecastM02, ForecastM01, ForecastM00,
+              PredictedM12, PredictedM11, PredictedM10, PredictedM09, PredictedM08, PredictedM07,
+              PredictedM06, PredictedM05, PredictedM04, PredictedM03, PredictedM02, PredictedM01, PredictedM00
+            FROM log.TurnsValClassSnapshot
+            {whereSql}
+            ORDER BY Material
+            """, new { materials, mrpController }, cancellationToken: ct))).AsList();
+
+        var materialsInScope = rawRows.Select(r => r.Material).ToList();
+        var excludeSet = excludeDeliveryIds is { Count: > 0 } ? new HashSet<int>(excludeDeliveryIds) : null;
+
+        // Only pass materialsInScope down as an explicit filter when the caller actually
+        // narrowed the snapshot query (materials or mrpController) — an unfiltered "Show
+        // All" resolves materialsInScope to every material in the whole plant (thousands
+        // of rows), and hammering that into a Dapper `IN @materials` expansion (one SQL
+        // parameter per value) either blows past SQL Server's ~2100 parameter limit or is
+        // slow enough to trip the request's own cancellation token ("Operation cancelled
+        // by user" — confirmed for real against a live deploy). Passing null instead (no
+        // filter) is exactly as correct here: both queries are grouped by Material via
+        // ToLookup afterward regardless of how many extra materials came back.
+        var hasExplicitFilter = materials is { Count: > 0 } || !string.IsNullOrWhiteSpace(mrpController);
+        var incomingTask = PurchaseOrderSuggestionHelper.ListOpenIncomingOrdersAsync(db, hasExplicitFilter ? materialsInScope : null, ct);
+        var adjustmentsTask = VendorMasterDataHelper.ListDemandAdjustmentsAsync(db, hasExplicitFilter ? materialsInScope : null, ct);
+        var isoparContextTask = IsoparHelper.GetForecastContextAsync(db, ct);
+        await Task.WhenAll(incomingTask, adjustmentsTask, isoparContextTask);
+
+        var incomingByMaterial = (await incomingTask).ToLookup(o => o.Material);
+        var adjustmentsByMaterial = (await adjustmentsTask).ToLookup(a => a.Material);
+        var isoparContext = await isoparContextTask;
+
+        var useDailyBuckets = materialsInScope.Count == 1
+            && (materialsInScope[0] == IsoparPeriodHelper.IsoparMaterial || dailyBucketRequested);
+
+        var data = new List<TurnsValClassHistoryMaterial>();
+        var perMaterialForecasts = new List<ForecastMathHelper.WeeklyStockForecast>();
+        var now = DateTime.UtcNow;
+
+        foreach (var r in rawRows)
+        {
+            var consumptionHistory = new decimal?[]
+            {
+                r.HistoryM12, r.HistoryM11, r.HistoryM10, r.HistoryM09, r.HistoryM08, r.HistoryM07,
+                r.HistoryM06, r.HistoryM05, r.HistoryM04, r.HistoryM03, r.HistoryM02, r.HistoryM01, r.HistoryM00,
+            };
+            var demandForecast = new decimal?[]
+            {
+                r.ForecastM12, r.ForecastM11, r.ForecastM10, r.ForecastM09, r.ForecastM08, r.ForecastM07,
+                r.ForecastM06, r.ForecastM05, r.ForecastM04, r.ForecastM03, r.ForecastM02, r.ForecastM01, r.ForecastM00,
+            };
+            var predictedMonthly = new[]
+            {
+                r.PredictedM12 ?? 0m, r.PredictedM11 ?? 0m, r.PredictedM10 ?? 0m, r.PredictedM09 ?? 0m, r.PredictedM08 ?? 0m, r.PredictedM07 ?? 0m,
+                r.PredictedM06 ?? 0m, r.PredictedM05 ?? 0m, r.PredictedM04 ?? 0m, r.PredictedM03 ?? 0m, r.PredictedM02 ?? 0m, r.PredictedM01 ?? 0m, r.PredictedM00 ?? 0m,
+            };
+
+            var onHandStock = (r.StockQty ?? 0m) + (r.ConsignmentQty ?? 0m);
+
+            var isIsopar = r.Material == IsoparPeriodHelper.IsoparMaterial;
+            var isoparReading = isIsopar ? isoparContext.LatestReading : null;
+            var usingMeterReading = isIsopar && isoparReading is not null;
+            var effectiveOnHandStock = usingMeterReading ? isoparReading!.ReadingQty : onHandStock;
+            var isoparDailyUsageFnOverride = (usingMeterReading && isoparContext.PlanningRate is not null)
+                ? ForecastMathHelper.MakeIsoparDailyUsageFn(isoparContext.PlanningRate.WeekdayRateLPerDay, isoparContext.PlanningRate.WeekendRateLPerDay)
+                : null;
+
+            IsoparMeterReadingOverlay? isoparOverlay = isIsopar
+                ? new IsoparMeterReadingOverlay(usingMeterReading, isoparReading?.ReadingDate.ToString("yyyy-MM-dd"),
+                    usingMeterReading ? null : "No Isopar meter reading recorded yet — showing SAP stock figures until the first reading is entered.")
+                : null;
+
+            data.Add(new TurnsValClassHistoryMaterial(r.Material, r.MaterialText, r.Plant, r.Uom, r.StockQty, r.ConsignmentQty,
+                consumptionHistory, demandForecast, Array.ConvertAll(predictedMonthly, v => (decimal?)v), isoparOverlay));
+
+            var incomingDeliveries = incomingByMaterial[r.Material]
+                .Where(o => o.DeliveryDate.HasValue && (excludeSet is null || !excludeSet.Contains(o.SuggestionId)))
+                .Select(o => new ForecastMathHelper.IncomingDelivery(o.DeliveryDate!.Value, o.OrderQty, o.SuggestionId, o.PoNumber, o.VendorName))
+                .ToList();
+            var materialAdjustments = adjustmentsByMaterial[r.Material]
+                .Select(a => new ForecastMathHelper.DemandAdjustmentWindow(a.StartDate, a.EndDate, a.UsagePercent, a.OverrideQty))
+                .ToList();
+
+            perMaterialForecasts.Add(ForecastMathHelper.BuildWeeklyStockForecast(
+                effectiveOnHandStock, predictedMonthly, now, incomingDeliveries, materialAdjustments,
+                isoparDailyUsageFnOverride, useDailyBuckets ? 1 : 7));
+        }
+
+        var stockForecast = ForecastMathHelper.MergeWeeklyForecasts(perMaterialForecasts, materialsInScope);
+        var horizon = useDailyBuckets ? PurchaseOrderSuggestionHelper.IsoparDailyForecastHorizonDays : 26;
+        stockForecast = stockForecast with { Weeks = stockForecast.Weeks.Take(horizon).ToList() };
+
+        // ── Recorded accuracy overlay (log.ForecastAccuracyLog) ────────────
+        var thisMonth = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var fromMonth = thisMonth.AddMonths(-12);
+        // Scoped by the caller's own explicit `materials` filter only — matching Node's
+        // real route exactly (it never scopes this query by mrpController or the resolved
+        // materialsInScope set, only req.query.materials). Also sidesteps the same
+        // huge-IN-clause risk an unfiltered "Show All" would hit if this used
+        // materialsInScope instead (thousands of materials into one Dapper `IN` expansion).
+        var accuracyConditions = new List<string> { "TargetMonth >= @fromMonth AND TargetMonth <= @toMonth" };
+        if (materials is { Count: > 0 }) accuracyConditions.Add("Material IN @materials");
+
+        var accuracyRows = await connection.QueryAsync<(DateTime TargetMonth, decimal? SapDemandQty, decimal? PredictedQty, decimal? ActualQty)>(
+            new CommandDefinition($"""
+                SELECT TargetMonth, SUM(SapDemandQty) AS SapDemandQty, SUM(PredictedQty) AS PredictedQty, SUM(ActualQty) AS ActualQty
+                FROM log.ForecastAccuracyLog
+                WHERE {string.Join(" AND ", accuracyConditions)}
+                GROUP BY TargetMonth
+                ORDER BY TargetMonth
+                """, new { fromMonth, toMonth = thisMonth, materials }, cancellationToken: ct));
+
+        var recordedSapDemand = new decimal?[13];
+        var recordedPredicted = new decimal?[13];
+        var recordedActual = new decimal?[13];
+        foreach (var row in accuracyRows)
+        {
+            var monthsBack = (thisMonth.Year - row.TargetMonth.Year) * 12 + (thisMonth.Month - row.TargetMonth.Month);
+            if (monthsBack is < 0 or > 12) continue;
+            var idx = 12 - monthsBack;
+            recordedSapDemand[idx] = row.SapDemandQty;
+            recordedPredicted[idx] = row.PredictedQty;
+            recordedActual[idx] = row.ActualQty;
+        }
+
+        return new TurnsValClassHistoryResult(
+            data,
+            new ForecastAccuracyOverlay(recordedSapDemand, recordedPredicted, recordedActual),
+            PurchaseOrderSuggestionHelper.ToDto(stockForecast));
     }
 
     internal static async Task<IReadOnlyList<ValuationClassCatalogRow>> GetValuationClassesAsync(INexusOperationsDb db, string? materialType, CancellationToken ct)

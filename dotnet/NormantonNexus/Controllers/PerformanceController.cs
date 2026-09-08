@@ -106,6 +106,19 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
     public async Task<IActionResult> GetTurnsValClassMrpControllers(CancellationToken ct) =>
         Ok(ApiResponse<IReadOnlyList<MrpControllerOption>>.Ok(await PerformanceDashboardHelper.GetMrpControllersAsync(nexusOperationsDb, ct)));
 
+    // Stock History & Forecast tile — the one Sub-phase 8b.1 route left genuinely
+    // deferred (see PerformanceDashboardHelper.GetTurnsValClassHistoryAsync's own
+    // header comment), now that ForecastMathHelper/order-suggestion/demand-adjustment
+    // all exist to build it on.
+    [HttpGet("turns-valclass/history")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> GetTurnsValClassHistory(
+        [FromQuery] string[]? materials, [FromQuery] string? mrpController,
+        [FromQuery] int[]? excludeDeliveryIds, [FromQuery] string? bucket, CancellationToken ct) =>
+        Ok(ApiResponse<TurnsValClassHistoryResult>.Ok(await PerformanceDashboardHelper.GetTurnsValClassHistoryAsync(
+            nexusOperationsDb, materials, mrpController, excludeDeliveryIds,
+            string.Equals(bucket, "days", StringComparison.OrdinalIgnoreCase), ct)));
+
     [HttpGet("turns-valclass/valuation-classes")]
     [Authorize(Policy = "Perm:LOG_MRP")]
     public async Task<IActionResult> GetValuationClasses([FromQuery] string? materialType, CancellationToken ct) =>

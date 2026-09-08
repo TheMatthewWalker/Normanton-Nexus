@@ -90,8 +90,9 @@ internal static class IsoparDeclarationHelper
         return rows.AsList();
     }
 
+    // DeclarationId is int, matching log.IsoparDeclaration.DeclarationId's real column type.
     private static async Task<long?> GetDeclarationIdForPeriodAsync(IDbConnection connection, DateTime periodStart, DateTime periodEnd, CancellationToken ct) =>
-        await connection.QuerySingleOrDefaultAsync<long?>(new CommandDefinition("""
+        await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition("""
             SELECT TOP 1 DeclarationId FROM log.IsoparDeclaration
             WHERE PeriodStart = @periodStart AND PeriodEnd = @periodEnd
             """, new { periodStart, periodEnd }, cancellationToken: ct));
@@ -130,7 +131,8 @@ internal static class IsoparDeclarationHelper
         if (existing is not null)
             throw new NexusValidationException("A declaration for this period has already been submitted.");
 
-        var declarationId = await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        // DeclarationId is int, matching log.IsoparDeclaration.DeclarationId's real column type.
+        var declarationId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.IsoparDeclaration (
                 PeriodStart, PeriodEnd, OpeningStockQty, ReceivedQty, ClosingStockQty, ConsumedQty,
                 OpeningReadingId, ClosingReadingId, CalculationSnapshotJson, Notes,

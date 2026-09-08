@@ -11,16 +11,16 @@ namespace NormantonNexus.Models.Dto;
 // without writing anything, a separate save endpoint (fed the previewed
 // data back) is what actually creates the snapshot.
 
-public sealed record MrpRefreshStatusRow(string? Status, DateTime? CompletedAtUtc, string? ErrorMessage, long RunId);
+public sealed record MrpRefreshStatusRow(string? Status, DateTime? CompletedAtUtc, string? ErrorMessage, int RunId);
 
-public sealed record MrpForecastRunSummaryRow(long RunId, int TargetYear, string Method, int? BaselineYear, decimal? PercentageChange, string? CreatedBy, DateTime CreatedAtUtc);
+public sealed record MrpForecastRunSummaryRow(int RunId, int TargetYear, string Method, int? BaselineYear, decimal? PercentageChange, string? CreatedBy, DateTime CreatedAtUtc);
 
 public sealed record MrpForecastRunMaterialRow(string Material, string? MaterialText, decimal PredictedQty, string? Uom);
 
 public sealed record MrpForecastRunProductRow(string Material, string? MaterialText, decimal ExpectedSalesUnits);
 
 public sealed record MrpForecastRunDetail(
-    long RunId, int TargetYear, string Method, int? BaselineYear, decimal? PercentageChange, string? CreatedBy, DateTime CreatedAtUtc,
+    int RunId, int TargetYear, string Method, int? BaselineYear, decimal? PercentageChange, string? CreatedBy, DateTime CreatedAtUtc,
     IReadOnlyList<MrpForecastRunMaterialRow> Materials, IReadOnlyList<MrpForecastRunProductRow> Products);
 
 // ── Percentage method ───────────────────────────────────────────────────
@@ -34,7 +34,7 @@ public sealed record PercentageForecastPreviewResult(int BaselineYear, decimal P
 
 public sealed record PercentageForecastSaveRequest(int? TargetYear, int? BaselineYear, decimal? PercentageChange, List<PercentageForecastMaterialResult>? Materials);
 
-public sealed record CreateMrpForecastRunResult(long RunId);
+public sealed record CreateMrpForecastRunResult(int RunId);
 
 /// <summary>Shared shape for the log.MrpForecastRunMaterial child-row insert — both forecast methods' save routes funnel their own material list into this before calling MrpForecastHelper.CreateRunAsync.</summary>
 public sealed record MrpForecastRunMaterialInput(string Material, decimal PredictedQty, string? Uom);

@@ -172,7 +172,7 @@
 
   async function deleteInstruction(material, customer) {
     const scopeLabel = customer ? ` / ${customer}` : " (plant default)";
-    if (!confirm(`Delete the packaging instruction for ${material}${scopeLabel}?`)) return;
+    if (!(await NexusModal.confirm(`Delete the packaging instruction for ${material}${scopeLabel}?`, { danger: true, confirmLabel: "Delete" }))) return;
 
     try {
       await api("/instruction", {

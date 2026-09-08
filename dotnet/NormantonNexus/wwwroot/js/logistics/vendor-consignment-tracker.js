@@ -88,7 +88,7 @@
       });
       detailEl.querySelectorAll("button[data-action='cancel']").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Cancel this declaration?")) return;
+          if (!(await NexusModal.confirm("Cancel this declaration?", { danger: true, confirmLabel: "Cancel Declaration", cancelLabel: "Back" }))) return;
           try {
             await api(`/declarations/${btn.dataset.decl}/cancel`, { method: "POST" });
             await loadDetail(vendorId);

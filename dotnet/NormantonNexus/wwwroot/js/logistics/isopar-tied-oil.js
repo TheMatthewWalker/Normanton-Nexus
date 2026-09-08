@@ -37,7 +37,7 @@
       </table>`;
     el.querySelectorAll("button[data-id]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!confirm("Delete this reading?")) return;
+        if (!(await NexusModal.confirm("Delete this reading?", { danger: true, confirmLabel: "Delete" }))) return;
         try {
           await api(`/isopar/readings/${btn.dataset.id}`, { method: "DELETE" });
           await Promise.all([loadReadings(), loadStockRisk()]);
@@ -203,7 +203,7 @@
         const btn = outEl.querySelector(`button[data-submit="${p.index}"]`);
         if (!btn) return;
         btn.addEventListener("click", async () => {
-          if (!confirm(`Submit declaration for ${fmtDate(p.figures.periodStart)} – ${fmtDate(p.figures.periodEnd)}?`)) return;
+          if (!(await NexusModal.confirm(`Submit declaration for ${fmtDate(p.figures.periodStart)} – ${fmtDate(p.figures.periodEnd)}?`, { confirmLabel: "Submit" }))) return;
           try {
             await api("/isopar/declarations", {
               method: "POST",

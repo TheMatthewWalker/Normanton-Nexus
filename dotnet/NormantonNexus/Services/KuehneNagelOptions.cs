@@ -14,7 +14,8 @@ public sealed class KuehneNagelOptions
 {
     public const string SectionName = "KuehneNagel";
 
-    public string ApiUrl { get; set; } = "";
+    /// <summary>Real production KN booking endpoint — confirmed against the real (gitignored) .env's KN_API_URL directly, not the stale value in .env.example. Not a secret, so it's a safe default here rather than requiring every environment to repeat it, same as ClearPortOptions.ApiUrl.</summary>
+    public string ApiUrl { get; set; } = "https://gateway.api.kuehne-nagel.com/booking/road/v1";
     public string CustomerId { get; set; } = "";
     public string CustomerKey { get; set; } = "";
     public string Secret { get; set; } = "";

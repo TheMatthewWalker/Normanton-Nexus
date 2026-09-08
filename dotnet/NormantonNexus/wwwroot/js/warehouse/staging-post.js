@@ -54,7 +54,7 @@
   }
 
   async function cancelRequest(row) {
-    if (!confirm(`Cancel request #${row.requestId}?`)) return;
+    if (!(await NexusModal.confirm(`Cancel request #${row.requestId}?`, { danger: true, confirmLabel: "Cancel Request", cancelLabel: "Back" }))) return;
     try {
       await api(`/requests/${row.requestId}/cancel`, { method: "POST" });
       await load();

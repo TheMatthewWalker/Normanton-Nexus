@@ -83,7 +83,7 @@
 
   async function cancelRun(processCode, recordId) {
     const reason = prompt("Reason for cancelling this open run (optional):") || "";
-    if (!confirm("Cancel this open run?")) return;
+    if (!(await NexusModal.confirm("Cancel this open run?", { danger: true, confirmLabel: "Cancel Run", cancelLabel: "Back" }))) return;
     msgEl.textContent = "";
     try {
       await api(`/open-runs/${processCode}/${recordId}/cancel`, {

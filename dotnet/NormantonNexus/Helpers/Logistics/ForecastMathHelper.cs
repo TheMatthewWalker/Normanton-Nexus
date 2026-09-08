@@ -27,13 +27,20 @@ namespace NormantonNexus.Helpers.Logistics;
 /// </summary>
 internal static class ForecastMathHelper
 {
-    /// <summary>A demand adjustment window — log.DemandAdjustment shaped for makeDailyUsageFn (null bounds = unbounded).</summary>
-    internal readonly record struct DemandAdjustmentWindow(DateTime? StartDate, DateTime? EndDate, decimal UsagePercent);
+    /// <summary>
+    /// A demand adjustment window — log.DemandAdjustment shaped for MakeDailyUsageFn (null StartDate/EndDate
+    /// = unbounded). OverrideQty (when set) is a fixed TOTAL quantity to plan across the whole window,
+    /// replacing the UsagePercent scale entirely for every day inside it — a deliberate enhancement beyond
+    /// Node's original percentage-only design (see DemandAdjustmentRow's own doc comment). Only meaningful
+    /// with both StartDate and EndDate set (validated at the API boundary, VendorMasterDataHelper.ValidateDemandAdjustment) —
+    /// dividing a total across an unbounded window has no sensible daily rate.
+    /// </summary>
+    internal readonly record struct DemandAdjustmentWindow(DateTime? StartDate, DateTime? EndDate, decimal UsagePercent, decimal? OverrideQty = null);
 
-    /// <summary>An open order/PO expected to land on <paramref name="Date"/> — see log.PurchaseOrderSuggestion.</summary>
-    internal readonly record struct IncomingDelivery(DateTime Date, decimal Qty, long? Id = null, string? PoNumber = null);
+    /// <summary>An open order/PO expected to land on <paramref name="Date"/> — see log.PurchaseOrderSuggestion. VendorName lets a dual-sourced material's deliveries be attributed to a specific supplier (Stock History &amp; Forecast tile).</summary>
+    internal readonly record struct IncomingDelivery(DateTime Date, decimal Qty, long? Id = null, string? PoNumber = null, string? VendorName = null);
 
-    internal sealed record ForecastDelivery(long? Id, string? PoNumber, decimal Qty, string? Material = null);
+    internal sealed record ForecastDelivery(long? Id, string? PoNumber, decimal Qty, string? Material = null, string? VendorName = null);
 
     internal sealed record ForecastWeek(string WeekEnding, decimal WeeklyUsage, decimal IncomingQty, IReadOnlyList<ForecastDelivery> Deliveries, decimal ExpectedStock);
 
@@ -72,7 +79,19 @@ internal static class ForecastMathHelper
                 var beforeEnd = adj.EndDate is null || day <= adj.EndDate;
                 if (afterStart && beforeEnd)
                 {
-                    rate *= adj.UsagePercent / 100m;
+                    // OverrideQty (when present, and only meaningful with both bounds set — see
+                    // DemandAdjustmentWindow's own comment) replaces the scaled rate entirely: a
+                    // fixed total for the window, spread evenly across every day in it (inclusive
+                    // of both endpoints — a single-day window is 1 day, not 0).
+                    if (adj.OverrideQty is not null && adj.StartDate is not null && adj.EndDate is not null)
+                    {
+                        var windowDays = (decimal)(adj.EndDate.Value.Date - adj.StartDate.Value.Date).TotalDays + 1m;
+                        rate = windowDays > 0 ? adj.OverrideQty.Value / windowDays : 0m;
+                    }
+                    else
+                    {
+                        rate *= adj.UsagePercent / 100m;
+                    }
                     break;
                 }
             }
@@ -140,7 +159,7 @@ internal static class ForecastMathHelper
                 WeekEnding: weekEnd.ToString("yyyy-MM-dd"),
                 WeeklyUsage: Round2(weeklyUsage),
                 IncomingQty: Round2(incomingThisWeek),
-                Deliveries: deliveriesThisWeek.Select(d => new ForecastDelivery(d.Id, d.PoNumber, Round2(d.Qty))).ToList(),
+                Deliveries: deliveriesThisWeek.Select(d => new ForecastDelivery(d.Id, d.PoNumber, Round2(d.Qty), VendorName: d.VendorName)).ToList(),
                 ExpectedStock: Round2(runningStock)));
 
             weekStart = weekEnd;

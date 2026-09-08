@@ -16,7 +16,12 @@ Import-Module WebAdministration
 $appPoolName = 'NormantonNexus'
 $projectRoot = "$PSScriptRoot\.."
 $publishDir  = "$projectRoot\publish"
-$healthUrl   = 'http://localhost:7300/health'
+# Deliberately plain http on the default port (not https://localhost/health)
+# - /health is exempted from Program.cs's UseHttpsRedirection specifically so
+# this warm-up (and IIS's own Application Initialization warm-up) keeps
+# working over port 80 regardless of whether install.ps1's :443 certificate
+# step has been completed yet. See install.ps1's own SSL certificate section.
+$healthUrl   = 'http://localhost/health'
 
 # ---- Stop if running -------------------------------------------------------
 $poolExists = Test-Path "IIS:\AppPools\$appPoolName"

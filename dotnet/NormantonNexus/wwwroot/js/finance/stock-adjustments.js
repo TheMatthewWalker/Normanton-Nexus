@@ -205,7 +205,7 @@
   }
 
   async function approve(countId) {
-    if (!confirm("Approve this count? This posts the resulting 711/712 SAP goods movements immediately.")) return;
+    if (!(await NexusModal.confirm("Approve this count? This posts the resulting 711/712 SAP goods movements immediately.", { confirmLabel: "Approve" }))) return;
     const resultEl = document.getElementById("scf-action-result");
     try {
       const { data } = await api(`/counts/${countId}/approve`, { method: "POST" });

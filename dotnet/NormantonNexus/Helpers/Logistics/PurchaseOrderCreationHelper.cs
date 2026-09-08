@@ -213,7 +213,7 @@ internal static class PurchaseOrderCreationHelper
             poPdfError = ex.Message;
         }
 
-        return new CreatePoResult(poNumber, rows.Select(r => r.SuggestionId).ToList(), sapResponse.Messages, poPdfSaved, poPdfError);
+        return new CreatePoResult(poNumber, rows.Select(r => (long)r.SuggestionId).ToList(), sapResponse.Messages, poPdfSaved, poPdfError);
     }
 
     /// <summary>

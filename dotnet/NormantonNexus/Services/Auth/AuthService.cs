@@ -50,6 +50,16 @@ public abstract record OrderbookCredentialResult
     private OrderbookCredentialResult() { }
 }
 
+public enum ResetPasswordFailureReason { InvalidOrExpiredToken, NewPasswordTooWeak }
+
+public abstract record ResetPasswordResult
+{
+    public sealed record Success : ResetPasswordResult;
+    public sealed record Failure(ResetPasswordFailureReason Reason) : ResetPasswordResult;
+
+    private ResetPasswordResult() { }
+}
+
 public interface IAuthService
 {
     Task<LoginResult> LoginAsync(string username, string password, string? ipAddress, CancellationToken ct = default);
@@ -66,6 +76,21 @@ public interface IAuthService
     /// over username+password plus the account being usable.
     /// </summary>
     Task<OrderbookCredentialResult> VerifyOrderbookCredentialsAsync(string username, string password, string? ipAddress, CancellationToken ct = default);
+
+    /// <summary>
+    /// Port of routes/auth.js's POST /forgot-password. Always completes the
+    /// same way regardless of whether the email matched an account — the
+    /// caller (AuthApiController) returns the same generic message either
+    /// way, mitigating account enumeration exactly like Node's own
+    /// early-return-on-zero-rows-affected still responding 200. resetLinkBaseUrl
+    /// is the scheme+host to build the reset link against (e.g.
+    /// "https://portal.example.com") — passed in rather than resolved here so
+    /// this class doesn't need an HttpContext dependency, matching how
+    /// ipAddress is already passed into every other method here.
+    /// </summary>
+    Task RequestPasswordResetAsync(string email, string resetLinkBaseUrl, CancellationToken ct = default);
+
+    Task<ResetPasswordResult> ResetPasswordAsync(string token, string newPassword, string? ipAddress, CancellationToken ct = default);
 }
 
 internal sealed record PortalUserRow(
@@ -90,7 +115,8 @@ internal sealed class AuthService(
     IPermissionResolver permissionResolver,
     IIdleTimeoutPolicy idleTimeoutPolicy,
     IOptions<AuthOptions> authOptions,
-    IAuditLogger auditLogger) : IAuthService
+    IAuditLogger auditLogger,
+    NormantonNexus.Services.IResendClient resendClient) : IAuthService
 {
     // Matches routes/auth.js's hardcoded dummy hash exactly — reused rather than
     // regenerated so an unknown-username request costs the same bcrypt work as a
@@ -149,14 +175,19 @@ internal sealed class AuthService(
         }
 
         // Success — reset the failure counter/lock (the only reset path, same as Node),
-        // record LastLogin, and resolve departments + effective permissions.
-        var departmentsTask = connection.QueryAsync<string>(new CommandDefinition(
-            "SELECT Department FROM dbo.PortalUserDepartments WHERE UserID = @userId",
-            new { userId = user.UserID }, cancellationToken: ct));
+        // record LastLogin, and resolve departments + effective permissions, all
+        // concurrently. Each awaited task below must own its own connection — the
+        // shared `connection` from the lookup above can only ever have one command
+        // in flight at a time (confirmed for real against a live SQL Server: running
+        // a second command on it concurrently throws "The connection does not
+        // support MultipleActiveResultSets", since this app's connection strings
+        // don't set MultipleActiveResultSets=True and nothing here actually needs
+        // it — GetEffectivePermissionsAsync already opens its own connection for
+        // exactly this reason, matching that same pattern here rather than turning
+        // MARS on).
+        var departmentsTask = QueryDepartmentsAsync(user.UserID, ct);
         var permissionsTask = permissionResolver.GetEffectivePermissionsAsync(user.UserID, ct);
-        var resetTask = connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE dbo.PortalUsers SET FailedLogins = 0, IsLocked = 0, LastLogin = GETDATE() WHERE UserID = @userId",
-            new { userId = user.UserID }, cancellationToken: ct));
+        var resetTask = ResetLoginStateAsync(user.UserID, ct);
 
         await Task.WhenAll(departmentsTask, permissionsTask, resetTask);
         var departments = await departmentsTask;
@@ -192,6 +223,22 @@ internal sealed class AuthService(
         };
 
         return new LoginResult.Success(principal, properties);
+    }
+
+    private async Task<IEnumerable<string>> QueryDepartmentsAsync(int userId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        return await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT Department FROM dbo.PortalUserDepartments WHERE UserID = @userId",
+            new { userId }, cancellationToken: ct));
+    }
+
+    private async Task ResetLoginStateAsync(int userId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE dbo.PortalUsers SET FailedLogins = 0, IsLocked = 0, LastLogin = GETDATE() WHERE UserID = @userId",
+            new { userId }, cancellationToken: ct));
     }
 
     /// <summary>
@@ -276,5 +323,74 @@ internal sealed class AuthService(
 
         await auditLogger.LogAsync("ORDERBOOK_TOKEN_OK", username, null, ipAddress, ct);
         return new OrderbookCredentialResult.Success(user.UserID, user.Username);
+    }
+
+    public async Task RequestPasswordResetAsync(string email, string resetLinkBaseUrl, CancellationToken ct = default)
+    {
+        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        var expiresAt = DateTime.UtcNow.AddDays(7); // matches Node's 604800000ms (1 week) window
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rowsAffected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE dbo.PortalUsers SET reset_token = @token, reset_token_expires = @expiresAt WHERE Email = @email",
+            new { token, expiresAt, email }, cancellationToken: ct));
+
+        // No account matched — stop here without sending anything. The caller
+        // (AuthApiController) returns the exact same "if the email exists..."
+        // response either way, mitigating account enumeration, matching
+        // Node's own early-return-on-zero-rows-affected behavior.
+        if (rowsAffected == 0) return;
+
+        var resetLink = $"{resetLinkBaseUrl.TrimEnd('/')}/ResetPassword?token={token}";
+
+        // DEVIATION, deliberate bug fix, not a faithful port: Node's real
+        // routes/auth.js hardcodes the recipient to a single developer
+        // address (matthew.walker@ka-group.com) regardless of which email
+        // was actually submitted — meaning nobody but that one address could
+        // ever receive a real reset link, defeating the feature entirely for
+        // every other user. Sent to the real requesting email here instead,
+        // matching this migration's established "fix a confirmed real bug,
+        // document it, don't reproduce it" precedent (see e.g. the Goods
+        // Issue Items fix in Sub-phase 7c).
+        await resendClient.SendEmailAsync(
+            email,
+            "Password Recovery Request - Normanton Nexus",
+            $"<p>A password reset request was initiated for {System.Net.WebUtility.HtmlEncode(email)}. Click <a href=\"{resetLink}\">here</a> to select a new password.</p>",
+            ct);
+    }
+
+    public async Task<ResetPasswordResult> ResetPasswordAsync(string token, string newPassword, string? ipAddress, CancellationToken ct = default)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var userId = await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
+            "SELECT UserID FROM dbo.PortalUsers WHERE reset_token = @token AND reset_token_expires > GETUTCDATE()",
+            new { token }, cancellationToken: ct));
+
+        if (userId is null)
+        {
+            return new ResetPasswordResult.Failure(ResetPasswordFailureReason.InvalidOrExpiredToken);
+        }
+
+        // DEVIATION, deliberate: Node's reset-password route applies neither
+        // the strength rule every other password-set path in this app
+        // enforces, nor this app's own bcrypt cost-12 convention (it hashes
+        // at cost 10) — both real, confirmed inconsistencies in Node's own
+        // source against its own established rules elsewhere, closed here
+        // rather than reproduced.
+        if (!IsStrongEnoughPassword(newPassword))
+        {
+            return new ResetPasswordResult.Failure(ResetPasswordFailureReason.NewPasswordTooWeak);
+        }
+
+        var newHash = BCrypt.Net.BCrypt.HashPassword(newPassword, workFactor: 12);
+        await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE dbo.PortalUsers
+            SET PasswordHash = @newHash, reset_token = NULL, reset_token_expires = NULL
+            WHERE UserID = @userId
+            """, new { newHash, userId }, cancellationToken: ct));
+
+        await auditLogger.LogAsync("PASSWORD_RESET_OK", null, null, ipAddress, ct);
+        return new ResetPasswordResult.Success();
     }
 }

@@ -19,7 +19,8 @@ internal static class InboundCostHelper
 {
     private const string InboundCostCenter = "0000002012";
 
-    private sealed record ShipmentForCostRow(long ShipmentId, long? ForwarderId, bool IsManual);
+    /// <summary>ShipmentId is int, matching log.PurchaseOrderShipment.ShipmentId's real column type (confirmed via schema dump) — was long, causing every "Add Cost" request to throw a Dapper deserializer error regardless of row content.</summary>
+    private sealed record ShipmentForCostRow(int ShipmentId, long? ForwarderId, bool IsManual);
 
     private sealed record CostLineForUpdateRow(long CostId, bool IsManual);
 

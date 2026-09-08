@@ -13,8 +13,9 @@ public sealed record ShipmentContextDeliveryRow(
     decimal NetWeight, decimal GrossWeight, decimal PalletCount, decimal DeliveryVolume,
     string? DestinationName, string? DestinationStreet, string? DestinationCity, string? DestinationPostCode, string? DestinationCountry, string? DestinationEmail);
 
+/// <summary>PalletId is int, matching log.PalletMain.palletID's real column type — DeliveryId stays long (log.DeliveryMain.deliveryID is genuinely bigint).</summary>
 public sealed record ShipmentContextPalletRow(
-    long DeliveryId, long PalletId, string? PalletType, bool? PalletFinish, decimal PackagingWeight, decimal GrossWeight, decimal PalletVolume,
+    long DeliveryId, int PalletId, string? PalletType, bool? PalletFinish, decimal PackagingWeight, decimal GrossWeight, decimal PalletVolume,
     int? PalletLength, int? PalletWidth, int? PalletHeight, string? PalletLocation);
 
 /// <summary>Mirrors Node's getShipmentContext return shape exactly — the shipment row plus its linked deliveries/pallets (empty for a Manual Outbound Shipment, which uses ManualCargo instead).</summary>

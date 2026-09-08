@@ -40,7 +40,7 @@
       </table>`;
     bodyEl.querySelectorAll("button[data-id]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!confirm("Delete this restriction?")) return;
+        if (!(await NexusModal.confirm("Delete this restriction?", { danger: true, confirmLabel: "Delete" }))) return;
         try {
           await api(`/bin-restrictions/${btn.dataset.id}`, { method: "DELETE" });
           await load();

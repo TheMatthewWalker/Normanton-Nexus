@@ -112,7 +112,7 @@
   }
 
   async function deleteRow(customer) {
-    if (!confirm(`Delete standard instructions for customer ${customer}?`)) return;
+    if (!(await NexusModal.confirm(`Delete standard instructions for customer ${customer}?`, { danger: true, confirmLabel: "Delete" }))) return;
     try {
       await api(`/customer-instructions/${encodeURIComponent(customer)}`, { method: "DELETE" });
       await load();

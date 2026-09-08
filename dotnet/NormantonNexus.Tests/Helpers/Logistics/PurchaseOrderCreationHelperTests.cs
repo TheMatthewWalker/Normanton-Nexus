@@ -6,7 +6,7 @@ namespace NormantonNexus.Tests.Helpers.Logistics;
 public class PurchaseOrderCreationHelperTests
 {
     private static OrderSuggestionTrackedRow Row(
-        long suggestionId, string material, decimal orderQty, string? uom = "KG", string? orderMoqUom = null, string? incoterms = null,
+        int suggestionId, string material, decimal orderQty, string? uom = "KG", string? orderMoqUom = null, string? incoterms = null,
         string? poItemNumber = null, DateTime? deliveryDate = null, DateTime? readyToCollectDate = null) =>
         new(suggestionId, VendorId: 1, VendorName: "Acme Ltd", SapVendorNumber: "0000123456", Currency: "GBP", OrderMoqUom: orderMoqUom, Incoterms: incoterms,
             VendorMaterialId: 1, Material: material, MaterialText: $"{material} text", Uom: uom, Status: "Accepted", SuggestedQty: null, OrderQty: orderQty,

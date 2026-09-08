@@ -154,17 +154,31 @@ Write-Host "ASP.NET Core Module v2 found: $ancmPath" -ForegroundColor Green
 $siteName    = 'NormantonNexus'
 $appPoolName = 'NormantonNexus'
 $publishDir  = (Resolve-Path "$PSScriptRoot\..\publish").Path
-$port        = 7300
+# Matches server.js's own real bindings exactly (443 HTTPS serves the app,
+# 80 HTTP does nothing but redirect to it) — see Program.cs's
+# UseHttpsRedirection wiring, which is what actually performs that redirect
+# once both bindings exist on this site.
+$httpPort  = 80
+$httpsPort = 443
 
 # ---- Machine environment variables ------------------------------------------
 # ASPNETCORE_ENVIRONMENT has to be an env var - it's what WebApplication.
 # CreateBuilder(args) reads to pick which appsettings.{Environment}.json
-# layers on top of appsettings.json, same fundamental mechanism (and same
-# "a plain app pool recycle does NOT pick this up" caveat) as SapServer's
-# own ASPNETCORE_ENVIRONMENT note - new worker processes get their
-# environment block from WAS's own cached copy from when WAS itself last
-# started, not a live read on every recycle. A changed value here needs a
-# full `iisreset` or a machine reboot before a new worker actually sees it.
+# layers on top of appsettings.json. CONFIRMED FOR REAL that a machine-level
+# value like this one is NOT sufficient on its own: WAS (Windows Process
+# Activation Service) caches its own environment block from whenever WAS
+# itself last started, and hands that cached block to every worker process
+# it spawns from then on - a value set (or changed) here while WAS is
+# already running is invisible to new worker processes until a full
+# `iisreset` or machine reboot, not just an app-pool recycle. NormantonNexus/
+# web.config now sets ASPNETCORE_ENVIRONMENT directly in its own
+# <aspNetCore><environmentVariables> block instead (see that file's own
+# comment) - ANCM reads that straight from web.config at process-launch
+# time, completely bypassing WAS's cached environment, so a plain app-pool
+# restart (what deploy.ps1 already does) is enough to pick up a change
+# there. This machine-level var is set below anyway as a harmless fallback
+# (e.g. for `dotnet <dll>` run directly outside IIS), but web.config's own
+# setting is what this app actually depends on in production.
 Write-Host "Setting environment variables..."
 [System.Environment]::SetEnvironmentVariable('ASPNETCORE_ENVIRONMENT', 'Production', 'Machine')
 
@@ -237,12 +251,53 @@ Clear-ItemProperty "IIS:\AppPools\$appPoolName" -Name recycling.periodicRestart.
 Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name processModel.idleTimeout -Value '00:00:00'
 
 # ---- Site ---------------------------------------------------------------
-Write-Host "Creating site '$siteName' (physical path: $publishDir, port: $port)..."
+Write-Host "Creating site '$siteName' (physical path: $publishDir, port: $httpPort)..."
 if (Get-Website -Name $siteName -ErrorAction SilentlyContinue) {
     Write-Host "Site already exists - leaving its bindings as-is." -ForegroundColor DarkGray
 } else {
-    New-Website -Name $siteName -PhysicalPath $publishDir -ApplicationPool $appPoolName -Port $port | Out-Null
+    # New-Website's own -Port only takes one binding at a time - the :443
+    # binding is added separately just below.
+    New-Website -Name $siteName -PhysicalPath $publishDir -ApplicationPool $appPoolName -Port $httpPort | Out-Null
 }
+
+# ---- :443 https binding (no certificate attached yet) -----------------
+# The binding itself is created now - production is meant to be HTTPS-only
+# (see Program.cs's UseHttpsRedirection) and there's no reason to wait on a
+# certificate to at least get IIS listening on the port. Http.sys will
+# accept the binding with no certificate bound; it just can't complete a TLS
+# handshake on it until one is attached - a curl/browser hit against :443
+# will fail at the TLS layer (connection reset / "no certificate configured
+# for this port") rather than getting a real response, which is expected and
+# harmless until the certificate step below is done.
+if (-not (Get-WebBinding -Name $siteName -Protocol https -Port $httpsPort -ErrorAction SilentlyContinue)) {
+    Write-Host "Adding https binding on port $httpsPort (no certificate attached yet)..."
+    New-WebBinding -Name $siteName -Protocol https -Port $httpsPort -IPAddress '*' -SslFlags 0 | Out-Null
+} else {
+    Write-Host "https binding on port $httpsPort already exists - leaving it as-is." -ForegroundColor DarkGray
+}
+
+# ---- SSL certificate --------------------------------------------------
+# Deliberately still a manual step, same posture as the sibling SapServer
+# repo's own install.ps1 - a wrong or self-signed cert attached here would be
+# actively worse than no certificate at all, and this script has no way to
+# confirm which real certificate is the right one for this site. The Node
+# app's own certs\cert.pem/certs\key.pem are the same underlying certificate
+# this binding needs, just in the wrong format for IIS (which needs it in
+# the Windows certificate store, not raw PEM files on disk).
+Write-Host ""
+Write-Host "*** Reminder: no certificate is attached to the :$httpsPort binding yet ***" -ForegroundColor Yellow
+Write-Host "The site won't actually serve HTTPS until you:" -ForegroundColor Yellow
+Write-Host "  1. Get the certificate into the Windows certificate store (Cert:\LocalMachine\My)." -ForegroundColor Yellow
+Write-Host "     If you only have certs\cert.pem + certs\key.pem (the Node app's own files)," -ForegroundColor Yellow
+Write-Host "     combine them into a .pfx first, e.g.:" -ForegroundColor Yellow
+Write-Host "       openssl pkcs12 -export -out normanton-nexus.pfx -inkey certs\key.pem -in certs\cert.pem" -ForegroundColor Yellow
+Write-Host "     then: Import-PfxCertificate -FilePath normanton-nexus.pfx -CertStoreLocation Cert:\LocalMachine\My" -ForegroundColor Yellow
+Write-Host "  2. Assign it to the existing :$httpsPort binding, e.g.:" -ForegroundColor Yellow
+Write-Host "       `$thumbprint = (Get-ChildItem Cert:\LocalMachine\My | Where-Object Subject -like '*normanton*').Thumbprint" -ForegroundColor Yellow
+Write-Host "       (Get-WebBinding -Name '$siteName' -Protocol https -Port $httpsPort).AddSslCertificate(`$thumbprint, 'My')" -ForegroundColor Yellow
+Write-Host "Until then, plain HTTP on port $httpPort still works for /health (see Program.cs's" -ForegroundColor Yellow
+Write-Host "UseHttpsRedirection exemption) but every other request will redirect to a :$httpsPort" -ForegroundColor Yellow
+Write-Host "that can't complete a TLS handshake yet." -ForegroundColor Yellow
 
 # ---- File system permissions -------------------------------------------------
 # ApplicationPoolIdentity ("IIS AppPool\<name>") needs explicit filesystem
@@ -308,8 +363,7 @@ if (-not $appInitInstalled) {
 }
 
 Write-Host ""
-Write-Host "Site registered on http://localhost:$port - for HTTPS, bind a" -ForegroundColor Yellow
-Write-Host "certificate via IIS Manager or New-WebBinding + netsh http add sslcert" -ForegroundColor Yellow
-Write-Host "(a one-time manual step; not automated here since it needs a real cert)." -ForegroundColor Yellow
+Write-Host "Site registered on http://localhost:$httpPort (see the SSL certificate step" -ForegroundColor Yellow
+Write-Host "above if the :$httpsPort https binding still needs a real certificate attached)." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Run 'deploy.ps1' to publish the app into $publishDir and start the site." -ForegroundColor Green

@@ -19,7 +19,7 @@ public class ShipmentPackingListPdfHelperTests
         PlannedDelivery: new DateTime(2026, 3, 3), ActualDelivery: null, DeliveryStatus: false, BookingStatus: true, CustomsId: null, IsManual: isManual,
         ForwarderName: "Best Haulage", ForwarderMode: "Road", PlannedMovement: null);
 
-    private static ShipmentContextPalletRow SamplePallet(long deliveryId, long palletId) => new(
+    private static ShipmentContextPalletRow SamplePallet(long deliveryId, int palletId) => new(
         deliveryId, palletId, "EU", false, 15m, 280m, 1.2m, 120, 80, 100, "A1");
 
     private static ManualCargoItemRow SampleManualCargo(int cargoId) => new(

@@ -38,6 +38,29 @@ public class ForecastMathHelperTests
     }
 
     [Fact]
+    public void MakeDailyUsageFn_an_override_quantity_replaces_the_percentage_scale_with_an_even_daily_spread()
+    {
+        var from = Utc(2026, 1, 1);
+        // 11-day window (inclusive both ends) planning a fixed 220 total => 20/day regardless of
+        // the material's own normal predicted rate (10/day from FlatMonthly(310) in January).
+        var adjustments = new[] { new DemandAdjustmentWindow(Utc(2026, 1, 10), Utc(2026, 1, 20), 100m, OverrideQty: 220m) };
+        var fn = MakeDailyUsageFn(FlatMonthly(310m), from, adjustments);
+
+        Assert.Equal(20m, fn(Utc(2026, 1, 15))); // inside the window: fixed override rate
+        Assert.Equal(10m, fn(Utc(2026, 1, 5)));  // outside the window: untouched
+    }
+
+    [Fact]
+    public void MakeDailyUsageFn_a_single_day_override_window_divides_by_one_day_not_zero()
+    {
+        var from = Utc(2026, 1, 1);
+        var adjustments = new[] { new DemandAdjustmentWindow(Utc(2026, 1, 15), Utc(2026, 1, 15), 100m, OverrideQty: 42m) };
+        var fn = MakeDailyUsageFn(FlatMonthly(310m), from, adjustments);
+
+        Assert.Equal(42m, fn(Utc(2026, 1, 15)));
+    }
+
+    [Fact]
     public void MakeDailyUsageFn_treats_a_null_adjustment_bound_as_unbounded()
     {
         var from = Utc(2026, 1, 1);

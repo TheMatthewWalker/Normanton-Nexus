@@ -110,4 +110,58 @@ public class VendorMasterDataHelperTests
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    // ── OverrideQty (fixed total to plan for a window) — a deliberate enhancement
+    // beyond Node's original percentage-only design, see DemandAdjustmentRow's own
+    // doc comment. Mutually exclusive with usagePercent per row.
+
+    [Fact]
+    public async Task CreateDemandAdjustmentAsync_rejects_a_negative_overrideQty_without_opening_a_connection()
+    {
+        var db = UnreachableDb();
+        var body = new UpsertDemandAdjustmentRequest("MAT001", DateTime.UtcNow, DateTime.UtcNow.AddDays(7), null, null, OverrideQty: -1m);
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            VendorMasterDataHelper.CreateDemandAdjustmentAsync(db.Object, body, "tester", CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CreateDemandAdjustmentAsync_rejects_an_overrideQty_with_no_start_or_end_date()
+    {
+        var db = UnreachableDb();
+        var body = new UpsertDemandAdjustmentRequest("MAT001", null, null, null, null, OverrideQty: 500m);
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            VendorMasterDataHelper.CreateDemandAdjustmentAsync(db.Object, body, "tester", CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CreateDemandAdjustmentAsync_rejects_an_overrideQty_window_ending_before_it_starts()
+    {
+        var db = UnreachableDb();
+        var body = new UpsertDemandAdjustmentRequest("MAT001", DateTime.UtcNow, DateTime.UtcNow.AddDays(-1), null, null, OverrideQty: 500m);
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            VendorMasterDataHelper.CreateDemandAdjustmentAsync(db.Object, body, "tester", CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CreateDemandAdjustmentAsync_accepts_a_valid_overrideQty_with_no_usagePercent_supplied()
+    {
+        // usagePercent is only required when overrideQty is absent — a valid override request with
+        // both dates and no usagePercent must clear validation and reach the DB layer.
+        var db = UnreachableDb();
+        var body = new UpsertDemandAdjustmentRequest("MAT001", DateTime.UtcNow, DateTime.UtcNow.AddDays(7), null, null, OverrideQty: 500m);
+
+        var ex = await Record.ExceptionAsync(() =>
+            VendorMasterDataHelper.CreateDemandAdjustmentAsync(db.Object, body, "tester", CancellationToken.None));
+
+        Assert.IsType<InvalidOperationException>(ex); // reached the mock's "should not be called" connection throw, not a validation error
+    }
 }

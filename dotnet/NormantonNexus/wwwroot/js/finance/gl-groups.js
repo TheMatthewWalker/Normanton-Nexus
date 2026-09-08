@@ -92,7 +92,7 @@
   }
 
   async function deleteGroup(group) {
-    if (!confirm(`Delete GL group "${group.label}"?`)) return;
+    if (!(await NexusModal.confirm(`Delete GL group "${group.label}"?`, { danger: true, confirmLabel: "Delete" }))) return;
     try {
       await api(`/gl-groups/${group.id}`, { method: "DELETE" });
       await load();

@@ -254,13 +254,13 @@ internal static class MrpForecastHelper
 
     // ── Shared: create the immutable run snapshot + child rows ───────────
 
-    private static async Task<long> CreateRunAsync(
+    private static async Task<int> CreateRunAsync(
         INexusOperationsDb db, int targetYear, string method, int? baselineYear, decimal? percentageChange, string? createdBy,
         IReadOnlyList<MrpForecastRunMaterialInput> materials, IReadOnlyList<BomUploadProduct>? products, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
 
-        var runId = await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        var runId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.MrpForecastRun (TargetYear, Method, BaselineYear, PercentageChange, CreatedBy)
             OUTPUT INSERTED.RunId
             VALUES (@targetYear, @method, @baselineYear, @percentageChange, @createdBy)

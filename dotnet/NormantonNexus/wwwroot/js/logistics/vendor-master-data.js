@@ -43,7 +43,7 @@
 
     bodyEl.querySelectorAll("button[data-action='delete']").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!confirm("Delete this vendor?")) return;
+        if (!(await NexusModal.confirm("Delete this vendor?", { danger: true, confirmLabel: "Delete" }))) return;
         await api(`/vendors/${btn.dataset.id}`, { method: "DELETE" });
         await load();
       });

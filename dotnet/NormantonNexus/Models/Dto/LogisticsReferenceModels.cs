@@ -12,9 +12,9 @@ namespace NormantonNexus.Models.Dto;
 
 // ── Cost Types (log.CostTypes) ──────────────────────────────────────────
 
-public sealed record CostTypeRow(long? TypeId, string? TypeDescription);
+public sealed record CostTypeRow(string? TypeId, string? TypeDescription);
 
-public sealed record CreateCostTypeRequest(long TypeId, string? TypeDescription);
+public sealed record CreateCostTypeRequest(string TypeId, string? TypeDescription);
 
 // ── Cost Elements (log.CostElements) ────────────────────────────────────
 

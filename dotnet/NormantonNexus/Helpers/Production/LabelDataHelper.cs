@@ -49,7 +49,7 @@ internal static class LabelDataHelper
             r = await connection.QuerySingleOrDefaultAsync<LabelRawRow>(new CommandDefinition($"""
                 SELECT m.Material, m.TotalWeightKG AS Quantity,
                        m.Status, m.CreatedAt, m.CompletedAt, m.Notes,
-                       NULL AS MachineName, NULL AS MachineCode,
+                       CAST(NULL AS NVARCHAR(100)) AS MachineName, CAST(NULL AS NVARCHAR(20)) AS MachineCode,
                        {DisplayNameSql},
                        m.MixRef AS BatchRef, m.SupplierBatchNo, m.SupplierTubNo
                 FROM   prod.Mixing m
@@ -64,7 +64,7 @@ internal static class LabelDataHelper
                        t.Status, t.CreatedAt, t.CompletedAt, t.Notes,
                        mc.MachineName, mc.MachineCode,
                        {DisplayNameSql},
-                       NULL AS BatchRef, NULL AS SupplierBatchNo, NULL AS SupplierTubNo
+                       CAST(NULL AS NVARCHAR(10)) AS BatchRef, CAST(NULL AS NVARCHAR(50)) AS SupplierBatchNo, CAST(NULL AS NVARCHAR(20)) AS SupplierTubNo
                 FROM   {cfg.Table} t
                 LEFT JOIN prod.Machines mc ON mc.MachineID = t.MachineID
                 LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = t.CreatedByUserID

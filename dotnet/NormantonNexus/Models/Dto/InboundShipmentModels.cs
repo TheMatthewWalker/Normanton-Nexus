@@ -7,7 +7,7 @@ namespace NormantonNexus.Models.Dto;
 // (Mark Received/Undo Received) is deferred to 8b.7.
 
 public sealed record OrderShipmentListRow(
-    long ShipmentId, string ShipmentReference, DateTime? DispatchDate, DateTime? ExpectedEta,
+    int ShipmentId, string ShipmentReference, DateTime? DispatchDate, DateTime? ExpectedEta,
     string? Haulier, long? ForwarderId, string? ModeOfTransport, string? TrackingNumber, string? BillOfLading, string? ContainerNumber,
     string? Notes, DateTime? ReceivedAtUtc, string? ReceivedBy, DateTime? CancelledAtUtc, string? CancelledBy,
     DateTime CreatedAtUtc, DateTime UpdatedAtUtc, bool IsManual, string? OriginName,
@@ -29,11 +29,11 @@ public sealed record InsertedCostLineResult(long CostId, string ElementCode);
 public sealed record CreateManualOrderShipmentResult(long ShipmentId, string ShipmentReference, InsertedCostLineResult? Cost);
 
 public sealed record OrderShipmentDetailOrderRow(
-    long SuggestionId, string Material, string? MaterialText, string? Uom, string VendorName, string? OrderMoqUom,
+    int SuggestionId, string Material, string? MaterialText, string? Uom, string VendorName, string? OrderMoqUom,
     decimal OrderQty, decimal? ReceivedQty, string Status, string? SupplierReference, string? PoNumber, string? PoItemNumber,
     string? Notes, string? SapMaterialDocument, string? SapGrError, bool? SapGrSkipped);
 
-public sealed record ManualInboundItemRow(long ItemId, long ShipmentId, string? Material, string? Description, decimal Quantity, string? UnitOfMeasure, DateTime CreatedAtUtc, string? CreatedBy);
+public sealed record ManualInboundItemRow(int ItemId, int ShipmentId, string? Material, string? Description, decimal Quantity, string? UnitOfMeasure, DateTime CreatedAtUtc, string? CreatedBy);
 
 public sealed record OrderShipmentDetailResult(
     long ShipmentId, string ShipmentReference, DateTime? DispatchDate, DateTime? ExpectedEta,

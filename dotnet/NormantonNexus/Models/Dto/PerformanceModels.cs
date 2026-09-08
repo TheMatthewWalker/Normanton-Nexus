@@ -3,7 +3,7 @@ namespace NormantonNexus.Models.Dto;
 // ── Logistics Sub-phase 8b.1: shared dashboard/forecast read models ───────
 
 /// <summary>Raw dbo.RefreshLog row — shared by /refresh-log, /refresh-status and /turns-valclass/refresh-status.</summary>
-public sealed record RefreshLogRow(long RunId, string? DatasetName, string? Status, DateTime? CompletedAtUtc, string? ErrorMessage);
+public sealed record RefreshLogRow(int RunId, string? DatasetName, string? Status, DateTime? CompletedAtUtc, string? ErrorMessage);
 
 public sealed record DatasetRefreshStatus(string Name, string Status, DateTime? CompletedAtUtc, string? ErrorMessage);
 
@@ -66,11 +66,33 @@ public sealed record MrpControllerOption(string Controller, int MaterialCount);
 
 public sealed record ValuationClassCatalogRow(string ValuationClass, string MaterialType, string? AccountRef, string? Description);
 
+// ── Stock History & Forecast tile (GET /turns-valclass/history) ───────────
+// The one genuinely missing piece of Sub-phase 8b.1 — flagged there as
+// "deferred" pending ForecastMathHelper/the order-suggestion and
+// demand-adjustment backends, all of which now exist. Port of
+// routes/performance.js's own /turns-valclass/history handler: 13-month
+// consumption history vs. SAP demand forecast vs. our own predicted usage,
+// plus a 26-week (or, single-material daily view, 60-day) expected-stock
+// projection built from ForecastMathHelper.BuildWeeklyStockForecast.
+
+public sealed record IsoparMeterReadingOverlay(bool UsingMeterReading, string? ReadingDate, string? FallbackWarning);
+
+/// <summary>One material's 13-month consumption/forecast/predicted-usage series (index 12 = current month, 0 = 12 months ago), matching Node's own array layout exactly.</summary>
+public sealed record TurnsValClassHistoryMaterial(
+    string Material, string? MaterialText, string Plant, string? Uom, decimal? StockQty, decimal? ConsignmentQty,
+    IReadOnlyList<decimal?> ConsumptionHistory, IReadOnlyList<decimal?> DemandForecast, IReadOnlyList<decimal?> PredictedUsage,
+    IsoparMeterReadingOverlay? IsoparMeterReading);
+
+/// <summary>log.ForecastAccuracyLog's frozen-at-month-start figures, aggregated across whatever material set the request resolved to — same 13-slot alignment as TurnsValClassHistoryMaterial's own arrays.</summary>
+public sealed record ForecastAccuracyOverlay(IReadOnlyList<decimal?> RecordedSapDemand, IReadOnlyList<decimal?> RecordedPredicted, IReadOnlyList<decimal?> RecordedActual);
+
+public sealed record TurnsValClassHistoryResult(IReadOnlyList<TurnsValClassHistoryMaterial> Data, ForecastAccuracyOverlay Accuracy, WeeklyStockForecastDto StockForecast);
+
 // ── mrpanalysis.js /trends ─────────────────────────────────────────────────
 
 public sealed record ConsumptionByYearRow(string Material, string? MaterialText, int FiscalYear, decimal? ConsumedQty);
 
-public sealed record ReceiptHistoryByVendorRow(string Material, string? MaterialText, long? VendorId, string? VendorName, string? SapVendorNumber, int FiscalYear, decimal? ReceivedQty, string? Uom);
+public sealed record ReceiptHistoryByVendorRow(string Material, string? MaterialText, int? VendorId, string? VendorName, string? SapVendorNumber, int FiscalYear, decimal? ReceivedQty, string? Uom);
 
 public sealed record MrpTrendsResult(IReadOnlyList<ConsumptionByYearRow> Consumption, IReadOnlyList<ReceiptHistoryByVendorRow> Receipts);
 

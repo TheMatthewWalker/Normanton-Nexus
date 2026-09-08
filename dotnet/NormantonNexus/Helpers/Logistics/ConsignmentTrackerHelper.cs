@@ -940,9 +940,9 @@ internal static class ConsignmentTrackerHelper
 }
 
 /// <summary>Minimal shape ComputeReversalCancellations actually needs — a subset of ConsignmentDeliveryRow's columns.</summary>
-internal sealed record ReversalWalkRow(long DeliveryId, string Material, string MaterialDocument, string MaterialDocItem, decimal Quantity, decimal RemainingQty, string? ReversalOfMaterialDocument, string? ReversalOfMaterialDocItem);
+internal sealed record ReversalWalkRow(int DeliveryId, string Material, string MaterialDocument, string MaterialDocItem, decimal Quantity, decimal RemainingQty, string? ReversalOfMaterialDocument, string? ReversalOfMaterialDocItem);
 
 /// <summary>Minimal shape BuildAllocationProposal actually needs.</summary>
-internal sealed record AllocatableDeliveryRow(long DeliveryId, string Material, decimal RemainingQty, string? InvoiceNumber, DateTime? ExpiryDate, DateTime? DocumentDate);
+internal sealed record AllocatableDeliveryRow(int DeliveryId, string Material, decimal RemainingQty, string? InvoiceNumber, DateTime? ExpiryDate, DateTime? DocumentDate);
 
 internal sealed record AllocationProposal(IReadOnlyList<AllocationProposalLine> Lines, decimal UnallocatedQty);

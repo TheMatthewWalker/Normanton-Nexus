@@ -5,7 +5,7 @@ namespace NormantonNexus.Models.Dto;
 // own migration comment for why this isn't sourced from SAP.
 
 public sealed record VendorRow(
-    long VendorId, string VendorName, string? SapVendorNumber, string? Currency, string? Incoterms,
+    int VendorId, string VendorName, string? SapVendorNumber, string? Currency, string? Incoterms,
     decimal? OrderMoqQty, decimal? OrderMaxQty, string? OrderMoqUom, decimal? DefaultLeadTimeDays, decimal? TransitTimeDays,
     string? Notes, DateTime CreatedAtUtc, DateTime UpdatedAtUtc, int MaterialCount);
 
@@ -15,7 +15,7 @@ public sealed record UpsertVendorRequest(
     decimal? OrderMoqQty, decimal? OrderMaxQty, string? OrderMoqUom, decimal? DefaultLeadTimeDays, decimal? TransitTimeDays, string? Notes);
 
 public sealed record VendorMaterialAssignmentRow(
-    long VendorMaterialId, long VendorId, string Material, decimal? MaterialMoqQty, decimal? MaterialMaxQty,
+    int VendorMaterialId, int VendorId, string Material, decimal? MaterialMoqQty, decimal? MaterialMaxQty,
     decimal? LeadTimeDaysOverride, decimal? MinSafetyStockQty, string? ScheduleAgreement, string? ScheduleAgreementItem, string? SourceHint,
     string? MaterialText, string? MrpController, decimal? SapLeadTimeDays, decimal? SapSafetyStock);
 
@@ -28,11 +28,25 @@ public sealed record UpdateVendorMaterialRequest(
     decimal? MaterialMoqQty, decimal? MaterialMaxQty, decimal? LeadTimeDaysOverride,
     decimal? MinSafetyStockQty, string? ScheduleAgreement, string? ScheduleAgreementItem);
 
+/// <summary>
+/// OverrideQty is a deliberate enhancement beyond Node's original percentage-only design (log.DemandAdjustment
+/// gained the column here, not ported from Node) — when set, this window plans at a fixed TOTAL quantity spread
+/// evenly across the window's days, instead of scaling the normal predicted usage by UsagePercent. The two modes
+/// are mutually exclusive per row: OverrideQty (when present) always wins over UsagePercent — see
+/// ForecastMathHelper.MakeDailyUsageFn's own comment for the exact math.
+/// </summary>
 public sealed record DemandAdjustmentRow(
-    long AdjustmentId, string Material, DateTime? StartDate, DateTime? EndDate, decimal UsagePercent,
-    string? Reason, string? CreatedBy, DateTime CreatedAtUtc, DateTime UpdatedAtUtc, string? MaterialText);
+    int AdjustmentId, string Material, DateTime? StartDate, DateTime? EndDate, decimal UsagePercent,
+    string? Reason, string? CreatedBy, DateTime CreatedAtUtc, DateTime UpdatedAtUtc, string? MaterialText, decimal? OverrideQty = null);
 
-/// <summary>Same shape for both POST /demand-adjustments and PUT /demand-adjustments/:id. UsagePercent is nullable so a missing value can be rejected distinctly from a literal 0, matching Node's `usagePercent == null` check.</summary>
-public sealed record UpsertDemandAdjustmentRequest(string Material, DateTime? StartDate, DateTime? EndDate, decimal? UsagePercent, string? Reason);
+/// <summary>
+/// Same shape for both POST /demand-adjustments and PUT /demand-adjustments/:id. UsagePercent is nullable so a
+/// missing value can be rejected distinctly from a literal 0, matching Node's `usagePercent == null` check — but
+/// see ValidateDemandAdjustment: UsagePercent is only actually required when OverrideQty is not supplied, since
+/// the two are mutually-exclusive planning modes for the same window (percentage scale of normal predicted usage,
+/// vs. a fixed total quantity for the whole window). OverrideQty requires both StartDate and EndDate — dividing a
+/// total across an unbounded window has no sensible meaning.
+/// </summary>
+public sealed record UpsertDemandAdjustmentRequest(string Material, DateTime? StartDate, DateTime? EndDate, decimal? UsagePercent, string? Reason, decimal? OverrideQty = null);
 
 internal sealed record OverlappingAdjustment(long AdjustmentId, DateTime? StartDate, DateTime? EndDate);

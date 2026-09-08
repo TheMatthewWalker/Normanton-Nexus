@@ -29,6 +29,23 @@ builder.Services.AddRazorPages()
     .AddMvcOptions(options => options.Filters.Add<MustChangePasswordPageFilter>());
 builder.Services.AddControllers();
 
+// C# equivalent of server.js's plain http.createServer on port 80 that does
+// nothing but `res.writeHead(301, { Location: 'https://' + host + url })` —
+// this app is IIS-hosted (ASP.NET Core Module v2, in-process — see
+// dotnet/CLAUDE.md's "Hosting" section), so both the :80 and :443 IIS site
+// bindings deliver into this same process; HttpsPort has to be set
+// explicitly because UseHttpsRedirection normally infers it from Kestrel's
+// own bound HTTPS endpoint (IServerAddressesFeature), which doesn't exist
+// under IIS in-process hosting — without this it silently no-ops with just a
+// startup warning log, never actually redirecting. RedirectStatusCode is
+// explicitly 301 (Permanent), not the framework default of 307, to match
+// Node's own status code exactly.
+builder.Services.AddHttpsRedirection(options =>
+{
+    options.HttpsPort = 443;
+    options.RedirectStatusCode = StatusCodes.Status301MovedPermanently;
+});
+
 // Persist Data Protection keys to a fixed folder instead of the framework's
 // default (%LOCALAPPDATA%\ASP.NET\DataProtection-Keys under the current
 // user's profile). Every cookie-auth ticket this app issues (PortalSessionStore
@@ -89,6 +106,9 @@ builder.Services.AddHttpClient<IClearPortExportProxyClient, ClearPortExportProxy
 
 builder.Services.Configure<KuehneNagelOptions>(builder.Configuration.GetSection(KuehneNagelOptions.SectionName));
 builder.Services.AddHttpClient<IKuehneNagelClient, KuehneNagelClient>();
+
+builder.Services.Configure<ResendOptions>(builder.Configuration.GetSection(ResendOptions.SectionName));
+builder.Services.AddHttpClient<IResendClient, ResendClient>();
 
 builder.Services.Configure<LabelPrinterOptions>(builder.Configuration.GetSection(LabelPrinterOptions.SectionName));
 
@@ -268,6 +288,31 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/Error");
 }
 
+// Production/IIS only — matches the cookie SecurePolicy precedent right below
+// (Always only in Production, SameAsRequest elsewhere) that exists
+// specifically so a plain `dotnet run` + http://localhost smoke test keeps
+// working with no local cert/https setup needed. Applying this
+// unconditionally would break that: this app's own HttpsPort is hardcoded to
+// 443 (there's no Kestrel https endpoint to infer it from under IIS
+// in-process hosting — see AddHttpsRedirection's own comment above), so a
+// local dev run would otherwise try to redirect every request to a port
+// nothing is listening on.
+//
+// /health is deliberately exempted from the redirect even in Production — it
+// exists specifically as an unauthenticated liveness probe for IIS's own
+// Application Initialization warm-up request and external monitoring (see
+// this file's own MapGet("/health", ...) comment below), and forcing it
+// through HTTPS would tie its usability to whether install.ps1's manual
+// "bind a real certificate to the :443 binding" step has been completed yet
+// — the same reasoning that keeps it free of auth/DB dependencies applies
+// here too.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseWhen(
+        context => !context.Request.Path.StartsWithSegments("/health"),
+        branch => branch.UseHttpsRedirection());
+}
+
 app.UseRouting();
 
 app.UseApiExceptionHandling();
@@ -327,6 +372,48 @@ app.MapPost("/api/auth/orderbook-token", async (OrderbookTokenRequest body, IAut
 .RequireRateLimiting(RateLimitPolicies.OrderbookToken)
 .AllowAnonymous();
 
+// C# port of POST /forgot-password in routes/auth.js — same root-level path (not
+// under /api), same reuse of the Login rate-limit bucket (Node's own loginLimiter
+// applied to both this route and reset-password below). Always responds 200 with
+// the same generic message regardless of whether the email matched an account,
+// mitigating enumeration exactly like Node's own early-return-on-zero-rows-affected.
+app.MapPost("/forgot-password", async (ForgotPasswordRequest body, IAuthService authService, HttpContext httpContext) =>
+{
+    if (string.IsNullOrWhiteSpace(body.Email))
+        return Results.Json(new { success = false, error = "Email address is required." }, statusCode: 400);
+
+    var baseUrl = $"{httpContext.Request.Scheme}://{httpContext.Request.Host}";
+    await authService.RequestPasswordResetAsync(body.Email, baseUrl, httpContext.RequestAborted);
+
+    return Results.Json(new { success = true, message = "If the email exists, a password reset link has been dispatched." });
+})
+.RequireRateLimiting(RateLimitPolicies.Login)
+.AllowAnonymous();
+
+// C# port of POST /reset-password in routes/auth.js.
+app.MapPost("/reset-password", async (ResetPasswordRequest body, IAuthService authService, HttpContext httpContext) =>
+{
+    if (string.IsNullOrEmpty(body.Token) || string.IsNullOrEmpty(body.NewPassword))
+        return Results.Json(new { success = false, error = "Missing mandatory payload properties." }, statusCode: 400);
+
+    var ip = httpContext.Connection.RemoteIpAddress?.ToString();
+    var result = await authService.ResetPasswordAsync(body.Token, body.NewPassword, ip, httpContext.RequestAborted);
+
+    if (result is ResetPasswordResult.Failure failure)
+    {
+        var message = failure.Reason == ResetPasswordFailureReason.NewPasswordTooWeak
+            ? "New password must be at least 10 characters and include an uppercase letter and a number."
+            : "The provided recovery verification token is invalid or has expired.";
+        return Results.Json(new { success = false, error = message }, statusCode: 400);
+    }
+
+    return Results.Json(new { success = true, message = "Password updated successfully." });
+})
+.RequireRateLimiting(RateLimitPolicies.Login)
+.AllowAnonymous();
+
 app.Run();
 
 internal sealed record OrderbookTokenRequest(string? Username, string? Password);
+internal sealed record ForgotPasswordRequest(string? Email);
+internal sealed record ResetPasswordRequest(string? Token, string? NewPassword);

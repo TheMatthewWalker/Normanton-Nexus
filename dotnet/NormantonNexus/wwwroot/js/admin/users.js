@@ -47,7 +47,7 @@
       });
       el.querySelectorAll("button[data-reject]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Reject this user?")) return;
+          if (!(await NexusModal.confirm("Reject this user?", { danger: true, confirmLabel: "Reject" }))) return;
           try {
             await api(`/users/${btn.dataset.reject}/reject`, { method: "POST" });
             await loadPending();
@@ -201,7 +201,7 @@
         </table>`;
       el.querySelectorAll("button[data-revoke]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (!confirm(`Revoke ${btn.dataset.revoke}?`)) return;
+          if (!(await NexusModal.confirm(`Revoke ${btn.dataset.revoke}?`, { danger: true, confirmLabel: "Revoke" }))) return;
           try {
             await api(`/users/${userId}/permissions/${encodeURIComponent(btn.dataset.revoke)}`, { method: "DELETE" });
             await loadUserPermissions(userId);

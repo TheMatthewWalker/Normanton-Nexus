@@ -33,8 +33,10 @@ internal static class PurchaseOrderSuggestionHelper
     // unit — e.g. rounds a raw 3006.303 LB shortfall to a clean 3000 LB.
     private const int OrderUnitRounding = 100;
     // How far ahead a daily-bucketed stock forecast runs for Isopar's always-daily preview, in
-    // place of the usual 26-week horizon everyone else gets.
-    private const int IsoparDailyForecastHorizonDays = 60;
+    // place of the usual 26-week horizon everyone else gets. Internal (not private) so
+    // PerformanceDashboardHelper.GetTurnsValClassHistoryAsync (Stock History & Forecast tile)
+    // can reuse the same figure rather than a second, potentially-drifting copy.
+    internal const int IsoparDailyForecastHorizonDays = 60;
 
     /// <summary>
     /// Open (not yet Received/Cancelled) accepted orders — nets "already incoming" quantity off a
@@ -52,9 +54,10 @@ internal static class PurchaseOrderSuggestionHelper
         var rows = await connection.QueryAsync<OpenIncomingOrderRow>(new CommandDefinition($"""
             SELECT pos.SuggestionId, pos.Material, pos.OrderQty,
                    COALESCE(shp.ExpectedEta, pos.DeliveryDate) AS DeliveryDate,
-                   pos.Status, pos.PoNumber
+                   pos.Status, pos.PoNumber, pos.VendorId, v.VendorName
             FROM log.PurchaseOrderSuggestion pos
             LEFT JOIN log.PurchaseOrderShipment shp ON shp.ShipmentId = pos.ShipmentId
+            LEFT JOIN log.Vendor v ON v.VendorId = pos.VendorId
             {whereSql}
             """, new { materials }, cancellationToken: ct));
         return rows.AsList();
@@ -174,7 +177,7 @@ internal static class PurchaseOrderSuggestionHelper
         foreach (var r in adjustments)
         {
             if (!map.TryGetValue(r.Material, out var list)) { list = []; map[r.Material] = list; }
-            list.Add(new ForecastMathHelper.DemandAdjustmentWindow(r.StartDate, r.EndDate, r.UsagePercent));
+            list.Add(new ForecastMathHelper.DemandAdjustmentWindow(r.StartDate, r.EndDate, r.UsagePercent, r.OverrideQty));
         }
         return map;
     }
@@ -396,8 +399,10 @@ internal static class PurchaseOrderSuggestionHelper
         return new AcceptPayload(vendorMaterialId, vendorId, material, suggestedQty, orderQty, orderDate, leadTime, deliveryDate, transitTime, readyToCollectDate, isSpotPo ?? false, notes);
     }
 
+    // SuggestionId is int, matching log.PurchaseOrderSuggestion.SuggestionId's real column type —
+    // QuerySingleAsync<long> here would throw Dapper's strict-materialization error on every accept.
     private static async Task<long> InsertAcceptedOrderAsync(IDbConnection connection, AcceptPayload payload, CancellationToken ct) =>
-        await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.PurchaseOrderSuggestion
               (VendorId, VendorMaterialId, Material, Status, SuggestedQty, OrderQty, OrderDate,
                LeadTimeDaysUsed, DeliveryDate, TransitTimeDaysUsed, ReadyToCollectDate, IsSpotPo, Notes)
@@ -475,10 +480,11 @@ internal static class PurchaseOrderSuggestionHelper
         return results;
     }
 
-    private static WeeklyStockForecastDto ToDto(ForecastMathHelper.WeeklyStockForecast forecast) =>
+    /// <summary>Internal (not private) so PerformanceDashboardHelper.GetTurnsValClassHistoryAsync — the Stock History &amp; Forecast tile's backing route — can reuse the same mapping rather than duplicating it.</summary>
+    internal static WeeklyStockForecastDto ToDto(ForecastMathHelper.WeeklyStockForecast forecast) =>
         new(forecast.AsOfDate, forecast.CurrentStock,
             forecast.Weeks.Select(w => new ForecastWeekDto(w.WeekEnding, w.WeeklyUsage, w.IncomingQty,
-                w.Deliveries.Select(d => new ForecastDeliveryDto(d.Id, d.PoNumber, d.Qty, d.Material)).ToList(),
+                w.Deliveries.Select(d => new ForecastDeliveryDto(d.Id, d.PoNumber, d.Qty, d.Material, d.VendorName)).ToList(),
                 w.ExpectedStock)).ToList(),
             forecast.BucketDays);
 
@@ -746,7 +752,7 @@ internal static class PurchaseOrderSuggestionHelper
                 new UpdateOrderSuggestionStatusRequest("Ordered", r.ScheduleAgreement, r.ScheduleAgreementItem, r.Notes, r.SupplierReference, null, null, null), ct);
         }
 
-        return new AssignScheduleAgreementResult(rows.Select(r => r.SuggestionId).ToList());
+        return new AssignScheduleAgreementResult(rows.Select(r => (long)r.SuggestionId).ToList());
     }
 
     /// <summary>Full-row update — the caller sends the complete current state (see UpdateOrderSuggestionStatusRequest's own comment).</summary>
@@ -803,7 +809,7 @@ internal static class PurchaseOrderSuggestionHelper
     {
         using var connection = await db.CreateConnectionAsync(ct);
         await AssertOrderEditableAsync(connection, suggestionId, ct);
-        var deletedId = await connection.QuerySingleOrDefaultAsync<long?>(new CommandDefinition(
+        var deletedId = await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
             "DELETE FROM log.PurchaseOrderSuggestion OUTPUT DELETED.SuggestionId WHERE SuggestionId = @suggestionId", new { suggestionId }, cancellationToken: ct));
         if (deletedId is null) throw new NexusNotFoundException("Tracked order not found.");
     }

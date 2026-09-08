@@ -10,7 +10,7 @@ namespace NormantonNexus.Tests.Helpers.Logistics;
 // documented production incidents (Raaj Ratna reversal chains).
 public class ConsignmentTrackerHelperTests
 {
-    private static ReversalWalkRow Row(long id, string doc, string item, decimal qty, decimal remaining, string? reversalDoc = null, string? reversalItem = null) =>
+    private static ReversalWalkRow Row(int id, string doc, string item, decimal qty, decimal remaining, string? reversalDoc = null, string? reversalItem = null) =>
         new(id, "MAT001", doc, item, qty, remaining, reversalDoc, reversalItem);
 
     [Fact]
@@ -108,7 +108,7 @@ public class ConsignmentTrackerHelperTests
         Assert.Empty(result.NeedsReview);
     }
 
-    private static AllocatableDeliveryRow Allocatable(long id, decimal remaining, DateTime? expiry = null, DateTime? documentDate = null) =>
+    private static AllocatableDeliveryRow Allocatable(int id, decimal remaining, DateTime? expiry = null, DateTime? documentDate = null) =>
         new(id, "MAT001", remaining, $"INV{id}", expiry, documentDate);
 
     [Fact]
@@ -169,7 +169,7 @@ public class ConsignmentTrackerHelperTests
         Assert.Equal(5.679m, result.Lines[0].QtyAllocated);
     }
 
-    private static OpenDeliveryForReassignment OpenDelivery(long id, decimal remaining, DateTime? expiry = null, DateTime? documentDate = null) =>
+    private static OpenDeliveryForReassignment OpenDelivery(int id, decimal remaining, DateTime? expiry = null, DateTime? documentDate = null) =>
         new(id, "MAT001", remaining, expiry, documentDate);
 
     [Fact]

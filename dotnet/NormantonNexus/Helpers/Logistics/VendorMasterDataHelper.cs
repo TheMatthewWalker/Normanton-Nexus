@@ -37,7 +37,7 @@ internal static class VendorMasterDataHelper
         using var connection = await db.CreateConnectionAsync(ct);
         try
         {
-            return await connection.QuerySingleAsync<long>(new CommandDefinition("""
+            return await connection.QuerySingleAsync<int>(new CommandDefinition("""
                 INSERT INTO log.Vendor (VendorName, SapVendorNumber, Currency, Incoterms, OrderMoqQty, OrderMaxQty, OrderMoqUom, DefaultLeadTimeDays, TransitTimeDays, Notes)
                 OUTPUT INSERTED.VendorId
                 VALUES (@VendorName, @SapVendorNumber, @Currency, @Incoterms, @OrderMoqQty, @OrderMaxQty, @OrderMoqUom, @DefaultLeadTimeDays, @TransitTimeDays, @Notes)
@@ -105,7 +105,7 @@ internal static class VendorMasterDataHelper
         using var connection = await db.CreateConnectionAsync(ct);
         try
         {
-            return await connection.QuerySingleAsync<long>(new CommandDefinition("""
+            return await connection.QuerySingleAsync<int>(new CommandDefinition("""
                 INSERT INTO log.VendorMaterial (VendorId, Material, MaterialMoqQty, MaterialMaxQty, LeadTimeDaysOverride, MinSafetyStockQty, ScheduleAgreement, ScheduleAgreementItem, SourceHint)
                 OUTPUT INSERTED.VendorMaterialId
                 VALUES (@vendorId, @Material, @MaterialMoqQty, @MaterialMaxQty, @LeadTimeDaysOverride, @MinSafetyStockQty, @ScheduleAgreement, @ScheduleAgreementItem, @SourceHint)
@@ -146,7 +146,7 @@ internal static class VendorMasterDataHelper
         var rows = await connection.QueryAsync<DemandAdjustmentRow>(new CommandDefinition("""
             SELECT
               d.AdjustmentId, d.Material, d.StartDate, d.EndDate, d.UsagePercent, d.Reason,
-              d.CreatedBy, d.CreatedAtUtc, d.UpdatedAtUtc, t.MaterialText
+              d.CreatedBy, d.CreatedAtUtc, d.UpdatedAtUtc, t.MaterialText, d.OverrideQty
             FROM log.DemandAdjustment d
             LEFT JOIN log.TurnsValClassSnapshot t ON t.Material = d.Material
             ORDER BY d.Material, d.StartDate
@@ -164,7 +164,7 @@ internal static class VendorMasterDataHelper
         var whereSql = materials is { Count: > 0 } ? "WHERE Material IN @materials" : "";
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<DemandAdjustmentRow>(new CommandDefinition($"""
-            SELECT AdjustmentId, Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy, CreatedAtUtc, UpdatedAtUtc, NULL AS MaterialText
+            SELECT AdjustmentId, Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy, CreatedAtUtc, UpdatedAtUtc, CAST(NULL AS NVARCHAR(40)) AS MaterialText, OverrideQty
             FROM log.DemandAdjustment
             {whereSql}
             ORDER BY Material, StartDate
@@ -181,11 +181,11 @@ internal static class VendorMasterDataHelper
         if (overlap is not null)
             throw new NexusValidationException($"This material already has an adjustment covering {FormatAdjustmentRange(overlap)} — edit or delete that one instead of creating an overlapping second adjustment.");
 
-        return await connection.QuerySingleAsync<long>(new CommandDefinition("""
-            INSERT INTO log.DemandAdjustment (Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy)
+        return await connection.QuerySingleAsync<int>(new CommandDefinition("""
+            INSERT INTO log.DemandAdjustment (Material, StartDate, EndDate, UsagePercent, Reason, CreatedBy, OverrideQty)
             OUTPUT INSERTED.AdjustmentId
-            VALUES (@Material, @StartDate, @EndDate, @UsagePercent, @Reason, @createdBy)
-            """, new { body.Material, body.StartDate, body.EndDate, body.UsagePercent, body.Reason, createdBy }, cancellationToken: ct));
+            VALUES (@Material, @StartDate, @EndDate, @UsagePercent, @Reason, @createdBy, @OverrideQty)
+            """, new { body.Material, body.StartDate, body.EndDate, UsagePercent = body.UsagePercent ?? 100m, body.Reason, createdBy, body.OverrideQty }, cancellationToken: ct));
     }
 
     internal static async Task UpdateDemandAdjustmentAsync(INexusOperationsDb db, long adjustmentId, UpsertDemandAdjustmentRequest body, CancellationToken ct)
@@ -200,9 +200,9 @@ internal static class VendorMasterDataHelper
         await connection.ExecuteAsync(new CommandDefinition("""
             UPDATE log.DemandAdjustment SET
               Material = @Material, StartDate = @StartDate, EndDate = @EndDate,
-              UsagePercent = @UsagePercent, Reason = @Reason, UpdatedAtUtc = GETUTCDATE()
+              UsagePercent = @UsagePercent, Reason = @Reason, OverrideQty = @OverrideQty, UpdatedAtUtc = GETUTCDATE()
             WHERE AdjustmentId = @adjustmentId
-            """, new { adjustmentId, body.Material, body.StartDate, body.EndDate, body.UsagePercent, body.Reason }, cancellationToken: ct));
+            """, new { adjustmentId, body.Material, body.StartDate, body.EndDate, UsagePercent = body.UsagePercent ?? 100m, body.Reason, body.OverrideQty }, cancellationToken: ct));
     }
 
     internal static async Task DeleteDemandAdjustmentAsync(INexusOperationsDb db, long adjustmentId, CancellationToken ct)
@@ -211,10 +211,28 @@ internal static class VendorMasterDataHelper
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM log.DemandAdjustment WHERE AdjustmentId = @adjustmentId", new { adjustmentId }, cancellationToken: ct));
     }
 
+    /// <summary>
+    /// Two mutually-exclusive planning modes per window: a percentage scale of the material's normal
+    /// predicted usage (UsagePercent — the original, Node-ported behavior), or a fixed total quantity
+    /// to plan for across the whole window (OverrideQty — a deliberate enhancement beyond Node, see
+    /// DemandAdjustmentRow's own doc comment). OverrideQty wins when both happen to be present, since
+    /// UsagePercent's own DB column is NOT NULL and always carries a value (defaulted to 100 above when
+    /// the caller is really in override mode and never sent one).
+    /// </summary>
     private static void ValidateDemandAdjustment(UpsertDemandAdjustmentRequest body)
     {
         if (string.IsNullOrWhiteSpace(body.Material)) throw new NexusValidationException("material is required.");
-        if (body.UsagePercent is null || body.UsagePercent < 0) throw new NexusValidationException("usagePercent is required and cannot be negative.");
+        if (body.OverrideQty is not null)
+        {
+            if (body.OverrideQty < 0) throw new NexusValidationException("overrideQty cannot be negative.");
+            if (body.StartDate is null || body.EndDate is null)
+                throw new NexusValidationException("A manual override quantity needs both a start and end date — it's a total to plan across a specific window, which is meaningless without one.");
+            if (body.EndDate < body.StartDate) throw new NexusValidationException("endDate cannot be before startDate.");
+        }
+        else if (body.UsagePercent is null || body.UsagePercent < 0)
+        {
+            throw new NexusValidationException("usagePercent is required and cannot be negative (or provide overrideQty instead for a fixed total quantity).");
+        }
     }
 
     /// <summary>

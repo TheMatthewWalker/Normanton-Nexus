@@ -52,7 +52,7 @@
     });
     el.querySelectorAll("button[data-delete]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!confirm(`Delete permission ${btn.dataset.delete}? This also removes it from every user/group holding it.`)) return;
+        if (!(await NexusModal.confirm(`Delete permission ${btn.dataset.delete}? This also removes it from every user/group holding it.`, { danger: true, confirmLabel: "Delete" }))) return;
         try {
           await api(`/permissions/${encodeURIComponent(btn.dataset.delete)}`, { method: "DELETE" });
           await load();

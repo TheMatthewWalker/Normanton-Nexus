@@ -33,7 +33,7 @@ internal static class InboundShipmentHelper
         [".pdf", ".jpg", ".jpeg", ".png", ".docx", ".doc", ".xlsx", ".xls", ".msg", ".eml", ".txt", ".csv"];
 
     private sealed record ShipmentDetailHeaderRow(
-        long ShipmentId, string ShipmentReference, DateTime? DispatchDate, DateTime? ExpectedEta,
+        int ShipmentId, string ShipmentReference, DateTime? DispatchDate, DateTime? ExpectedEta,
         string? Haulier, long? ForwarderId, string? ModeOfTransport, string? TrackingNumber, string? BillOfLading, string? ContainerNumber,
         string? Notes, DateTime? ReceivedAtUtc, string? ReceivedBy, DateTime? CancelledAtUtc, string? CancelledBy,
         DateTime CreatedAtUtc, DateTime UpdatedAtUtc, bool IsManual, long? OriginDestinationId, string? OriginName);
@@ -78,7 +78,10 @@ internal static class InboundShipmentHelper
         using var connection = await db.CreateConnectionAsync(ct);
         var resolvedName = await ResolveForwarderNameAsync(connection, body.ForwarderId, ct);
 
-        var shipmentId = await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        // ShipmentId is int, matching log.PurchaseOrderShipment.ShipmentId's real column type — a
+        // QuerySingleAsync<long> here throws Dapper's strict-materialization InvalidOperationException
+        // regardless of row content, purely from the int/bigint column-type mismatch.
+        var shipmentId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.PurchaseOrderShipment
               (DispatchDate, ExpectedEta, Haulier, ForwarderID, ModeOfTransport, TrackingNumber, BillOfLading, ContainerNumber, Notes)
             OUTPUT INSERTED.ShipmentId
@@ -118,7 +121,7 @@ internal static class InboundShipmentHelper
                 "SELECT destinationName FROM log.Destinations WHERE destinationID = @destinationId", new { destinationId = body.OriginDestinationId }, cancellationToken: ct));
         }
 
-        var shipmentId = await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        var shipmentId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.PurchaseOrderShipment
               (DispatchDate, ExpectedEta, Haulier, ForwarderID, ModeOfTransport, TrackingNumber, Notes, IsManual, OriginDestinationID, OriginName)
             OUTPUT INSERTED.ShipmentId
@@ -293,7 +296,7 @@ internal static class InboundShipmentHelper
     // against a valid JWT only), unlike Create PO in SAP's per-user-elevated session — see
     // SapServer's PurchasingController.PostGoodsReceipt/ReverseGoodsReceipt.
 
-    internal sealed record ReceivableOrderRow(long SuggestionId, string Material, decimal OrderQty, string? PoNumber, string? PoItemNumber, string? SupplierReference, string? OrderMoqUom, string? MaterialUom);
+    internal sealed record ReceivableOrderRow(int SuggestionId, string Material, decimal OrderQty, string? PoNumber, string? PoItemNumber, string? SupplierReference, string? OrderMoqUom, string? MaterialUom);
 
     /// <summary>
     /// Only attempted for a line with a real SAP PO on file — a manually-entered order line with
@@ -454,7 +457,7 @@ internal static class InboundShipmentHelper
         if (shipment.Value.ReceivedAtUtc is null) throw new NexusValidationException("This shipment has not been marked received.");
         if (shipment.Value.CancelledAtUtc is not null) throw new NexusValidationException("This shipment has been cancelled — its orders were already unlinked, so there is nothing to undo here.");
 
-        var orders = await connection.QueryAsync<(long SuggestionId, string Material, string? SapMaterialDocument)>(new CommandDefinition(
+        var orders = await connection.QueryAsync<(int SuggestionId, string Material, string? SapMaterialDocument)>(new CommandDefinition(
             "SELECT SuggestionId, Material, SapMaterialDocument FROM log.PurchaseOrderSuggestion WHERE ShipmentId = @shipmentId AND Status IN ('Booked', 'Received')",
             new { shipmentId }, cancellationToken: ct));
 

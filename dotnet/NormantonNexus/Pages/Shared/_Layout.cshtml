@@ -1,9 +1,17 @@
+@using NormantonNexus.Services.UI
+@{
+    var dept = ViewData["Department"] as string;
+    var isHub = dept == "Normanton Nexus";
+    var theme = DepartmentTheme.For(dept);
+}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@ViewData["Title"] — Normanton Nexus</title>
+    <link rel="icon" href="~/images/logo16.png" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" />
 
     <!-- Must be the first script, non-deferred, non-module — see wwwroot/js/shared/session-guard.js's own
          comments (ported from private/js/session-guard.js, same load-order requirement in the Node app). -->
@@ -15,14 +23,64 @@
          first, since Scripts always renders after this block. -->
     <script src="~/js/shared/api-helpers.js"></script>
 
+    <!-- Shared table-pagination helper (window.NexusTable) — see that file's
+         own comment. Opt-in: a page only sees pagination once it's rewritten
+         to call NexusTable.paginate(...) around its own row-rendering code;
+         loading it here just makes it available everywhere, same convention
+         as api-helpers.js above. -->
+    <script src="~/js/shared/table-helpers.js"></script>
+
+    <!-- Shared modal shell / confirm+alert dialog (window.NexusModal) — see
+         that file's own comment. Loaded on every page so the mechanical
+         native-confirm()-replacement sweep and any future modal usage can
+         assume it's always present. -->
+    <script src="~/js/shared/modal.js"></script>
+
+    <!-- Self-mounting notification bell (injects itself into .header-right)
+         — see that file's own comment. -->
+    <script src="~/js/shared/notifications.js"></script>
+
+    <!-- Self-mounting "My Account" button + modal (password change + SAP
+         credentials self-service) — see that file's own comment. -->
+    <script src="~/js/shared/account.js"></script>
+
     <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+
+    @if (theme is not null)
+    {
+        <!-- Per-department accent override — see Services/UI/DepartmentTheme.cs.
+             Scoped to :root so every shared component (tiles, buttons, the
+             page-title-bar's glow) on this page picks it up automatically. -->
+        <style>
+            :root {
+                --accent: @theme.Accent;
+                --accent2: @theme.Accent2;
+                --accent-dim: @theme.AccentDim;
+                --dept-glow: @(theme.Accent)33;
+            }
+        </style>
+    }
 </head>
 <body>
     <header class="header">
         <div class="header-left">
-            <a href="~/" class="back-link">&larr; Hub</a>
-            <div class="brand-sep"></div>
-            <span class="brand-name">@ViewData["Department"]</span>
+            @if (isHub)
+            {
+                <div class="brand-icon"><img src="~/images/logo32.png" alt="Kongsberg" /></div>
+                <span class="brand-name">Normanton Nexus</span>
+                <div class="brand-sep"></div>
+                <span class="brand-module">Enterprise Portal</span>
+            }
+            else
+            {
+                <a href="~/" class="back-link">&larr; Hub</a>
+                <div class="brand-sep"></div>
+                @if (theme is not null)
+                {
+                    <div class="dept-badge">@Html.Raw($"<svg viewBox=\"0 0 24 24\" fill=\"none\">{theme.IconSvg}</svg>")</div>
+                }
+                <span class="brand-name">@dept</span>
+            }
         </div>
         <div class="header-right">
             <div class="user-badge">
@@ -33,15 +91,28 @@
         </div>
     </header>
 
-    <div class="page-title-bar">
-        <div class="page-title-inner">
-            <h1 class="page-title">@ViewData["PageTitle"]</h1>
-            @if (ViewData["PageSubtitle"] is string subtitle)
-            {
-                <p class="page-subtitle">@subtitle</p>
-            }
+    @if (isHub)
+    {
+        <section class="hub-hero">
+            <div class="hub-hero-inner">
+                <div class="hub-eyebrow">Operations Overview &middot; Normanton Plant</div>
+                <h1 class="hub-title">Good day, @(User.Identity?.Name ?? "operator").</h1>
+                <p class="hub-sub">Normanton Nexus &mdash; unified operations portal. Select your area below.</p>
+            </div>
+        </section>
+    }
+    else
+    {
+        <div class="page-title-bar">
+            <div class="page-title-inner">
+                <h1 class="page-title">@ViewData["PageTitle"]</h1>
+                @if (ViewData["PageSubtitle"] is string subtitle)
+                {
+                    <p class="page-subtitle">@subtitle</p>
+                }
+            </div>
         </div>
-    </div>
+    }
 
     <main class="page-content">
         @RenderBody()

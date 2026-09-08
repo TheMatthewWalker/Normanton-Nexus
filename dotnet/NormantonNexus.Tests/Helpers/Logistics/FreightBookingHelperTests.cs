@@ -8,7 +8,7 @@ public class FreightBookingHelperTests
 {
     // ── MapPalletsToCargoItems ─────────────────────────────────────────
 
-    private static ShipmentContextPalletRow Pallet(long id, string? type = "Standard", decimal grossWeight = 100m, decimal volume = 1.2m, int? length = 120, int? width = 100, int? height = 150) =>
+    private static ShipmentContextPalletRow Pallet(int id, string? type = "Standard", decimal grossWeight = 100m, decimal volume = 1.2m, int? length = 120, int? width = 100, int? height = 150) =>
         new(DeliveryId: 1, PalletId: id, PalletType: type, PalletFinish: false, PackagingWeight: 10m, GrossWeight: grossWeight, PalletVolume: volume,
             PalletLength: length, PalletWidth: width, PalletHeight: height, PalletLocation: "A1");
 

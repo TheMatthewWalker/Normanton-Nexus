@@ -6,13 +6,14 @@ namespace NormantonNexus.Models.Dto;
 // shipmentID there) — posting to SAP happens through that same shared flow
 // (POST /api/shipmentcost/post-migo), not a separate route here.
 
+/// <summary>PoShipmentId is int, matching log.ShipmentCost.poShipmentID's real column type — CostId stays long (that column is genuinely bigint).</summary>
 public sealed record InboundCostLineRow(
-    long CostId, long PoShipmentId, string? CostElement, string? CostCenter, string? CostType,
+    long CostId, int PoShipmentId, string? CostElement, string? CostCenter, string? CostType,
     decimal ExpectedCost, decimal? ActualCost, bool MigoStatus, string? MaterialDocument, string? ModeOfTransport,
     string? ElementDescription, string? Tier);
 
 /// <summary>Body for POST / — costType is required here (the deliberate, full-context "Add Cost" entry point); costCenter is only honored when the target shipment IsManual.</summary>
-public sealed record AddInboundCostLineRequest(long? PoShipmentId, string? Tier, decimal? Amount, string? CostType, string? Information, string? ModeOfTransport, string? CostCenter);
+public sealed record AddInboundCostLineRequest(int? PoShipmentId, string? Tier, decimal? Amount, string? CostType, string? Information, string? ModeOfTransport, string? CostCenter);
 
 public sealed record AddInboundCostLineResult(long CostId, string ElementCode, bool ForwarderSet);
 
