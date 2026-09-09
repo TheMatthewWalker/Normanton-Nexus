@@ -11,3 +11,11 @@ public sealed record GroupMember(int UserId, string Username);
 public sealed record PermissionOption(string PermissionCode, string PermissionName, string Category);
 
 public sealed record UserOption(int UserId, string Username);
+
+public sealed record CreatePermissionGroupRequest(string GroupName, string? Description);
+
+public sealed record UpdatePermissionGroupRequest(string GroupName, string? Description);
+
+public sealed record SetGroupPermissionsRequest(List<string> PermissionCodes);
+
+public sealed record AssignGroupToUsersRequest(List<int> UserIds);

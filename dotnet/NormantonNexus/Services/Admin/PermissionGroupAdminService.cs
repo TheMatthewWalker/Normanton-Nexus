@@ -4,23 +4,28 @@ using NormantonNexus.Services.Sql;
 namespace NormantonNexus.Services.Admin;
 
 /// <summary>
-/// Minimal permission-group management — enough for an admin to create a
-/// group, assign tile permissions to it, and assign the group to users
-/// while department phases 2-8 are being built and need somewhere to grant
-/// their new per-tile codes. This is NOT the full Phase 9 admin UI (group
-/// list/create/edit/delete with a proper permission-checkbox grid,
-/// bulk-assign-to-users, folded into the existing bulk-apply/audit-log
-/// screens) — see the migration plan's "Authorization model" section for
-/// what Phase 9 adds on top of this.
+/// Permission-group management — full CRUD (create/edit/delete groups),
+/// a checkbox-grid-style bulk permission set (SetGroupPermissionsAsync),
+/// and bulk-assign-to-users. Originally built minimal in Phase 1 (create +
+/// one-row-at-a-time add/remove) purely so department phases 2-8 had
+/// somewhere to grant their new per-tile codes while being built; extended
+/// to the full shape here as part of the shared-component-library sweep
+/// once every department's own per-tile permission split had landed.
 /// </summary>
 public interface IPermissionGroupAdminService
 {
     Task<IReadOnlyList<PermissionGroupSummary>> ListGroupsAsync(CancellationToken ct = default);
     Task<PermissionGroupDetail?> GetGroupAsync(int groupId, CancellationToken ct = default);
     Task<int> CreateGroupAsync(string groupName, string? description, string? createdBy, CancellationToken ct = default);
+    Task UpdateGroupAsync(int groupId, string groupName, string? description, CancellationToken ct = default);
+    Task DeleteGroupAsync(int groupId, CancellationToken ct = default);
     Task AddPermissionToGroupAsync(int groupId, string permissionCode, CancellationToken ct = default);
     Task RemovePermissionFromGroupAsync(int groupId, string permissionCode, CancellationToken ct = default);
+    /// <summary>Replaces the group's full permission set in one call — the checkbox-grid save. Diffs against the current set so only the changed rows are added/removed.</summary>
+    Task SetGroupPermissionsAsync(int groupId, IReadOnlyList<string> permissionCodes, CancellationToken ct = default);
     Task AssignGroupToUserAsync(int userId, int groupId, int? grantedByUserId, CancellationToken ct = default);
+    /// <summary>Bulk-assign the group to several users at once — each already-a-member user is silently skipped, matching AssignGroupToUserAsync's own idempotent IF NOT EXISTS guard.</summary>
+    Task<int> AssignGroupToUsersAsync(int groupId, IReadOnlyList<int> userIds, int? grantedByUserId, CancellationToken ct = default);
     Task RemoveGroupFromUserAsync(int userId, int groupId, CancellationToken ct = default);
     Task<IReadOnlyList<PermissionOption>> ListAllPermissionsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<UserOption>> ListAllUsersAsync(CancellationToken ct = default);
@@ -81,6 +86,64 @@ internal sealed class PermissionGroupAdminService(INexusDb db) : IPermissionGrou
         using var connection = await db.CreateConnectionAsync(ct);
         return await connection.QuerySingleAsync<int>(new CommandDefinition(
             sql, new { groupName, description, createdBy }, cancellationToken: ct));
+    }
+
+    public async Task UpdateGroupAsync(int groupId, string groupName, string? description, CancellationToken ct = default)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE dbo.PortalPermissionGroups SET GroupName = @groupName, Description = @description WHERE GroupID = @groupId",
+            new { groupId, groupName, description }, cancellationToken: ct));
+    }
+
+    /// <summary>Junction rows cascade-delete (ON DELETE CASCADE on both PortalPermissionGroupPermissions and PortalUserPermissionGroups) — one DELETE is enough.</summary>
+    public async Task DeleteGroupAsync(int groupId, CancellationToken ct = default)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM dbo.PortalPermissionGroups WHERE GroupID = @groupId", new { groupId }, cancellationToken: ct));
+    }
+
+    public async Task SetGroupPermissionsAsync(int groupId, IReadOnlyList<string> permissionCodes, CancellationToken ct = default)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var current = (await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT PermissionCode FROM dbo.PortalPermissionGroupPermissions WHERE GroupID = @groupId",
+            new { groupId }, cancellationToken: ct))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var desired = permissionCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var toAdd = desired.Except(current, StringComparer.OrdinalIgnoreCase).ToArray();
+        var toRemove = current.Except(desired, StringComparer.OrdinalIgnoreCase).ToArray();
+
+        foreach (var code in toAdd)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO dbo.PortalPermissionGroupPermissions (GroupID, PermissionCode) VALUES (@groupId, @code)",
+                new { groupId, code }, cancellationToken: ct));
+        }
+        if (toRemove.Length > 0)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM dbo.PortalPermissionGroupPermissions WHERE GroupID = @groupId AND PermissionCode IN @toRemove",
+                new { groupId, toRemove }, cancellationToken: ct));
+        }
+    }
+
+    public async Task<int> AssignGroupToUsersAsync(int groupId, IReadOnlyList<int> userIds, int? grantedByUserId, CancellationToken ct = default)
+    {
+        var assigned = 0;
+        using var connection = await db.CreateConnectionAsync(ct);
+        foreach (var userId in userIds.Distinct())
+        {
+            var affected = await connection.ExecuteAsync(new CommandDefinition("""
+                IF NOT EXISTS (SELECT 1 FROM dbo.PortalUserPermissionGroups WHERE UserID = @userId AND GroupID = @groupId)
+                    INSERT INTO dbo.PortalUserPermissionGroups (UserID, GroupID, GrantedByUserID, GrantedAt)
+                    VALUES (@userId, @groupId, @grantedByUserId, GETDATE())
+                """, new { userId, groupId, grantedByUserId }, cancellationToken: ct));
+            assigned += affected;
+        }
+        return assigned;
     }
 
     public async Task AddPermissionToGroupAsync(int groupId, string permissionCode, CancellationToken ct = default)

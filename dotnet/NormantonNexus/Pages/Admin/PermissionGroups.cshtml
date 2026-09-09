@@ -2,43 +2,21 @@
 @model NormantonNexus.Pages.Admin.PermissionGroupsModel
 @{
     ViewData["Title"] = "Permission Groups";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Permission Groups";
+    ViewData["PageSubtitle"] = "Bundle tile permissions into a named, reusable group and assign the whole group to users at once";
 }
 
-<h1>Permission Groups</h1>
-<p>Bundle tile permissions into a named, reusable group and assign the whole group to a user instead of granting codes one at a time.</p>
+<p><a asp-page="Index">&larr; Admin</a></p>
 
-<table>
-    <thead>
-        <tr>
-            <th>Group</th>
-            <th>Description</th>
-            <th>Permissions</th>
-            <th>Members</th>
-            <th></th>
-        </tr>
-    </thead>
-    <tbody>
-        @foreach (var group in Model.Groups)
-        {
-            <tr>
-                <td>@group.GroupName</td>
-                <td>@group.Description</td>
-                <td>@group.PermissionCount</td>
-                <td>@group.MemberCount</td>
-                <td><a asp-page="PermissionGroupDetail" asp-route-groupId="@group.GroupId">Manage</a></td>
-            </tr>
-        }
-    </tbody>
-</table>
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-title" id="pg-hint">Loading…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="pg-create-btn">+ New Group</button>
+</div>
 
-<h2>Create group</h2>
-<form method="post" asp-page-handler="Create">
-    <label for="NewGroupName">Name</label>
-    <input type="text" id="NewGroupName" asp-for="NewGroupName" required />
+<div id="pg-body">Loading…</div>
 
-    <label for="NewGroupDescription">Description</label>
-    <input type="text" id="NewGroupDescription" asp-for="NewGroupDescription" />
-
-    <button type="submit">Create</button>
-</form>
-<span asp-validation-for="NewGroupName"></span>
+@section Scripts {
+    <script src="~/js/admin/permission-groups.js"></script>
+}
