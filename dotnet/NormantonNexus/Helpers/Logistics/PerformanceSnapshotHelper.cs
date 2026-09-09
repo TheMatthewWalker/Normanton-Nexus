@@ -127,15 +127,36 @@ internal static class PerformanceSnapshotHelper
             new("DeliveryDate", r => r.DeliveryDate),
             new("DeliveryQty", r => r.DeliveryQty),
             new("Uom", r => r.Uom, 3),
-            new("TargetDate", r => r.TargetDate),
+            // SAP sends an explicit 0001-01-01 (not a missing/null JSON field) for a line with
+            // no committed target date yet — confirmed live via a diagnostic dump (tgtNullCount
+            // was 0, tgtMin was 0001-01-01) after the nullable-DateTime? change alone didn't fix
+            // the "SqlDateTime overflow" failure. NullIfSapDateSentinel maps that to a real null.
+            new("TargetDate", r => NullIfSapDateSentinel(r.TargetDate), SqlType: System.Data.DbType.DateTime),
             new("TargetQty", r => r.TargetQty),
             new("QtyClass", r => r.QtyClass, 4),
             new("DateClass", r => r.DateClass, 4),
             new("OnTime", r => r.OnTime),
             new("ValueStream", r => r.ValueStream, 8),
         ];
-        return SnapshotTableWriter.ReplaceAsync(connection, "log.OtifSnapshot", columns, rows.Where(r => r.ValueStream is not null).ToList(), ct);
+        // log.OtifSnapshot.DeliveryDate is NOT NULL, and OTIF (on-time-in-full) is meaningless
+        // for a line with no real delivery date anyway — some SAP rows come back with the field
+        // simply absent from the JSON, which System.Text.Json defaults to DateTime.MinValue
+        // (0001-01-01) rather than throwing; writing that to a `datetime` column throws a real,
+        // confirmed-live "SqlDateTime overflow" (SQL Server's datetime floor is 1753-01-01),
+        // failing the whole batch for every other, otherwise-good row in it.
+        return SnapshotTableWriter.ReplaceAsync(connection, "log.OtifSnapshot", columns,
+            rows.Where(r => r.ValueStream is not null && r.DeliveryDate >= MinSqlDateTime).ToList(), ct);
     }
+
+    private static readonly DateTime MinSqlDateTime = new(1753, 1, 1);
+
+    /// <summary>SAP's own convention for "no date" on several optional date fields is an explicit
+    /// 0001-01-01 (or, at the C# deserialization layer, an absent JSON property defaulting the
+    /// same way) rather than a JSON null — either way it's an out-of-SQL-range `DateTime` value,
+    /// not a value that should ever reach a `datetime` column. Confirmed live via a diagnostic
+    /// dump on OtifSnapshot.TargetDate (0 nulls, but a real min of 0001-01-01) after making the
+    /// field itself nullable alone didn't stop the "SqlDateTime overflow" failure.</summary>
+    private static DateTime? NullIfSapDateSentinel(DateTime? value) => value is null or { Year: 1 } ? null : value;
 
     // ── MM Turns / Valuation Class ────────────────────────────────────────
 
@@ -179,7 +200,7 @@ internal static class PerformanceSnapshotHelper
             new("Material", r => r.Material, 18),
             new("Plant", r => r.Plant, 4),
             new("MaterialText", r => r.MaterialText, 40),
-            new("CreatedDate", r => r.CreatedDate),
+            new("CreatedDate", r => NullIfSapDateSentinel(r.CreatedDate)),
             new("MaterialType", r => r.MaterialType, 4),
             new("Uom", r => r.Uom, 3),
             new("ProfitCentre", r => r.ProfitCentre, 10),
@@ -230,10 +251,14 @@ internal static class PerformanceSnapshotHelper
 
         columns.AddRange(
         [
-            new("LastReceiptDate", r => r.LastReceiptDate),
-            new("LastGoodsIssueDate", r => r.LastGoodsIssueDate),
-            new("LastConsumptionDate", r => r.LastConsumptionDate),
-            new("LastGoodsMovementDate", r => r.LastGoodsMovementDate),
+            // NullIfSapDateSentinel guards the same "SAP sends an explicit 0001-01-01 for a
+            // genuinely missing optional date, not a JSON null" behavior confirmed live for
+            // Otif's TargetDate above — these four are exactly as optional (a material that's
+            // never moved has no last-receipt/issue/consumption/movement date at all).
+            new("LastReceiptDate", r => NullIfSapDateSentinel(r.LastReceiptDate)),
+            new("LastGoodsIssueDate", r => NullIfSapDateSentinel(r.LastGoodsIssueDate)),
+            new("LastConsumptionDate", r => NullIfSapDateSentinel(r.LastConsumptionDate)),
+            new("LastGoodsMovementDate", r => NullIfSapDateSentinel(r.LastGoodsMovementDate)),
             new("StockTurns", r => r.StockTurns),
             new("DaysInStock", r => r.DaysInStock),
             new("DailyRequirementValue", r => r.DailyRequirementValue),
@@ -450,6 +475,9 @@ internal static class PerformanceSnapshotHelper
 
         foreach (var row in rows)
         {
+            // Dapper refuses a ValueTuple instance as the parameters object directly ("ValueTuple
+            // should not be used for parameters" — confirmed live, every Invoicing refresh was
+            // failing here) — pass an anonymous object with the same named fields instead.
             await connection.ExecuteAsync(new CommandDefinition("""
                 IF EXISTS (SELECT 1 FROM log.DailyPerformance WHERE MetricDate = @MetricDate AND ValueStream = @ValueStream)
                   UPDATE log.DailyPerformance SET InvoicedValue = @InvoicedValue
@@ -457,7 +485,7 @@ internal static class PerformanceSnapshotHelper
                 ELSE
                   INSERT INTO log.DailyPerformance (MetricDate, ValueStream, InvoicedValue)
                   VALUES (@MetricDate, @ValueStream, @InvoicedValue)
-                """, row, cancellationToken: ct));
+                """, new { row.MetricDate, row.ValueStream, row.InvoicedValue }, cancellationToken: ct));
         }
     }
 
@@ -475,6 +503,7 @@ internal static class PerformanceSnapshotHelper
 
         foreach (var row in rows)
         {
+            // Same ValueTuple-as-parameters fix as RecomputeDailyInvoicedAsync above.
             await connection.ExecuteAsync(new CommandDefinition("""
                 IF EXISTS (SELECT 1 FROM log.DailyPerformance WHERE MetricDate = @MetricDate AND ValueStream = @ValueStream)
                   UPDATE log.DailyPerformance
@@ -483,7 +512,7 @@ internal static class PerformanceSnapshotHelper
                 ELSE
                   INSERT INTO log.DailyPerformance (MetricDate, ValueStream, OtifOnTimeCount, OtifTotalCount)
                   VALUES (@MetricDate, @ValueStream, @OtifOnTimeCount, @OtifTotalCount)
-                """, row, cancellationToken: ct));
+                """, new { row.MetricDate, row.ValueStream, row.OtifOnTimeCount, row.OtifTotalCount }, cancellationToken: ct));
         }
     }
 

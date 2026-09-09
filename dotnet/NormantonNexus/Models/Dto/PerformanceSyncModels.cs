@@ -111,7 +111,12 @@ public sealed class SapOtifRow
     public DateTime DeliveryDate { get; init; }
     public decimal DeliveryQty { get; init; }
     public string? Uom { get; init; }
-    public DateTime TargetDate { get; init; }
+    // Nullable — log.OtifSnapshot.TargetDate is a nullable column, and a delivery with no
+    // committed target date yet is real, expected SAP data, not missing data. A non-nullable
+    // DateTime here deserialized a missing JSON value as DateTime.MinValue (0001-01-01), which
+    // SQL Server's datetime type can't represent at all — confirmed live: "SqlDateTime overflow"
+    // failed the Otif dataset on every refresh.
+    public DateTime? TargetDate { get; init; }
     public decimal TargetQty { get; init; }
     public string? QtyClass { get; init; }
     public string? DateClass { get; init; }

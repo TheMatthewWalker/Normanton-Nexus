@@ -18,7 +18,18 @@ namespace NormantonNexus.Helpers.Logistics;
 /// </summary>
 internal static class SnapshotTableWriter
 {
-    internal sealed record Column<T>(string Name, Func<T, object?> Value, int? MaxLen = null);
+    /// <summary>
+    /// SqlType should be set for any column whose Value selector can return a boxed null for
+    /// SOME rows and a real value for others within the same batch — a boxed `(object?)null`
+    /// from a nullable value type (e.g. `DateTime?`) carries no CLR type information at all, so
+    /// Dapper/SqlClient can't infer a SqlDbType for that parameter. In a batch's UNION-ALL-SELECT
+    /// staging query, an untyped NULL parameter next to a properly-typed DateTime parameter for
+    /// the same column can make SQL Server resolve the whole UNION branch's type incorrectly,
+    /// confirmed live as a real "SqlDateTime overflow" on every batch mixing a null and a real
+    /// OtifSnapshot.TargetDate. Columns whose value is never actually null (or always null) in
+    /// practice have not shown this failure and don't need it set.
+    /// </summary>
+    internal sealed record Column<T>(string Name, Func<T, object?> Value, int? MaxLen = null, DbType? SqlType = null);
 
     /// <summary>TRUNCATE TABLE then batched positional INSERT — for "latest pull replaces everything" snapshot tables (StockSnapshot, AgreementSnapshot, InvoiceSnapshot, OtifSnapshot, TurnsValClassSnapshot, ValuationClassCatalog).</summary>
     internal static async Task ReplaceAsync<T>(IDbConnection connection, string tableName, IReadOnlyList<Column<T>> columns, IReadOnlyList<T> rows, CancellationToken ct)
@@ -42,7 +53,7 @@ internal static class SnapshotTableWriter
                 {
                     var col = columns[colIdx];
                     var paramName = $"p{rowIdx}_{colIdx}";
-                    parameters.Add(paramName, Truncate(col.Value(batch[rowIdx]), col.MaxLen));
+                    parameters.Add(paramName, Truncate(col.Value(batch[rowIdx]), col.MaxLen), col.SqlType);
                     parts.Add($"@{paramName}");
                 }
                 selectClauses.Add($"SELECT {string.Join(", ", parts)}");
@@ -86,7 +97,7 @@ internal static class SnapshotTableWriter
                 {
                     var col = allColumns[colIdx];
                     var paramName = $"{paramPrefix}{rowIdx}_{colIdx}";
-                    parameters.Add(paramName, Truncate(col.Value(batch[rowIdx]), col.MaxLen));
+                    parameters.Add(paramName, Truncate(col.Value(batch[rowIdx]), col.MaxLen), col.SqlType);
                     parts.Add($"@{paramName} AS [{col.Name}]");
                 }
                 selectClauses.Add($"SELECT {string.Join(", ", parts)}");
