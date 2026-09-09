@@ -43,10 +43,13 @@ internal static class ShipmentHelper
                 sm.plannedCollection AS PlannedCollection, sm.actualCollection AS ActualCollection,
                 CAST(ISNULL(sm.collectionStatus, 0) AS bit) AS CollectionStatus,
                 sm.forwarderID AS ForwarderId, sm.trackingNumber AS TrackingNumber, sm.incoTerms AS IncoTerms,
-                sm.customsRequired AS CustomsRequired, sm.customsComplete AS CustomsComplete, sm.shipmentCancelled AS ShipmentCancelled,
+                CAST(ISNULL(sm.customsRequired, 0) AS bit) AS CustomsRequired,
+                CAST(ISNULL(sm.customsComplete, 0) AS bit) AS CustomsComplete,
+                CAST(ISNULL(sm.shipmentCancelled, 0) AS bit) AS ShipmentCancelled,
                 sm.PlannedDelivery AS PlannedDelivery, sm.ActualDelivery AS ActualDelivery,
                 CAST(ISNULL(sm.deliveryStatus, 0) AS bit) AS DeliveryStatus,
-                sm.bookingStatus AS BookingStatus, sm.customsID AS CustomsId, sm.IsManual AS IsManual,
+                CAST(ISNULL(sm.bookingStatus, 0) AS bit) AS BookingStatus,
+                sm.customsID AS CustomsId, sm.IsManual AS IsManual,
                 fa.forwarderName AS ForwarderName, fa.forwarderMode AS ForwarderMode,
                 CASE WHEN ISNULL(sm.plannedDelivery, '1900-01-01') > '1900-01-01' THEN sm.plannedDelivery ELSE sm.plannedCollection END AS PlannedMovement
             FROM log.ShipmentMain sm

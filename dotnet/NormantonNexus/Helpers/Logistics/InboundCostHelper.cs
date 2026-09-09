@@ -29,7 +29,7 @@ internal static class InboundCostHelper
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<InboundCostLineRow>(new CommandDefinition("""
             SELECT sc.costID AS CostId, sc.poShipmentID AS PoShipmentId, sc.costElement AS CostElement, sc.costCenter AS CostCenter, sc.costType AS CostType,
-                   sc.expectedCost AS ExpectedCost, sc.actualCost AS ActualCost, sc.migoStatus AS MigoStatus, sc.materialDocument AS MaterialDocument, sc.modeOfTransport AS ModeOfTransport,
+                   sc.expectedCost AS ExpectedCost, sc.actualCost AS ActualCost, CAST(ISNULL(sc.migoStatus, 0) AS bit) AS MigoStatus, sc.materialDocument AS MaterialDocument, sc.modeOfTransport AS ModeOfTransport,
                    ce.elementDescription AS ElementDescription, ce.tier AS Tier
             FROM log.ShipmentCost sc
             LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'inbound'

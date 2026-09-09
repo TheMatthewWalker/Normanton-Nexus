@@ -61,7 +61,7 @@ internal static class ShipmentCostHelper
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<ShipmentCostByShipmentRow>(new CommandDefinition("""
             SELECT sc.costID AS CostId, sc.shipmentID AS ShipmentId, sc.costType AS CostType, sc.costElement AS CostElement, sc.costCenter AS CostCenter,
-                sc.expectedCost AS ExpectedCost, sc.actualCost AS ActualCost, sc.migoStatus AS MigoStatus, sc.materialDocument AS MaterialDocument, sc.modeOfTransport AS ModeOfTransport,
+                sc.expectedCost AS ExpectedCost, sc.actualCost AS ActualCost, CAST(ISNULL(sc.migoStatus, 0) AS bit) AS MigoStatus, sc.materialDocument AS MaterialDocument, sc.modeOfTransport AS ModeOfTransport,
                 ce.elementDescription AS ElementDescription, ce.tier AS Tier
             FROM log.ShipmentCost sc
             LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'outbound'
@@ -392,7 +392,7 @@ internal static class ShipmentCostHelper
 
     private const string SelectAllColumns = """
         SELECT costID AS CostId, shipmentID AS ShipmentId, poShipmentID AS PoShipmentId, costType AS CostType, costElement AS CostElement, costCenter AS CostCenter,
-            expectedCost AS ExpectedCost, actualCost AS ActualCost, migoStatus AS MigoStatus, materialDocument AS MaterialDocument, modeOfTransport AS ModeOfTransport, purchaseOrder AS PurchaseOrder,
+            expectedCost AS ExpectedCost, actualCost AS ActualCost, CAST(ISNULL(migoStatus, 0) AS bit) AS MigoStatus, materialDocument AS MaterialDocument, modeOfTransport AS ModeOfTransport, purchaseOrder AS PurchaseOrder,
             manualReference AS ManualReference, manualForwarderID AS ManualForwarderId, manualCountry AS ManualCountry, manualPostcode AS ManualPostcode, manualTrackingNumber AS ManualTrackingNumber, manualIncurredDate AS ManualIncurredDate
         """;
 
