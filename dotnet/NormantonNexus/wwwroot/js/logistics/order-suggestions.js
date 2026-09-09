@@ -7,8 +7,10 @@
 // Agreement, and locking Completed/Assigned-to-Shipment rows down to
 // read-only (see renderTrackedRow's own comment).
 //
-// Deliberately NOT ported (flagged, not silently dropped): manual order
-// entry (single + bulk CSV import), inline PO-item editing. Assign Shipment
+// Manual order entry (single + bulk CSV import) now lives in the Tracked
+// Orders toolbar (openManualOrderModal/openBulkImportModal), against the
+// already-built PurchaseOrderSuggestionHelper.ManualAsync/ManualBulkAsync.
+// Deliberately still NOT ported: inline PO-item editing. Assign Shipment
 // only offers existing shipments' Unassign — the full shipment detail page
 // (manual items, invoice upload, Mark Received/Undo Received, regenerate PO
 // PDF) is Inbound Log's own tile.
@@ -741,6 +743,8 @@
         </div>
         <div class="nx-toolbar-spacer"></div>
         <input type="text" id="os-search-input" placeholder="Search by part number or PO…" value="${esc(query || "")}">
+        <button type="button" class="secondary" id="os-add-manual-btn">+ Add Manual Order</button>
+        <button type="button" class="secondary" id="os-bulk-import-btn">Bulk Import (CSV)</button>
         <button type="button" class="secondary" id="os-save-selected-btn" ${selectedTrackedIds.size ? "" : "disabled"}>Save Selected</button>
         <button type="button" class="secondary" id="os-create-shipment-btn" ${selectedTrackedIds.size ? "" : "disabled"}>Create Shipment</button>
         <button type="button" class="btn" id="os-create-po-btn" ${createPoOrAssignScheduleSelectionValid() ? "" : "disabled"}>Create PO / Assign Schedule</button>
@@ -762,6 +766,8 @@
       newInput.setSelectionRange(caret, caret);
     });
 
+    document.getElementById("os-add-manual-btn").addEventListener("click", openManualOrderModal);
+    document.getElementById("os-bulk-import-btn").addEventListener("click", openBulkImportModal);
     document.getElementById("os-save-selected-btn").addEventListener("click", saveSelected);
     document.getElementById("os-create-shipment-btn").addEventListener("click", openCreateShipmentModal);
     document.getElementById("os-create-po-btn").addEventListener("click", handleCreatePoOrAssignSchedule);
@@ -1053,6 +1059,220 @@
       resultEl.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
       btn.disabled = false; btn.textContent = "Create PO";
     }
+  }
+
+  // ── Manual order entry (single + bulk CSV) — records an order that already
+  // exists outside the suggestion engine (e.g. placed by phone, or a legacy
+  // order being brought into tracking). Backend: POST order-suggestions/manual
+  // and .../manual/bulk (PurchaseOrderSuggestionHelper.ManualAsync/ManualBulkAsync).
+
+  const MANUAL_STATUS_OPTIONS = ["Accepted", "Ordered", "Booked", "Received"];
+
+  function openManualOrderModal() {
+    const card = NexusModal.open(`
+      <div class="ps-modal-header">
+        <div><div class="ps-modal-title">Add Manual Order</div><div class="ps-modal-sub">Record an order placed outside the suggestion engine</div></div>
+        <button type="button" class="ps-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="ps-modal-body">
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Vendor</label>
+            <select class="tf-input" id="mo-vendor"><option value="">Loading vendors…</option></select>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Material</label>
+            <select class="tf-input" id="mo-material" disabled><option value="">Select a vendor first</option></select>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Order Qty</label>
+            <input class="tf-input" type="number" step="0.001" min="0" id="mo-qty">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Order Date</label>
+            <input class="tf-input" type="date" id="mo-order-date" value="${todayIso()}">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">Delivery Date</label>
+            <input class="tf-input" type="date" id="mo-delivery-date">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Status</label>
+            <select class="tf-input" id="mo-status">${MANUAL_STATUS_OPTIONS.map((s) => `<option value="${s}">${s}</option>`).join("")}</select>
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field">
+            <label class="tf-label">PO Number</label>
+            <input class="tf-input" type="text" id="mo-po">
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">Supplier Reference</label>
+            <input class="tf-input" type="text" id="mo-supplier-ref">
+          </div>
+        </div>
+        <div class="tf-row">
+          <div class="tf-field tf-field--wide">
+            <label class="tf-label">Notes</label>
+            <input class="tf-input" type="text" id="mo-notes">
+          </div>
+        </div>
+        <div id="mo-result"></div>
+      </div>
+      <div class="ps-modal-actions">
+        <button type="button" class="secondary" id="mo-cancel">Cancel</button>
+        <button type="button" class="btn" id="mo-save-btn">Add Order</button>
+      </div>`);
+
+    card.querySelector(".ps-modal-close").addEventListener("click", () => NexusModal.close());
+    card.querySelector("#mo-cancel").addEventListener("click", () => NexusModal.close());
+
+    const vendorSelect = card.querySelector("#mo-vendor");
+    const materialSelect = card.querySelector("#mo-material");
+
+    api("/vendors").then(({ data }) => {
+      const vendors = (data || []).filter((v) => Number(v.materialCount) > 0);
+      vendorSelect.innerHTML = '<option value="">Select a vendor…</option>' + vendors.map((v) => `<option value="${v.vendorId}">${esc(v.vendorName)}</option>`).join("");
+    }).catch(() => { vendorSelect.innerHTML = '<option value="">Failed to load vendors</option>'; });
+
+    vendorSelect.addEventListener("change", async () => {
+      const vendorId = vendorSelect.value;
+      if (!vendorId) {
+        materialSelect.disabled = true;
+        materialSelect.innerHTML = '<option value="">Select a vendor first</option>';
+        return;
+      }
+      materialSelect.disabled = true;
+      materialSelect.innerHTML = '<option value="">Loading materials…</option>';
+      try {
+        const { data } = await api(`/vendors/${vendorId}/materials`);
+        const materials = data || [];
+        materialSelect.innerHTML = materials.length
+          ? '<option value="">Select a material…</option>' + materials.map((m) => `<option value="${m.vendorMaterialId}">${esc(m.material)}${m.materialText ? " — " + esc(m.materialText) : ""}</option>`).join("")
+          : '<option value="">No materials assigned to this vendor</option>';
+        materialSelect.disabled = materials.length === 0;
+      } catch {
+        materialSelect.innerHTML = '<option value="">Failed to load materials</option>';
+      }
+    });
+
+    card.querySelector("#mo-save-btn").addEventListener("click", async () => {
+      const btn = card.querySelector("#mo-save-btn");
+      const result = card.querySelector("#mo-result");
+      result.innerHTML = "";
+
+      const vendorMaterialId = materialSelect.value ? Number(materialSelect.value) : null;
+      const orderQty = card.querySelector("#mo-qty").value;
+      if (!vendorMaterialId) { result.innerHTML = '<div class="tf-inline-error">Select a vendor and material.</div>'; return; }
+      if (!orderQty || Number(orderQty) <= 0) { result.innerHTML = '<div class="tf-inline-error">Enter an order quantity greater than 0.</div>'; return; }
+
+      const body = {
+        vendorMaterialId,
+        orderQty: Number(orderQty),
+        orderDate: card.querySelector("#mo-order-date").value || null,
+        deliveryDate: card.querySelector("#mo-delivery-date").value || null,
+        poNumber: card.querySelector("#mo-po").value.trim() || null,
+        supplierReference: card.querySelector("#mo-supplier-ref").value.trim() || null,
+        status: card.querySelector("#mo-status").value,
+        notes: card.querySelector("#mo-notes").value.trim() || null,
+      };
+
+      btn.disabled = true; btn.textContent = "Adding…";
+      try {
+        await api("/order-suggestions/manual", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        NexusModal.close();
+        await loadTracked();
+      } catch (err) {
+        result.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = "Add Order";
+      }
+    });
+  }
+
+  const BULK_IMPORT_HEADERS = ["Vendor", "Material", "OrderQty", "OrderDate", "DeliveryDate", "PoNumber", "SupplierReference", "Notes", "Status"];
+
+  function parseBulkImportCsv(text) {
+    const lines = text.trim().split(/\r?\n/).filter((l) => l.trim());
+    if (lines.length < 2) return [];
+    const headers = lines[0].split(",").map((h) => h.trim());
+    return lines.slice(1).map((line) => {
+      const cols = line.split(",").map((c) => c.trim());
+      const raw = {};
+      headers.forEach((h, i) => { raw[h] = cols[i] ?? ""; });
+      return {
+        vendor: raw.Vendor || null,
+        material: raw.Material || null,
+        orderQty: raw.OrderQty ? Number(raw.OrderQty) : null,
+        orderDate: raw.OrderDate || null,
+        deliveryDate: raw.DeliveryDate || null,
+        poNumber: raw.PoNumber || null,
+        supplierReference: raw.SupplierReference || null,
+        notes: raw.Notes || null,
+        status: raw.Status || null,
+      };
+    });
+  }
+
+  function openBulkImportModal() {
+    const card = NexusModal.open(`
+      <div class="ps-modal-header">
+        <div><div class="ps-modal-title">Bulk Import Orders (CSV)</div><div class="ps-modal-sub">Paste rows with a header line — a mismatched Vendor/Material must already be assigned in Vendor Master Data</div></div>
+        <button type="button" class="ps-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="ps-modal-body">
+        <p style="font-size:12px;color:var(--text-muted)">Header row: <code>${BULK_IMPORT_HEADERS.join(",")}</code>. OrderDate/DeliveryDate as yyyy-mm-dd; Status one of ${MANUAL_STATUS_OPTIONS.join("/")} (defaults to Accepted).</p>
+        <textarea class="tf-input" id="bi-order-csv" rows="8" style="width:100%;font-family:monospace;font-size:12px" placeholder="${BULK_IMPORT_HEADERS.join(",")}
+Acme Ltd,30007R,500,2026-09-10,2026-09-24,,,,Ordered"></textarea>
+        <div id="bi-order-body" style="margin-top:10px"></div>
+      </div>
+      <div class="ps-modal-actions">
+        <button type="button" class="secondary" id="bi-order-cancel">Close</button>
+        <button type="button" class="secondary" id="bi-order-preview">Preview</button>
+        <button type="button" class="btn" id="bi-order-submit" style="display:none">Import</button>
+      </div>`, { wide: true });
+
+    card.querySelector(".ps-modal-close").addEventListener("click", () => NexusModal.close());
+    card.querySelector("#bi-order-cancel").addEventListener("click", () => NexusModal.close());
+
+    const bodyEl = card.querySelector("#bi-order-body");
+    const submitBtn = card.querySelector("#bi-order-submit");
+    let rows = [];
+
+    card.querySelector("#bi-order-preview").addEventListener("click", () => {
+      rows = parseBulkImportCsv(card.querySelector("#bi-order-csv").value);
+      if (rows.length === 0) {
+        bodyEl.innerHTML = '<div class="tf-inline-error">No valid rows found.</div>';
+        submitBtn.style.display = "none";
+        return;
+      }
+      bodyEl.innerHTML = `
+        <p>${rows.length} row(s) parsed</p>
+        <div style="overflow-x:auto"><table><thead><tr><th>Vendor</th><th>Material</th><th>Qty</th><th>Order Date</th><th>Delivery Date</th><th>PO</th><th>Status</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr><td>${esc(r.vendor)}</td><td>${esc(r.material)}</td><td>${esc(r.orderQty)}</td><td>${esc(r.orderDate)}</td><td>${esc(r.deliveryDate)}</td><td>${esc(r.poNumber)}</td><td>${esc(r.status || "Accepted")}</td></tr>`).join("")}</tbody>
+        </table></div>`;
+      submitBtn.style.display = "";
+    });
+
+    submitBtn.addEventListener("click", async () => {
+      submitBtn.disabled = true; submitBtn.textContent = "Importing…";
+      try {
+        const { data } = await api("/order-suggestions/manual/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows }) });
+        const failLines = (data.results || []).filter((r) => !r.success).map((r) => `Row ${r.row}: ${esc(r.error)}`).join("<br>");
+        bodyEl.innerHTML = `<p>Imported ${data.succeeded} of ${data.total} row(s)${data.failed ? `, ${data.failed} failed` : ""}.</p>${failLines ? `<div class="tf-inline-error">${failLines}</div>` : ""}`;
+        submitBtn.style.display = "none";
+        if (data.succeeded > 0) await loadTracked();
+      } catch (err) {
+        bodyEl.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
+      } finally {
+        submitBtn.disabled = false; submitBtn.textContent = "Import";
+      }
+    });
   }
 
   function openCreateShipmentModal() {

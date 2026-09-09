@@ -49,4 +49,5 @@ public sealed record DemandAdjustmentRow(
 /// </summary>
 public sealed record UpsertDemandAdjustmentRequest(string Material, DateTime? StartDate, DateTime? EndDate, decimal? UsagePercent, string? Reason, decimal? OverrideQty = null);
 
-internal sealed record OverlappingAdjustment(long AdjustmentId, DateTime? StartDate, DateTime? EndDate);
+/// <summary>AdjustmentId is int, matching log.DemandAdjustment.AdjustmentId's real column type — was long, which throws Dapper's strict-materialization error on every Create/Update Demand Adjustment call (FindOverlappingAdjustmentAsync runs on both paths regardless of whether an overlap is actually found).</summary>
+internal sealed record OverlappingAdjustment(int AdjustmentId, DateTime? StartDate, DateTime? EndDate);
