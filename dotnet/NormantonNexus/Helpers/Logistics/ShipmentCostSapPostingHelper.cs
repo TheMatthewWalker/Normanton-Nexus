@@ -164,7 +164,14 @@ internal static class ShipmentCostSapPostingHelper
                     var line = rows[i];
                     var lineResult = i < response.Lines.Count ? response.Lines[i] : null;
 
-                    if (lineResult is { Success: true, DocumentNumber: not null })
+                    // Defensive belt-and-braces on top of the SapServer-side fix (2026-09-09, see
+                    // that repo's PurchasingController.CreatePurchaseOrderAndReceipt): a real
+                    // production incident (PO 4500438460) came back Success=true with
+                    // DocumentNumber="" (empty, not null) for a goods receipt SAP had actually
+                    // rejected — `DocumentNumber: not null` alone let that through and flipped
+                    // migoStatus=1 with no real material document. Require a genuinely non-blank
+                    // document number, not just non-null.
+                    if (lineResult is { Success: true } && !string.IsNullOrWhiteSpace(lineResult.DocumentNumber))
                     {
                         await connection.ExecuteAsync(new CommandDefinition("""
                             UPDATE log.ShipmentCost SET migoStatus = 1, materialDocument = @materialDocument, purchaseOrder = @purchaseOrder
