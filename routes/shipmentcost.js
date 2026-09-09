@@ -945,6 +945,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
 
         const fetched = await req2.query(`
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.costType, sc.expectedCost, sc.modeOfTransport,
+                   sc.purchaseOrder, sc.poLineNumber,
                    'outbound' AS direction, 'outbound' AS sourceType, sm.shipmentID AS refID,
                    RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS shipmentRef,
                    sm.forwarderID, sm.actualCollection, sm.ActualDelivery AS deliveredDate, sm.trackingNumber,
@@ -956,6 +957,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             UNION ALL
 
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.costType, sc.expectedCost, sc.modeOfTransport,
+                   sc.purchaseOrder, sc.poLineNumber,
                    'inbound' AS direction, 'inbound' AS sourceType, ps.ShipmentId AS refID,
                    ps.ShipmentReference AS shipmentRef,
                    ps.ForwarderID AS forwarderID, ps.DispatchDate AS actualCollection, ps.ReceivedAtUtc AS deliveredDate, ps.TrackingNumber AS trackingNumber,
@@ -974,6 +976,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             -- further down) to keep this from colliding with a real
             -- shipmentID/poShipmentID that happens to equal the same number.
             SELECT sc.costID, sc.costCenter, sc.costElement, sc.costType, sc.expectedCost, sc.modeOfTransport,
+                   sc.purchaseOrder, sc.poLineNumber,
                    ISNULL(ce.direction, 'outbound') AS direction, 'manual' AS sourceType, sc.costID AS refID,
                    sc.manualReference AS shipmentRef,
                    sc.manualForwarderID AS forwarderID, sc.manualIncurredDate AS actualCollection,
@@ -1006,6 +1009,59 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             });
         }
 
+        const results = [];
+
+        // A line that already carries a purchaseOrder (from an earlier
+        // attempt whose PO creation succeeded but whose goods receipt
+        // failed) must NEVER go through create-po-and-receipt again — that
+        // would create a genuinely second, duplicate purchase order for the
+        // same freight cost, orphaning the first one forever with no goods
+        // receipt (confirmed live: costID 66, PO 4500438488, 2026-09-09 —
+        // this exact branch used to leave the PO completely untracked, so a
+        // retry had no way to know one already existed). These are retried
+        // individually against the PO/item SAP already committed, via
+        // SapServer's plain, non-elevated POST /api/purchasing/post-goods-
+        // receipt — no per-user SAP credentials needed for this leg at all,
+        // since only PO creation itself requires the calling user's own
+        // elevated session.
+        const retryRows = deliverable.filter(r => r.purchaseOrder);
+        const freshRows  = deliverable.filter(r => !r.purchaseOrder);
+
+        for (const r of retryRows) {
+            const deliveredDayStr = r.deliveredDate ? new Date(r.deliveredDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+            const location = `${(r.destinationCountry || '').slice(0, 2).toUpperCase()}${(r.destinationPostCode || '').slice(0, 2).toUpperCase()}`;
+            try {
+                const sapResp = await axios.post(
+                    `${sapConfig.url}/api/purchasing/post-goods-receipt`,
+                    {
+                        PurchaseOrder: r.purchaseOrder,
+                        LineNumber: r.poLineNumber || 1,
+                        Reference: r.shipmentRef || '',
+                        TrackingNumber: r.trackingNumber || '',
+                        AddressCode: location,
+                        ShipmentCompletionDate: deliveredDayStr,
+                        PostingDate: new Date().toISOString().slice(0, 10),
+                    },
+                    { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken(req.session?.user?.userID)}` } }
+                );
+                const bdc = sapResp.data?.data || {};
+                const succeeded = bdc.type !== 'E' && bdc.type !== 'A' && !!bdc.documentNumber;
+                if (succeeded) {
+                    await pool.request()
+                        .input('costID', sql.BigInt, r.costID)
+                        .input('materialDocument', sql.NVarChar(20), bdc.documentNumber)
+                        .query(`UPDATE log.ShipmentCost SET migoStatus = 1, materialDocument = @materialDocument WHERE costID = @costID`);
+                    results.push({ shipmentID: r.refID, direction: r.direction, costID: r.costID, success: true, purchaseOrder: r.purchaseOrder, materialDocument: bdc.documentNumber });
+                } else {
+                    const error = bdc.message || bdc.rawMessage || 'Goods receipt failed again — the purchase order already exists in SAP (see above); contact SAP support with this PO/item to diagnose.';
+                    results.push({ shipmentID: r.refID, direction: r.direction, costID: r.costID, success: false, purchaseOrder: r.purchaseOrder, error });
+                }
+            } catch (err) {
+                const message = err.response?.data?.error?.message || err.response?.data?.error || err.message;
+                results.push({ shipmentID: r.refID, direction: r.direction, costID: r.costID, success: false, purchaseOrder: r.purchaseOrder, error: message });
+            }
+        }
+
         // Group cost lines by sourceType+shipment — sourceType (not
         // direction) is part of the key because outbound shipmentID, inbound
         // poShipmentID, and a manual line's own costID are three separate
@@ -1013,7 +1069,7 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
         // up its own one-line group (no aggregation across unrelated manual
         // invoices) since refID is just that line's costID.
         const groups = {};
-        for (const r of deliverable) {
+        for (const r of freshRows) {
             const key = `${r.sourceType}:${r.refID}`;
             if (!groups[key]) {
                 groups[key] = {
@@ -1043,6 +1099,13 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
             groups[key]._costIDs.push(r.costID);
         }
 
+        // Nothing left needing a fresh PO (every selected line was a
+        // GR-only retry, above) — return now rather than requiring SAP
+        // credentials for a leg that doesn't need them at all.
+        if (!freshRows.length) {
+            return res.json({ success: true, results, blockedCostIDs });
+        }
+
         // PO creation needs to run as the calling user's own SAP account —
         // the shared service account doesn't have (and isn't being given)
         // rights to create purchase orders. Decrypted here, in memory, just
@@ -1054,13 +1117,15 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
         if (!sapCreds) {
             return res.status(400).json({
                 success: false,
-                error: 'You need to save your SAP username and password in My Account before posting costs to SAP.',
+                error: results.length
+                    ? 'You need to save your SAP username and password in My Account before posting the remaining costs to SAP.'
+                    : 'You need to save your SAP username and password in My Account before posting costs to SAP.',
+                results,
                 blockedCostIDs,
             });
         }
 
         const today = new Date().toISOString().slice(0, 10);
-        const results = [];
 
         // One PO + one goods receipt per cost line, per shipment group — via
         // SapServer's elevated POST /api/purchasing/create-po-and-receipt
@@ -1161,6 +1226,23 @@ router.post('/post-migo', requirePermission('LOG_PLANNING'), async (req, res) =>
                             materialDocument: line.documentNumber,
                         });
                     } else {
+                        // The PO creation leg is confirmed successful whenever
+                        // poResult.poSuccess is true (SapServer only returns this
+                        // shape once BAPI_PO_CREATE1 + BAPI_TRANSACTION_COMMIT have
+                        // both run) — that PO now genuinely, permanently exists in
+                        // SAP regardless of this line's own goods-receipt outcome.
+                        // Persisting it here is what lets a later retry (above) target
+                        // the existing PO instead of calling create-po-and-receipt
+                        // again and creating a second, duplicate one (confirmed live:
+                        // costID 66, PO 4500438488, 2026-09-09 — this exact branch used
+                        // to leave the PO completely untracked).
+                        if (poResult.poSuccess) {
+                            await pool.request()
+                                .input('costID',        sql.BigInt,       costID)
+                                .input('purchaseOrder', sql.NVarChar(20), poResult.purchaseOrder || null)
+                                .input('poLineNumber',  sql.Int,          i + 1)
+                                .query(`UPDATE log.ShipmentCost SET purchaseOrder = @purchaseOrder, poLineNumber = @poLineNumber WHERE costID = @costID`);
+                        }
                         results.push({
                             shipmentID:    groupRefLabel,
                             direction:     group.direction,
