@@ -1,12 +1,28 @@
+using Moq;
 using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
+using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Logistics;
 
 public class ShipmentHelperTests
 {
+    [Fact]
+    public async Task SetCustomsRequiredBulkAsync_rejects_an_empty_shipment_list_without_opening_a_connection()
+    {
+        var db = new Mock<INexusOperationsDb>();
+        db.Setup(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("should not be called"));
+        var dataChangeLog = new Mock<IDataChangeLogService>();
+
+        await Assert.ThrowsAsync<NexusValidationException>(
+            () => ShipmentHelper.SetCustomsRequiredBulkAsync(db.Object, dataChangeLog.Object, [], false, "tester", CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     [Theory]
     [InlineData(1, "00000001")]
     [InlineData(1234567, "01234567")]

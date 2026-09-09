@@ -65,6 +65,14 @@ public sealed class ShipmentMainController(
         return Ok(ApiResponse<object>.Ok(new { updated }));
     }
 
+    [HttpPatch("customs-required/bulk")]
+    [Authorize(Policy = "Perm:LOG_PLANNING")]
+    public async Task<IActionResult> SetCustomsRequiredBulk([FromBody] SetCustomsRequiredBulkRequest body, CancellationToken ct)
+    {
+        var result = await ShipmentHelper.SetCustomsRequiredBulkAsync(nexusOperationsDb, dataChangeLog, body.ShipmentIds, body.Required, GetUsername(), ct);
+        return Ok(ApiResponse<SetCustomsRequiredBulkResult>.Ok(result));
+    }
+
     [HttpPost("{shipmentId:long}/mark-collected")]
     [Authorize(Policy = "Perm:LOG_PLANNING")]
     public async Task<IActionResult> MarkCollected(long shipmentId, CancellationToken ct)

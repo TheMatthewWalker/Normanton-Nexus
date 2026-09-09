@@ -13,7 +13,7 @@ public class ShipmentPackingListPdfHelperTests
     private static ShipmentRow SampleShipment(bool isManual = false) => new(
         ShipmentId: 42, OriginId: null, OriginName: "Kongsberg Actuation System Ltd", OriginStreet: null, OriginCity: null, OriginPostCode: null, OriginCountry: null,
         DestinationId: 100, DestinationName: "Acme Ltd", DestinationStreet: "1 Main St", DestinationCity: "Leeds", DestinationPostCode: "LS1 1AA", DestinationCountry: "GB",
-        NetWeight: 500m, GrossWeight: 550m, PalletCount: 2m, ShipmentVolume: 3.5m,
+        NetWeight: 500m, GrossWeight: 550m, PalletCount: 2, ShipmentVolume: 3.5m,
         PlannedCollection: new DateTime(2026, 3, 1), ActualCollection: null, CollectionStatus: false,
         ForwarderId: 5, TrackingNumber: "TRK123", IncoTerms: "DAP", CustomsRequired: false, CustomsComplete: false, ShipmentCancelled: false,
         PlannedDelivery: new DateTime(2026, 3, 3), ActualDelivery: null, DeliveryStatus: false, BookingStatus: true, CustomsId: null, IsManual: isManual,

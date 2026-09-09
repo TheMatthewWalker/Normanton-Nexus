@@ -95,7 +95,7 @@ public class FreightBookingHelperTests
     private static ShipmentRow Shipment(DateTime? plannedCollection = null, string? incoTerms = "DAP") => new(
         ShipmentId: 555, OriginId: 1, OriginName: "Kongsberg UK", OriginStreet: "1 Factory Road", OriginCity: "Redditch", OriginPostCode: "B98 1AA", OriginCountry: "GB",
         DestinationId: 2, DestinationName: "Acme SARL", DestinationStreet: "10 Rue Example", DestinationCity: "Paris", DestinationPostCode: "75001", DestinationCountry: "FR",
-        NetWeight: 100m, GrossWeight: 110m, PalletCount: 1m, ShipmentVolume: 1m,
+        NetWeight: 100m, GrossWeight: 110m, PalletCount: 1, ShipmentVolume: 1m,
         PlannedCollection: plannedCollection, ActualCollection: null, CollectionStatus: false,
         ForwarderId: null, TrackingNumber: null, IncoTerms: incoTerms, CustomsRequired: true, CustomsComplete: false, ShipmentCancelled: false,
         PlannedDelivery: null, ActualDelivery: null, DeliveryStatus: false, BookingStatus: false, CustomsId: null, IsManual: false,

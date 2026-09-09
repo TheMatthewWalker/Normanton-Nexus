@@ -10,7 +10,7 @@ public class ClearPortShipmentPayloadHelperTests
     private static ShipmentRow SampleShipment() => new(
         ShipmentId: 42, OriginId: 0, OriginName: "Kongsberg Actuation System Ltd", OriginStreet: "Euroflex Centre", OriginCity: "Normanton", OriginPostCode: "WF6 1TN", OriginCountry: "GB",
         DestinationId: 100, DestinationName: "Acme Ltd", DestinationStreet: "1 Main St", DestinationCity: "Berlin", DestinationPostCode: "10115", DestinationCountry: "DE",
-        NetWeight: 500m, GrossWeight: 550m, PalletCount: 2m, ShipmentVolume: 3.5m,
+        NetWeight: 500m, GrossWeight: 550m, PalletCount: 2, ShipmentVolume: 3.5m,
         PlannedCollection: new DateTime(2026, 3, 1), ActualCollection: null, CollectionStatus: false,
         ForwarderId: 5, TrackingNumber: "TRK123", IncoTerms: "DAP", CustomsRequired: true, CustomsComplete: false, ShipmentCancelled: false,
         PlannedDelivery: new DateTime(2026, 3, 3), ActualDelivery: null, DeliveryStatus: false, BookingStatus: true, CustomsId: null, IsManual: false,

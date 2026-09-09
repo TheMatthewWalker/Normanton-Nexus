@@ -177,7 +177,7 @@ internal static class ClearPortShipmentPayloadHelper
             CustomsOfficeOfExit: clearPort.CustomsOfficeOfExit,
             TotalGrossMass: shipment.GrossWeight ?? 0,
             TotalNetMass: shipment.NetWeight ?? 0,
-            TotalPackages: Math.Max(1, (int)Math.Round(shipment.PalletCount ?? 0, MidpointRounding.AwayFromZero)),
+            TotalPackages: Math.Max(1, (int)(shipment.PalletCount ?? 0)),
             Containerised: false,
             NatureOfTransaction: clearPort.DefaultNatureOfTransaction,
             Rrs01: true,

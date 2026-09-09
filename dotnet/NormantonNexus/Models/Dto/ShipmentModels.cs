@@ -10,7 +10,7 @@ namespace NormantonNexus.Models.Dto;
 public sealed record ShipmentRow(
     long ShipmentId, long? OriginId, string? OriginName, string? OriginStreet, string? OriginCity, string? OriginPostCode, string? OriginCountry,
     long? DestinationId, string? DestinationName, string? DestinationStreet, string? DestinationCity, string? DestinationPostCode, string? DestinationCountry,
-    decimal? NetWeight, decimal? GrossWeight, decimal? PalletCount, decimal? ShipmentVolume,
+    decimal? NetWeight, decimal? GrossWeight, long? PalletCount, decimal? ShipmentVolume,
     DateTime? PlannedCollection, DateTime? ActualCollection, bool CollectionStatus,
     long? ForwarderId, string? TrackingNumber, string? IncoTerms, bool CustomsRequired, bool CustomsComplete, bool ShipmentCancelled,
     DateTime? PlannedDelivery, DateTime? ActualDelivery, bool DeliveryStatus, bool BookingStatus, string? CustomsId, bool IsManual,
@@ -31,6 +31,10 @@ public sealed record ShipmentEventEntry(long ShipmentId, string Category, string
 public sealed record WriteShipmentEventsRequest(List<ShipmentEventEntry> Events);
 
 public sealed record ShipmentEventRow(int EventId, long ShipmentId, string EventCategory, string EventDescription, DateTime TimeStamp);
+
+public sealed record SetCustomsRequiredBulkRequest(List<long> ShipmentIds, bool Required);
+
+public sealed record SetCustomsRequiredBulkResult(int Updated, List<long> Skipped);
 
 public sealed record MarkDeliveredRequest(DateTime? ActualDelivery);
 

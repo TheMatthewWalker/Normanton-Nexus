@@ -332,6 +332,35 @@ internal static class ShipmentHelper
         }
     }
 
+    // ── Customs required (bulk toggle) ────────────────────────────────
+
+    /// <summary>
+    /// Mass "mark as no customs required" from the Customs queue — clears (or sets)
+    /// customsRequired for every selected shipment in one call, matching Node's
+    /// PATCH /customs-required/bulk exactly, including its same-guard-as-the-
+    /// single-shipment-route behavior: a shipment whose customs is already complete
+    /// is left untouched and reported back in Skipped rather than failing the batch.
+    /// </summary>
+    internal static async Task<SetCustomsRequiredBulkResult> SetCustomsRequiredBulkAsync(
+        INexusOperationsDb db, IDataChangeLogService dataChangeLog, List<long> shipmentIds, bool required, string? actor, CancellationToken ct)
+    {
+        if (shipmentIds.Count == 0) throw new NexusValidationException("Select at least one shipment.");
+
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var skipped = (await connection.QueryAsync<long>(new CommandDefinition(
+            "SELECT shipmentID FROM log.ShipmentMain WHERE shipmentID IN @shipmentIds AND ISNULL(customsComplete, 0) = 1",
+            new { shipmentIds }, cancellationToken: ct))).AsList();
+
+        var updated = await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE log.ShipmentMain SET customsRequired = @required
+            WHERE shipmentID IN @shipmentIds AND ISNULL(customsComplete, 0) = 0
+            """, new { shipmentIds, required }, cancellationToken: ct));
+
+        await dataChangeLog.StampAsync(actor, "ShipmentMain", ct);
+        return new SetCustomsRequiredBulkResult(updated, skipped);
+    }
+
     // ── Planned collection / events ──────────────────────────────────
 
     internal static async Task UpdatePlannedCollectionAsync(INexusOperationsDb db, IDataChangeLogService dataChangeLog, List<long> shipmentIds, DateTime date, string? actor, CancellationToken ct)
@@ -883,7 +912,7 @@ internal static class ShipmentHelper
         public string? destinationCountry { get; set; }
         public decimal? netWeight { get; set; }
         public decimal? grossWeight { get; set; }
-        public decimal? palletCount { get; set; }
+        public long? palletCount { get; set; }
         public decimal? shipmentVolume { get; set; }
         public DateTime? plannedCollection { get; set; }
         public DateTime? actualCollection { get; set; }

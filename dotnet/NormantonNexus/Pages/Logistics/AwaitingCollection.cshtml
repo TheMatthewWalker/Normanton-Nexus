@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Logistics.AwaitingCollectionModel
+@{
+    ViewData["Title"] = "Awaiting Collection";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Awaiting Collection";
+    ViewData["PageSubtitle"] = "Shipments ready and waiting to leave Kongsberg";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-title" id="ac-hint">Loading…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="secondary" id="ac-date-btn" disabled>Update Planned Collection</button>
+    <button type="button" class="secondary" id="ac-unbook-btn" disabled style="color:var(--error)">Unbook</button>
+    <button type="button" class="btn" id="ac-collect-btn" disabled>Mark Collected</button>
+</div>
+
+<div id="ac-notice"></div>
+<div id="ac-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/awaiting-collection.js"></script>
+}

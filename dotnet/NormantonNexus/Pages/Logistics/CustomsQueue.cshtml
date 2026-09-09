@@ -1,0 +1,24 @@
+@page
+@model NormantonNexus.Pages.Logistics.CustomsQueueModel
+@{
+    ViewData["Title"] = "Customs";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Customs";
+    ViewData["PageSubtitle"] = "Shipments awaiting export declarations and customs paperwork";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-title" id="cq-hint">Loading…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="secondary" id="cq-not-required-btn" disabled style="color:var(--error)">Mark Not Required</button>
+    <button type="button" class="btn" id="cq-create-btn" disabled>Create Customs Entry</button>
+</div>
+
+<div id="cq-notice"></div>
+<div id="cq-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/customs-queue.js"></script>
+}
