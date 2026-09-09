@@ -173,7 +173,8 @@ internal static class ConsignmentTrackerHelper
     internal static async Task<long> AddManualDeliveryAsync(INexusOperationsDb db, long vendorId, AddManualConsignmentDeliveryRequest body, string? username, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
-        return await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        // DeliveryId is int, matching log.ConsignmentDelivery.DeliveryId's real column type.
+        return await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO log.ConsignmentDelivery
                 (VendorId, Material, MaterialDocument, MaterialDocItem, Quantity, Uom,
                  Container, BillOfLading, InvoiceNumber, DocumentDate, PostingDate, ExpiryDate,
@@ -590,7 +591,8 @@ internal static class ConsignmentTrackerHelper
         try
         {
             var totalQty = body.Lines.Sum(l => l.QtyAllocated);
-            var declarationId = await connection.QuerySingleAsync<long>(new CommandDefinition("""
+            // DeclarationId is int, matching log.ConsignmentDeclaration.DeclarationId's real column type.
+            var declarationId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
                 INSERT INTO log.ConsignmentDeclaration (VendorId, Status, AllocationMethod, TotalQty, CreatedByUsername)
                 OUTPUT INSERTED.DeclarationId
                 VALUES (@vendorId, 'Draft', @allocationMethod, @totalQty, @username)
@@ -730,7 +732,8 @@ internal static class ConsignmentTrackerHelper
             if (status is null) throw new NexusNotFoundException("Declaration not found.");
             if (status != "Draft") throw new NexusValidationException($"Declaration is already {status}, not Draft.");
 
-            var lines = await connection.QueryAsync<(long DeliveryId, decimal QtyAllocated)>(new CommandDefinition(
+            // DeliveryId is int, matching log.ConsignmentDeclarationLine.DeliveryId's real column type.
+            var lines = await connection.QueryAsync<(int DeliveryId, decimal QtyAllocated)>(new CommandDefinition(
                 "SELECT DeliveryId, QtyAllocated FROM log.ConsignmentDeclarationLine WHERE DeclarationId = @declarationId",
                 new { declarationId }, transaction, cancellationToken: ct));
 

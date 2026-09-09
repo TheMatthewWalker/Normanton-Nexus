@@ -242,7 +242,8 @@ internal static class InboundShipmentHelper
     internal static async Task RemoveManualItemAsync(INexusOperationsDb db, long itemId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
-        var existing = await connection.QuerySingleOrDefaultAsync<long?>(new CommandDefinition(
+        // ItemId is int, matching log.ManualInboundItem.ItemId's real column type.
+        var existing = await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
             "SELECT ItemId FROM log.ManualInboundItem WHERE ItemId = @itemId AND Removed = 0", new { itemId }, cancellationToken: ct));
         if (existing is null) throw new NexusNotFoundException("Item not found.");
         await connection.ExecuteAsync(new CommandDefinition("UPDATE log.ManualInboundItem SET Removed = 1 WHERE ItemId = @itemId", new { itemId }, cancellationToken: ct));
@@ -282,7 +283,8 @@ internal static class InboundShipmentHelper
             "UPDATE log.PurchaseOrderShipment SET CancelledAtUtc = GETUTCDATE(), CancelledBy = @cancelledBy, UpdatedAtUtc = GETUTCDATE() WHERE ShipmentId = @shipmentId",
             new { shipmentId, cancelledBy }, cancellationToken: ct));
 
-        var unlinked = await connection.QueryAsync<long>(new CommandDefinition("""
+        // SuggestionId is int, matching log.PurchaseOrderSuggestion.SuggestionId's real column type.
+        var unlinked = await connection.QueryAsync<int>(new CommandDefinition("""
             UPDATE log.PurchaseOrderSuggestion SET ShipmentId = NULL, UpdatedAtUtc = GETUTCDATE()
             OUTPUT INSERTED.SuggestionId
             WHERE ShipmentId = @shipmentId

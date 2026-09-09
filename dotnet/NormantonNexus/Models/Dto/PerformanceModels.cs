@@ -12,7 +12,8 @@ public sealed record RefreshStatusResult(DateTime? LastRefreshUtc, IReadOnlyList
 
 public sealed record ValueMetricRawRow(DateTime MetricDate, string ValueStream, decimal? InvoicedValue, decimal? StockValue, decimal? PickedValue);
 
-public sealed record OtifMetricRawRow(DateTime MetricDate, string ValueStream, long? OtifOnTimeCount, long? OtifTotalCount);
+/// <summary>OtifOnTimeCount/OtifTotalCount are int, matching log.DailyPerformance's real column type — were long?, throwing Dapper's strict-materialization error on every /otif-metrics request regardless of row content.</summary>
+public sealed record OtifMetricRawRow(DateTime MetricDate, string ValueStream, int? OtifOnTimeCount, int? OtifTotalCount);
 
 public sealed record ValueMetricStream(decimal Invoiced, decimal Stock, decimal Picked);
 

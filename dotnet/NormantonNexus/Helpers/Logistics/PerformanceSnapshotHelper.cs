@@ -368,7 +368,8 @@ internal static class PerformanceSnapshotHelper
     {
         if (rows.Count == 0) return;
 
-        var vendorRows = await connection.QueryAsync<(long VendorId, string SapVendorNumber)>(new CommandDefinition(
+        // VendorId is int, matching log.Vendor.VendorId's real column type.
+        var vendorRows = await connection.QueryAsync<(int VendorId, string SapVendorNumber)>(new CommandDefinition(
             "SELECT VendorId, SapVendorNumber FROM log.Vendor WHERE SapVendorNumber IS NOT NULL", cancellationToken: ct));
         var vendorIdByNumber = vendorRows.ToDictionary(v => v.SapVendorNumber, v => (long?)v.VendorId);
 
@@ -399,8 +400,11 @@ internal static class PerformanceSnapshotHelper
 
     // ── Refresh log (dbo.RefreshLog, Nexus database) ─────────────────────
 
+    // RunId is int, matching dbo.RefreshLog.RunId's real column type (Nexus database) — was
+    // long, which threw Dapper's strict-materialization error on every scheduled/manual refresh
+    // before any actual sync work ever ran.
     internal static async Task<long> StartRefreshAsync(IDbConnection connection, string datasetName, CancellationToken ct) =>
-        await connection.QuerySingleAsync<long>(new CommandDefinition("""
+        await connection.QuerySingleAsync<int>(new CommandDefinition("""
             INSERT INTO dbo.RefreshLog (DatasetName, StartedAtUtc, Status)
             OUTPUT INSERTED.RunId
             VALUES (@datasetName, GETUTCDATE(), 'Running')
