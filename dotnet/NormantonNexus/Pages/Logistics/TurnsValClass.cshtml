@@ -4,19 +4,31 @@
     ViewData["Title"] = "Stock Turns & Valuation";
     ViewData["Department"] = "Logistics";
     ViewData["PageTitle"] = "Stock Turns & Valuation";
-    ViewData["PageSubtitle"] = "MM Turns / Valuation Class";
+    ViewData["PageSubtitle"] = "Full material list — stock, valuation class, turns and days in stock";
 }
 
 <p><a asp-page="Index">&larr; Logistics</a></p>
 
-<h3>Totals</h3>
-<div id="tv-totals">Loading…</div>
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap">
+        <div class="tf-field"><label class="tf-label">Search</label><input class="tf-input" type="text" id="tv-search" placeholder="Material or description…"></div>
+        <div class="tf-field"><label class="tf-label">Material</label><input class="tf-input" type="text" id="tv-material"></div>
+        <div class="tf-field"><label class="tf-label">Plant</label><input class="tf-input" type="text" id="tv-plant" style="width:70px"></div>
+        <div class="tf-field"><label class="tf-label">MRP Controller</label><select class="tf-input" id="tv-mrp-controller"><option value="">All</option></select></div>
+        <div class="tf-field"><label class="tf-label">Material Type</label><input class="tf-input" type="text" id="tv-material-type" style="width:80px"></div>
+        <div class="tf-field"><label class="tf-label">Valuation Class</label><input class="tf-input" type="text" id="tv-valuation-class" style="width:90px"></div>
+        <div class="tf-field"><label class="tf-label">Profit Centre</label><input class="tf-input" type="text" id="tv-profit-centre" style="width:90px"></div>
+        <div class="tf-field" style="justify-content:flex-end"><button type="button" class="btn" id="tv-apply-btn">Apply Filters</button></div>
+    </div>
+</div>
 
-<h3>By Turnover Category</h3>
-<div id="tv-turnover"></div>
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-hint" id="tv-refresh-status">Loading refresh status…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="secondary" id="tv-refresh-btn">Refresh Now</button>
+</div>
 
-<h3>Stock Value by Price Band</h3>
-<div id="tv-price-band"></div>
+<div id="tv-body">Loading…</div>
 
 @section Scripts {
     <script src="~/js/logistics/turns-valclass.js"></script>

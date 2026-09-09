@@ -1,0 +1,21 @@
+@page
+@model NormantonNexus.Pages.Logistics.CostCentresModel
+@{
+    ViewData["Title"] = "Cost Centres";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Cost Centres";
+    ViewData["PageSubtitle"] = "Maintain SAP cost centre codes used across booking, manual shipments and MIGO postings";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="cc-add-btn">+ Add Cost Centre</button>
+</div>
+
+<div id="cc-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/cost-centres.js"></script>
+}

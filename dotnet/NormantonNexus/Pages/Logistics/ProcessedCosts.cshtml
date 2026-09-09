@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Logistics.ProcessedCostsModel
+@{
+    ViewData["Title"] = "Processed Costs";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Processed Costs";
+    ViewData["PageSubtitle"] = "Freight cost lines already posted to SAP — reverse a goods receipt here";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div id="pc-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/processed-costs.js"></script>
+}

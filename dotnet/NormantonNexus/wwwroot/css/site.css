@@ -342,6 +342,21 @@ a:hover { color: var(--accent2); text-decoration: underline; }
   line-height: 1.5;
 }
 
+/* Named tile groups on a department landing page (e.g. Logistics' Transport
+   Management / Material Planning / Reports / Admin sections) — matches the
+   real Node app's own section-per-department-area grouping. */
+.tile-section-group + .tile-section-group { margin-top: 32px; }
+.tile-section-title {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-dim);
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* ── FORMS ───────────────────────────────────────────────────────────────── */
 form {
   display: flex;

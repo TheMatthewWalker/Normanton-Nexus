@@ -1,0 +1,21 @@
+@page
+@model NormantonNexus.Pages.Logistics.UpdateForwardersModel
+@{
+    ViewData["Title"] = "Update Forwarders";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Update Forwarders";
+    ViewData["PageSubtitle"] = "Add, edit and approve hauliers — forwarder ID doubles as the SAP vendor code";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="uf-add-btn">+ Add Forwarder</button>
+</div>
+
+<div id="uf-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/update-forwarders.js"></script>
+}

@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Logistics.UpdatePalletDataModel
+@{
+    ViewData["Title"] = "Update Pallet Data";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Update Pallet Data";
+    ViewData["PageSubtitle"] = "Maintain pallet type definitions and weight limits";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div id="upd-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/update-pallet-data.js"></script>
+}

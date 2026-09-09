@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Logistics.UnprocessedCostsModel
+@{
+    ViewData["Title"] = "Unprocessed Costs";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Unprocessed Costs";
+    ViewData["PageSubtitle"] = "Freight cost lines awaiting MIGO processing in SAP";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-title" id="uc-hint">Loading…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="secondary" id="uc-add-manual-btn">+ Add Manual Cost</button>
+    <button type="button" class="btn" id="uc-post-migo-btn" disabled>Post to MIGO</button>
+</div>
+
+<div id="uc-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/unprocessed-costs.js"></script>
+}

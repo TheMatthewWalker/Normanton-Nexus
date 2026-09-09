@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Logistics.UpdatePackagingDataModel
+@{
+    ViewData["Title"] = "Update Packaging Data";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Update Packaging Data";
+    ViewData["PageSubtitle"] = "Maintain packaging codes, types and dimensions";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div id="upa-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/update-packaging-data.js"></script>
+}

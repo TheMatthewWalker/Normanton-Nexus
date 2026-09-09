@@ -1,0 +1,22 @@
+@page
+@model NormantonNexus.Pages.Logistics.UpdateDestinationsModel
+@{
+    ViewData["Title"] = "Update Destinations";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Update Destinations";
+    ViewData["PageSubtitle"] = "Maintain delivery destinations, addresses and transit times";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <input class="tf-input" id="ud-search" type="text" placeholder="Search name or city…" style="max-width:280px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="ud-add-btn">+ Add Destination</button>
+</div>
+
+<div id="ud-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/update-destinations.js"></script>
+}

@@ -3,25 +3,62 @@
 @{
     ViewData["Title"] = "Logistics";
     ViewData["Department"] = "Logistics";
-    ViewData["PageTitle"] = "Logistics";
-    ViewData["PageSubtitle"] = "Select a function to begin";
+    ViewData["PageTitle"] = "Logistics Nexus";
+    ViewData["PageSubtitle"] = "Transport, customs & shipment planning — select a function to begin";
 }
 
-<div class="tile-grid">
-    <a class="tile" asp-page="CreateShipment"><p class="tile-title">Create Outbound Shipment</p><p class="tile-hint">Build a shipment from open deliveries</p></a>
-    <a class="tile" asp-page="ShipmentQueue"><p class="tile-title">Shipment Queue</p><p class="tile-hint">Awaiting Booking / Awaiting Collection / In Transit</p></a>
-    <a class="tile" asp-page="ShipmentSearch"><p class="tile-title">Search</p><p class="tile-hint">Find a shipment by ref, forwarder, customer, tracking or date</p></a>
-    <a class="tile" asp-page="OtifReport"><p class="tile-title">Haulier On-Time Performance</p><p class="tile-hint">OTIF by haulier, country, destination and month</p></a>
-    <a class="tile" asp-page="CustomsReport"><p class="tile-title">Monthly Customs Report (French VAT)</p><p class="tile-hint">Generate the DDP customs report, plus VAT override / HS description admin</p></a>
-    <a class="tile" asp-page="Costs"><p class="tile-title">Freight Costs</p><p class="tile-hint">Unprocessed and processed freight cost lines</p></a>
-    <a class="tile" asp-page="VendorMasterData"><p class="tile-title">Vendor Master Data</p><p class="tile-hint">MRP vendor and vendor-material configuration</p></a>
-    <a class="tile" asp-page="VendorConsignmentTracker"><p class="tile-title">Vendor Consignment Tracker</p><p class="tile-hint">Consignment balances, deliveries and Isopar declarations</p></a>
-    <a class="tile" asp-page="OrderSuggestions"><p class="tile-title">MRP System</p><p class="tile-hint">Order suggestions and tracked orders</p></a>
-    <a class="tile" asp-page="TurnsValClass"><p class="tile-title">Stock Turns &amp; Valuation</p><p class="tile-hint">MM Turns / Valuation Class</p></a>
-    <a class="tile" asp-page="StockHistoryForecast"><p class="tile-title">Stock History &amp; Forecast</p><p class="tile-hint">13-month consumption vs. demand forecast, plus expected-stock projection</p></a>
-    <a class="tile" asp-page="MrpAnalysis"><p class="tile-title">MRP Analysis</p><p class="tile-hint">Consumption/GR history and BOM explosion forecasting</p></a>
-    <a class="tile" asp-page="DemandAdjustments"><p class="tile-title">Demand Adjustments</p><p class="tile-hint">Manual overrides to forecast demand</p></a>
-    <a class="tile" asp-page="IsoparTiedOil"><p class="tile-title">Isopar Tied Oil</p><p class="tile-hint">Readings, planning rate, stock risk and HMRC declarations</p></a>
-    <a class="tile" asp-page="InboundLog"><p class="tile-title">Inbound Log</p><p class="tile-hint">Inbound shipment tracking</p></a>
-    <a class="tile" asp-page="ReferenceData"><p class="tile-title">Reference Data</p><p class="tile-hint">Pallet/packaging data, destinations, forwarders, cost centres, GL accounts, forwarder mode mapping, material request units</p></a>
+<div class="tile-section-group">
+    <h2 class="tile-section-title">Transport Management</h2>
+    <div class="tile-grid">
+        <a class="tile" asp-page="CreateShipment"><p class="tile-title">Create Outbound Shipment</p><p class="tile-hint">Completed picksheets ready to group into a shipment</p></a>
+        <a class="tile" asp-page="CustomsQueue"><p class="tile-title">Customs</p><p class="tile-hint">Shipments awaiting export declarations and customs paperwork</p></a>
+        <a class="tile" asp-page="AwaitingBooking"><p class="tile-title">Awaiting Booking</p><p class="tile-hint">Shipments with a forwarder assigned that still need booking</p></a>
+        <div class="tile" style="opacity:0.5; cursor:default;"><p class="tile-title">Customer Specifics</p><p class="tile-hint">Coming soon (a placeholder in the original app too)</p></div>
+        <a class="tile" asp-page="AwaitingCollection"><p class="tile-title">Awaiting Collection</p><p class="tile-hint">Shipments ready and waiting to leave Kongsberg</p></a>
+        <a class="tile" asp-page="InTransit"><p class="tile-title">In Transit</p><p class="tile-hint">Outbound shipments collected and not yet delivered</p></a>
+        <a class="tile" asp-page="ShipmentSearch"><p class="tile-title">Search</p><p class="tile-hint">Find outbound and inbound shipments by ref, forwarder, customer or date</p></a>
+        <a class="tile" asp-page="InboundLog"><p class="tile-title">Inbound Log</p><p class="tile-hint">Inbound shipments created from tracked orders</p></a>
+    </div>
+</div>
+
+<div class="tile-section-group">
+    <h2 class="tile-section-title">Material Planning</h2>
+    <div class="tile-grid">
+        <a class="tile" asp-page="VendorMasterData"><p class="tile-title">Vendor Master Data</p><p class="tile-hint">Lead time, Incoterms and minimum order quantities per vendor &amp; material</p></a>
+        <a class="tile" asp-page="VendorConsignmentTracker"><p class="tile-title">Vendor Consignment Tracker</p><p class="tile-hint">Delivered/stock/declared balance per vendor, FEFO declaration builder, printable supplier declaration</p></a>
+        <a class="tile" asp-page="OrderSuggestions"><p class="tile-title">MRP System</p><p class="tile-hint">Materials projected to fall below their safety stock floor before a fresh order could arrive</p></a>
+        <a class="tile" asp-page="TurnsValClass"><p class="tile-title">Stock Turns &amp; Valuation</p><p class="tile-hint">Full material list — stock, valuation class, turns and days-in-stock, filterable</p></a>
+        <a class="tile" asp-page="ChangeValuationClass"><p class="tile-title">Change Valuation Class</p><p class="tile-hint">Move stock to an order, change valuation class in SAP, move stock back</p></a>
+        <a class="tile" asp-page="StockHistoryForecast"><p class="tile-title">Stock History &amp; Forecast</p><p class="tile-hint">13-month consumption history vs. demand forecast, by material</p></a>
+        <a class="tile" asp-page="MrpAnalysis"><p class="tile-title">MRP Analysis</p><p class="tile-hint">Year-on-year consumption &amp; order quantities per material and vendor, plus sales-forecast-to-raw-material predictions</p></a>
+        <a class="tile" asp-page="DemandAdjustments"><p class="tile-title">Demand Adjustments</p><p class="tile-hint">Manual usage overrides for known events — machine downtime, extra production, or a standing forecast correction</p></a>
+        <a class="tile" asp-page="IsoparTiedOil"><p class="tile-title">Isopar Tied Oil</p><p class="tile-hint">Daily meter-reading log, weekday/weekend planning rate, and HMRC Tied Oil declarations for Material 10010</p></a>
+    </div>
+</div>
+
+<div class="tile-section-group">
+    <h2 class="tile-section-title">Reports</h2>
+    <div class="tile-grid">
+        <a class="tile" asp-page="CustomsReport"><p class="tile-title">Monthly Customs Report (French VAT)</p><p class="tile-hint">Upload the Shipments list, download the SAP-enriched CUSTOMS report for DDP France import-VAT reclaim</p></a>
+        <a class="tile" asp-page="FreightSpend"><p class="tile-title">Freight Spend</p><p class="tile-hint">Analytics dashboard — spend by forwarder, country, month and direction</p></a>
+        <a class="tile" asp-page="OtifReport"><p class="tile-title">Haulier On-Time Performance</p><p class="tile-hint">Planned vs actual delivery — by haulier, country, destination and month</p></a>
+        <a class="tile" asp-page="StockValueOverview"><p class="tile-title">Stock Value Overview</p><p class="tile-hint">Aggregate stock &amp; book value by turnover category, valuation class and material type</p></a>
+        <a class="tile" asp-page="StockValueByPrice"><p class="tile-title">Stock Value by Price</p><p class="tile-hint">Breakdown of stock value across unit-price bands</p></a>
+    </div>
+</div>
+
+<div class="tile-section-group">
+    <h2 class="tile-section-title">Admin</h2>
+    <div class="tile-grid">
+        <a class="tile" asp-page="UnprocessedCosts"><p class="tile-title">Unprocessed Costs</p><p class="tile-hint">Freight cost lines awaiting MIGO processing in SAP</p></a>
+        <a class="tile" asp-page="ProcessedCosts"><p class="tile-title">Processed Costs</p><p class="tile-hint">Freight cost lines already posted to SAP — reverse a goods receipt here</p></a>
+        <a class="tile" asp-page="UpdatePalletData"><p class="tile-title">Update Pallet Data</p><p class="tile-hint">Maintain pallet type definitions and weight limits</p></a>
+        <a class="tile" asp-page="UpdatePackagingData"><p class="tile-title">Update Packaging Data</p><p class="tile-hint">Maintain packaging codes, types and dimensions</p></a>
+        <a class="tile" asp-page="UpdateDestinations"><p class="tile-title">Update Destinations</p><p class="tile-hint">Maintain delivery destinations, addresses and transit times</p></a>
+        <a class="tile" asp-page="UpdateForwarders"><p class="tile-title">Update Forwarders</p><p class="tile-hint">Add, edit and approve hauliers — forwarder ID doubles as the SAP vendor code</p></a>
+        <a class="tile" asp-page="CostCentres"><p class="tile-title">Cost Centres</p><p class="tile-hint">Maintain SAP cost centre codes used across booking, manual shipments and MIGO postings</p></a>
+        <a class="tile" asp-page="GlAccounts"><p class="tile-title">GL Accounts</p><p class="tile-hint">Maintain freight GL account codes (direction &amp; tier)</p></a>
+        <a class="tile" asp-page="ForwarderModeMapping"><p class="tile-title">Forwarder Mode Mapping</p><p class="tile-hint">Maps a forwarder's type to the Mode of Transport stored on cost lines when a shipment is booked</p></a>
+        <a class="tile" asp-page="MaterialRequestUnits"><p class="tile-title">Material Request Units</p><p class="tile-hint">Spool/tub/etc. to KG conversions per material — feeds Staging Post's request-in-your-own-units dropdown</p></a>
+    </div>
 </div>
