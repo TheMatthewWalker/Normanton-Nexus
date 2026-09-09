@@ -1,0 +1,19 @@
+@page
+@model NormantonNexus.Pages.Production.Reports.ScrapModel
+@{
+    ViewData["Title"] = "Scrap Analysis";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Scrap Analysis";
+    ViewData["PageSubtitle"] = "Scrap KG by reason, process and trend";
+}
+
+<p><a asp-page="/Production/Index">&larr; Production</a></p>
+
+<div id="rpt-filters"></div>
+<p id="rpt-msg" style="color:#b91c1c;"></p>
+<div id="rpt-output"></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/reports/scrap.js"></script>
+}

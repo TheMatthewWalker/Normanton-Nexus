@@ -1,0 +1,19 @@
+@page
+@model NormantonNexus.Pages.Production.Reports.MaterialOutputModel
+@{
+    ViewData["Title"] = "Material Throughput";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Material Throughput";
+    ViewData["PageSubtitle"] = "Output ranked by material";
+}
+
+<p><a asp-page="/Production/Index">&larr; Production</a></p>
+
+<div id="rpt-filters"></div>
+<p id="rpt-msg" style="color:#b91c1c;"></p>
+<div id="rpt-output"></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/reports/material-output.js"></script>
+}

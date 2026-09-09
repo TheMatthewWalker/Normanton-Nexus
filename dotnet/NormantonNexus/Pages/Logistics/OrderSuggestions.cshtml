@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Logistics.OrderSuggestionsModel
+@{
+    ViewData["Title"] = "MRP System";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "MRP System";
+    ViewData["PageSubtitle"] = "Order suggestions and tracked orders";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<h3>Order Suggestions (by vendor)</h3>
+<div id="os-suggestions">Loading…</div>
+
+<h3>Tracked Orders</h3>
+<div id="os-tracked">Loading…</div>
+
+@section Scripts {
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        window.__osInitialMaterial = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Material));
+    </script>
+    <script src="~/js/logistics/shipment-detail.js"></script>
+    <script src="~/js/logistics/order-suggestions.js"></script>
+}

@@ -1,0 +1,31 @@
+@page
+@model NormantonNexus.Pages.Admin.PermissionDefinitionsModel
+@{
+    ViewData["Title"] = "Permission Definitions";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Permission Definitions";
+    ViewData["PageSubtitle"] = "The PortalPermissions code registry";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<div id="pd-list">Loading…</div>
+
+@if (Model.IsSuperadmin)
+{
+    <form id="pd-form" class="card" style="margin-top:0.75rem;">
+        <h4 id="pd-form-title">Add Permission</h4>
+        <input type="hidden" id="pd-code-hidden">
+        <label>Code<input type="text" id="pd-code" required></label>
+        <label>Name<input type="text" id="pd-name" required></label>
+        <label>Description<input type="text" id="pd-desc"></label>
+        <label>Category<input type="text" id="pd-category"></label>
+        <button type="submit" class="btn secondary">Save</button>
+        <button type="button" class="btn" id="pd-cancel">Cancel Edit</button>
+    </form>
+}
+
+@section Scripts {
+    <script>window.NexusIsSuperadmin = @(Model.IsSuperadmin ? "true" : "false");</script>
+    <script src="~/js/admin/permission-definitions.js"></script>
+}

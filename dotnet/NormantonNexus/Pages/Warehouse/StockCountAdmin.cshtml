@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Warehouse.StockCountAdminModel
+@{
+    ViewData["Title"] = "Stock Count Administration";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Stock Count Administration";
+    ViewData["PageSubtitle"] = "Every stock count and its status";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<label>Status filter
+    <select id="sca-status">
+        <option value="">All</option>
+        <option value="Open">Open</option>
+        <option value="PendingApproval">Pending Approval</option>
+        <option value="Approved">Approved</option>
+        <option value="Rejected">Rejected</option>
+        <option value="Posted">Posted</option>
+    </select>
+</label>
+<div id="sca-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/stock-count-admin.js"></script>
+}

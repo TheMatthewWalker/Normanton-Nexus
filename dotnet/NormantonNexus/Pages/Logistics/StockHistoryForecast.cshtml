@@ -1,0 +1,73 @@
+@page
+@model NormantonNexus.Pages.Logistics.StockHistoryForecastModel
+@{
+    ViewData["Title"] = "Stock History & Forecast";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Stock History & Forecast";
+    ViewData["PageSubtitle"] = "13-month consumption history vs. demand forecast, plus a weekly expected-stock projection";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="tf-row">
+    <div class="tf-field">
+        <label class="tf-label">Material Number</label>
+        <input class="tf-input" id="shf-search-material" type="text" placeholder="Part number" autocomplete="off">
+    </div>
+    <div class="tf-field tf-field--wide">
+        <label class="tf-label">Description</label>
+        <input class="tf-input" id="shf-search-desc" type="text" placeholder="Material description" autocomplete="off">
+    </div>
+    <div class="tf-field">
+        <label class="tf-label">MRP Controller</label>
+        <select class="tf-input" id="shf-mrp-controller"><option value="">All controllers</option></select>
+    </div>
+    <div class="tf-field">
+        <label class="tf-label">Filter by Vendor</label>
+        <select class="tf-input" id="shf-vendor"><option value="">— none —</option></select>
+    </div>
+    <div class="tf-field" style="justify-content:flex-end">
+        <button type="button" class="btn" id="shf-search-btn">Search</button>
+    </div>
+    <div class="tf-field" style="justify-content:flex-end">
+        <button type="button" class="secondary" id="shf-all-btn">Show All (combined)</button>
+    </div>
+</div>
+<div id="shf-picker" style="margin:10px 0"></div>
+
+<div id="shf-single-view">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px">
+            <div id="shf-chart-title" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Select a material or press &ldquo;Show All&rdquo;</div>
+            <div style="display:flex;gap:14px;flex-shrink:0">
+                <a href="#" id="shf-adjustment-link" class="hidden" style="font-size:11px;color:var(--accent);white-space:nowrap">+ Add Demand Adjustment</a>
+                <a href="#" id="shf-mrp-link" class="hidden" style="font-size:11px;color:var(--accent);white-space:nowrap">View in MRP &rarr;</a>
+            </div>
+        </div>
+        <canvas id="shf-chart" style="max-height:320px"></canvas>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px">
+            <div id="shf-stock-chart-heading" style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Expected Stock Level (Next 26 Weeks)</div>
+            <div id="shf-bucket-toggle" class="hidden" style="display:flex;gap:4px;flex-shrink:0">
+                <button type="button" class="secondary shf-bucket-btn" data-bucket="weeks" style="padding:2px 10px;font-size:11px">Weeks</button>
+                <button type="button" class="secondary shf-bucket-btn" data-bucket="days" style="padding:2px 10px;font-size:11px">Days</button>
+            </div>
+        </div>
+        <div id="shf-stock-chart-desc" style="font-size:11px;color:var(--text-muted);margin-bottom:14px">Projected forward from current stock using predicted usage, spread across weeks, plus open incoming deliveries. Untick a delivery below to simulate it arriving late or being lost.</div>
+        <canvas id="shf-stock-chart" style="max-height:280px"></canvas>
+        <div id="shf-stock-deliveries" style="margin-top:10px"></div>
+    </div>
+</div>
+
+<div id="shf-vendor-view" class="hidden"></div>
+
+@section Scripts {
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        window.__shfInitialMaterial = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Material));
+        window.__shfInitialMaterialText = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.MaterialText));
+    </script>
+    <script src="~/js/logistics/stock-history-forecast.js"></script>
+}

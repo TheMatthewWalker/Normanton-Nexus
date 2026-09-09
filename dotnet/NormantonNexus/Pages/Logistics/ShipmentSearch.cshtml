@@ -1,0 +1,22 @@
+@page
+@model NormantonNexus.Pages.Logistics.ShipmentSearchModel
+@{
+    ViewData["Title"] = "Search Shipments";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Search";
+    ViewData["PageSubtitle"] = "Find a shipment by ref, forwarder, customer, tracking or date";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+<form id="ss-form">
+    <label>Shipment Ref<input type="text" id="ss-ref"></label>
+    <label>Forwarder<input type="text" id="ss-forwarder"></label>
+    <label>Customer<input type="text" id="ss-customer"></label>
+    <label>Tracking<input type="text" id="ss-tracking"></label>
+    <button type="submit" class="btn secondary">Search</button>
+</form>
+<div id="ss-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/shipment-search.js"></script>
+}

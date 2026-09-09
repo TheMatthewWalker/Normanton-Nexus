@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Warehouse.ZdelflagWarningsModel
+@{
+    ViewData["Title"] = "ZDELFLAG Warnings";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "ZDELFLAG Warnings";
+    ViewData["PageSubtitle"] = "Deliveries whose transfer-order confirm/delete needs attention";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<button type="button" class="btn secondary" id="zw-refresh">Refresh</button>
+<div id="zw-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/zdelflag-warnings.js"></script>
+}

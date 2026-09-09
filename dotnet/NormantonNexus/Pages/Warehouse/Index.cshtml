@@ -1,0 +1,67 @@
+@page
+@model NormantonNexus.Pages.Warehouse.IndexModel
+@{
+    ViewData["Title"] = "Warehouse";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Warehouse";
+    ViewData["PageSubtitle"] = "Select a function to begin";
+}
+
+<div class="tile-grid">
+    <a class="tile" asp-page="StockManagement">
+        <p class="tile-title">Stock Management</p>
+        <p class="tile-hint">Search stock by material, batch, bin &amp; more — create a Transfer Order</p>
+    </a>
+    <a class="tile" asp-page="TransferRequirements">
+        <p class="tile-title">Transfer Requirements (LT04)</p>
+        <p class="tile-hint">Open TRs auto-created from production goods movements — confirm via LT04</p>
+    </a>
+    <a class="tile" asp-page="OpenPicksheets">
+        <p class="tile-title">Open Picksheets</p>
+        <p class="tile-hint">Active deliveries requiring picking — sorted by priority and due date</p>
+    </a>
+    <a class="tile" asp-page="PackagingHolding">
+        <p class="tile-title">Picksheets on Hold</p>
+        <p class="tile-hint">Deliveries completed or deleted in SAP outside Nexus — waiting for confirmation</p>
+    </a>
+    <a class="tile" asp-page="AddPicksheet">
+        <p class="tile-title">Add Picksheet</p>
+        <p class="tile-hint">Manually add a single delivery</p>
+    </a>
+    <a class="tile" asp-page="BulkImport">
+        <p class="tile-title">Bulk CSV Import</p>
+        <p class="tile-hint">Import many deliveries at once</p>
+    </a>
+    <a class="tile" asp-page="SapSync">
+        <p class="tile-title">SAP Sync</p>
+        <p class="tile-hint">Pull open picksheets from SAP now, instead of waiting for the hourly sync</p>
+    </a>
+    <a class="tile" asp-page="StagingPost">
+        <p class="tile-title">Staging Post</p>
+        <p class="tile-hint">Fulfil open material staging requests</p>
+    </a>
+    <a class="tile" asp-page="CompletedRequests">
+        <p class="tile-title">Completed Requests</p>
+        <p class="tile-hint">History of fulfilled staging requests</p>
+    </a>
+    <a class="tile" asp-page="BinRestrictions">
+        <p class="tile-title">Bin Restrictions</p>
+        <p class="tile-hint">Manage material/bin staging restrictions</p>
+    </a>
+    <a class="tile" asp-page="ZdelflagWarnings">
+        <p class="tile-title">ZDELFLAG Warnings</p>
+        <p class="tile-hint">Deliveries whose transfer-order confirm/delete needs attention</p>
+    </a>
+    <a class="tile" asp-page="GoodsIssueWarnings">
+        <p class="tile-title">Goods Issue Warnings</p>
+        <p class="tile-hint">Deliveries whose Goods Issue posting needs attention</p>
+    </a>
+    <a class="tile" asp-page="PtfeCycleCount">
+        <p class="tile-title">Weekly PTFE Cycle Count</p>
+        <p class="tile-hint">Auto-created every Monday — this week's count</p>
+    </a>
+    <a class="tile" asp-page="StockCountAdmin">
+        <p class="tile-title">Stock Count Administration</p>
+        <p class="tile-hint">View every stock count and its status</p>
+    </a>
+</div>

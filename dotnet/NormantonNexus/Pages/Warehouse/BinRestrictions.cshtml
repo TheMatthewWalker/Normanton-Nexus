@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Warehouse.BinRestrictionsModel
+@{
+    ViewData["Title"] = "Bin Restrictions";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Bin Restrictions";
+    ViewData["PageSubtitle"] = "Material/bin staging restrictions"; }
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<form id="br-form">
+    <label>Material<input type="text" id="br-material" required></label>
+    <label>Storage Type<input type="text" id="br-storage-type" required></label>
+    <label>Bin<input type="text" id="br-bin"></label>
+    <label>Notes<input type="text" id="br-notes"></label>
+    <button type="submit" class="btn">Add Restriction</button>
+</form>
+<p id="br-status"></p>
+<div id="br-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/bin-restrictions.js"></script>
+}

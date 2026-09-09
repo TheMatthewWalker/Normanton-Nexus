@@ -1,0 +1,19 @@
+@page
+@model NormantonNexus.Pages.Admin.IndexModel
+@{
+    ViewData["Title"] = "Admin";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Admin";
+    ViewData["PageSubtitle"] = "User & permission administration";
+}
+
+<p><a asp-page="/Index">&larr; Hub</a></p>
+
+<div class="tile-grid">
+    <a class="tile" asp-page="Users"><p class="tile-title">Users</p><p class="tile-hint">Pending approvals, user list, edit, bulk operations, per-user permissions</p></a>
+    <a class="tile" asp-page="PermissionDefinitions"><p class="tile-title">Permission Definitions</p><p class="tile-hint">Superadmin — the PortalPermissions code registry</p></a>
+    <a class="tile" asp-page="PermissionGroups"><p class="tile-title">Permission Groups</p><p class="tile-hint">Bundle tile permissions into reusable groups</p></a>
+    <a class="tile" asp-page="AuditLog"><p class="tile-title">Audit Log</p><p class="tile-hint">Search admin/auth events</p></a>
+    <a class="tile" asp-page="DbExplorer"><p class="tile-title">DB Explorer</p><p class="tile-hint">Superadmin — SSMS-lite schema browser</p></a>
+    <a class="tile" asp-page="BapiInspector"><p class="tile-title">BAPI Inspector</p><p class="tile-hint">Superadmin — SAP RFC/BAPI function metadata lookup</p></a>
+</div>

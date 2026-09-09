@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Warehouse.PtfeCycleCountModel
+@{
+    ViewData["Title"] = "Weekly PTFE Cycle Count";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Weekly PTFE Cycle Count";
+    ViewData["PageSubtitle"] = "Auto-created every Monday";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<div id="pc-body">Loading…</div>
+<p style="color:#6b7280;font-size:0.85rem;">Line entry (material/quantity/location, compared live against SAP) is not yet built — this view shows the current week's count and any lines already recorded.</p>
+
+@section Scripts {
+    <script src="~/js/warehouse/ptfe-cycle-count.js"></script>
+}

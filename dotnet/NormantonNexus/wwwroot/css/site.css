@@ -1,0 +1,1051 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   site.css — Normanton Nexus (dotnet)
+   Single consolidated theme file — tokens + every shared component, in one
+   place, on purpose: this app already has one CSS file per whole site
+   (unlike the Node app's 14 separate department stylesheets, each
+   re-declaring its own :root token block) and stays that way so a future
+   design change never means hunting across department-specific files.
+   Colours/fonts/component shapes are lifted verbatim from the real Node
+   app's private/css/nexus-common.css + landing.css + admin.css +
+   warehouse.css + public/css/index.css — this is the redesign approved as
+   "Normanton Nexus Redesign" (design canvas), not a fresh invention.
+   Per-department accent colours are handled as CSS custom-property
+   overrides on [data-dept="..."] (see the DEPARTMENT ACCENTS section) set
+   by Pages/Shared/_Layout.cshtml from Services/UI/DepartmentTheme.cs,
+   rather than a separate stylesheet per department.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── TOKENS ──────────────────────────────────────────────────────────────── */
+:root {
+  --bg:         #EEF2F7;
+  --surface:    #FFFFFF;
+  --surface2:   #F4F7FB;
+  --surface3:   #ECF1F8;
+  --border:     #D0DAE8;
+  --border2:    #B8C8DC;
+
+  --accent:     #2563EB;
+  --accent2:    #1D4ED8;
+  --accent3:    #3B82F6;
+  --accent-dim: #DBEAFE;
+
+  --night:      #1E2D45;
+  --night2:     #29456F;
+  --night3:     #0F1B30;
+
+  --text:       #1E2D3D;
+  --text-dim:   #4D6380;
+  --text-muted: #8DA3BE;
+  --muted:      #B8C8DC;
+
+  --success:     #059669;
+  --success-dim: #D1FAE5;
+  --warn:        #D97706;
+  --warn-dim:    #FEF3C7;
+  --error:       #DC2626;
+  --error-dim:   #FEE2E2;
+  --pending:     #7C3AED;
+  --pending-dim: #EDE9FE;
+
+  --shadow-sm: 0 1px 3px  rgba(30,45,69,0.08);
+  --shadow-md: 0 4px 12px rgba(30,45,69,0.10);
+  --shadow-lg: 0 16px 40px rgba(30,45,69,0.18);
+}
+
+/* ── RESET / BASE ────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Generic visibility utility — several shared scripts (modal.js, account.js,
+   table-helpers.js) toggle this class via classList.add/remove("hidden")
+   expecting it to actually hide the element. Without this rule the class
+   toggled fine but nothing visually changed — most visibly, closing a modal
+   left its full-screen blurred backdrop on screen forever, since
+   .ps-modal-overlay.hidden had no display:none to fall back to. */
+.hidden { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Manrope', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  min-height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  position: relative;
+}
+
+/* Dot-grid background wash, same as Node's landing/login pages */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image: radial-gradient(circle, rgba(37,99,235,0.05) 1px, transparent 1px);
+  background-size: 28px 28px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { color: var(--accent2); text-decoration: underline; }
+
+::-webkit-scrollbar             { width: 7px; height: 7px; }
+::-webkit-scrollbar-track       { background: transparent; }
+::-webkit-scrollbar-thumb       { background: var(--border2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── HEADER ──────────────────────────────────────────────────────────────── */
+.header {
+  position: relative; z-index: 2;
+  height: 52px;
+  padding: 0 32px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-right { display: flex; align-items: center; gap: 14px; }
+
+.brand-icon { width: 28px; height: 28px; display: flex; align-items: center; flex-shrink: 0; }
+.brand-icon img { width: 100%; height: 100%; object-fit: contain; }
+
+.brand-name {
+  font-family: 'Manrope', sans-serif;
+  font-size: 15px; font-weight: 800;
+  color: var(--text); letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.brand-sep { width: 1px; height: 16px; background: var(--border); flex-shrink: 0; }
+
+.brand-module {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted); letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.back-link {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 500;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 4px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.back-link:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  text-decoration: none;
+}
+
+.dept-badge {
+  width: 28px; height: 28px;
+  border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  background: var(--accent-dim);
+  border: 1px solid rgba(0,0,0,0.06);
+  color: var(--accent);
+}
+.dept-badge svg { width: 15px; height: 15px; }
+
+.user-badge {
+  display: flex; align-items: center; gap: 7px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-dim);
+  white-space: nowrap;
+}
+.user-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(5,150,105,0.55);
+  flex-shrink: 0;
+  animation: nexusPulse 2.5s infinite;
+}
+@keyframes nexusPulse {
+  0%   { box-shadow: 0 0 0 0   rgba(5,150,105,0.55); }
+  70%  { box-shadow: 0 0 0 7px rgba(5,150,105,0); }
+  100% { box-shadow: 0 0 0 0   rgba(5,150,105,0); }
+}
+
+.btn-logout {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px; font-weight: 500;
+  padding: 5px 13px;
+  background: transparent;
+  border: 1px solid var(--border2); border-radius: 6px;
+  color: var(--text-dim); cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.btn-logout:hover { border-color: var(--error); color: var(--error); text-decoration: none; }
+
+/* ── PAGE TITLE BAR ──────────────────────────────────────────────────────── */
+.page-title-bar {
+  position: relative; z-index: 1;
+  background: linear-gradient(135deg, var(--night) 0%, var(--night3) 100%);
+  padding: 28px 32px 26px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.page-title-bar::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    -45deg, transparent, transparent 24px,
+    rgba(255,255,255,0.018) 24px, rgba(255,255,255,0.018) 25px
+  );
+  pointer-events: none;
+}
+.page-title-bar::after {
+  content: '';
+  position: absolute; top: -60px; left: -40px;
+  width: 380px; height: 220px;
+  background: radial-gradient(ellipse, var(--dept-glow, rgba(59,130,246,0.22)) 0%, transparent 65%);
+  pointer-events: none;
+}
+
+.page-title-inner { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; }
+
+.page-title {
+  font-size: 24px; font-weight: 800;
+  color: #fff; letter-spacing: -0.2px;
+  margin: 0 0 4px;
+  line-height: 1.2;
+}
+
+.page-subtitle {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px; letter-spacing: 0.4px;
+  color: rgba(148,168,194,0.8);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ── HUB HERO (replaces the page-title-bar on the Hub only — see
+   Pages/Shared/_Layout.cshtml's isHub branch) ───────────────────────────── */
+.hub-hero {
+  position: relative; z-index: 1;
+  background: linear-gradient(180deg, var(--night) 0%, var(--night3) 100%);
+  color: #fff;
+  padding: 36px 32px 34px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.hub-hero::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(-45deg, transparent, transparent 24px, rgba(255,255,255,0.018) 24px, rgba(255,255,255,0.018) 25px);
+  pointer-events: none;
+}
+.hub-hero::after {
+  content: '';
+  position: absolute; top: -100px; left: 50%; transform: translateX(-50%);
+  width: 900px; height: 480px;
+  background: radial-gradient(ellipse, rgba(59,130,246,0.24) 0%, transparent 65%);
+  pointer-events: none;
+}
+.hub-hero-inner { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; }
+.hub-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 500;
+  color: var(--accent3); letter-spacing: 3px; text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.hub-title { font-size: 32px; font-weight: 800; letter-spacing: -0.4px; margin: 0 0 6px; line-height: 1.1; }
+.hub-sub { font-size: 14px; color: rgba(203,213,225,0.8); margin: 0; }
+
+@media (max-width: 900px) {
+  .hub-hero { padding: 28px 20px; }
+}
+
+/* ── PAGE CONTENT ────────────────────────────────────────────────────────── */
+.page-content {
+  position: relative; z-index: 1;
+  /* Widened from 1180px — several data-dense tables (Tracked Orders' 12
+     columns, admin lists) genuinely need the room; a narrower cap forced
+     horizontal scrolling inside every wide table on ordinary desktop
+     viewports. Still centred/capped rather than full-bleed so a giant
+     monitor doesn't stretch a simple form page into a thin ribbon of text
+     down the middle of acres of whitespace. */
+  max-width: 1600px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 32px 56px;
+  flex: 1;
+}
+
+/* ── TILE GRID (department landing pages) ───────────────────────────────── */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 16px;
+}
+
+.tile {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 20px 20px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  text-decoration: none;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.tile::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--accent2), var(--accent3));
+  transform: scaleY(0); transform-origin: bottom;
+  transition: transform 0.2s ease;
+}
+.tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(30,45,69,0.13);
+  border-color: var(--border2);
+  text-decoration: none;
+}
+.tile:hover::before { transform: scaleY(1); }
+
+.tile-title {
+  font-weight: 800;
+  font-size: 15px;
+  margin: 0;
+  color: var(--text);
+}
+
+.tile-hint {
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* Named tile groups on a department landing page (e.g. Logistics' Transport
+   Management / Material Planning / Reports / Admin sections) — matches the
+   real Node app's own section-per-department-area grouping. */
+.tile-section-group + .tile-section-group { margin-top: 32px; }
+.tile-section-title {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-dim);
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── FORMS ───────────────────────────────────────────────────────────────── */
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 480px;
+}
+
+label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input[type="email"],
+input[type="date"],
+select,
+textarea {
+  padding: 9px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: 'Manrope', sans-serif;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+}
+input::placeholder { color: var(--muted); }
+
+/* Baseline for every plain <button> — most buttons across this app are
+   ad-hoc `type="button"` elements built by JS for row/filter/toolbar
+   actions (never `type="submit"`, never given a class), which the old
+   `button[type="submit"], .btn` rule below never matched at all — they
+   rendered with zero styling. This gives every button a sensible, subtle
+   default (outlined, not the loud gradient); `type="submit"`/.btn opts
+   into the bolder primary CTA look instead. */
+button {
+  font-family: 'Manrope', sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 14px;
+  border: 1px solid var(--border2);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+button:hover { border-color: var(--accent); color: var(--accent); background: var(--surface2); }
+button:disabled { opacity: 0.55; cursor: default; }
+
+button[type="submit"], .btn {
+  align-self: flex-start;
+  padding: 9px 18px;
+  border: none;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--accent2), var(--accent3));
+  color: #ffffff;
+  font-family: 'Manrope', sans-serif;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(37,99,235,0.28);
+  transition: opacity 0.15s, transform 0.1s;
+}
+button[type="submit"]:hover, .btn:hover { opacity: 0.92; border-color: transparent; color: #fff; background: linear-gradient(135deg, var(--accent2), var(--accent3)); }
+button[type="submit"]:active, .btn:active { transform: scale(0.99); }
+
+/* .secondary is now just an explicit alias of the plain-<button> default
+   above — kept so existing markup using this class keeps working. */
+button.secondary, .btn.secondary {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  color: var(--text-dim);
+  box-shadow: none;
+  font-weight: 600;
+}
+button.secondary:hover, .btn.secondary:hover {
+  background: var(--surface2);
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── TABLES ──────────────────────────────────────────────────────────────── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+thead th, th {
+  text-align: left;
+  padding: 10px 14px;
+  background: var(--night);
+  color: #93C5FD;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+tbody tr:nth-child(odd)  td { background: var(--surface); }
+tbody tr:nth-child(even) td { background: var(--surface2); }
+tbody tr:hover td { background: var(--accent-dim); }
+
+/* Denser padding for data-heavy operational tables (Tracked Orders' 12
+   columns of inline-editable fields etc.) — trims ~10px/column of padding
+   so wide tables fit the page width instead of forcing horizontal scroll. */
+.table--compact th, .table--compact td { padding: 6px 8px; }
+/* Tracked Orders' inline-editable cells (qty/PO number/PO item/supplier ref
+   inputs) were clipping real values — e.g. "RR-2026-0007" truncated to
+   "RR-2026" — at the standard 12.5px .tf-input size in a column this narrow.
+   Smaller text fits the full value without needing a wider column (which
+   would reintroduce horizontal scroll on the wider tracked-orders table). */
+.table--compact .tf-input { font-size: 10.5px; padding: 6px 7px; }
+.table--compact select.tf-input { padding-right: 4px; }
+
+td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  color: var(--text);
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: none; }
+
+/* ── COLLAPSIBLE GROUPED SECTIONS (ps-section family) ───────────────────────
+   Shared "bucket" pattern for pages that group a long list into meaningful
+   categories (e.g. Logistics' Tracked Orders — Overdue for Shipping / Ordered
+   / Assigned to Shipment / Completed — each further split by vendor). Lifted
+   from the Node app's own private/css/logistics.css .ps-section rules
+   (colours mapped onto this app's own tokens). Any page can use this, not
+   just Tracked Orders — it's deliberately generic. */
+.ps-sections { display: flex; flex-direction: column; gap: 12px; }
+.ps-section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.ps-section-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  cursor: pointer; user-select: none;
+  background: var(--surface2);
+}
+.ps-section-header:hover { background: var(--accent-dim); }
+.ps-section-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ps-section-dot--priority { background: var(--error);   box-shadow: 0 0 6px rgba(220,38,38,0.5); }
+.ps-section-dot--backlog  { background: var(--warn); }
+.ps-section-dot--today    { background: var(--success); }
+.ps-section-dot--week     { background: var(--accent); }
+.ps-section-dot--month    { background: var(--pending); }
+.ps-section-dot--other    { background: var(--text-muted); }
+.ps-section-title { font-size: 13px; font-weight: 700; flex: 1; }
+.ps-section-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 1px 8px;
+}
+.ps-chevron { font-size: 10px; color: var(--text-muted); transition: transform 0.2s; }
+.ps-section--collapsed .ps-chevron { transform: rotate(-90deg); }
+.ps-section--collapsed .ps-section-body { display: none; }
+.ps-sections--nested { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.ps-section--nested .ps-section-header { padding: 7px 12px; }
+.ps-section--nested .ps-section-title { font-size: 12px; }
+.ps-section-body { padding: 0; }
+.ps-section-body table { margin: 0; border: none; border-radius: 0; box-shadow: none; }
+.ps-section-body > div { overflow-x: auto; }
+
+/* ── SMALL TOOLBAR / EMPTY-STATE UTILITIES (shared across grouped-list pages) ── */
+.nx-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-sm);
+}
+.nx-toolbar-title { font-size: 14px; font-weight: 800; }
+.nx-toolbar-hint { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text-muted); }
+.nx-toolbar-spacer { flex: 1; }
+.nx-toolbar input[type="text"] { padding: 6px 10px; font-size: 12.5px; }
+.nx-empty {
+  padding: 28px; text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: var(--surface);
+  border: 1px dashed var(--border2);
+  border-radius: 10px;
+}
+.nx-table-input {
+  padding: 4px 7px; font-size: 12px;
+  border: 1.5px solid var(--border); border-radius: 5px;
+  background: var(--surface); color: var(--text);
+  font-family: 'Manrope', sans-serif;
+}
+.nx-badge-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 700;
+  padding: 2px 7px; border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* ── MODAL SHELL (wwwroot/js/shared/modal.js) ───────────────────────────────
+   Ported from Node's two overlay patterns (.ps-modal in logistics.css, the
+   narrower .wc-overlay/.wc-modal confirm/alert dialog in nexus-common.css) —
+   unified into one shell here since this app had neither. */
+.ps-modal-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(15,25,45,0.55);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(2px);
+  animation: nx-modal-fade 0.12s ease;
+}
+@keyframes nx-modal-fade { from { opacity: 0; } to { opacity: 1; } }
+.ps-modal {
+  background: var(--surface);
+  border-radius: 12px;
+  width: 460px; max-width: 92vw; max-height: 86vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+}
+.ps-modal--wide { width: 720px; }
+.ps-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.ps-modal-title { font-size: 15px; font-weight: 800; color: var(--text); }
+.ps-modal-sub { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text-muted); margin-top: 3px; }
+.ps-modal-close {
+  background: none; border: none;
+  font-size: 20px; line-height: 1;
+  color: var(--text-muted); cursor: pointer;
+  padding: 2px 6px;
+}
+.ps-modal-close:hover { color: var(--text); }
+.ps-modal-body { padding: 20px; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
+.ps-modal-body p { margin: 0; }
+.ps-modal-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* Compact form fields used inside modal bodies (Assign Shipment/Create
+   Shipment/Create PO/Accept Order etc.) — a lighter-weight sibling to the
+   page-level <form> rules above, laid out in a responsive row rather than
+   one full-width field per line. */
+.tf-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.tf-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 160px; min-width: 0; }
+.tf-field--wide { flex-basis: 100%; }
+.tf-label { font-size: 11.5px; font-weight: 700; color: var(--text-dim); }
+.tf-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: 'JetBrains Mono', monospace;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface2);
+  color: var(--text);
+}
+.tf-input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+.tf-inline-error { color: var(--error); font-size: 12px; margin-top: 8px; }
+
+/* ── NOTIFICATION BELL (wwwroot/js/shared/notifications.js) ─────────────────
+   Ported from private/css/notifications.css, re-themed onto this app's own
+   light-surface tokens instead of Node's dark-surface fallback values. */
+.notif-bell-btn {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+.notif-bell-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.notif-bell-btn svg { width: 16px; height: 16px; }
+.notif-badge {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  background: var(--error); border-radius: 9px;
+  font-size: 9.5px; font-weight: 700; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  line-height: 1; pointer-events: none;
+}
+.notif-tray {
+  position: fixed; top: 58px; right: 18px;
+  width: 360px; max-height: calc(100vh - 80px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column;
+  z-index: 8500; overflow: hidden;
+}
+.notif-tray-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.notif-tray-title { font-size: 13px; font-weight: 800; }
+.notif-tray-actions { display: flex; align-items: center; gap: 8px; }
+.notif-tray-link { font-size: 11.5px; color: var(--accent); text-decoration: none; font-weight: 600; }
+.notif-tray-link:hover { text-decoration: underline; }
+.notif-tray-close {
+  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 17px; border-radius: 5px; line-height: 1;
+}
+.notif-tray-close:hover { color: var(--text); background: var(--surface2); }
+.notif-tray-list { overflow-y: auto; flex: 1; padding: 6px 0; }
+.notif-empty { padding: 30px 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
+.notif-empty-icon { font-size: 26px; margin-bottom: 8px; opacity: 0.5; }
+.notif-card { position: relative; padding: 11px 14px 10px 18px; border-bottom: 1px solid var(--border); }
+.notif-card:last-child { border-bottom: none; }
+.notif-card:hover { background: var(--surface2); }
+.notif-card::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; }
+.notif-sev-1::before { background: var(--accent); }
+.notif-sev-2::before { background: var(--warn); }
+.notif-sev-3::before { background: var(--error); }
+.notif-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
+.notif-card-title { font-size: 13px; font-weight: 700; line-height: 1.3; flex: 1; }
+.notif-card--read .notif-card-title { font-weight: 500; color: var(--text-dim); }
+.notif-dismiss-btn {
+  flex-shrink: 0; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 15px; line-height: 1; border-radius: 4px; margin-top: -1px;
+}
+.notif-dismiss-btn:hover { color: var(--error); background: var(--error-dim); }
+.notif-card-body { font-size: 12px; color: var(--text-dim); line-height: 1.45; margin-bottom: 6px; }
+.notif-card--read .notif-card-body { color: var(--text-muted); }
+.notif-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.notif-card-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text-muted); }
+.notif-cat-pill { padding: 1px 6px; background: var(--surface2); border-radius: 4px; font-size: 9.5px; letter-spacing: 0.5px; text-transform: uppercase; font-weight: 600; }
+.notif-action-btn { font-size: 11px; font-weight: 700; color: var(--accent); text-decoration: none; padding: 2px 8px; border-radius: 5px; background: var(--accent-dim); white-space: nowrap; }
+.notif-action-btn:hover { background: rgba(37,99,235,0.2); }
+.notif-unread-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; margin-right: 2px; }
+.notif-sev-2 .notif-unread-dot { background: var(--warn); }
+.notif-sev-3 .notif-unread-dot { background: var(--error); }
+
+.notif-bell--active {
+  color: var(--warn); background: var(--warn-dim); border-color: rgba(217,119,6,0.4);
+  animation: notif-bell-pulse 2s ease-in-out infinite;
+}
+@keyframes notif-bell-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,6,0.35); }
+  50%      { box-shadow: 0 0 0 5px rgba(217,119,6,0); }
+}
+.notif-bell--ring { animation: notif-bell-ring 0.8s ease; }
+@keyframes notif-bell-ring {
+  0% { transform: rotate(0deg); } 15% { transform: rotate(18deg); } 30% { transform: rotate(-15deg); }
+  45% { transform: rotate(12deg); } 60% { transform: rotate(-8deg); } 75% { transform: rotate(4deg); } 100% { transform: rotate(0deg); }
+}
+
+/* Notification history page */
+.nh-sev-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; margin-right: 5px; margin-top: -1px; }
+.nh-sev-1 { background: var(--accent); } .nh-sev-2 { background: var(--warn); } .nh-sev-3 { background: var(--error); }
+.nh-dismissed { opacity: 0.5; }
+.nh-title { font-weight: 700; margin-bottom: 2px; }
+.nh-body { font-size: 12px; color: var(--text-dim); }
+
+/* ── MY ACCOUNT MODAL FORMS (wwwroot/js/shared/account.js) ──────────────────
+   Ported from Node's .account-* classes — the modal shell itself is the
+   shared .ps-modal above, not a bespoke overlay like Node's. */
+.account-section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 8px;
+}
+.account-hint { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; margin: 0 0 12px; }
+.account-hint--muted { font-size: 12px; color: var(--text-muted); }
+.account-form { display: flex; flex-direction: column; gap: 6px; max-width: none; }
+.account-field-label { font-size: 11px; font-weight: 600; color: var(--text-dim); margin-top: 8px; }
+.account-input { padding: 8px 10px; border: 1px solid var(--border2); border-radius: 6px; background: var(--surface2); color: var(--text); font-family: 'Manrope', sans-serif; font-size: 13px; }
+.account-input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+.account-result { font-size: 12px; margin-top: 8px; min-height: 16px; }
+.account-result--ok { color: var(--success); }
+.account-result--error { color: var(--error); }
+.account-form-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; gap: 10px; }
+
+/* ── TABLE PAGER (wwwroot/js/shared/table-helpers.js) ───────────────────── */
+.nx-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  margin-top: -0.75rem;
+}
+.nx-pager-controls { display: flex; align-items: center; gap: 12px; }
+.nx-pager-btn {
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px; font-weight: 600;
+  padding: 5px 12px;
+}
+.nx-pager-current { white-space: nowrap; }
+
+/* ── BADGES / TAGS ───────────────────────────────────────────────────────── */
+.badge, .nx-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.6px; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 4px;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-dim);
+}
+.badge--success, .badge--live, .badge--active, .nx-tag--live   { background: var(--success-dim); color: var(--success); border-color: rgba(5,150,105,0.3); }
+.badge--warn, .badge--pending, .nx-tag--warn                   { background: var(--warn-dim);    color: var(--warn);    border-color: rgba(217,119,6,0.3); }
+.badge--error, .badge--locked, .nx-tag--error                  { background: var(--error-dim);   color: var(--error);   border-color: rgba(220,38,38,0.3); }
+.badge--accent, .nx-tag--accent                                { background: var(--accent-dim);  color: var(--accent2); border-color: rgba(37,99,235,0.3); }
+
+/* Admin-only role/status badges — ported verbatim from private/css/admin.css
+   (Admin user list/audit log). --pending here is a distinct purple accent
+   token (superadmin/registration-level), unrelated to .badge--pending above
+   (an amber "workflow pending" status) — same real naming overlap Node itself
+   has; preserved, not "fixed". */
+.badge--viewer, .badge--inactive { background: rgba(148,168,194,0.15); color: var(--text-muted); }
+.badge--editor                   { background: var(--accent-dim); color: var(--accent); }
+.badge--admin                    { background: var(--warn-dim); color: var(--warn); }
+.badge--superadmin               { background: var(--pending-dim); color: var(--pending); }
+.badge--operator                 { background: rgba(148,168,194,0.15); color: var(--text-muted); }
+
+/* Audit-log event-type tags (Admin) */
+.event--LOGIN_OK, .event--APPROVED, .event--SAP_OK, .event--PERM_CREATE { background: var(--success-dim); color: var(--success); }
+.event--LOGIN_FAIL, .event--REJECTED, .event--LOCKED, .event--RAW_SQL_ERROR, .event--SAP_ERROR, .event--PERM_DELETE { background: var(--error-dim); color: var(--error); }
+.event--LOGOUT, .event--PERM_UPDATE { background: var(--accent-dim); color: var(--accent); }
+.event--REGISTER, .event--PERM_GRANT { background: var(--pending-dim); color: var(--pending); }
+.event--ROLE_CHANGE, .event--DEPT_CHANGE, .event--RAW_SQL_BLOCKED, .event--PERM_REVOKE { background: var(--warn-dim); color: var(--warn); }
+.event--RAW_SQL { background: #E0F2FE; color: #0369A1; }
+/* .event--* needs the base .badge layout too — Node always pairs them
+   (e.g. class="badge event--LOGIN_OK"), same convention as .badge--role. */
+
+/* ── LOGIN PAGE (Layout = null, standalone) ─────────────────────────────── */
+.login-shell {
+  position: relative;
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 48px 20px;
+  overflow: hidden;
+}
+.login-shell::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image: radial-gradient(circle, rgba(37,99,235,0.07) 1px, transparent 1px);
+  background-size: 28px 28px;
+  pointer-events: none;
+}
+.login-shell::after {
+  content: '';
+  position: fixed; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 700px; height: 700px;
+  background: radial-gradient(circle, rgba(37,99,235,0.06) 0%, transparent 68%);
+  pointer-events: none;
+}
+
+.login-page {
+  position: relative; z-index: 1;
+  width: 420px; max-width: 100%;
+}
+
+.login-brand { text-align: center; margin-bottom: 32px; }
+.login-brand-logo {
+  display: inline-flex; align-items: center; gap: 12px;
+  margin-bottom: 10px;
+}
+.login-brand-logo img { width: 34px; height: 34px; object-fit: contain; }
+.login-brand-name {
+  font-family: 'Manrope', sans-serif;
+  font-size: 24px; font-weight: 800;
+  color: var(--night); letter-spacing: 0.5px;
+}
+.login-brand-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  letter-spacing: 3px; text-transform: uppercase;
+}
+
+.login-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 36px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(30,45,69,0.1);
+}
+.login-card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent2), var(--accent3));
+}
+
+.login-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 3px; text-transform: uppercase;
+  margin-bottom: 24px;
+  display: flex; align-items: center; gap: 10px;
+}
+.login-eyebrow::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+.login-card form { max-width: none; gap: 18px; }
+.login-card form > div { display: flex; flex-direction: column; gap: 6px; }
+.login-card input {
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  font-family: 'JetBrains Mono', monospace;
+  padding: 11px 14px;
+}
+.login-card button[type="submit"] {
+  width: 100%;
+  align-self: stretch;
+  margin-top: 8px;
+  padding: 13px;
+  font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase;
+  box-shadow: 0 3px 12px rgba(37,99,235,0.35);
+}
+
+.login-error {
+  margin-top: 4px;
+  background: transparent;
+  color: var(--error);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  text-align: center;
+  padding: 0;
+}
+
+.switch-link {
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.switch-link a { color: var(--accent); text-decoration: none; }
+.switch-link a:hover { text-decoration: underline; }
+
+.login-footer-note {
+  margin-top: 22px;
+  text-align: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
+/* ── RESULT ROWS (success/failure per-item feedback) ────────────────────── */
+.result-ok   { color: var(--success); font-weight: 700; }
+.result-fail { color: var(--error);   font-weight: 700; }
+
+/* ── ERROR PAGE ──────────────────────────────────────────────────────────── */
+.text-danger { color: var(--error); }
+
+/* ── PERMISSION GROUPS (Admin) ──────────────────────────────────────────────
+   Design approved via the /design canvas "Permission Groups Redesign" —
+   replaces the original plain-table/native-multi-select version. Reuses
+   existing tokens/components everywhere one already fit (.ps-section for
+   collapsible permission categories, .tf-input/.secondary/.btn for controls,
+   plain <table> for the members list) — the classes below are only the
+   genuinely new pieces: the groups-list card grid, tabs, a search-input-
+   with-icon wrapper (reused for all four search boxes across both pages),
+   the sticky unsaved-changes save bar, and the search-to-chip user picker. */
+
+.pg-search { position: relative; }
+.pg-search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+.pg-search input { width: 100%; padding: 9px 12px 9px 36px; }
+
+.pg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.pg-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 18px 16px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 10px; }
+.pg-card-name { font-size: 15.5px; font-weight: 800; }
+.pg-card-name a { color: var(--text); }
+.pg-card-name a:hover { color: var(--accent); }
+.pg-card-desc { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; flex: 1; margin: 0; }
+.pg-card-stats { display: flex; gap: 8px; }
+.pg-card-stat { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; color: var(--text-dim); background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; }
+.pg-card-actions { display: flex; gap: 8px; margin-top: 2px; }
+.pg-card-manage-btn { flex: 1; border: none; background: var(--accent-dim); color: var(--accent2); text-align: center; }
+.pg-card-manage-btn:hover { background: var(--accent2); color: #fff; }
+.pg-card-icon-btn { flex: 0 0 auto; width: 34px; padding: 7px 0; }
+
+.pg-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+.pg-tab { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13.5px; color: var(--text-muted); background: none; border: none; border-bottom: 2.5px solid transparent; border-radius: 0; padding: 10px 4px 11px; cursor: pointer; display: flex; align-items: center; gap: 8px; margin-right: 24px; }
+.pg-tab:hover { color: var(--text-dim); border-color: transparent; background: none; }
+.pg-tab--active, .pg-tab--active:hover { color: var(--accent2); border-bottom-color: var(--accent2); background: none; }
+.pg-tab-count { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; background: var(--surface3); color: var(--text-dim); border-radius: 10px; padding: 1px 8px; }
+.pg-tab--active .pg-tab-count { background: var(--accent-dim); color: var(--accent2); }
+
+.ps-section-body.pg-perm-grid { padding: 4px 6px; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 2px; }
+.pg-perm-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 10px; border-radius: 7px; cursor: pointer; }
+.pg-perm-row:hover { background: var(--surface2); }
+.pg-perm-checkbox { width: 17px; height: 17px; margin-top: 1px; accent-color: var(--accent2); flex-shrink: 0; cursor: pointer; }
+.pg-perm-code { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 700; color: var(--text); }
+.pg-perm-name { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
+
+.pg-save-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 400; display: flex; justify-content: center; padding: 0 32px 24px; pointer-events: none; }
+.pg-save-bar-inner { pointer-events: all; display: flex; align-items: center; gap: 16px; background: var(--night); color: #fff; border-radius: 12px; padding: 12px 14px 12px 20px; box-shadow: var(--shadow-lg); }
+.pg-save-bar-text { font-size: 13px; font-weight: 700; }
+.pg-save-bar-sub { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: rgba(148,168,194,0.85); margin-top: 1px; }
+.pg-save-btn { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13px; padding: 9px 18px; border: none; border-radius: 7px; background: linear-gradient(135deg, var(--accent2), var(--accent3)); color: #fff; cursor: pointer; box-shadow: 0 3px 10px rgba(37,99,235,0.35); }
+.pg-discard-btn { font-family: 'Manrope', sans-serif; font-weight: 600; font-size: 13px; padding: 9px 16px; border: 1px solid rgba(255,255,255,0.18); border-radius: 7px; background: transparent; color: rgba(255,255,255,0.85); cursor: pointer; }
+.pg-discard-btn:hover { border-color: rgba(255,255,255,0.4); color: #fff; background: transparent; }
+.pg-saved-toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--success); color: #fff; font-weight: 700; font-size: 13px; padding: 10px 20px; border-radius: 8px; box-shadow: var(--shadow-lg); z-index: 410; }
+
+.pg-chip-tray { min-height: 44px; background: var(--surface); border: 1.5px dashed var(--border2); border-radius: 10px; padding: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.pg-chip-tray-empty { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); padding: 4px 6px; }
+.pg-chip { display: flex; align-items: center; gap: 7px; background: var(--accent-dim); color: var(--accent2); font-size: 12.5px; font-weight: 700; padding: 5px 8px 5px 12px; border-radius: 20px; }
+.pg-chip-x { width: 16px; height: 16px; border-radius: 50%; background: rgba(37,99,235,0.18); display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 11px; line-height: 1; color: var(--accent2); }
+.pg-chip-x:hover { background: var(--accent2); color: #fff; }
+.pg-user-list { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-sm); max-height: 420px; overflow-y: auto; }
+.pg-user-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.pg-user-row:last-child { border-bottom: none; }
+.pg-user-row:hover { background: var(--surface2); }
+.pg-user-row--picked { background: var(--success-dim); }
+.pg-user-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--surface3); color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.pg-user-name { font-size: 13px; font-weight: 700; flex: 1; }
+.pg-user-pick-mark { color: var(--success); font-weight: 800; font-size: 13px; }
+
+/* ── SHARED SMALL COMPONENTS (search box, kebab context menu, form section
+   label, flag checkboxes, post-action cards) ────────────────────────────
+   Design approved via the /design canvas "Create Outbound Shipment
+   Redesign" — genuinely generic, so named nx- (this app's existing
+   "small shared utility" prefix — nx-toolbar/nx-empty/etc.) rather than
+   page-specific, for reuse by later Logistics redesign passes. */
+
+.nx-search { position: relative; }
+.nx-search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+.nx-search input { padding: 8px 12px 8px 34px !important; }
+
+.nx-ctx-menu { position: fixed; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-md); padding: 5px; z-index: 500; min-width: 190px; }
+.nx-ctx-item { padding: 8px 10px; font-size: 12.5px; font-weight: 600; border-radius: 6px; cursor: pointer; }
+.nx-ctx-item:hover { background: var(--surface2); }
+.nx-ctx-item--danger { color: var(--error); }
+
+.nx-row-menu-btn { border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 15px; padding: 2px 6px; border-radius: 5px; }
+.nx-row-menu-btn:hover { background: var(--surface3); color: var(--text-dim); }
+.nx-priority-flag { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--error); margin-right: 6px; box-shadow: 0 0 5px rgba(220,38,38,0.6); }
+.nx-comment-cell { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.nx-lock-msg { background: var(--warn-dim); border: 1px solid rgba(217,119,6,0.3); color: var(--warn); border-radius: 8px; padding: 9px 14px; font-size: 12.5px; margin-bottom: 14px; }
+
+.tf-section-label { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin: 16px 0 10px; }
+.tf-section-label:first-child { margin-top: 0; }
+.tf-section-label .tf-locked { float: right; color: var(--text-muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.lg-flag { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--text-dim); }
+.lg-flag-row { display: flex; gap: 20px; margin-bottom: 4px; flex-wrap: wrap; }
+
+.lg-post-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+.lg-post-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.lg-post-card--muted { opacity: 0.55; }
+.lg-post-title { font-weight: 800; font-size: 13.5px; }
+.lg-doc-links { display: flex; flex-direction: column; gap: 4px; }
+.lg-doc-links a { font-size: 11.5px; }
+@media (max-width: 640px) { .lg-post-grid { grid-template-columns: 1fr; } }

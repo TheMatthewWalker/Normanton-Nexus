@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Admin.AuditLogModel
+@{
+    ViewData["Title"] = "Audit Log";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Audit Log";
+    ViewData["PageSubtitle"] = "Search admin/auth events";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<form id="al-form" style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:end;">
+    <label>Event Type<input type="text" id="al-event"></label>
+    <label>Username<input type="text" id="al-username"></label>
+    <label>Detail contains<input type="text" id="al-detail"></label>
+    <label>From<input type="date" id="al-from"></label>
+    <label>To<input type="date" id="al-to"></label>
+    <button type="submit" class="btn secondary">Search</button>
+</form>
+
+<div id="al-results" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/admin/audit-log.js"></script>
+}

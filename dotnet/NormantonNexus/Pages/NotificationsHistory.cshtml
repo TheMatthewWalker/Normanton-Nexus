@@ -1,0 +1,51 @@
+@page
+@model NormantonNexus.Pages.NotificationsHistoryModel
+@{
+    ViewData["Title"] = "Notifications";
+    ViewData["Department"] = "Account";
+    ViewData["PageTitle"] = "Notification History";
+    ViewData["PageSubtitle"] = "Everything sent to you, including dismissed notifications";
+}
+
+@if (Model.Notifications.Count == 0)
+{
+    <div class="nx-empty">No notifications yet.</div>
+}
+else
+{
+    <table>
+        <thead><tr><th></th><th>Title</th><th>Category</th><th>Created</th><th>Status</th></tr></thead>
+        <tbody>
+            @foreach (var n in Model.Notifications)
+            {
+                <tr class="@(n.IsDismissed ? "nh-dismissed" : "")">
+                    <td><span class="nh-sev-dot nh-sev-@n.Severity"></span></td>
+                    <td>
+                        <div class="nh-title">@n.Title</div>
+                        <div class="nh-body">@n.Body</div>
+                        @if (n.ActionUrl is not null)
+                        {
+                            <a href="@n.ActionUrl">@(n.ActionLabel ?? "View")</a>
+                        }
+                    </td>
+                    <td>@(n.Category ?? "—")</td>
+                    <td>@n.CreatedAt.ToString("dd/MM/yyyy HH:mm")</td>
+                    <td>
+                        @if (n.IsDismissed)
+                        {
+                            <span class="badge">Dismissed</span>
+                        }
+                        else if (n.IsRead)
+                        {
+                            <span class="badge badge--active">Read</span>
+                        }
+                        else
+                        {
+                            <span class="badge badge--accent">Unread</span>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}

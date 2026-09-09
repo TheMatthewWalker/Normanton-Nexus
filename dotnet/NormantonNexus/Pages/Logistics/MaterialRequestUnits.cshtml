@@ -1,0 +1,22 @@
+@page
+@model NormantonNexus.Pages.Logistics.MaterialRequestUnitsModel
+@{
+    ViewData["Title"] = "Material Request Units";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Material Request Units";
+    ViewData["PageSubtitle"] = "Spool/tub/etc. to KG conversions per material — feeds Staging Post's request-in-your-own-units dropdown";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="secondary" id="mru-bulk-btn">Bulk Import (CSV)</button>
+    <button type="button" class="btn" id="mru-add-btn">+ Add Request Unit</button>
+</div>
+
+<div id="mru-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/material-request-units.js"></script>
+}

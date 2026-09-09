@@ -1,0 +1,63 @@
+@page
+@model NormantonNexus.Pages.Production.ScrapReversalModel
+@{
+    ViewData["Title"] = "Scrap Reversal";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Scrap Reversal";
+    ViewData["PageSubtitle"] = "Search and reverse SAP scrap documents · alerts on missed reversals from reversed backflushes";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<h3>Missed Reversals</h3>
+<p style="color:#6b7280; font-size:0.85rem;">
+    Scrap documents still posted in SAP even though the parent backflush they came from has since been reversed.
+</p>
+<div id="sr-missed">Loading…</div>
+
+<h3>Search</h3>
+<div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:flex-end; margin-bottom:0.5rem;">
+    <div>
+        <label for="sr-matdoc">Material Document</label>
+        <input type="text" id="sr-matdoc" />
+    </div>
+    <div>
+        <label for="sr-batchref">Batch Ref</label>
+        <input type="text" id="sr-batchref" />
+    </div>
+    <div>
+        <label for="sr-material">Material</label>
+        <input type="text" id="sr-material" />
+    </div>
+    <div>
+        <label for="sr-pc">Process</label>
+        <select id="sr-pc">
+            <option value="">Any</option>
+            <option value="MX">Mixing</option>
+            <option value="EX">Extrusion</option>
+            <option value="CO">Convoluting</option>
+            <option value="BR">Braiding</option>
+            <option value="CL">Coverline</option>
+            <option value="TW">Tape Wrap</option>
+            <option value="DR">Drumming</option>
+        </select>
+    </div>
+    <div>
+        <label for="sr-from">From</label>
+        <input type="date" id="sr-from" />
+    </div>
+    <div>
+        <label for="sr-to">To</label>
+        <input type="date" id="sr-to" />
+    </div>
+    <div>
+        <label for="sr-operator">Operator</label>
+        <input type="text" id="sr-operator" />
+    </div>
+    <button type="button" id="sr-search-btn">Search</button>
+</div>
+<div id="sr-results"></div>
+
+@section Scripts {
+    <script src="~/js/production/scrap-reversal.js"></script>
+}

@@ -1,0 +1,19 @@
+@page
+@model NormantonNexus.Pages.Production.Reports.ShiftComparisonModel
+@{
+    ViewData["Title"] = "Shift Performance";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Shift Performance";
+    ViewData["PageSubtitle"] = "Days/Afters/Nights comparison";
+}
+
+<p><a asp-page="/Production/Index">&larr; Production</a></p>
+
+<div id="rpt-filters"></div>
+<p id="rpt-msg" style="color:#b91c1c;"></p>
+<div id="rpt-output"></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/reports/shift-comparison.js"></script>
+}

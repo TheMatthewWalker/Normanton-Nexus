@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Sales.ProductionScheduleModel
+@{
+    ViewData["Title"] = "Production Schedule";
+    ViewData["Department"] = "Sales";
+    ViewData["PageTitle"] = "Production Schedule";
+    ViewData["PageSubtitle"] = "Open PTFE order lines due in the next 5 working days — comments, ETA and OTIF KPI";
+}
+
+<p><a asp-page="Index">&larr; Sales</a></p>
+
+<div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+    <button type="button" class="psched-tab-btn secondary" data-view="schedule">Schedule</button>
+    <button type="button" class="psched-tab-btn secondary" data-view="arrears">Arrears</button>
+    <button type="button" class="psched-tab-btn secondary" data-view="kpi">OTIF KPI</button>
+</div>
+
+<div id="psched-actions" style="display:flex; gap:0.5rem; align-items:center; margin-bottom:0.5rem;"></div>
+<p id="psched-msg" style="color:#b91c1c;"></p>
+<div id="psched-body"></div>
+
+@section Scripts {
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="~/js/production-schedule/index.js"></script>
+}

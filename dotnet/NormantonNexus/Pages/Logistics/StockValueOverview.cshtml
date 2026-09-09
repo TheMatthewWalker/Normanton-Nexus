@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Logistics.StockValueOverviewModel
+@{
+    ViewData["Title"] = "Stock Value Overview";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Stock Value Overview";
+    ViewData["PageSubtitle"] = "Aggregate stock & book value by turnover category, valuation class and material type";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div id="svo-totals">Loading…</div>
+
+<h3>By Turnover Category</h3>
+<div id="svo-turnover"></div>
+
+<h3>By Profit Centre</h3>
+<div id="svo-profit-centre"></div>
+
+<h3>By Material Type</h3>
+<div id="svo-material-type"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/stock-value-overview.js"></script>
+}

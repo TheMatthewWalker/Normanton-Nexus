@@ -1334,23 +1334,25 @@ async function runZdelflagMaintenance(pool, deliveryId, userId) {
     }
 }
 
-// ── Post Goods Issue for a delivery (BAPI_DELIVERYPROCESSING_EXEC) ──
+// ── Post Goods Issue for a delivery (BAPI_OUTB_DELIVERY_CONFIRM_DEC) ──
 //
 // Fired automatically right after runZdelflagMaintenance records 'Success'
 // for a delivery (see the .complete handler below) — no manual approval
 // step. Mirrors runZdelflagMaintenance's shape (never throws, always
 // resolves { status, messages }, writes exactly one row to
-// log.DeliveryGoodsIssueRun) but is much simpler: one POST to SapServer, no
-// multi-step SAP lookup chain, since GI only needs the delivery number
-// itself. ranByUserID is always null — this is an automatic run, same as
-// ZDELFLAG's own.
+// log.DeliveryGoodsIssueRun). ranByUserID is always null — this is an
+// automatic run, same as ZDELFLAG's own.
 //
-// SapServer's GoodsIssueHelper/BAPI_DELIVERYPROCESSING_EXEC integration is
-// new and its REQUEST-table field set is a deliberately minimal starting
-// point pending live confirmation (see GoodsIssueModels.cs's header
-// comment on the SapServer side) — Failed runs here are expected during
-// that confirmation phase, which is exactly why this never blocks
-// completion and always gets its own reprocess path below.
+// SapServer originally tried BAPI_DELIVERYPROCESSING_EXEC here, which
+// never worked live; it now posts via BAPI_OUTB_DELIVERY_CONFIRM_DEC
+// instead (see GoodsIssueModels.cs's header comment on the SapServer side
+// for the full story). Confirmed live (2026-08-28) that POST_GI_FLG alone
+// isn't enough — SAP rejects with "Delivery has not yet been put away /
+// picked (completely)" unless ITEM_DATA_SPL also carries each real
+// delivery item's picked quantity. Built here from log.PalletPackages —
+// the same source/grouping getDeliveryQuantityMatch already uses (SUM of
+// sapQuantity per sapDeliveryItem, real batches only — sapMaterial IS NOT
+// NULL excludes the outer box/container shells, which aren't SAP items).
 async function runGoodsIssueApproval(pool, deliveryId) {
     const recordRun = async (status, messages) => {
         // Same fire-and-forget guard as runZdelflagMaintenance's recordRun
@@ -1374,9 +1376,20 @@ async function runGoodsIssueApproval(pool, deliveryId) {
     };
 
     try {
+        const itemsRes = await pool.request()
+            .input('sapDelivery', sql.NVarChar, String(deliveryId))
+            .query(`SELECT sapDeliveryItem, SUM(sapQuantity) AS pickedQty
+                    FROM   log.PalletPackages
+                    WHERE  sapDelivery = @sapDelivery AND sapMaterial IS NOT NULL
+                    GROUP  BY sapDeliveryItem`);
+        const items = itemsRes.recordset.map(r => ({
+            ItemNumber: String(r.sapDeliveryItem || '').trim(),
+            Quantity:   Number(r.pickedQty || 0),
+        })).filter(i => i.ItemNumber);
+
         const response = await axios.post(
             `${sapConfig.url}/api/warehouse/goods-issue`,
-            { DeliveryNumber: String(deliveryId) },
+            { DeliveryNumber: String(deliveryId), Items: items },
             { timeout: 30000, httpsAgent: sapAgent, headers: { Authorization: `Bearer ${makeSapToken()}` } }
         );
 

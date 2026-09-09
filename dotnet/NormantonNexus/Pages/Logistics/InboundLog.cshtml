@@ -1,0 +1,24 @@
+@page
+@model NormantonNexus.Pages.Logistics.InboundLogModel
+@{
+    ViewData["Title"] = "Inbound Log";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Inbound Log";
+    ViewData["PageSubtitle"] = "Inbound shipments created from tracked orders, plus manual shipments";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:0.75rem">
+    <input class="tf-input" id="il-search" type="text" placeholder="Search vendor, tracking, container, B/L, material, PO, supplier ref…" style="max-width:340px">
+    <span id="il-count" class="nx-toolbar-hint"></span>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="secondary" id="il-manual-btn">+ Manual Shipment</button>
+</div>
+
+<div id="il-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/shipment-detail.js"></script>
+    <script src="~/js/logistics/inbound-log.js"></script>
+}

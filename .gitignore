@@ -18,3 +18,14 @@ deploy-runner.log
 # migrations/README.md) — still sensitive, so still ignored under both names.
 seeds/nexus/001_reference_data.cjs
 seeds/kongsberg/001_reference_data.cjs
+
+# dotnet/ — ASP.NET Core rewrite (see dotnet/README.md)
+dotnet/**/bin/
+dotnet/**/obj/
+dotnet/**/appsettings.Production.json
+dotnet/**/appsettings.Local.json
+dotnet/publish/
+# Data Protection key ring (Program.cs's PersistKeysToFileSystem) — created
+# next to the project on a local `dotnet run`; the real deployed copy lives
+# under publish/keys/, already covered by dotnet/publish/ above.
+dotnet/NormantonNexus/keys/

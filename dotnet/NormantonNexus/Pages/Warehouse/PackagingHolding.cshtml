@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Warehouse.PackagingHoldingModel
+@{
+    ViewData["Title"] = "Picksheets on Hold";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Picksheets on Hold";
+    ViewData["PageSubtitle"] = "Deliveries completed or deleted in SAP outside Nexus";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+<button type="button" class="btn secondary" id="ph-refresh">Refresh</button>
+<div id="ph-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/packaging-holding.js"></script>
+}

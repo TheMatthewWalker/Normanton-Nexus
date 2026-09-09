@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Logistics.AwaitingBookingModel
+@{
+    ViewData["Title"] = "Awaiting Booking";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Awaiting Booking";
+    ViewData["PageSubtitle"] = "Shipments with a forwarder assigned that still need booking";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-title" id="ab-hint">Loading…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="ab-book-btn" disabled>Book Selected</button>
+</div>
+
+<div id="ab-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/shipment-booking.js"></script>
+    <script src="~/js/logistics/awaiting-booking.js"></script>
+}

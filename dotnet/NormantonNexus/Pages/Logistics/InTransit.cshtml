@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Logistics.InTransitModel
+@{
+    ViewData["Title"] = "In Transit";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "In Transit";
+    ViewData["PageSubtitle"] = "Outbound shipments collected and not yet delivered";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-title" id="it-hint">Loading…</div>
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="it-deliver-btn" disabled>Mark Selected Delivered</button>
+</div>
+
+<div id="it-notice"></div>
+<div id="it-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/in-transit.js"></script>
+}

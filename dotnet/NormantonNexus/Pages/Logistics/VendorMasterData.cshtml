@@ -1,0 +1,24 @@
+@page
+@model NormantonNexus.Pages.Logistics.VendorMasterDataModel
+@{
+    ViewData["Title"] = "Vendor Master Data";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Vendor Master Data";
+    ViewData["PageSubtitle"] = "MRP vendor and vendor-material configuration";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<form id="vm-form">
+    <label>Vendor Name<input type="text" id="vm-name" required></label>
+    <label>SAP Vendor Number<input type="text" id="vm-sap-number"></label>
+    <label>Currency<input type="text" id="vm-currency" maxlength="3"></label>
+    <label>Incoterms<input type="text" id="vm-incoterms" maxlength="3"></label>
+    <label>Default Lead Time (days)<input type="number" id="vm-lead-time"></label>
+    <button type="submit" class="btn secondary">Add Vendor</button>
+</form>
+<div id="vm-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/vendor-master-data.js"></script>
+}

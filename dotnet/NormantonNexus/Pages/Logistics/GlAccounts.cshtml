@@ -1,0 +1,21 @@
+@page
+@model NormantonNexus.Pages.Logistics.GlAccountsModel
+@{
+    ViewData["Title"] = "GL Accounts";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "GL Accounts";
+    ViewData["PageSubtitle"] = "Maintain freight GL account codes (direction & tier)";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="ga-add-btn">+ Add GL Account</button>
+</div>
+
+<div id="ga-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/gl-accounts.js"></script>
+}

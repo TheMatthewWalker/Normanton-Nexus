@@ -1,0 +1,16 @@
+@page "{groupId:int}"
+@model NormantonNexus.Pages.Admin.PermissionGroupDetailModel
+@{
+    ViewData["Title"] = "Permission Group";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Permission Group";
+    ViewData["PageSubtitle"] = "Manage this group's permissions and members";
+}
+
+<p><a asp-page="PermissionGroups">&larr; All groups</a></p>
+
+<div id="pgd-body" data-group-id="@Model.GroupId">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/admin/permission-group-detail.js"></script>
+}

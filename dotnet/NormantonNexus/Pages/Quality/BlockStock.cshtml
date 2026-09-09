@@ -1,0 +1,51 @@
+@page
+@model NormantonNexus.Pages.Quality.BlockStockModel
+@{
+    ViewData["Title"] = "Block Stock";
+    ViewData["Department"] = "Quality";
+    ViewData["PageTitle"] = "Block Stock";
+    ViewData["PageSubtitle"] = "Move stock to quality inspection via MB1B movement 344";
+}
+
+<p><a asp-page="Index">&larr; Quality</a></p>
+
+<form id="q-form" data-direction="block">
+    <label for="q-header">Header / Reference</label>
+    <input type="text" id="q-header" maxlength="25" required placeholder="e.g. Hold for inspection — J.Smith" />
+
+    <label for="q-material">Material</label>
+    <input type="text" id="q-material" maxlength="18" required />
+
+    <label for="q-quantity">Quantity</label>
+    <input type="number" id="q-quantity" step="any" min="0.001" required />
+
+    <label for="q-batch">Batch</label>
+    <input type="text" id="q-batch" maxlength="10" />
+
+    <label for="q-sloc">Storage Location</label>
+    <input type="text" id="q-sloc" maxlength="4" required />
+
+    <p id="q-wm-hint" style="color:#6b7280; font-size:0.85rem;">Bin Type and Bin are only required for WM-managed locations (1710, 1711).</p>
+    <div id="q-bintype-wrap" hidden>
+        <label for="q-bintype">Bin Type</label>
+        <input type="text" id="q-bintype" maxlength="3" />
+    </div>
+    <div id="q-bin-wrap" hidden>
+        <label for="q-bin">Bin</label>
+        <input type="text" id="q-bin" maxlength="10" />
+    </div>
+
+    <label for="q-spcind">Special Stock Indicator</label>
+    <input type="text" id="q-spcind" maxlength="1" />
+
+    <label for="q-spcno">Special Stock Number</label>
+    <input type="text" id="q-spcno" maxlength="16" />
+
+    <button type="submit" id="q-submit">Block Stock</button>
+</form>
+
+<div id="q-result" style="margin-top:1rem;"></div>
+
+@section Scripts {
+    <script src="~/js/quality/block-unblock-form.js"></script>
+}

@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Logistics.StockValueByPriceModel
+@{
+    ViewData["Title"] = "Stock Value by Price";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Stock Value by Price";
+    ViewData["PageSubtitle"] = "Breakdown of stock value across unit-price bands";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div id="svp-body">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/stock-value-by-price.js"></script>
+}

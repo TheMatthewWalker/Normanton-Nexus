@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="NormantonNexus.Tests/NormantonNexus.Tests.csproj" />
+  <Project Path="NormantonNexus/NormantonNexus.csproj" />
+</Solution>

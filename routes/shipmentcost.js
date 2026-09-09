@@ -590,6 +590,15 @@ router.get('/estimate/:shipmentId', async (req, res) => {
 // zero-padded shipmentID; manual uses its free-text manualReference).
 // migoPredicate/orderBy are the only things GET /unprocessed and GET
 // /processed below vary — both pass fixed literals, never request input.
+//
+// CostCenters/CostElements are both joined via OUTER APPLY ... TOP 1, not a
+// plain LEFT JOIN — neither table has a unique constraint on centerCode/
+// elementCode (see migrations/nexus_operations/20260804120000_initial_schema.cjs),
+// so a duplicate row for the same code (bad seed data, a manual edit via the
+// Admin SQL Console, etc.) would otherwise fan the join out and print the
+// SAME log.ShipmentCost row twice — exactly the bug that already bit
+// log.Forwarders here once before (see COMBINED_COST_OUTBOUND/_INBOUND's own
+// comment further down this file), now fixed here too, for real.
 function buildCostListQuery(migoPredicate, orderBy) {
     return `SELECT
                 sc.costID,
@@ -615,8 +624,8 @@ function buildCostListQuery(migoPredicate, orderBy) {
                 sc.purchaseOrder
             FROM log.ShipmentCost sc
             INNER JOIN log.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-            LEFT  JOIN log.CostCenters  cc ON cc.centerCode  = sc.costCenter
-            LEFT  JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+            OUTER APPLY (SELECT TOP 1 centerCode FROM log.CostCenters WHERE centerCode = sc.costCenter) cc
+            OUTER APPLY (SELECT TOP 1 elementCode, direction FROM log.CostElements WHERE elementCode = sc.costElement) ce
             WHERE ${migoPredicate} AND sc.shipmentID IS NOT NULL
 
             UNION ALL
@@ -651,8 +660,8 @@ function buildCostListQuery(migoPredicate, orderBy) {
                 sc.purchaseOrder
             FROM log.ShipmentCost sc
             INNER JOIN log.PurchaseOrderShipment ps ON ps.ShipmentId = sc.poShipmentID
-            LEFT  JOIN log.CostCenters   cc ON cc.centerCode  = sc.costCenter
-            LEFT  JOIN log.CostElements  ce ON ce.elementCode = sc.costElement
+            OUTER APPLY (SELECT TOP 1 centerCode FROM log.CostCenters WHERE centerCode = sc.costCenter) cc
+            OUTER APPLY (SELECT TOP 1 elementCode, direction FROM log.CostElements WHERE elementCode = sc.costElement) ce
             LEFT  JOIN log.Destinations  d  ON d.destinationID = ps.OriginDestinationID
             WHERE ${migoPredicate} AND sc.poShipmentID IS NOT NULL
 
@@ -686,8 +695,8 @@ function buildCostListQuery(migoPredicate, orderBy) {
                 sc.materialDocument,
                 sc.purchaseOrder
             FROM log.ShipmentCost sc
-            LEFT  JOIN log.CostCenters  cc ON cc.centerCode  = sc.costCenter
-            LEFT  JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+            OUTER APPLY (SELECT TOP 1 centerCode FROM log.CostCenters WHERE centerCode = sc.costCenter) cc
+            OUTER APPLY (SELECT TOP 1 elementCode, direction FROM log.CostElements WHERE elementCode = sc.costElement) ce
             WHERE ${migoPredicate} AND sc.shipmentID IS NULL AND sc.poShipmentID IS NULL
 
             ORDER BY ${orderBy}`;

@@ -1,0 +1,21 @@
+@page
+@model NormantonNexus.Pages.Logistics.ForwarderModeMappingModel
+@{
+    ViewData["Title"] = "Forwarder Mode Mapping";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Forwarder Mode Mapping";
+    ViewData["PageSubtitle"] = "Maps a forwarder's type to the Mode of Transport stored on cost lines when a shipment is booked";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn" id="fmm-add-btn">+ Add Mapping</button>
+</div>
+
+<div id="fmm-list">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/logistics/forwarder-mode-mapping.js"></script>
+}

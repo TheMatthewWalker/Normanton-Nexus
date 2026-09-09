@@ -1,0 +1,19 @@
+@page
+@model NormantonNexus.Pages.Production.Reports.SapPerformanceModel
+@{
+    ViewData["Title"] = "SAP Performance";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "SAP Performance";
+    ViewData["PageSubtitle"] = "Backflush success rate, failures, and alerts";
+}
+
+<p><a asp-page="/Production/Index">&larr; Production</a></p>
+
+<div id="rpt-filters"></div>
+<p id="rpt-msg" style="color:#b91c1c;"></p>
+<div id="rpt-output"></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/reports/sap-performance.js"></script>
+}

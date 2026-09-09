@@ -1,0 +1,23 @@
+@page
+@model NormantonNexus.Pages.Quality.ConcessionsModel
+@{
+    ViewData["Title"] = "Traceability Concessions";
+    ViewData["Department"] = "Quality";
+    ViewData["PageTitle"] = "Traceability Concessions";
+    ViewData["PageSubtitle"] = "Production's requests to proceed despite a BOM mismatch";
+}
+
+<p><a asp-page="Index">&larr; Quality</a></p>
+
+<div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
+    <button type="button" class="qc-status-btn secondary" data-status="PENDING">Pending</button>
+    <button type="button" class="qc-status-btn secondary" data-status="APPROVED">Approved</button>
+    <button type="button" class="qc-status-btn secondary" data-status="REJECTED">Rejected</button>
+</div>
+
+<div id="qc-table"></div>
+<p id="qc-msg" style="color:#b91c1c;"></p>
+
+@section Scripts {
+    <script src="~/js/quality/concessions.js"></script>
+}

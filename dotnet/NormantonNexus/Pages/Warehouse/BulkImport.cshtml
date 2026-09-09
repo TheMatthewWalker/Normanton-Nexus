@@ -1,0 +1,22 @@
+@page
+@model NormantonNexus.Pages.Warehouse.BulkImportModel
+@{
+    ViewData["Title"] = "Bulk CSV Import";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Bulk CSV Import";
+    ViewData["PageSubtitle"] = "Import many deliveries at once";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<p>Paste CSV with header row: <code>deliveryID,customerID,dispatchDate,deliveryService,deliveryPriority,picksheetComment,incoterms</code></p>
+<textarea id="bi-csv" rows="10" style="width:100%;max-width:700px;font-family:monospace;"></textarea>
+<div>
+    <button type="button" class="btn secondary" id="bi-preview">Preview</button>
+    <button type="button" class="btn" id="bi-submit" style="display:none;">Import</button>
+</div>
+<div id="bi-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/bulk-import.js"></script>
+}

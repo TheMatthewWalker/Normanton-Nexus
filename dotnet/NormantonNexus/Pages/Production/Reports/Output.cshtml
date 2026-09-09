@@ -1,0 +1,19 @@
+@page
+@model NormantonNexus.Pages.Production.Reports.OutputModel
+@{
+    ViewData["Title"] = "Production Output";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Production Output";
+    ViewData["PageSubtitle"] = "Metres/KG produced by process over time";
+}
+
+<p><a asp-page="/Production/Index">&larr; Production</a></p>
+
+<div id="rpt-filters"></div>
+<p id="rpt-msg" style="color:#b91c1c;"></p>
+<div id="rpt-output"></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/reports/output.js"></script>
+}

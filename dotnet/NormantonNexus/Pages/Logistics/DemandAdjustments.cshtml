@@ -1,0 +1,60 @@
+@page
+@model NormantonNexus.Pages.Logistics.DemandAdjustmentsModel
+@{
+    ViewData["Title"] = "Demand Adjustments";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Demand Adjustments";
+    ViewData["PageSubtitle"] = "Manual overrides to forecast demand";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<form id="da-form" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px">
+    <div class="tf-row">
+        <div class="tf-field">
+            <label class="tf-label">Material</label>
+            <input class="tf-input" type="text" id="da-material" required>
+        </div>
+        <div class="tf-field">
+            <label class="tf-label">Start Date</label>
+            <input class="tf-input" type="date" id="da-start">
+        </div>
+        <div class="tf-field">
+            <label class="tf-label">End Date</label>
+            <input class="tf-input" type="date" id="da-end">
+        </div>
+    </div>
+    <div class="tf-row">
+        <div class="tf-field">
+            <label class="tf-label">Mode</label>
+            <select class="tf-input" id="da-mode">
+                <option value="percentage">Percentage increase/decrease</option>
+                <option value="override">Fixed override quantity</option>
+            </select>
+        </div>
+        <div class="tf-field" id="da-usage-field">
+            <label class="tf-label">Usage % <span style="font-weight:400;color:var(--text-muted)">(100 = no change, &lt;100 decrease, &gt;100 increase)</span></label>
+            <input class="tf-input" type="number" id="da-usage" value="100">
+        </div>
+        <div class="tf-field hidden" id="da-override-field">
+            <label class="tf-label">Override Total Quantity <span style="font-weight:400;color:var(--text-muted)">(planned across the whole window, spread evenly per day — needs both dates)</span></label>
+            <input class="tf-input" type="number" id="da-override" min="0">
+        </div>
+    </div>
+    <div class="tf-row">
+        <div class="tf-field tf-field--wide">
+            <label class="tf-label">Reason</label>
+            <input class="tf-input" type="text" id="da-reason">
+        </div>
+    </div>
+    <div id="da-form-error"></div>
+    <button type="submit" class="btn">Add</button>
+</form>
+<div id="da-body" style="margin-top:0.75rem;"></div>
+
+@section Scripts {
+    <script>
+        window.__daInitialMaterial = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Material));
+    </script>
+    <script src="~/js/logistics/demand-adjustments.js"></script>
+}
