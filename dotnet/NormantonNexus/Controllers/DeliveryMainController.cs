@@ -99,6 +99,22 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
         return Ok(ApiResponse<PicksheetMaterialsResult>.Ok(result));
     }
 
+    /// <summary>Pallets built for a delivery — feeds the outbound Shipment Details modal's Packaging card. No permission gate, matching Node's real route exactly.</summary>
+    [HttpGet("{deliveryId:long}/pallets")]
+    public async Task<IActionResult> GetPallets(long deliveryId, CancellationToken ct)
+    {
+        var rows = await WarehousePicksheetHelper.GetPalletsForDeliveryAsync(nexusOperationsDb, deliveryId, ct);
+        return Ok(ApiResponse<IReadOnlyList<DeliveryPalletRow>>.Ok(rows));
+    }
+
+    /// <summary>Unshipped deliveries for one customer — the "Add Deliveries" picker inside Modify Deliveries. No permission gate, matching Node's real route exactly.</summary>
+    [HttpGet("available-for-shipment/{customerId:long}")]
+    public async Task<IActionResult> GetAvailableForShipment(long customerId, CancellationToken ct)
+    {
+        var rows = await WarehousePicksheetHelper.GetAvailableForShipmentAsync(nexusOperationsDb, customerId, ct);
+        return Ok(ApiResponse<IReadOnlyList<AvailableForShipmentRow>>.Ok(rows));
+    }
+
     [HttpGet("{deliveryId:long}/linked-picksheets")]
     public async Task<IActionResult> GetLinkedPicksheets(long deliveryId, CancellationToken ct)
     {

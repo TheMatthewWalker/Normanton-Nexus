@@ -257,6 +257,57 @@ internal static partial class WarehousePicksheetHelper
     }
 
     /// <summary>
+    /// GET :deliveryId/pallets — real pallets built for a delivery, widened
+    /// to also include pallets owned (via log.DeliveryLink) by any
+    /// picksheet linked to this one. Feeds the outbound Shipment Details
+    /// modal's Packaging card (Sub-phase 8a.1's ShipmentHelper never needed
+    /// this — pallets are keyed by delivery, not shipment, since one
+    /// shipment can bundle several deliveries).
+    /// </summary>
+    internal static async Task<IReadOnlyList<DeliveryPalletRow>> GetPalletsForDeliveryAsync(INexusOperationsDb db, long deliveryId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<DeliveryPalletRow>(new CommandDefinition("""
+            SELECT pm.palletID AS PalletId, pm.palletType AS PalletType, pm.palletFinish AS PalletFinish,
+                   pm.palletLength AS PalletLength, pm.palletWidth AS PalletWidth, pm.palletHeight AS PalletHeight,
+                   pm.grossWeight AS GrossWeight, pm.packagingWeight AS PackagingWeight, pm.palletVolume AS PalletVolume,
+                   pm.palletLocation AS PalletLocation, pm.palletCategory AS PalletCategory, pm.palletCreationDate AS PalletCreationDate
+            FROM log.PalletMain pm
+            INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
+            WHERE pm.palletRemoved = 0
+              AND (dl.deliveryID = @deliveryId
+                   OR dl.deliveryID IN (SELECT linkedDeliveryID FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId))
+            ORDER BY pm.palletCreationDate ASC
+            """, new { deliveryId }, cancellationToken: ct));
+        return rows.ToArray();
+    }
+
+    /// <summary>GET available-for-shipment/:customerId — unshipped, completed deliveries for one customer, feeding the outbound Shipment Details modal's "Add Deliveries" picker.</summary>
+    internal static async Task<IReadOnlyList<AvailableForShipmentRow>> GetAvailableForShipmentAsync(INexusOperationsDb db, long customerId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<AvailableForShipmentRow>(new CommandDefinition("""
+            SELECT dm.deliveryID AS DeliveryId, dm.customerID AS CustomerId, dm.dispatchDate AS DispatchDate, dm.deliveryDate AS DeliveryDate, dm.completionDate AS CompletionDate,
+                   dm.deliveryService AS DeliveryService, dm.picksheetComment AS PicksheetComment, dm.incoterms AS Incoterms,
+                   CAST(ISNULL(dm.netWeight,      0) AS decimal(18,3)) AS NetWeight,
+                   CAST(ISNULL(dm.grossWeight,    0) AS decimal(18,3)) AS GrossWeight,
+                   CAST(ISNULL(dm.palletCount,    0) AS decimal(18,3)) AS PalletCount,
+                   CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS DeliveryVolume,
+                   d.destinationName AS DestinationName, d.defaultIncoterms AS DefaultIncoterms
+            FROM log.DeliveryMain dm
+            LEFT JOIN log.Destinations d  ON d.destinationID  = dm.customerID
+            LEFT JOIN log.ShipmentLink  sl ON sl.deliveryID    = dm.deliveryID
+            WHERE dm.customerID = @customerId
+              AND dm.completionStatus = 1
+              AND ISNULL(dm.deliveryCancelled, 0) = 0
+              AND ISNULL(dm.pendingPackagingData, 0) = 0
+              AND sl.deliveryID IS NULL
+            ORDER BY dm.deliveryID ASC
+            """, new { customerId }, cancellationToken: ct));
+        return rows.ToArray();
+    }
+
+    /// <summary>
     /// Orchestrates: LIPS (materials required for this delivery) →
     /// picksheet-stock (LQUA+ZPRODBATCH batches for those materials) →
     /// LIKP (customer on any delivery a batch is already tagged against).

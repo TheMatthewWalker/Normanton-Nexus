@@ -600,6 +600,13 @@ tbody tr:last-child td { border-bottom: none; }
   box-shadow: var(--shadow-lg);
 }
 .ps-modal--wide { width: 720px; }
+/* Third, widest tier for data-dense content (the outbound Shipment Details
+   modal's two-column card grid, the Modify Deliveries panel's side-by-side
+   tables) — anything narrower forces those grids to cram into one column
+   or scroll horizontally unnecessarily. min(…, 94vw) still shrinks
+   gracefully on a laptop-width viewport instead of the fixed-720px tier's
+   hard cap. */
+.ps-modal--xwide { width: min(980px, 94vw); }
 .ps-modal-header {
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px;
@@ -643,6 +650,64 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .tf-input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
 .tf-inline-error { color: var(--error); font-size: 12px; margin-top: 8px; }
+
+/* ── OUTBOUND SHIPMENT DETAIL MODAL (wwwroot/js/logistics/shipment-detail-outbound.js)
+   Ported from private/css/logistics.css's .sd-* family (the real Node
+   "Shipment Details" popup shown when a shipment reference is clicked in
+   Awaiting Booking/Collection, In Transit, Customs or Search) — colours/
+   spacing carried over onto this app's own tokens, no visual invention. */
+.sd-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 760px) { .sd-grid, .sd-actions-cols, .sd-ds-cols { grid-template-columns: 1fr; } }
+.sd-section { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.sd-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 10px; }
+.sd-actions { display: flex; flex-direction: column; gap: 8px; }
+.sd-actions-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.sd-actions-subtitle { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px; }
+.sd-customs-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sd-toggle-group { display: inline-flex; border: 1px solid var(--border2); border-radius: 6px; overflow: hidden; }
+.sd-toggle-btn { font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; padding: 4px 10px; border: none; border-left: 1px solid var(--border2); background: var(--surface); color: var(--text-dim); cursor: pointer; transition: background .15s, color .15s; }
+.sd-toggle-btn:first-child { border-left: none; }
+.sd-toggle-btn:hover:not(:disabled):not(.sd-toggle-btn--active) { color: var(--text); }
+.sd-toggle-btn:disabled { cursor: not-allowed; opacity: .7; }
+.sd-toggle-btn--active { background: var(--accent); color: #fff; }
+.sd-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 700; }
+.sd-badge--complete { background: var(--success-dim); color: var(--success); }
+.sd-haulier-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sd-haulier-row select { flex: 1; min-width: 0; }
+.sd-contact-table { font-size: 13px; width: 100%; border-collapse: collapse; }
+.sd-contact-table td { padding: 4px 0; vertical-align: top; }
+.sd-contact-table td:first-child { color: var(--text-muted); width: 70px; white-space: nowrap; }
+.sd-contact-email { font-family: 'JetBrains Mono', monospace; font-size: 12px; word-break: break-word; }
+.sd-ds-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.sd-ds-grid { display: flex; flex-direction: column; gap: 8px; }
+.sd-ds-check { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; color: var(--text); }
+.sd-ds-check input { width: 14px; height: 14px; }
+.sd-ds-check input:disabled { cursor: not-allowed; }
+.sd-ds-field label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 2px; }
+.sd-ds-field input { width: 100%; }
+.sd-pkg-totals { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.sd-pkg-totals span { color: var(--text-muted); }
+.sd-pkg-totals strong { color: var(--text); font-weight: 700; }
+.sd-pkg-list { max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.sd-pkg-item { font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 4px 8px; background: var(--surface2); border-radius: 5px; display: flex; justify-content: space-between; gap: 8px; }
+.sd-pkg-item span:last-child { color: var(--text-muted); white-space: nowrap; }
+.sd-pcard-empty { font-size: 12px; color: var(--text-muted); padding: 8px 0; }
+.sd-delivery-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sd-delivery-table th { text-align: left; padding: 6px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+.sd-delivery-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.sd-delivery-table tr:last-child td { border-bottom: none; }
+.sd-delivery-table .sd-totals-row td { font-weight: 700; background: var(--bg); }
+.sd-remove-btn { background: transparent; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-size: 12px; color: var(--error); cursor: pointer; }
+.sd-remove-btn:hover { background: var(--error-dim); }
+.sd-picker-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 10px; }
+.sd-picker-empty { font-size: 13px; color: var(--text-muted); padding: 10px 0; }
+.sd-picker-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.sd-wide-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .sd-wide-grid { grid-template-columns: 1fr; } }
+/* Every table embedded in this modal scrolls itself, never the page/modal
+   around it — keeps a genuinely wide grid (Add Deliveries' 7 columns) from
+   ever forcing the whole card wider than its own --xwide cap. */
+.sd-scroll { overflow-x: auto; }
 
 /* ── NOTIFICATION BELL (wwwroot/js/shared/notifications.js) ─────────────────
    Ported from private/css/notifications.css, re-themed onto this app's own

@@ -37,6 +37,26 @@ public sealed record LinkedPicksheetRow(long DeliveryId, long? CustomerId, strin
 public sealed record LinkSearchRow(long DeliveryId, long? CustomerId, string? DestinationName, DateTime? DispatchDate);
 
 /// <summary>
+/// GET :deliveryId/pallets — pallets picked for a delivery (includes
+/// palletID for the builder). Widened to also include pallets OWNED (via
+/// log.DeliveryLink) by any picksheet linked to this one, matching Node's
+/// own query exactly — a delivery with no links just gets an empty IN
+/// subquery, byte-for-byte equivalent to the unwidened form. Used by both
+/// the pallet builder (not yet ported) and the outbound Shipment Details
+/// modal's read-only Packaging card.
+/// </summary>
+public sealed record DeliveryPalletRow(
+    long PalletId, string? PalletType, bool PalletFinish, decimal? PalletLength, decimal? PalletWidth, decimal? PalletHeight,
+    decimal? GrossWeight, decimal? PackagingWeight, decimal? PalletVolume, string? PalletLocation, string? PalletCategory, DateTime? PalletCreationDate);
+
+/// <summary>GET available-for-shipment/:customerId — unshipped, completed deliveries for one customer, the "Add Deliveries" picker inside the outbound Shipment Details modal's Modify Deliveries panel.</summary>
+public sealed record AvailableForShipmentRow(
+    long DeliveryId, long? CustomerId, DateTime? DispatchDate, DateTime? DeliveryDate, DateTime? CompletionDate,
+    string? DeliveryService, string? PicksheetComment, string? Incoterms,
+    decimal NetWeight, decimal GrossWeight, decimal PalletCount, decimal DeliveryVolume,
+    string? DestinationName, string? DefaultIncoterms);
+
+/// <summary>
 /// GET completed-unshipped — Logistics' Create Outbound Shipment picker.
 /// Completed, not-cancelled, not-in-packaging-holding deliveries with no
 /// row in log.ShipmentLink yet (never shipped). Mirrors Node's own query
