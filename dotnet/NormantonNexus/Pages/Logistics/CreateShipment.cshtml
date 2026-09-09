@@ -4,22 +4,28 @@
     ViewData["Title"] = "Create Outbound Shipment";
     ViewData["Department"] = "Logistics";
     ViewData["PageTitle"] = "Create Outbound Shipment";
-    ViewData["PageSubtitle"] = "Build a shipment from open deliveries";
+    ViewData["PageSubtitle"] = "Completed picksheets ready for shipment creation";
 }
 
 <p><a asp-page="Index">&larr; Logistics</a></p>
 
-<form id="cs-form">
-    <label>Delivery IDs (comma-separated)<input type="text" id="cs-deliveries" required></label>
-    <label>Destination Name<input type="text" id="cs-dest-name"></label>
-    <label>Destination Country<input type="text" id="cs-dest-country"></label>
-    <label>Forwarder ID<input type="text" id="cs-forwarder-id"></label>
-    <label>Planned Collection<input type="date" id="cs-planned-collection"></label>
-    <label>Incoterms<input type="text" id="cs-incoterms" maxlength="3"></label>
-    <label><input type="checkbox" id="cs-customs-required"> Customs Required</label>
-    <button type="submit" class="btn">Create Shipment</button>
-</form>
-<p id="cs-status"></p>
+<div class="nx-toolbar" id="cs-toolbar" style="margin-bottom:10px">
+    <div>
+        <div class="nx-toolbar-title">Completed picksheets</div>
+        <div class="nx-toolbar-hint" id="cs-hint">Loading…</div>
+    </div>
+    <div class="nx-toolbar-spacer"></div>
+    <div class="nx-search" style="max-width:230px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4.3-4.3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input type="text" id="cs-search-input" placeholder="Search reference, destination…">
+    </div>
+    <button type="button" class="secondary" id="cs-manual-btn">+ Manual Shipment</button>
+    <button type="button" class="secondary" id="cs-clear-btn" disabled>Clear Selection</button>
+    <button type="button" class="btn" id="cs-create-btn" disabled>Create Shipment</button>
+</div>
+
+<div id="cs-lock-msg"></div>
+<div id="cs-body">Loading…</div>
 
 @section Scripts {
     <script src="~/js/logistics/create-shipment.js"></script>

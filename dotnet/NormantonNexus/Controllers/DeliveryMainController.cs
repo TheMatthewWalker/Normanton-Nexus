@@ -76,6 +76,21 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
         return Ok(ApiResponse<IReadOnlyList<PackagingHoldingRow>>.Ok(rows));
     }
 
+    /// <summary>Create Outbound Shipment's own delivery picker — no permission gate beyond being logged in, matching Node's real route exactly (no requirePermission call on either this or /uncomplete).</summary>
+    [HttpGet("completed-unshipped")]
+    public async Task<IActionResult> GetCompletedUnshipped(CancellationToken ct)
+    {
+        var rows = await WarehousePicksheetHelper.GetCompletedUnshippedAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<CompletedUnshippedRow>>.Ok(rows));
+    }
+
+    [HttpPatch("{deliveryId:long}/uncomplete")]
+    public async Task<IActionResult> Uncomplete(long deliveryId, CancellationToken ct)
+    {
+        await WarehousePicksheetHelper.UncompleteAsync(nexusOperationsDb, deliveryId, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
     [HttpGet("{deliveryId:long}/picksheet-materials")]
     [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
     public async Task<IActionResult> GetPicksheetMaterials(long deliveryId, CancellationToken ct)

@@ -142,6 +142,85 @@ internal static partial class WarehousePicksheetHelper
         return rows.ToArray();
     }
 
+    /// <summary>
+    /// GET completed-unshipped — Create Outbound Shipment's own delivery
+    /// picker. A completed, active picksheet only ever leaves this list by
+    /// being linked to a real shipment (log.ShipmentLink) — genuinely
+    /// missing from this migration until now (this controller's own header
+    /// comment flagged the whole write/picker half as "a later slice");
+    /// closing it here since Create Outbound Shipment's real UI can't work
+    /// without it.
+    /// </summary>
+    internal static async Task<IReadOnlyList<CompletedUnshippedRow>> GetCompletedUnshippedAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<CompletedUnshippedRow>(new CommandDefinition("""
+            SELECT dm.deliveryID AS DeliveryId, dm.customerID AS CustomerId, dm.dispatchDate AS DispatchDate, dm.deliveryDate AS DeliveryDate, dm.completionDate AS CompletionDate,
+                   dm.deliveryService AS DeliveryService, dm.picksheetComment AS PicksheetComment, dm.deliveryPriority AS DeliveryPriority,
+                   CAST(ISNULL(dm.netWeight, 0) AS decimal(18,3)) AS NetWeight,
+                   CAST(ISNULL(dm.grossWeight, 0) AS decimal(18,3)) AS GrossWeight,
+                   CAST(ISNULL(dm.palletCount, 0) AS decimal(18,3)) AS PalletCount,
+                   CAST(ISNULL(dm.deliveryVolume, 0) AS decimal(18,3)) AS DeliveryVolume,
+                   d.destinationName AS DestinationName, d.destinationStreet AS DestinationStreet, d.destinationCity AS DestinationCity,
+                   d.destinationPostCode AS DestinationPostCode, d.destinationCountry AS DestinationCountry,
+                   d.defaultIncoterms AS DefaultIncoterms, d.defaultForwarder AS DefaultForwarder, dm.incoterms AS Incoterms,
+                   STUFF((
+                       SELECT '; ' + e.address
+                       FROM log.Email e
+                       WHERE e.ID = dm.customerID
+                       FOR XML PATH('')
+                   ), 1, 2, '') AS Address
+            FROM log.DeliveryMain dm
+            LEFT JOIN log.Destinations d ON dm.customerID = d.destinationID
+            LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+            WHERE dm.completionStatus = 1
+              AND ISNULL(dm.deliveryCancelled, 0) = 0
+              AND ISNULL(dm.pendingPackagingData, 0) = 0
+              AND sl.deliveryID IS NULL
+            ORDER BY dm.deliveryPriority DESC, dm.completionDate DESC, dm.dispatchDate ASC, dm.deliveryID ASC
+            """, cancellationToken: ct));
+        return rows.ToArray();
+    }
+
+    /// <summary>
+    /// PATCH :deliveryId/uncomplete — sends a completed-but-unshipped picksheet
+    /// back to Open Picksheets for re-picking/re-building. Any pallets already
+    /// built are left alone (the pallet builder doesn't key off completionStatus)
+    /// — only the completion rollup itself is reverted, since the real
+    /// palletCount/grossWeight/netWeight/deliveryVolume are recalculated fresh
+    /// from PalletMain by the completion route (DeliveryCompletionHelper) the
+    /// next time this delivery is completed anyway. Restricted to deliveries
+    /// genuinely sitting in Create Outbound Shipment right now: completed, not
+    /// cancelled, not already linked to a shipment, not in packaging holding
+    /// (that queue has its own tile/reconciliation, undoing it here would fight
+    /// the next SAP sync pass).
+    /// </summary>
+    internal static async Task UncompleteAsync(INexusOperationsDb db, long deliveryId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var row = await connection.QuerySingleOrDefaultAsync<(bool CompletionStatus, bool DeliveryCancelled, bool PendingPackagingData, long? LinkedShipmentDelivery)?>(
+            new CommandDefinition("""
+                SELECT dm.completionStatus AS CompletionStatus, ISNULL(dm.deliveryCancelled, 0) AS DeliveryCancelled,
+                       ISNULL(dm.pendingPackagingData, 0) AS PendingPackagingData, sl.deliveryID AS LinkedShipmentDelivery
+                FROM log.DeliveryMain dm
+                LEFT JOIN log.ShipmentLink sl ON sl.deliveryID = dm.deliveryID
+                WHERE dm.deliveryID = @deliveryId
+                """, new { deliveryId }, cancellationToken: ct));
+
+        if (row is null) throw new NexusNotFoundException("Delivery not found.");
+        if (!row.Value.CompletionStatus || row.Value.DeliveryCancelled || row.Value.PendingPackagingData)
+            throw new NexusConflictException("This delivery is not an active completed picksheet.");
+        if (row.Value.LinkedShipmentDelivery is not null)
+            throw new NexusConflictException("This delivery is already linked to a shipment — remove it from the shipment first.");
+
+        await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE log.DeliveryMain
+            SET completionStatus = 0, completionDate = NULL, palletCount = NULL, grossWeight = NULL, netWeight = NULL, deliveryVolume = NULL
+            WHERE deliveryID = @deliveryId
+            """, new { deliveryId }, cancellationToken: ct));
+    }
+
     /// <summary>Same open/not-cancelled scoping as GetOpenPicksheetsAsync, restricted to excludeDeliveryId's own customer (a shared pallet is one physical unit for one destination) and excluding whatever's already linked to it.</summary>
     internal static async Task<IReadOnlyList<LinkSearchRow>> LinkSearchAsync(INexusOperationsDb db, long? excludeDeliveryId, string? q, CancellationToken ct)
     {

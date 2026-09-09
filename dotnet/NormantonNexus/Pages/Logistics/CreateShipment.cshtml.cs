@@ -4,7 +4,7 @@ using NormantonNexus.Services.Auth;
 
 namespace NormantonNexus.Pages.Logistics;
 
-/// <summary>Create-from-deliveries only — CreateManual (no source deliveries) is the same LOG_PLANNING-gated API but a rarer edge case, not built into this UI.</summary>
+/// <summary>Full delivery-picker flow (bucketed by urgency, locked to one customer) + Manual Shipment + the post-create action cards — design approved via the /design canvas "Create Outbound Shipment Redesign", replacing the earlier bare comma-separated-delivery-IDs form.</summary>
 [Authorize(Policy = "Dept:" + NexusDepartments.Logistics)]
 [Authorize(Policy = "Perm:LOG_PLANNING")]
 public class CreateShipmentModel : PageModel

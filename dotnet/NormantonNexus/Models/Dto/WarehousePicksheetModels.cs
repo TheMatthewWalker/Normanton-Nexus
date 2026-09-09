@@ -36,6 +36,25 @@ public sealed record LinkedPicksheetRow(long DeliveryId, long? CustomerId, strin
 
 public sealed record LinkSearchRow(long DeliveryId, long? CustomerId, string? DestinationName, DateTime? DispatchDate);
 
+/// <summary>
+/// GET completed-unshipped — Logistics' Create Outbound Shipment picker.
+/// Completed, not-cancelled, not-in-packaging-holding deliveries with no
+/// row in log.ShipmentLink yet (never shipped). Mirrors Node's own query
+/// field-for-field, including the customer's own email address list
+/// (STUFF/FOR XML PATH concatenation — this app's SQL Server 2005-
+/// compatible string-aggregation idiom, matching every other place in
+/// this migration that needed one) even though no confirmed frontend
+/// caller reads it yet — cheap to keep, and a generic "picker row" is
+/// exactly the kind of read a not-yet-built follow-up (e.g. an inline
+/// "email this customer" action) would want more of, not less.
+/// </summary>
+public sealed record CompletedUnshippedRow(
+    long DeliveryId, long? CustomerId, DateTime? DispatchDate, DateTime? DeliveryDate, DateTime? CompletionDate,
+    string? DeliveryService, string? PicksheetComment, int? DeliveryPriority,
+    decimal NetWeight, decimal GrossWeight, decimal PalletCount, decimal DeliveryVolume,
+    string? DestinationName, string? DestinationStreet, string? DestinationCity, string? DestinationPostCode, string? DestinationCountry,
+    string? DefaultIncoterms, string? DefaultForwarder, string? Incoterms, string? Address);
+
 /// <summary>POST / (Add Picksheet tile) — manual single-delivery entry, port of deliverymain.js's own field list exactly (completionStatus/deliveryCancelled default to false, deliveryPriority to 0, matching Node's `?? 0`/`?? 0` coalesces).</summary>
 public sealed record CreateDeliveryMainRequest(
     long DeliveryId, long? CustomerId, DateTime? DispatchDate, DateTime? DeliveryDate, DateTime? CompletionDate,
