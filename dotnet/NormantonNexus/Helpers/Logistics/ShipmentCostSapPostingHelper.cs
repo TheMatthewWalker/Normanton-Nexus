@@ -38,6 +38,7 @@ internal static class ShipmentCostSapPostingHelper
 {
     private const string FetchQuery = """
         SELECT sc.costID AS CostId, sc.costCenter AS CostCenter, sc.costElement AS CostElement, sc.costType AS CostType, sc.expectedCost AS ExpectedCost, sc.modeOfTransport AS ModeOfTransport,
+            sc.purchaseOrder AS PurchaseOrder, sc.poLineNumber AS PoLineNumber,
             'outbound' AS Direction, 'outbound' AS SourceType, sm.shipmentID AS RefId,
             RIGHT('00000000' + CONVERT(VARCHAR(12), sm.shipmentID), 8) AS ShipmentRef,
             sm.forwarderID AS ForwarderId, sm.actualCollection AS ActualCollection, sm.ActualDelivery AS DeliveredDate, sm.trackingNumber AS TrackingNumber,
@@ -49,6 +50,7 @@ internal static class ShipmentCostSapPostingHelper
         UNION ALL
 
         SELECT sc.costID AS CostId, sc.costCenter AS CostCenter, sc.costElement AS CostElement, sc.costType AS CostType, sc.expectedCost AS ExpectedCost, sc.modeOfTransport AS ModeOfTransport,
+            sc.purchaseOrder AS PurchaseOrder, sc.poLineNumber AS PoLineNumber,
             ISNULL(ce.direction, 'outbound') AS Direction, 'manual' AS SourceType, sc.costID AS RefId,
             sc.manualReference AS ShipmentRef,
             sc.manualForwarderID AS ForwarderId, sc.manualIncurredDate AS ActualCollection, sc.manualIncurredDate AS DeliveredDate, sc.manualTrackingNumber AS TrackingNumber,
@@ -70,6 +72,8 @@ internal static class ShipmentCostSapPostingHelper
         public string? CostType { get; set; }
         public decimal? ExpectedCost { get; set; }
         public string? ModeOfTransport { get; set; }
+        public string? PurchaseOrder { get; set; }
+        public int? PoLineNumber { get; set; }
         public string Direction { get; set; } = "";
         public string SourceType { get; set; } = "";
         public long RefId { get; set; }
@@ -107,22 +111,76 @@ internal static class ShipmentCostSapPostingHelper
         if (deliverable.Count == 0)
             return new PostMigoResult([], blockedCostIds, "None of the selected lines have been delivered/received yet — nothing to post.");
 
+        var results = new List<PostMigoLineResult>();
+
+        // A line that already carries a purchaseOrder (from an earlier
+        // attempt whose PO creation succeeded but whose goods receipt
+        // failed) must NEVER go through create-po-and-receipt again — that
+        // would create a genuinely second, duplicate purchase order for the
+        // same freight cost, orphaning the first one forever with no goods
+        // receipt (confirmed live: costID 66, PO 4500438488, 2026-09-09).
+        // These are retried individually against the PO/item SAP already
+        // committed, via SapServer's plain, non-elevated post-goods-receipt
+        // — no per-user SAP credentials needed for this leg at all, since
+        // only PO creation requires the calling user's own elevated session.
+        var retryRows = deliverable.Where(r => !string.IsNullOrEmpty(r.PurchaseOrder)).ToList();
+        var freshRows = deliverable.Where(r => string.IsNullOrEmpty(r.PurchaseOrder)).ToList();
+
+        foreach (var line in retryRows)
+        {
+            var deliveredDayStr = (line.DeliveredDate ?? DateTime.UtcNow).ToString("yyyy-MM-dd");
+            var lineNumber = line.PoLineNumber ?? 1; // manual lines are always their own single-item PO — 1 is correct even if somehow unset.
+            try
+            {
+                var bdc = await sap.PostAsync<BdcResponse>("api/purchasing/post-goods-receipt",
+                    new GoodsReceiptRequest(line.PurchaseOrder!, lineNumber, line.ShipmentRef ?? "", line.TrackingNumber ?? "",
+                        Prefix2(line.DestinationCountry) + Prefix2(line.DestinationPostCode), deliveredDayStr, DateTime.UtcNow.ToString("yyyy-MM-dd"), null),
+                    userId, ct: ct) ?? throw new NexusBadGatewayException("SapServer returned an empty response.");
+
+                var succeeded = bdc.Type != "E" && bdc.Type != "A" && !string.IsNullOrWhiteSpace(bdc.DocumentNumber);
+                if (succeeded)
+                {
+                    await connection.ExecuteAsync(new CommandDefinition("""
+                        UPDATE log.ShipmentCost SET migoStatus = 1, materialDocument = @materialDocument WHERE costID = @costId
+                        """, new { costId = line.CostId, materialDocument = bdc.DocumentNumber }, cancellationToken: ct));
+                    results.Add(new PostMigoLineResult(line.RefId, line.Direction, line.CostId, true, line.PurchaseOrder, bdc.DocumentNumber, null));
+                }
+                else
+                {
+                    var error = string.IsNullOrEmpty(bdc.Message) ? bdc.RawMessage : bdc.Message;
+                    results.Add(new PostMigoLineResult(line.RefId, line.Direction, line.CostId, false, line.PurchaseOrder,
+                        null, string.IsNullOrWhiteSpace(error) ? "Goods receipt failed again — the purchase order already exists in SAP (see above); contact SAP support with this PO/item to diagnose." : error));
+                }
+            }
+            catch (SapProxyException sapEx)
+            {
+                results.Add(new PostMigoLineResult(line.RefId, line.Direction, line.CostId, false, line.PurchaseOrder, null, sapEx.Message));
+            }
+        }
+
+        if (freshRows.Count == 0)
+            return new PostMigoResult(results, blockedCostIds, null);
+
         using var nexusConnection = await nexusDb.CreateConnectionAsync(ct);
         var sapCreds = await nexusConnection.QuerySingleOrDefaultAsync<SapCredentialsRow>(new CommandDefinition(
             "SELECT SapUsername, SapPasswordEncrypted FROM dbo.PortalUsers WHERE UserID = @userId", new { userId }, cancellationToken: ct));
 
         if (string.IsNullOrEmpty(sapCreds?.SapUsername) || string.IsNullOrEmpty(sapCreds.SapPasswordEncrypted))
-            return new PostMigoResult([], blockedCostIds, "You need to save your SAP username and password in My Account before posting costs to SAP.");
+        {
+            var error = results.Count > 0
+                ? "You need to save your SAP username and password in My Account before posting the remaining costs to SAP."
+                : "You need to save your SAP username and password in My Account before posting costs to SAP.";
+            return new PostMigoResult(results, blockedCostIds, error);
+        }
 
         var sapPassword = credentialCipher.Decrypt(sapCreds.SapPasswordEncrypted);
         var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        var results = new List<PostMigoLineResult>();
 
         // Sequential on purpose — matches Node's own reasoning: the elevated
         // worker pool only has a handful of slots and each call already does
         // logon->PO->commit->GR-per-line->logoff as one unit of work, so
         // there's nothing to gain from firing every group concurrently.
-        foreach (var group in deliverable.GroupBy(r => (r.SourceType, r.RefId)))
+        foreach (var group in freshRows.GroupBy(r => (r.SourceType, r.RefId)))
         {
             var rows = group.ToList();
             var first = rows[0];
@@ -182,6 +240,22 @@ internal static class ShipmentCostSapPostingHelper
                     else
                     {
                         var error = lineResult?.Error ?? (!response.PoSuccess ? "Purchase order creation failed" : "Goods receipt failed");
+
+                        // The PO creation leg is confirmed successful whenever response.PoSuccess
+                        // is true (SapServer only returns this shape at all once BAPI_PO_CREATE1
+                        // + BAPI_TRANSACTION_COMMIT have both run) — that PO now genuinely, and
+                        // permanently, exists in SAP regardless of this line's own goods-receipt
+                        // outcome. Persisting it here is what lets a later retry target the
+                        // existing PO instead of calling create-po-and-receipt again and creating
+                        // a second, duplicate one (confirmed live: costID 66, PO 4500438488,
+                        // 2026-09-09 — this exact branch left the PO completely untracked before).
+                        if (response.PoSuccess)
+                        {
+                            await connection.ExecuteAsync(new CommandDefinition("""
+                                UPDATE log.ShipmentCost SET purchaseOrder = @purchaseOrder, poLineNumber = @poLineNumber
+                                WHERE costID = @costId
+                                """, new { costId = line.CostId, purchaseOrder = response.PurchaseOrder, poLineNumber = i + 1 }, cancellationToken: ct));
+                        }
                         results.Add(new PostMigoLineResult(first.RefId, first.Direction, line.CostId, false, response.PurchaseOrder, null, error));
                     }
                 }
