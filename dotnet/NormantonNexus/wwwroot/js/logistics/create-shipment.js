@@ -123,7 +123,7 @@
             <tbody>${bucketRows.map((r) => `
               <tr data-id="${r.deliveryId}">
                 <td><input type="checkbox" class="cs-check" data-id="${r.deliveryId}" ${selected.has(r.deliveryId) ? "checked" : ""}></td>
-                <td>${r.deliveryPriority === 1 ? '<span class="nx-priority-flag"></span>' : ""}${esc(r.deliveryId)}</td>
+                <td>${r.deliveryPriority === 1 ? '<span class="nx-priority-flag"></span>' : ""}<a href="#" class="cs-open" data-id="${r.deliveryId}">${esc(r.deliveryId)}</a></td>
                 <td>${esc(r.destinationName || "—")}</td>
                 <td>${fmtDate(r.completionDate)}</td>
                 <td>${fmtDate(r.dispatchDate)}</td>
@@ -149,6 +149,10 @@
     }));
     bodyEl.querySelectorAll(".cs-check").forEach((cb) => cb.addEventListener("change", (e) => onToggleRow(Number(e.target.dataset.id), e.target)));
     bodyEl.querySelectorAll(".cs-menu-btn").forEach((btn) => btn.addEventListener("click", (e) => openRowMenu(e, Number(btn.dataset.id))));
+    bodyEl.querySelectorAll(".cs-open").forEach((a) => a.addEventListener("click", (e) => {
+      e.preventDefault();
+      openDeliveryDetailModal(Number(a.dataset.id));
+    }));
 
     updateToolbar();
   }
@@ -210,6 +214,56 @@
         await NexusModal.alert(err.message);
       }
     });
+  }
+
+  // ── Read-only delivery-detail popup (row click) ────────────────────────
+  // Node's own logistics.js has no equivalent single-delivery popup for this
+  // picker — deliveries here aren't shipments yet, so this is a lightweight,
+  // read-only view of what's already loaded plus a Packaging card sourced
+  // from the same GET .../pallets endpoint the outbound shipment-detail
+  // modal (shipment-detail-outbound.js) uses for its own Packaging card.
+
+  async function openDeliveryDetailModal(deliveryId) {
+    const row = rows.find((r) => r.deliveryId === deliveryId);
+    if (!row) return;
+    const card = NexusModal.open(`
+      <div class="ps-modal-header">
+        <div><div class="ps-modal-title">Delivery ${esc(String(deliveryId))}</div><div class="ps-modal-sub">${esc(row.destinationName || "")}${row.destinationCountry ? `, ${esc(row.destinationCountry)}` : ""}</div></div>
+        <button type="button" class="ps-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="ps-modal-body">
+        <table class="sd-contact-table">
+          <tr><td>Service</td><td>${esc(row.deliveryService || "—")}</td></tr>
+          <tr><td>Completed</td><td>${fmtDate(row.completionDate)}</td></tr>
+          <tr><td>Due</td><td>${fmtDate(row.dispatchDate)}</td></tr>
+          <tr><td>Comment</td><td>${esc(row.picksheetComment || "—")}</td></tr>
+        </table>
+        <div class="sd-pkg-totals" style="margin-top:12px">
+          <span>Pallets <strong>${esc(String(row.palletCount ?? 0))}</strong></span>
+          <span>Gross <strong>${Number(row.grossWeight || 0).toFixed(1)} kg</strong></span>
+          <span>Volume <strong>${Number(row.deliveryVolume || 0).toFixed(3)} m&sup3;</strong></span>
+        </div>
+        <p class="tf-section-label" style="margin-top:14px">Packaging</p>
+        <div class="sd-pkg-list" id="dd-pkg-list"><div class="sd-pcard-empty">Loading…</div></div>
+      </div>
+      <div class="ps-modal-actions">
+        <button type="button" class="secondary" id="dd-close">Close</button>
+      </div>`);
+    card.querySelector(".ps-modal-close").addEventListener("click", () => NexusModal.close());
+    card.querySelector("#dd-close").addEventListener("click", () => NexusModal.close());
+
+    const list = card.querySelector("#dd-pkg-list");
+    try {
+      const { data } = await deliveryApi(`/${deliveryId}/pallets`);
+      const pallets = data || [];
+      list.innerHTML = pallets.length === 0 ? '<div class="sd-pcard-empty">No pallets built for this delivery yet.</div>' : pallets.map((p) => {
+        const dims = [p.palletLength, p.palletWidth, p.palletHeight].filter(Boolean).join("x");
+        const wt = p.grossWeight != null ? Number(p.grossWeight).toFixed(1) : "—";
+        return `<div class="sd-pkg-item"><span>${esc(p.palletType || "Pallet")}</span><span>${dims ? `${esc(dims)}cm @ ` : ""}${wt} KG</span></div>`;
+      }).join("");
+    } catch (err) {
+      list.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
+    }
   }
 
   // ── Shared reference data ─────────────────────────────────────────────

@@ -37,7 +37,7 @@
         <tbody>
           ${rows.map((r) => `
             <tr>
-              <td>${esc(r.refDisplay)}</td>
+              <td>${r.direction === "outbound" ? `<a href="#" class="ss-open" data-id="${r.shipmentId}">${esc(r.refDisplay)}</a>` : esc(r.refDisplay)}</td>
               <td>${esc(r.direction)}</td>
               <td>${esc(r.customer)}</td>
               <td>${esc(r.forwarderName)}</td>
@@ -46,5 +46,10 @@
             </tr>`).join("")}
         </tbody>
       </table>`;
+
+    bodyEl.querySelectorAll(".ss-open").forEach((a) => a.addEventListener("click", (e) => {
+      e.preventDefault();
+      OutboundShipmentDetail.open(Number(a.dataset.id), () => document.getElementById("ss-form").requestSubmit());
+    }));
   }
 })();

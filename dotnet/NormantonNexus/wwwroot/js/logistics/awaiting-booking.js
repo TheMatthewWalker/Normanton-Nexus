@@ -74,7 +74,7 @@
     }));
     bodyEl.querySelectorAll(".ab-open").forEach((a) => a.addEventListener("click", (e) => {
       e.preventDefault();
-      ShipmentBooking.open([rows.find((r) => r.shipmentId === Number(a.dataset.id))], load);
+      OutboundShipmentDetail.open(Number(a.dataset.id), load);
     }));
     updateHint();
   }

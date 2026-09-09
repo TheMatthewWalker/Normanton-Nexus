@@ -40,10 +40,11 @@
     return overlayEl;
   }
 
-  function open(html, { wide = false } = {}) {
+  function open(html, { wide = false, size = null } = {}) {
     const overlay = ensureOverlay();
     const card = overlay.querySelector("#ps-modal-content");
-    card.className = "ps-modal" + (wide ? " ps-modal--wide" : "");
+    const sizeClass = size ? ` ps-modal--${size}` : wide ? " ps-modal--wide" : "";
+    card.className = "ps-modal" + sizeClass;
     card.innerHTML = html;
     overlay.classList.remove("hidden");
     return card;
