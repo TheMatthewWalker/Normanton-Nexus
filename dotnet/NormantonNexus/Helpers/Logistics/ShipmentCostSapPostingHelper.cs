@@ -54,9 +54,13 @@ internal static class ShipmentCostSapPostingHelper
             sc.manualForwarderID AS ForwarderId, sc.manualIncurredDate AS ActualCollection, sc.manualIncurredDate AS DeliveredDate, sc.manualTrackingNumber AS TrackingNumber,
             sc.manualCountry AS DestinationCountry, sc.manualPostcode AS DestinationPostCode
         FROM log.ShipmentCost sc
-        LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+        OUTER APPLY (SELECT TOP 1 direction FROM log.CostElements WHERE elementCode = sc.costElement) ce
         WHERE sc.costID IN @costIds AND ISNULL(sc.migoStatus, 0) = 0 AND sc.shipmentID IS NULL AND sc.poShipmentID IS NULL
         """;
+    // CostElements is joined via OUTER APPLY ... TOP 1, not a plain LEFT JOIN — the table has no
+    // unique constraint on elementCode, so a duplicate row would otherwise fan this UNION branch
+    // out and post the SAME cost line to SAP (MIGO) twice for one costID. Same fix already
+    // applied to ShipmentCostHelper's queries and Node's own routes/shipmentcost.js.
 
     private sealed class FetchedCostRow
     {

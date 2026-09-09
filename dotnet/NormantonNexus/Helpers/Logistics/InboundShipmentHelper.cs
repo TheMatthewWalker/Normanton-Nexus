@@ -64,12 +64,19 @@ internal static class InboundShipmentHelper
         return rows.AsList();
     }
 
-    /// <summary>forwarderID is looked up against log.Forwarders and its name stored into Haulier as a display snapshot. When forwarderID isn't supplied, the caller's free-text haulier is kept as-is.</summary>
+    /// <summary>
+    /// forwarderID is looked up against log.Forwarders and its name stored into Haulier as a
+    /// display snapshot. When forwarderID isn't supplied, the caller's free-text haulier is kept
+    /// as-is. TOP 1, not a bare QuerySingleOrDefaultAsync — a vendor with several shipping modes
+    /// genuinely has one log.Forwarders row PER MODE sharing the same forwarderID (confirmed live:
+    /// 4 real forwarders currently have 2-4 mode rows each), which would otherwise throw
+    /// "Sequence contains more than one element" for any of them.
+    /// </summary>
     private static async Task<string?> ResolveForwarderNameAsync(IDbConnection connection, long? forwarderId, CancellationToken ct)
     {
         if (forwarderId is null) return null;
         return await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
-            "SELECT forwarderName FROM log.Forwarders WHERE forwarderID = @forwarderId", new { forwarderId }, cancellationToken: ct));
+            "SELECT TOP 1 forwarderName FROM log.Forwarders WHERE forwarderID = @forwarderId", new { forwarderId }, cancellationToken: ct));
     }
 
     /// <summary>Create-shipment-from-selected-lines, mirroring Open Deliveries — creation and line-assignment happen together. The reference is generated server-side, never supplied by the caller.</summary>

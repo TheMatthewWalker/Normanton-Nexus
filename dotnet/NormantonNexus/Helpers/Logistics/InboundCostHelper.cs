@@ -24,6 +24,13 @@ internal static class InboundCostHelper
 
     private sealed record CostLineForUpdateRow(long CostId, bool IsManual);
 
+    /// <summary>
+    /// CostElements is joined via OUTER APPLY ... TOP 1, not a plain LEFT JOIN — the table has no
+    /// unique constraint on elementCode (confirmed live: zero indexes on log.CostElements at all),
+    /// so a duplicate row for the same code would otherwise fan the join out and print the SAME
+    /// log.ShipmentCost row twice. Same fix already applied to ShipmentCostHelper's
+    /// BuildCostListQuery/GetByShipmentAsync and Node's own routes/shipmentcost.js.
+    /// </summary>
     internal static async Task<IReadOnlyList<InboundCostLineRow>> ListForShipmentAsync(INexusOperationsDb db, long poShipmentId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
@@ -32,7 +39,7 @@ internal static class InboundCostHelper
                    sc.expectedCost AS ExpectedCost, sc.actualCost AS ActualCost, CAST(ISNULL(sc.migoStatus, 0) AS bit) AS MigoStatus, sc.materialDocument AS MaterialDocument, sc.modeOfTransport AS ModeOfTransport,
                    ce.elementDescription AS ElementDescription, ce.tier AS Tier
             FROM log.ShipmentCost sc
-            LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'inbound'
+            OUTER APPLY (SELECT TOP 1 elementDescription, tier FROM log.CostElements WHERE elementCode = sc.costElement AND direction = 'inbound') ce
             WHERE sc.poShipmentID = @poShipmentId
             ORDER BY sc.costID DESC
             """, new { poShipmentId }, cancellationToken: ct));

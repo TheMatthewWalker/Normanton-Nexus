@@ -56,6 +56,7 @@ internal static class ShipmentCostHelper
         return rows.AsList();
     }
 
+    /// <summary>CostElements is joined via OUTER APPLY ... TOP 1 — same non-unique-table fix as BuildCostListQuery below.</summary>
     internal static async Task<IReadOnlyList<ShipmentCostByShipmentRow>> GetByShipmentAsync(INexusOperationsDb db, long shipmentId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
@@ -64,7 +65,7 @@ internal static class ShipmentCostHelper
                 sc.expectedCost AS ExpectedCost, sc.actualCost AS ActualCost, CAST(ISNULL(sc.migoStatus, 0) AS bit) AS MigoStatus, sc.materialDocument AS MaterialDocument, sc.modeOfTransport AS ModeOfTransport,
                 ce.elementDescription AS ElementDescription, ce.tier AS Tier
             FROM log.ShipmentCost sc
-            LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement AND ce.direction = 'outbound'
+            OUTER APPLY (SELECT TOP 1 elementDescription, tier FROM log.CostElements WHERE elementCode = sc.costElement AND direction = 'outbound') ce
             WHERE sc.shipmentID = @shipmentId
             ORDER BY sc.costID DESC
             """, new { shipmentId }, cancellationToken: ct));
@@ -252,6 +253,16 @@ internal static class ShipmentCostHelper
         return parameters;
     }
 
+    /// <summary>
+    /// Forwarders is joined via OUTER APPLY ... TOP 1, not a plain LEFT JOIN — a vendor with
+    /// several shipping modes genuinely has one log.Forwarders row PER MODE, all sharing the same
+    /// forwarderID (confirmed live: 4 real forwarders currently have 2-4 mode rows each), so a
+    /// plain join here would make QuerySingleOrDefaultAsync throw "Sequence contains more than
+    /// one element" for any shipment assigned to one of them. There's no stored ModeOfTransport
+    /// on log.ShipmentMain itself to disambiguate which mode row is the right one, so this picks
+    /// an arbitrary one — good enough to stop a hard crash; the forwarder's name (used for the
+    /// KN/Kenneth-Howley detection just below) is the same across every mode row regardless.
+    /// </summary>
     internal static async Task<CostEstimateResult> GetEstimateAsync(INexusOperationsDb db, long shipmentId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
@@ -261,7 +272,7 @@ internal static class ShipmentCostHelper
                 sm.originID AS OriginId, sm.destinationID AS DestinationId, sm.incoTerms AS IncoTerms,
                 f.forwarderName AS ForwarderName, f.forwarderMode AS ForwarderMode
             FROM log.ShipmentMain sm
-            LEFT JOIN log.Forwarders f ON f.forwarderID = sm.forwarderID
+            OUTER APPLY (SELECT TOP 1 forwarderName, forwarderMode FROM log.Forwarders WHERE forwarderID = sm.forwarderID) f
             WHERE sm.shipmentID = @shipmentId
             """, new { shipmentId }, cancellationToken: ct))
             ?? throw new NexusNotFoundException("Shipment not found");
@@ -328,6 +339,15 @@ internal static class ShipmentCostHelper
     /// Outbound + manual only — see this class's own header comment for why
     /// the inbound leg (log.PurchaseOrderShipment) is absent, deferred to
     /// Sub-phase 8b.
+    ///
+    /// CostCenters/CostElements are both joined via OUTER APPLY ... TOP 1, not
+    /// a plain LEFT JOIN — neither table has a unique constraint on
+    /// centerCode/elementCode, so a duplicate row for the same code (bad seed
+    /// data, a manual edit via the Admin SQL Console, etc.) would otherwise
+    /// fan the join out and print the SAME log.ShipmentCost row twice. Ported
+    /// from a real fix applied to Node's own routes/shipmentcost.js
+    /// buildCostListQuery (the exact same class of bug that already bit
+    /// log.Forwarders there once before).
     /// </summary>
     private static string BuildCostListQuery(string migoPredicate, string orderBy) => $"""
         SELECT
@@ -354,8 +374,8 @@ internal static class ShipmentCostHelper
             sc.purchaseOrder AS PurchaseOrder
         FROM log.ShipmentCost sc
         INNER JOIN log.ShipmentMain sm ON sm.shipmentID = sc.shipmentID
-        LEFT JOIN log.CostCenters cc ON cc.centerCode = sc.costCenter
-        LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+        OUTER APPLY (SELECT TOP 1 centerCode FROM log.CostCenters WHERE centerCode = sc.costCenter) cc
+        OUTER APPLY (SELECT TOP 1 elementCode, direction FROM log.CostElements WHERE elementCode = sc.costElement) ce
         WHERE {migoPredicate} AND sc.shipmentID IS NOT NULL
 
         UNION ALL
@@ -383,8 +403,8 @@ internal static class ShipmentCostHelper
             sc.materialDocument AS MaterialDocument,
             sc.purchaseOrder AS PurchaseOrder
         FROM log.ShipmentCost sc
-        LEFT JOIN log.CostCenters cc ON cc.centerCode = sc.costCenter
-        LEFT JOIN log.CostElements ce ON ce.elementCode = sc.costElement
+        OUTER APPLY (SELECT TOP 1 centerCode FROM log.CostCenters WHERE centerCode = sc.costCenter) cc
+        OUTER APPLY (SELECT TOP 1 elementCode, direction FROM log.CostElements WHERE elementCode = sc.costElement) ce
         WHERE {migoPredicate} AND sc.shipmentID IS NULL AND sc.poShipmentID IS NULL
 
         ORDER BY {orderBy}
