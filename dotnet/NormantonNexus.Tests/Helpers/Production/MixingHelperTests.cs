@@ -4,6 +4,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Production;
@@ -29,7 +30,7 @@ public class MixingHelperTests
         var body = new MixingEntryRequest(null, "SB1", "ST1", [new MixingTubInput(10m)], null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -41,7 +42,7 @@ public class MixingHelperTests
         var body = new MixingEntryRequest("MAT1", "SB1", "ST1", [], null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
     }
 
     [Fact]
@@ -51,7 +52,7 @@ public class MixingHelperTests
         var body = new MixingEntryRequest("MAT1", "", "ST1", [new MixingTubInput(10m)], null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
     }
 
     [Theory]
@@ -64,7 +65,7 @@ public class MixingHelperTests
         var body = new MixingEntryRequest("MAT1", "SB1", "ST1", [new MixingTubInput((decimal)weight)], null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -79,7 +80,7 @@ public class MixingHelperTests
         var body = new MixingEntryRequest("MAT1", "SB1", "ST1", [new MixingTubInput(38m)], null);
 
         var ex = await Record.ExceptionAsync(() =>
-            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MixingHelper.EnterAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         Assert.IsNotType<NexusValidationException>(ex);
     }

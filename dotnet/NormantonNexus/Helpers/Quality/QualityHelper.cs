@@ -4,6 +4,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Quality;
@@ -204,21 +205,22 @@ internal static class QualityHelper
     }
 
     /// <summary>
-    /// Approve/reject a concession. Now writes the production-batch event-
-    /// log entry (writeEvent in Node) since ProductionEventLogHelper exists
-    /// (built in Sub-phase 6b) — this closes the gap this method's own
-    /// comment originally flagged. Still deliberately does NOT send the
-    /// raiser an in-app notification (notify() in Node) — the Notifications
-    /// feature itself remains deferred, per Phase 1's CLAUDE.md notes.
+    /// Approve/reject a concession. Writes the production-batch event-log
+    /// entry (writeEvent in Node) since ProductionEventLogHelper exists
+    /// (built in Sub-phase 6b), and now also notifies the raiser (notify()
+    /// in Node, target type 'user' matched by username) now that
+    /// INotificationService is real infrastructure — closes the gap this
+    /// method's own comment used to flag. Best-effort: a notify failure
+    /// must never block the review itself from completing.
     /// </summary>
     internal static async Task<ConcessionRow> ReviewConcessionAsync(
-        INexusOperationsDb db, int concessionId, string newStatus, string? notes, int reviewerUserId, CancellationToken ct)
+        INexusOperationsDb db, INotificationService notify, int concessionId, string newStatus, string? notes, int reviewerUserId, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
 
-        var current = await connection.QuerySingleOrDefaultAsync<(string Status, string ProcessCode, int RecordId, string ParentProcessCode, int ParentRecordId, string Component, string ActualMaterial)?>(
+        var current = await connection.QuerySingleOrDefaultAsync<(string Status, string ProcessCode, int RecordId, string ParentProcessCode, int ParentRecordId, string Component, string ActualMaterial, int RaisedByUserId)?>(
             new CommandDefinition(
-                "SELECT Status, ProcessCode, RecordID AS RecordId, ParentProcessCode, ParentRecordID AS ParentRecordId, Component, ActualMaterial FROM prod.TraceabilityConcessions WHERE ConcessionID = @concessionId",
+                "SELECT Status, ProcessCode, RecordID AS RecordId, ParentProcessCode, ParentRecordID AS ParentRecordId, Component, ActualMaterial, RaisedByUserID AS RaisedByUserId FROM prod.TraceabilityConcessions WHERE ConcessionID = @concessionId",
                 new { concessionId }, cancellationToken: ct));
 
         if (current is null)
@@ -241,6 +243,23 @@ internal static class QualityHelper
         await ProductionEventLogHelper.WriteEventAsync(connection, concession.ProcessCode, concession.RecordId, "NOTE",
             $"Traceability concession for {parentLabel} ({concession.Component} → {concession.ActualMaterial}) {newStatus.ToLowerInvariant()} by reviewer #{reviewerUserId}" +
             (string.IsNullOrWhiteSpace(notes) ? "." : $": {notes.Trim()}"), newStatus == "REJECTED" ? 1 : 0, reviewerUserId, ct);
+
+        try
+        {
+            var raiserUsername = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+                "SELECT Username FROM Nexus.dbo.PortalUsers WHERE UserID = @raisedByUserId", new { concession.RaisedByUserId }, cancellationToken: ct));
+            var batchRef = $"{concession.ProcessCode}{concession.RecordId:D8}";
+            if (!string.IsNullOrEmpty(raiserUsername))
+            {
+                await notify.NotifyAsync(new NotificationRequest(
+                    Title: newStatus == "APPROVED" ? "Concession Approved" : "Concession Rejected",
+                    Body: $"{batchRef} — your concession for {concession.Component} was {newStatus.ToLowerInvariant()}{(string.IsNullOrWhiteSpace(notes) ? "." : $": {notes.Trim()}")}",
+                    Severity: (byte)(newStatus == "APPROVED" ? 0 : 2), Category: "production",
+                    ActionLabel: "Open Batch", ActionUrl: "/Production/Traceability",
+                    Target: new NotificationTarget(NotificationTargetType.User, raiserUsername)), ct);
+            }
+        }
+        catch { /* best-effort — a notify failure must never block the review itself */ }
 
         var updated = await ListConcessionsAsync(db, newStatus, ct);
         return updated.First(row => row.ConcessionId == concessionId);

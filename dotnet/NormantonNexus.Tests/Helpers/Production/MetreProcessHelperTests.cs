@@ -4,6 +4,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Production;
@@ -31,7 +32,7 @@ public class MetreProcessHelperTests
         var body = new MetreProcessEntryRequest("MAT1", 10m, null, null, null, null, false, null, null, null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MetreProcessHelper.EnterAsync(processCode, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MetreProcessHelper.EnterAsync(processCode, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -43,7 +44,7 @@ public class MetreProcessHelperTests
         var body = new MetreProcessEntryRequest(null, 10m, null, null, null, null, false, null, null, null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MetreProcessHelper.EnterAsync("EX", db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MetreProcessHelper.EnterAsync("EX", db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
     }
 
     [Theory]
@@ -55,7 +56,7 @@ public class MetreProcessHelperTests
         var body = new MetreProcessEntryRequest("MAT1", (decimal)length, null, null, null, null, false, null, null, null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MetreProcessHelper.EnterAsync("EX", db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MetreProcessHelper.EnterAsync("EX", db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -122,7 +123,7 @@ public class MetreProcessHelperTests
         var body = new MetreCompleteRequest(10m, null, null, false, null, null, null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MetreProcessHelper.CompleteAsync("DR", 1, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MetreProcessHelper.CompleteAsync("DR", 1, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -137,7 +138,7 @@ public class MetreProcessHelperTests
         var body = new MetreCompleteRequest(length.HasValue ? (decimal)length.Value : null, null, null, false, null, null, null);
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            MetreProcessHelper.CompleteAsync("CL", 1, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            MetreProcessHelper.CompleteAsync("CL", 1, db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }

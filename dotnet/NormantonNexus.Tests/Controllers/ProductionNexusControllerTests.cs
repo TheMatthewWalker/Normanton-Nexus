@@ -4,6 +4,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Controllers;
@@ -13,12 +14,14 @@ public class ProductionNexusControllerTests
     private static ProductionNexusController CreateController(
         Mock<INexusOperationsDb>? nexusOperationsDb = null,
         Mock<ISapServerClient>? sap = null,
-        Mock<IAuditLogger>? audit = null)
+        Mock<IAuditLogger>? audit = null,
+        Mock<INotificationService>? notify = null)
     {
         var controller = new ProductionNexusController(
             (nexusOperationsDb ?? new Mock<INexusOperationsDb>()).Object,
             (sap ?? new Mock<ISapServerClient>()).Object,
-            (audit ?? new Mock<IAuditLogger>()).Object);
+            (audit ?? new Mock<IAuditLogger>()).Object,
+            (notify ?? new Mock<INotificationService>()).Object);
         ControllerTestHelpers.SetUser(controller, userId: 11, departments: [NexusDepartments.Production]);
         return controller;
     }

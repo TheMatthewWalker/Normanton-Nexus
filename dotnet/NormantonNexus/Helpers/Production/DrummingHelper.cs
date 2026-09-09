@@ -4,6 +4,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Production;
@@ -174,7 +175,7 @@ internal static class DrummingHelper
 
     /// <summary>POST /drumming/stock or /drumming/customer — entryType comes from which literal route was called, not the request body. Mirrors Node's submitDrumming exactly.</summary>
     internal static async Task<DrummingSubmitResult> SubmitAsync(
-        INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit,
+        INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit, INotificationService notify,
         string entryType, DrummingSubmitRequest body, string? username, string? ipAddress, int userId, CancellationToken ct)
     {
         var coilLengths = body.CoilLengths ?? [];
@@ -437,6 +438,17 @@ internal static class DrummingHelper
 
                 await ProductionEventLogHelper.WriteEventAsync(connection, "DR", drummingId, "NOTE",
                     $"BOM mismatch: backflushed {material}, BOM expects {expectedText}, traceability shows {actualText} (entered by {username ?? $"user #{userId}"}).", 2, userId, ct);
+
+                try
+                {
+                    await notify.NotifyAsync(new NotificationRequest(
+                        Title: "Drumming traceability does not match BOM",
+                        Body: $"{drumRef} backflushed {material} — BOM expects {expectedText}, but traceability shows {actualText}. Entered by {username ?? $"user #{userId}"}.",
+                        Severity: 2, Category: "production",
+                        ActionLabel: "Open Production", ActionUrl: "/Production",
+                        Target: new NotificationTarget(NotificationTargetType.Permission, "PROD_SUPERVISOR")), ct);
+                }
+                catch { /* best-effort */ }
             }
 
             // Locally patch the AgreementSnapshot row's dock-stock figure so
@@ -483,6 +495,17 @@ internal static class DrummingHelper
                 """, new { drummingId, totalLength, errMsg, userId }, cancellationToken: ct));
 
             await ProductionEventLogHelper.WriteEventAsync(connection, "DR", drummingId, "SAP_FAIL", $"SAP backflush failed: {errMsg}", 2, userId, ct);
+
+            try
+            {
+                await notify.NotifyAsync(new NotificationRequest(
+                    Title: "SAP Backflush Failed",
+                    Body: $"{drumRef} (Drumming) failed to post to SAP: {errMsg}",
+                    Severity: 2, Category: "production",
+                    ActionLabel: "Open Production", ActionUrl: "/Production",
+                    Target: new NotificationTarget(NotificationTargetType.Permission, "PROD_SUPERVISOR")), ct);
+            }
+            catch { /* best-effort */ }
 
             return new DrummingSubmitResult(drummingId, drumRef, null, null, false, "SAP_FAILED",
                 false, "Record saved but SAP backflush failed. See failed backflush queue.", errMsg);

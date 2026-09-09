@@ -4,6 +4,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Production;
@@ -39,7 +40,7 @@ public class DrummingHelperTests
         var body = ValidRequest with { CoilLengths = [] };
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -51,7 +52,7 @@ public class DrummingHelperTests
         var body = ValidRequest with { CoilLengths = Enumerable.Repeat(1m, 1001).ToList() };
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -63,7 +64,7 @@ public class DrummingHelperTests
         var body = ValidRequest with { Material = null };
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -75,7 +76,7 @@ public class DrummingHelperTests
         var body = ValidRequest with { PackagingId = null };
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), "customer", body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), "customer", body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -90,7 +91,7 @@ public class DrummingHelperTests
         var body = ValidRequest with { WeightKg = weightKg.HasValue ? (decimal)weightKg.Value : null };
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
+            DrummingHelper.SubmitAsync(db.Object, Mock.Of<ISapServerClient>(), Mock.Of<IAuditLogger>(), Mock.Of<INotificationService>(), "stock", body, "alice", "127.0.0.1", 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }

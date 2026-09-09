@@ -3,6 +3,7 @@ using NormantonNexus.Helpers.Production;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Production;
@@ -97,8 +98,8 @@ public class BomHelperTests
         var db = UnreachableDb();
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            BomHelper.RaiseConcessionAsync(db.Object, "MX", recordId: 1,
-                new RaiseConcessionRequest("BR", 1, "COMP-1", "MAT-2", null, "wrong batch linked"), userId: 1, CancellationToken.None));
+            BomHelper.RaiseConcessionAsync(db.Object, Mock.Of<INotificationService>(), "MX", recordId: 1,
+                new RaiseConcessionRequest("BR", 1, "COMP-1", "MAT-2", null, "wrong batch linked"), username: "tester", userId: 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -109,8 +110,8 @@ public class BomHelperTests
         var db = UnreachableDb();
 
         await Assert.ThrowsAsync<NexusValidationException>(() =>
-            BomHelper.RaiseConcessionAsync(db.Object, "DR", recordId: 1,
-                new RaiseConcessionRequest("", 1, "", "", null, ""), userId: 1, CancellationToken.None));
+            BomHelper.RaiseConcessionAsync(db.Object, Mock.Of<INotificationService>(), "DR", recordId: 1,
+                new RaiseConcessionRequest("", 1, "", "", null, ""), username: "tester", userId: 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }

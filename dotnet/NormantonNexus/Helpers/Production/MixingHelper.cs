@@ -3,6 +3,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Production;
@@ -23,9 +24,9 @@ internal static class MixingHelper
 {
     private const decimal MaxTubWeightKg = 38m;
 
-    /// <summary>notify() is deliberately not called here (SAP-failure alert to PROD_SUPERVISOR) — same reasoning as Quality's Phase 3 concession review: depends on the Notifications feature deferred since Phase 1, not built yet in this migration. writeEvent/prod.EventLog IS written for real (see ProductionEventLogHelper) — Sub-phase 6b treats that as load-bearing infrastructure, unlike notify().</summary>
+    /// <summary>notify() (SAP-failure alert to PROD_SUPERVISOR) is now wired up — see the anyFailed branch below — now that INotificationService is real infrastructure. writeEvent/prod.EventLog is also written for real (see ProductionEventLogHelper) — both are load-bearing.</summary>
     internal static async Task<MixingEntryResult> EnterAsync(
-        INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit,
+        INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit, INotificationService notify,
         MixingEntryRequest body, string? username, string? ipAddress, int userId, CancellationToken ct)
     {
         var mixCode = body.MixCode?.Trim();
@@ -147,6 +148,23 @@ internal static class MixingHelper
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE prod.Mixing SET Status = 6 WHERE MixingID = @mixingId", new { mixingId }, cancellationToken: ct));
+
+            try
+            {
+                // Target PROD_SUPERVISOR (Node's own literal target), not the new
+                // PROD_FAILED_BACKFLUSH per-tile code — matching StagingHelper's own
+                // established precedent for notify targets post-Phase-10-Slice-5:
+                // PROD_SUPERVISOR is deliberately still bundled into the "Production
+                // Supervisor" default group precisely so this keeps reaching the same
+                // audience regardless of how a holder was granted access.
+                await notify.NotifyAsync(new NotificationRequest(
+                    Title: "SAP Backflush Failed",
+                    Body: $"{mixRef} (Mixing) had one or more tubs fail SAP posting.",
+                    Severity: 2, Category: "production",
+                    ActionLabel: "Open Production", ActionUrl: "/Production",
+                    Target: new NotificationTarget(NotificationTargetType.Permission, "PROD_SUPERVISOR")), ct);
+            }
+            catch { /* best-effort */ }
         }
 
         return new MixingEntryResult(

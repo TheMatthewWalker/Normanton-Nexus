@@ -3,6 +3,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Production;
@@ -33,9 +34,9 @@ internal static class MetreProcessHelper
         return (table, pk, refCol);
     }
 
-    /// <summary>notify() (SAP-failure alert to PROD_SUPERVISOR) is deliberately not wired up — same deferred-Notifications-feature reasoning as MixingHelper.EnterAsync.</summary>
+    /// <summary>notify() (SAP-failure alert to PROD_SUPERVISOR) is now wired up in the catch block below, now that INotificationService is real infrastructure.</summary>
     internal static async Task<MetreProcessEntryResult> EnterAsync(
-        string processCode, INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit,
+        string processCode, INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit, INotificationService notify,
         MetreProcessEntryRequest body, string? username, string? ipAddress, int userId, CancellationToken ct)
     {
         var (table, pk, refCol) = RequireMetreProcess(processCode);
@@ -129,6 +130,17 @@ internal static class MetreProcessHelper
                 """, new { code, recordId, length, errMsg, userId }, cancellationToken: ct));
 
             await ProductionEventLogHelper.WriteEventAsync(connection, code, recordId, "SAP_FAIL", $"SAP backflush failed: {errMsg}", 2, userId, ct);
+
+            try
+            {
+                await notify.NotifyAsync(new NotificationRequest(
+                    Title: "SAP Backflush Failed",
+                    Body: $"{batchRef} ({code}) failed to post to SAP: {errMsg}",
+                    Severity: 2, Category: "production",
+                    ActionLabel: "Open Production", ActionUrl: "/Production",
+                    Target: new NotificationTarget(NotificationTargetType.Permission, "PROD_SUPERVISOR")), ct);
+            }
+            catch { /* best-effort */ }
 
             return new MetreProcessEntryResult(recordId, batchRef, null, "SAP_FAILED", "Record saved but SAP backflush failed. See failed backflush queue.", errMsg);
         }
@@ -396,7 +408,7 @@ internal static class MetreProcessHelper
     /// too, never an error status.
     /// </summary>
     internal static async Task<MetreCompleteResult> CompleteAsync(
-        string processCode, int recordId, INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit,
+        string processCode, int recordId, INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit, INotificationService notify,
         MetreCompleteRequest body, string? username, string? ipAddress, int userId, CancellationToken ct)
     {
         var (table, pk, _) = RequireMetreProcess(processCode);
@@ -473,7 +485,7 @@ internal static class MetreProcessHelper
                 var suffix = blocking.Count > 0
                     ? " Raise a concession from the traceability screen, or use \"Refresh BOM\" if SAP's BOM has since been corrected."
                     : "";
-                return await MarkMetreSapFailedAsync(connection, audit, table, pk, code, recordId, batchRef, length, $"Blocked: {reasons}{suffix}", username, ipAddress, userId, ct);
+                return await MarkMetreSapFailedAsync(connection, audit, notify, table, pk, code, recordId, batchRef, length, $"Blocked: {reasons}{suffix}", username, ipAddress, userId, ct);
             }
 
             if (problems.Count > 0)
@@ -509,7 +521,7 @@ internal static class MetreProcessHelper
                 if (problems.Count > 0)
                 {
                     var errMsg = $"Blocked: {string.Join(" ", problems.Select(p => p.Reason))}";
-                    return await MarkMetreSapFailedAsync(connection, audit, table, pk, code, recordId, batchRef, length, errMsg, username, ipAddress, userId, ct);
+                    return await MarkMetreSapFailedAsync(connection, audit, notify, table, pk, code, recordId, batchRef, length, errMsg, username, ipAddress, userId, ct);
                 }
             }
         }
@@ -588,13 +600,13 @@ internal static class MetreProcessHelper
         }
         catch (Exception sapErr) when (sapErr is not NexusApiException)
         {
-            return await MarkMetreSapFailedAsync(connection, audit, table, pk, code, recordId, batchRef, length, sapErr.Message, username, ipAddress, userId, ct);
+            return await MarkMetreSapFailedAsync(connection, audit, notify, table, pk, code, recordId, batchRef, length, sapErr.Message, username, ipAddress, userId, ct);
         }
     }
 
-    /// <summary>Shared by every hard-block AND real-SAP-failure path in CompleteAsync — same function Node itself reuses for both (markSapFailed), including for a pure pre-SAP traceability block (no SAP call was even attempted). Always returns Status="SAP_FAILED" with HTTP 200 at the controller — never throws.</summary>
+    /// <summary>Shared by every hard-block AND real-SAP-failure path in CompleteAsync — same function Node itself reuses for both (markSapFailed), including for a pure pre-SAP traceability block (no SAP call was even attempted). Always returns Status="SAP_FAILED" with HTTP 200 at the controller — never throws. notify() lives inside this shared function in Node too, so both branches alert PROD_SUPERVISOR identically.</summary>
     private static async Task<MetreCompleteResult> MarkMetreSapFailedAsync(
-        Microsoft.Data.SqlClient.SqlConnection connection, IAuditLogger audit, string table, string pk, string code, int recordId,
+        Microsoft.Data.SqlClient.SqlConnection connection, IAuditLogger audit, INotificationService notify, string table, string pk, string code, int recordId,
         string batchRef, decimal length, string errMsg, string? username, string? ipAddress, int userId, CancellationToken ct)
     {
         await connection.ExecuteAsync(new CommandDefinition($"UPDATE {table} SET Status = 6 WHERE {pk} = @recordId", new { recordId }, cancellationToken: ct));
@@ -607,6 +619,17 @@ internal static class MetreProcessHelper
             """, new { code, recordId, length, errMsg, userId }, cancellationToken: ct));
 
         await ProductionEventLogHelper.WriteEventAsync(connection, code, recordId, "SAP_FAIL", $"SAP backflush failed: {errMsg}", 2, userId, ct);
+
+        try
+        {
+            await notify.NotifyAsync(new NotificationRequest(
+                Title: "SAP Backflush Failed",
+                Body: $"{batchRef} ({code}) failed to post to SAP: {errMsg}",
+                Severity: 2, Category: "production",
+                ActionLabel: "Open Production", ActionUrl: "/Production",
+                Target: new NotificationTarget(NotificationTargetType.Permission, "PROD_SUPERVISOR")), ct);
+        }
+        catch { /* best-effort */ }
 
         return new MetreCompleteResult(recordId, batchRef, null, "SAP_FAILED", false, "Record saved but SAP backflush failed. See failed backflush queue.", errMsg);
     }

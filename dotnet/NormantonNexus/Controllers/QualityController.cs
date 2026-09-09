@@ -6,6 +6,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
@@ -23,7 +24,8 @@ public sealed class QualityController(
     ISapServerClient sapServerClient,
     INexusOperationsDb nexusOperationsDb,
     IAuditLogger auditLogger,
-    IAuthorizationService authorizationService) : NexusControllerBase
+    IAuthorizationService authorizationService,
+    INotificationService notificationService) : NexusControllerBase
 {
     private static readonly JsonSerializerOptions SseJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -116,7 +118,7 @@ public sealed class QualityController(
     [Authorize(Policy = "Perm:" + QualityHelper.FnTraceabilityConcession)]
     public async Task<IActionResult> ApproveConcession(int id, [FromBody] ConcessionReviewRequest body, CancellationToken ct)
     {
-        var result = await QualityHelper.ReviewConcessionAsync(nexusOperationsDb, id, "APPROVED", body.Notes, GetUserId(), ct);
+        var result = await QualityHelper.ReviewConcessionAsync(nexusOperationsDb, notificationService, id, "APPROVED", body.Notes, GetUserId(), ct);
         return Ok(ApiResponse<ConcessionRow>.Ok(result));
     }
 
@@ -124,7 +126,7 @@ public sealed class QualityController(
     [Authorize(Policy = "Perm:" + QualityHelper.FnTraceabilityConcession)]
     public async Task<IActionResult> RejectConcession(int id, [FromBody] ConcessionReviewRequest body, CancellationToken ct)
     {
-        var result = await QualityHelper.ReviewConcessionAsync(nexusOperationsDb, id, "REJECTED", body.Notes, GetUserId(), ct);
+        var result = await QualityHelper.ReviewConcessionAsync(nexusOperationsDb, notificationService, id, "REJECTED", body.Notes, GetUserId(), ct);
         return Ok(ApiResponse<ConcessionRow>.Ok(result));
     }
 }

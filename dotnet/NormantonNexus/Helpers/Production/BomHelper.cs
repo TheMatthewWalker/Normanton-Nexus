@@ -3,6 +3,7 @@ using Microsoft.Data.SqlClient;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Production;
@@ -300,7 +301,7 @@ internal static class BomHelper
     // ── Concession raising (Production's half — Quality's Phase 3 built the review half) ──
 
     internal static async Task<RaiseConcessionResult> RaiseConcessionAsync(
-        INexusOperationsDb db, string code, int recordId, RaiseConcessionRequest body, int userId, CancellationToken ct)
+        INexusOperationsDb db, INotificationService notify, string code, int recordId, RaiseConcessionRequest body, string? username, int userId, CancellationToken ct)
     {
         if (!BomValidatedProcesses.Contains(code))
             throw new NexusValidationException($"{code} is not handled by this endpoint.");
@@ -344,9 +345,23 @@ internal static class BomHelper
         await ProductionEventLogHelper.WriteEventAsync(connection, code, recordId, "NOTE",
             $"Traceability concession raised for {ppc}{body.ParentRecordId:D8} ({body.Component} → {body.ActualMaterial}): {reason}", 1, userId, ct);
 
-        // notify() (in-app notification to QUAL_CONCESSION holders) deliberately
-        // not wired up — same deferred-Notifications-feature precedent as
-        // Quality's own ReviewConcessionAsync and every Production write action.
+        // notify() (in-app notification to concession-review holders) — best-effort,
+        // must never block the raise itself from completing. Targets
+        // QUAL_TRACEABILITY_CONCESSION, not Node's legacy QUAL_CONCESSION code —
+        // Phase 3's own migration already remapped that code for review actions
+        // (see QualityHelper.FnTraceabilityConcession's own comment), and this is
+        // the same review audience.
+        try
+        {
+            var batchRef = $"{code}{recordId:D8}";
+            await notify.NotifyAsync(new NotificationRequest(
+                Title: "Traceability Concession Raised",
+                Body: $"{batchRef} — {body.Component} traceability shows {body.ActualMaterial} instead. Raised by {username ?? $"user #{userId}"}: {reason}",
+                Severity: 1, Category: "quality",
+                ActionLabel: "Review Concession", ActionUrl: "/Quality/Concessions",
+                Target: new NotificationTarget(NotificationTargetType.Permission, "QUAL_TRACEABILITY_CONCESSION")), ct);
+        }
+        catch { /* best-effort */ }
 
         return new RaiseConcessionResult(concessionId);
     }

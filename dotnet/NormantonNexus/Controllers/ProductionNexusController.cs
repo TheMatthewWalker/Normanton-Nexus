@@ -5,6 +5,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
+using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Controllers;
@@ -38,12 +39,12 @@ namespace NormantonNexus.Controllers;
 /// </summary>
 [Route("api/productionnexus")]
 [Authorize(Policy = "Dept:" + NexusDepartments.Production)]
-public sealed class ProductionNexusController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient, IAuditLogger auditLogger) : NexusControllerBase
+public sealed class ProductionNexusController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient, IAuditLogger auditLogger, INotificationService notificationService) : NexusControllerBase
 {
     [HttpPost("mixing/entry")]
     public async Task<IActionResult> MixingEntry([FromBody] MixingEntryRequest body, CancellationToken ct)
     {
-        var result = await MixingHelper.EnterAsync(nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        var result = await MixingHelper.EnterAsync(nexusOperationsDb, sapServerClient, auditLogger, notificationService, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return StatusCode(201, ApiResponse<MixingEntryResult>.Ok(result));
     }
 
@@ -111,7 +112,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     [HttpPost("process/{processCode}/entry")]
     public async Task<IActionResult> MetreProcessEntry(string processCode, [FromBody] MetreProcessEntryRequest body, CancellationToken ct)
     {
-        var result = await MetreProcessHelper.EnterAsync(processCode, nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        var result = await MetreProcessHelper.EnterAsync(processCode, nexusOperationsDb, sapServerClient, auditLogger, notificationService, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return StatusCode(201, ApiResponse<MetreProcessEntryResult>.Ok(result));
     }
 
@@ -125,14 +126,14 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     [HttpPost("process/{processCode}/complete/{recordId:int}")]
     public async Task<IActionResult> MetreProcessComplete(string processCode, int recordId, [FromBody] MetreCompleteRequest body, CancellationToken ct)
     {
-        var result = await MetreProcessHelper.CompleteAsync(processCode, recordId, nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        var result = await MetreProcessHelper.CompleteAsync(processCode, recordId, nexusOperationsDb, sapServerClient, auditLogger, notificationService, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return Ok(ApiResponse<MetreCompleteResult>.Ok(result));
     }
 
     [HttpPost("drumming/stock")]
     public async Task<IActionResult> DrummingStock([FromBody] DrummingSubmitRequest body, CancellationToken ct)
     {
-        var result = await DrummingHelper.SubmitAsync(nexusOperationsDb, sapServerClient, auditLogger, "stock", body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        var result = await DrummingHelper.SubmitAsync(nexusOperationsDb, sapServerClient, auditLogger, notificationService, "stock", body, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return StatusCode(result.Status == "BLOCKED" ? 409 : 201,
             result.Status == "BLOCKED"
                 ? new ApiResponse<DrummingSubmitResult>(false, result, new ApiError("BLOCKED", result.Error ?? "Blocked."))
@@ -142,7 +143,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     [HttpPost("drumming/customer")]
     public async Task<IActionResult> DrummingCustomer([FromBody] DrummingSubmitRequest body, CancellationToken ct)
     {
-        var result = await DrummingHelper.SubmitAsync(nexusOperationsDb, sapServerClient, auditLogger, "customer", body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        var result = await DrummingHelper.SubmitAsync(nexusOperationsDb, sapServerClient, auditLogger, notificationService, "customer", body, GetUsername(), GetIpAddress(), GetUserId(), ct);
         return StatusCode(result.Status == "BLOCKED" ? 409 : 201,
             result.Status == "BLOCKED"
                 ? new ApiResponse<DrummingSubmitResult>(false, result, new ApiError("BLOCKED", result.Error ?? "Blocked."))
@@ -505,7 +506,7 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
     [HttpPost("process/{processCode}/{recordId:int}/concession")]
     public async Task<IActionResult> RaiseConcession(string processCode, int recordId, [FromBody] RaiseConcessionRequest body, CancellationToken ct)
     {
-        var result = await BomHelper.RaiseConcessionAsync(nexusOperationsDb, processCode.ToUpperInvariant(), recordId, body, GetUserId(), ct);
+        var result = await BomHelper.RaiseConcessionAsync(nexusOperationsDb, notificationService, processCode.ToUpperInvariant(), recordId, body, GetUsername(), GetUserId(), ct);
         return StatusCode(201, ApiResponse<RaiseConcessionResult>.Ok(result));
     }
 }
