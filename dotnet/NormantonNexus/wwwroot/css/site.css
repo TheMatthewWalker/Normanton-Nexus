@@ -947,3 +947,68 @@ tbody tr:last-child td { border-bottom: none; }
 
 /* ── ERROR PAGE ──────────────────────────────────────────────────────────── */
 .text-danger { color: var(--error); }
+
+/* ── PERMISSION GROUPS (Admin) ──────────────────────────────────────────────
+   Design approved via the /design canvas "Permission Groups Redesign" —
+   replaces the original plain-table/native-multi-select version. Reuses
+   existing tokens/components everywhere one already fit (.ps-section for
+   collapsible permission categories, .tf-input/.secondary/.btn for controls,
+   plain <table> for the members list) — the classes below are only the
+   genuinely new pieces: the groups-list card grid, tabs, a search-input-
+   with-icon wrapper (reused for all four search boxes across both pages),
+   the sticky unsaved-changes save bar, and the search-to-chip user picker. */
+
+.pg-search { position: relative; }
+.pg-search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+.pg-search input { width: 100%; padding: 9px 12px 9px 36px; }
+
+.pg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.pg-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 18px 16px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 10px; }
+.pg-card-name { font-size: 15.5px; font-weight: 800; }
+.pg-card-name a { color: var(--text); }
+.pg-card-name a:hover { color: var(--accent); }
+.pg-card-desc { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; flex: 1; margin: 0; }
+.pg-card-stats { display: flex; gap: 8px; }
+.pg-card-stat { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; color: var(--text-dim); background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; }
+.pg-card-actions { display: flex; gap: 8px; margin-top: 2px; }
+.pg-card-manage-btn { flex: 1; border: none; background: var(--accent-dim); color: var(--accent2); text-align: center; }
+.pg-card-manage-btn:hover { background: var(--accent2); color: #fff; }
+.pg-card-icon-btn { flex: 0 0 auto; width: 34px; padding: 7px 0; }
+
+.pg-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+.pg-tab { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13.5px; color: var(--text-muted); background: none; border: none; border-bottom: 2.5px solid transparent; border-radius: 0; padding: 10px 4px 11px; cursor: pointer; display: flex; align-items: center; gap: 8px; margin-right: 24px; }
+.pg-tab:hover { color: var(--text-dim); border-color: transparent; background: none; }
+.pg-tab--active, .pg-tab--active:hover { color: var(--accent2); border-bottom-color: var(--accent2); background: none; }
+.pg-tab-count { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; background: var(--surface3); color: var(--text-dim); border-radius: 10px; padding: 1px 8px; }
+.pg-tab--active .pg-tab-count { background: var(--accent-dim); color: var(--accent2); }
+
+.ps-section-body.pg-perm-grid { padding: 4px 6px; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 2px; }
+.pg-perm-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 10px; border-radius: 7px; cursor: pointer; }
+.pg-perm-row:hover { background: var(--surface2); }
+.pg-perm-checkbox { width: 17px; height: 17px; margin-top: 1px; accent-color: var(--accent2); flex-shrink: 0; cursor: pointer; }
+.pg-perm-code { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 700; color: var(--text); }
+.pg-perm-name { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
+
+.pg-save-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 400; display: flex; justify-content: center; padding: 0 32px 24px; pointer-events: none; }
+.pg-save-bar-inner { pointer-events: all; display: flex; align-items: center; gap: 16px; background: var(--night); color: #fff; border-radius: 12px; padding: 12px 14px 12px 20px; box-shadow: var(--shadow-lg); }
+.pg-save-bar-text { font-size: 13px; font-weight: 700; }
+.pg-save-bar-sub { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: rgba(148,168,194,0.85); margin-top: 1px; }
+.pg-save-btn { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13px; padding: 9px 18px; border: none; border-radius: 7px; background: linear-gradient(135deg, var(--accent2), var(--accent3)); color: #fff; cursor: pointer; box-shadow: 0 3px 10px rgba(37,99,235,0.35); }
+.pg-discard-btn { font-family: 'Manrope', sans-serif; font-weight: 600; font-size: 13px; padding: 9px 16px; border: 1px solid rgba(255,255,255,0.18); border-radius: 7px; background: transparent; color: rgba(255,255,255,0.85); cursor: pointer; }
+.pg-discard-btn:hover { border-color: rgba(255,255,255,0.4); color: #fff; background: transparent; }
+.pg-saved-toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--success); color: #fff; font-weight: 700; font-size: 13px; padding: 10px 20px; border-radius: 8px; box-shadow: var(--shadow-lg); z-index: 410; }
+
+.pg-chip-tray { min-height: 44px; background: var(--surface); border: 1.5px dashed var(--border2); border-radius: 10px; padding: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.pg-chip-tray-empty { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); padding: 4px 6px; }
+.pg-chip { display: flex; align-items: center; gap: 7px; background: var(--accent-dim); color: var(--accent2); font-size: 12.5px; font-weight: 700; padding: 5px 8px 5px 12px; border-radius: 20px; }
+.pg-chip-x { width: 16px; height: 16px; border-radius: 50%; background: rgba(37,99,235,0.18); display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 11px; line-height: 1; color: var(--accent2); }
+.pg-chip-x:hover { background: var(--accent2); color: #fff; }
+.pg-user-list { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-sm); max-height: 420px; overflow-y: auto; }
+.pg-user-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.pg-user-row:last-child { border-bottom: none; }
+.pg-user-row:hover { background: var(--surface2); }
+.pg-user-row--picked { background: var(--success-dim); }
+.pg-user-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--surface3); color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.pg-user-name { font-size: 13px; font-weight: 700; flex: 1; }
+.pg-user-pick-mark { color: var(--success); font-weight: 800; font-size: 13px; }

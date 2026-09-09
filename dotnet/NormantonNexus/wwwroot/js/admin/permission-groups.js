@@ -1,13 +1,16 @@
-// Admin > Permission Groups — list/create/edit/delete, replacing the
-// earlier one-row-at-a-time Razor Page handler version. Per-group
-// permission-checkbox-grid and bulk-assign-to-users live on the detail
-// page (permission-group-detail.js) — this page is just the list + the
-// group-level CRUD.
+// Admin > Permission Groups — list/create/rename/delete. Design approved via
+// the /design canvas "Permission Groups Redesign": a searchable card grid
+// instead of a plain table, so a group's description isn't truncated and
+// its two headline numbers (permissions/members) are scannable at a glance.
+// Per-group permission-checkbox grid and bulk-assign-to-users live on the
+// detail page (permission-group-detail.js).
 (function () {
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/admin");
   const bodyEl = document.getElementById("pg-body");
+  const searchInput = document.getElementById("pg-search-input");
   let rows = [];
+  let search = "";
 
   async function load() {
     bodyEl.innerHTML = '<div class="nx-toolbar-hint">Loading…</div>';
@@ -21,27 +24,30 @@
   }
 
   function render() {
-    document.getElementById("pg-hint").textContent = `${rows.length} group(s)`;
-    if (rows.length === 0) { bodyEl.innerHTML = '<div class="nx-empty">No permission groups yet.</div>'; return; }
-    bodyEl.innerHTML = `
-      <div style="overflow-x:auto">
-      <table>
-        <thead><tr><th>Group</th><th>Description</th><th>Permissions</th><th>Members</th><th></th></tr></thead>
-        <tbody>${rows.map((g) => `
-          <tr>
-            <td><a href="/Admin/PermissionGroupDetail/${g.groupId}">${esc(g.groupName)}</a></td>
-            <td>${esc(g.description || "—")}</td>
-            <td>${esc(g.permissionCount)}</td>
-            <td>${esc(g.memberCount)}</td>
-            <td>
-              <button type="button" class="secondary pg-edit-btn" data-id="${g.groupId}" style="padding:3px 8px;font-size:11px">Rename</button>
-              <button type="button" class="secondary pg-delete-btn" data-id="${g.groupId}" style="padding:3px 8px;font-size:11px;color:var(--error)">Delete</button>
-            </td>
-          </tr>`).join("")}</tbody>
-      </table>
-      </div>`;
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? rows.filter((g) => g.groupName.toLowerCase().includes(q) || (g.description || "").toLowerCase().includes(q))
+      : rows;
 
-    bodyEl.querySelectorAll(".pg-edit-btn").forEach((btn) => btn.addEventListener("click", () => openEditModal(rows.find((g) => String(g.groupId) === btn.dataset.id))));
+    if (rows.length === 0) { bodyEl.innerHTML = '<div class="nx-empty">No permission groups yet.</div>'; return; }
+    if (filtered.length === 0) { bodyEl.innerHTML = `<div class="nx-empty">No groups match "${esc(search)}".</div>`; return; }
+
+    bodyEl.innerHTML = `<div class="pg-grid">${filtered.map((g) => `
+      <div class="pg-card">
+        <div class="pg-card-name"><a href="/Admin/PermissionGroupDetail/${g.groupId}">${esc(g.groupName)}</a></div>
+        <p class="pg-card-desc">${esc(g.description || "No description.")}</p>
+        <div class="pg-card-stats">
+          <div class="pg-card-stat">${esc(g.permissionCount)} permission${g.permissionCount === 1 ? "" : "s"}</div>
+          <div class="pg-card-stat">${esc(g.memberCount)} member${g.memberCount === 1 ? "" : "s"}</div>
+        </div>
+        <div class="pg-card-actions">
+          <a class="secondary pg-card-manage-btn" href="/Admin/PermissionGroupDetail/${g.groupId}">Manage &rarr;</a>
+          <button type="button" class="secondary pg-card-icon-btn pg-rename-btn" data-id="${g.groupId}" title="Rename">&#9998;</button>
+          <button type="button" class="secondary pg-card-icon-btn pg-delete-btn" data-id="${g.groupId}" title="Delete" style="color:var(--error)">&#128465;</button>
+        </div>
+      </div>`).join("")}</div>`;
+
+    bodyEl.querySelectorAll(".pg-rename-btn").forEach((btn) => btn.addEventListener("click", () => openGroupModal("Rename Group", rows.find((g) => String(g.groupId) === btn.dataset.id))));
     bodyEl.querySelectorAll(".pg-delete-btn").forEach((btn) => btn.addEventListener("click", async () => {
       const group = rows.find((g) => String(g.groupId) === btn.dataset.id);
       if (!(await NexusModal.confirm(`Delete "${group.groupName}"? This removes it from every member who holds it.`, { danger: true, confirmLabel: "Delete" }))) return;
@@ -62,10 +68,10 @@
       </div>
       <div class="ps-modal-body">
         <div class="tf-row">
-          <div class="tf-field tf-field--wide"><label class="tf-label">Name</label><input class="tf-input" type="text" id="pgm-name" value="${esc(group?.groupName || "")}"></div>
+          <div class="tf-field tf-field--wide"><label class="tf-label">Name</label><input class="tf-input" type="text" id="pgm-name" value="${esc(group?.groupName || "")}" placeholder="e.g. Warehouse Supervisor"></div>
         </div>
         <div class="tf-row">
-          <div class="tf-field tf-field--wide"><label class="tf-label">Description</label><input class="tf-input" type="text" id="pgm-desc" value="${esc(group?.description || "")}"></div>
+          <div class="tf-field tf-field--wide"><label class="tf-label">Description</label><input class="tf-input" type="text" id="pgm-desc" value="${esc(group?.description || "")}" placeholder="What access does this bundle grant?"></div>
         </div>
         <div id="pgm-result"></div>
       </div>
@@ -76,6 +82,7 @@
 
     card.querySelector(".ps-modal-close").addEventListener("click", () => NexusModal.close());
     card.querySelector("#pgm-cancel").addEventListener("click", () => NexusModal.close());
+    card.querySelector("#pgm-name").focus();
     card.querySelector("#pgm-save-btn").addEventListener("click", async () => {
       const btn = card.querySelector("#pgm-save-btn");
       const result = card.querySelector("#pgm-result");
@@ -100,9 +107,8 @@
     });
   }
 
-  function openEditModal(group) { openGroupModal("Rename Group", group); }
-
   document.getElementById("pg-create-btn").addEventListener("click", () => openGroupModal("New Permission Group", null));
+  searchInput.addEventListener("input", () => { search = searchInput.value; render(); });
 
   load();
 })();
