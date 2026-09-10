@@ -8,12 +8,26 @@
 }
 
 <p><a asp-page="Index">&larr; Logistics</a></p>
-<button type="button" class="btn secondary" id="ma-refresh">Refresh History</button>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <span class="nx-toolbar-title">Consumption / GR History</span>
+    <span class="nx-toolbar-spacer"></span>
+    <button type="button" class="btn secondary" id="ma-refresh">Refresh History</button>
+</div>
 <div id="ma-refresh-status"></div>
 
 <form id="ma-trends-form">
-    <label>Materials (comma-separated)<input type="text" id="ma-materials" required></label>
-    <button type="submit" class="btn secondary">Get Trends</button>
+    <div class="nx-toolbar" style="margin-bottom:10px">
+        <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+            <div class="tf-field" style="flex:2 1 260px">
+                <label class="tf-label" for="ma-materials">Materials (comma-separated)</label>
+                <input type="text" id="ma-materials" class="tf-input" required>
+            </div>
+            <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+                <button type="submit" class="btn secondary">Get Trends</button>
+            </div>
+        </div>
+    </div>
 </form>
 <div id="ma-trends"></div>
 

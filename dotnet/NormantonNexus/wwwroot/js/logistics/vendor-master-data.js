@@ -6,21 +6,24 @@
   const bodyEl = document.getElementById("vm-body");
 
   async function load() {
-    bodyEl.textContent = "Loading…";
+    bodyEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/vendors");
       render(data || []);
     } catch (err) {
-      bodyEl.textContent = "Error: " + err.message;
+      bodyEl.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
   function render(rows) {
     if (rows.length === 0) {
-      bodyEl.textContent = "No vendors.";
+      bodyEl.innerHTML = '<div class="nx-empty">No vendors configured.</div>';
       return;
     }
     bodyEl.innerHTML = `
+      <div class="nx-toolbar" style="margin-bottom:10px">
+        <span class="nx-toolbar-title">${rows.length} vendor${rows.length === 1 ? "" : "s"}</span>
+      </div>
       <table>
         <thead><tr><th>Name</th><th>SAP Vendor #</th><th>Currency</th><th>Incoterms</th><th>Lead Time</th><th>Materials</th><th></th></tr></thead>
         <tbody>
@@ -33,8 +36,8 @@
               <td>${esc(r.defaultLeadTimeDays)}</td>
               <td>${esc(r.materialCount)}</td>
               <td>
-                <button type="button" class="btn secondary" data-id="${r.vendorId}" data-action="materials">Materials</button>
-                <button type="button" class="btn secondary" data-id="${r.vendorId}" data-action="delete">Delete</button>
+                <button type="button" class="secondary" data-id="${r.vendorId}" data-action="materials">Materials</button>
+                <button type="button" class="secondary" data-id="${r.vendorId}" data-action="delete" style="color:var(--error)">Delete</button>
               </td>
             </tr>
             <tr id="vm-materials-${r.vendorId}" style="display:none;"><td colspan="7"></td></tr>`).join("")}
@@ -58,16 +61,17 @@
     const cell = row.querySelector("td");
     if (row.style.display === "none") {
       row.style.display = "";
-      cell.textContent = "Loading…";
+      cell.innerHTML = '<span class="nx-toolbar-hint">Loading…</span>';
       try {
         const { data } = await api(`/vendors/${vendorId}/materials`);
-        cell.innerHTML = (data || []).length === 0 ? "No materials." : `
+        const rows = data || [];
+        cell.innerHTML = rows.length === 0 ? '<div class="nx-empty">No materials configured for this vendor.</div>' : `
           <table>
             <thead><tr><th>Material</th><th>MOQ</th><th>Max</th><th>Lead Override</th><th>Sched. Agmt</th></tr></thead>
-            <tbody>${data.map((m) => `<tr><td>${esc(m.material)} ${esc(m.materialText)}</td><td>${esc(m.materialMoqQty)}</td><td>${esc(m.materialMaxQty)}</td><td>${esc(m.leadTimeDaysOverride)}</td><td>${esc(m.scheduleAgreement)}</td></tr>`).join("")}</tbody>
+            <tbody>${rows.map((m) => `<tr><td>${esc(m.material)} ${esc(m.materialText)}</td><td>${esc(m.materialMoqQty)}</td><td>${esc(m.materialMaxQty)}</td><td>${esc(m.leadTimeDaysOverride)}</td><td>${esc(m.scheduleAgreement)}</td></tr>`).join("")}</tbody>
           </table>`;
       } catch (err) {
-        cell.textContent = "Error: " + err.message;
+        cell.innerHTML = `<span class="tf-inline-error">Error: ${esc(err.message)}</span>`;
       }
     } else {
       row.style.display = "none";

@@ -10,10 +10,10 @@
     const fileInput = document.getElementById("cr-file");
     const statusEl = document.getElementById("cr-status");
     if (!fileInput.files.length) {
-      statusEl.textContent = "Choose a file first.";
+      statusEl.innerHTML = '<span class="tf-inline-error">Choose a file first.</span>';
       return;
     }
-    statusEl.textContent = "Generating…";
+    statusEl.innerHTML = '<span class="nx-toolbar-hint">Generating…</span>';
     try {
       const r = await fetch("/api/customsreport/generate", {
         method: "POST",
@@ -33,21 +33,27 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      statusEl.textContent = "Report downloaded.";
+      statusEl.innerHTML = '<span class="badge badge--success">Report downloaded</span>';
     } catch (err) {
-      statusEl.textContent = "Error: " + err.message;
+      statusEl.innerHTML = `<span class="tf-inline-error">Error: ${esc(err.message)}</span>`;
     }
   });
 
   // ── VAT Overrides ──
   async function loadVatOverrides() {
     const el = document.getElementById("vo-body");
+    el.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await adminApi("/vat-overrides");
-      el.innerHTML = (data || []).length === 0 ? "<p>None.</p>" : `
+      const rows = data || [];
+      if (rows.length === 0) { el.innerHTML = '<div class="nx-empty">No VAT overrides configured.</div>'; return; }
+      el.innerHTML = `
+        <div class="nx-toolbar" style="margin-bottom:10px">
+          <span class="nx-toolbar-title">${rows.length} override${rows.length === 1 ? "" : "s"}</span>
+        </div>
         <table>
           <thead><tr><th>Consignee</th><th>VAT Number</th><th>Notes</th><th></th></tr></thead>
-          <tbody>${data.map((r) => `<tr><td>${esc(r.consigneeCode)}</td><td>${esc(r.vatNumber)}</td><td>${esc(r.notes)}</td><td><button type="button" class="btn secondary" data-id="${r.overrideId}" data-kind="vo">Delete</button></td></tr>`).join("")}</tbody>
+          <tbody>${rows.map((r) => `<tr><td>${esc(r.consigneeCode)}</td><td>${esc(r.vatNumber)}</td><td>${esc(r.notes)}</td><td><button type="button" class="secondary" data-id="${r.overrideId}" data-kind="vo" style="color:var(--error)">Delete</button></td></tr>`).join("")}</tbody>
         </table>`;
       el.querySelectorAll("button[data-kind='vo']").forEach((btn) => {
         btn.addEventListener("click", async () => {
@@ -56,7 +62,7 @@
         });
       });
     } catch (err) {
-      el.textContent = "Error: " + err.message;
+      el.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
@@ -78,12 +84,18 @@
   // ── HS Descriptions ──
   async function loadHsDescriptions() {
     const el = document.getElementById("hs-body");
+    el.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await adminApi("/hs-descriptions");
-      el.innerHTML = (data || []).length === 0 ? "<p>None.</p>" : `
+      const rows = data || [];
+      if (rows.length === 0) { el.innerHTML = '<div class="nx-empty">No HS descriptions configured.</div>'; return; }
+      el.innerHTML = `
+        <div class="nx-toolbar" style="margin-bottom:10px">
+          <span class="nx-toolbar-title">${rows.length} description${rows.length === 1 ? "" : "s"}</span>
+        </div>
         <table>
           <thead><tr><th>Commodity Code</th><th>Description</th><th></th></tr></thead>
-          <tbody>${data.map((r) => `<tr><td>${esc(r.commodityCode)}</td><td>${esc(r.description)}</td><td><button type="button" class="btn secondary" data-id="${r.hsCodeId}" data-kind="hs">Delete</button></td></tr>`).join("")}</tbody>
+          <tbody>${rows.map((r) => `<tr><td>${esc(r.commodityCode)}</td><td>${esc(r.description)}</td><td><button type="button" class="secondary" data-id="${r.hsCodeId}" data-kind="hs" style="color:var(--error)">Delete</button></td></tr>`).join("")}</tbody>
         </table>`;
       el.querySelectorAll("button[data-kind='hs']").forEach((btn) => {
         btn.addEventListener("click", async () => {
@@ -92,7 +104,7 @@
         });
       });
     } catch (err) {
-      el.textContent = "Error: " + err.message;
+      el.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 

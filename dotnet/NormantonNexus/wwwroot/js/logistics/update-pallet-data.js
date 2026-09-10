@@ -5,9 +5,10 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api");
   const el = document.getElementById("upd-list");
+  const countEl = document.getElementById("upd-count");
 
   async function load() {
-    el.textContent = "Loading…";
+    el.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/palletdata");
       render(data || []);
@@ -17,6 +18,7 @@
   }
 
   function render(rows) {
+    countEl.textContent = `${rows.length} pallet type${rows.length === 1 ? "" : "s"}`;
     if (rows.length === 0) { el.innerHTML = '<div class="nx-empty">No pallet data.</div>'; return; }
     el.innerHTML = `
       <div style="overflow-x:auto">

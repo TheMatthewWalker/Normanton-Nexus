@@ -5,10 +5,11 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api");
   const listEl = document.getElementById("ud-list");
+  const countEl = document.getElementById("ud-count");
   let rows = [];
 
   async function load() {
-    listEl.textContent = "Loading…";
+    listEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/destinations");
       rows = data || [];
@@ -21,6 +22,7 @@
   function render() {
     const q = document.getElementById("ud-search").value.trim().toLowerCase();
     const filtered = q ? rows.filter((r) => (r.destinationName || "").toLowerCase().includes(q) || (r.destinationCity || "").toLowerCase().includes(q)) : rows;
+    countEl.textContent = q ? `${filtered.length} of ${rows.length} destinations` : `${rows.length} destination${rows.length === 1 ? "" : "s"}`;
     if (filtered.length === 0) { listEl.innerHTML = '<div class="nx-empty">No destinations match.</div>'; return; }
     listEl.innerHTML = `
       <div style="overflow-x:auto">

@@ -27,6 +27,10 @@
   function fmtDate(d) {
     return d ? new Date(d).toLocaleDateString("en-GB") : "";
   }
+  function statusBadge(status) {
+    const cls = status === "Received" || status === "Booked" ? "badge--success" : status === "Ordered" ? "badge--accent" : "";
+    return `<span class="badge ${cls}">${esc(status)}</span>`;
+  }
   function todayIso() {
     return new Date().toISOString().slice(0, 10);
   }
@@ -656,7 +660,7 @@
       ? (fmtDate(t.deliveryDate) || "—") + overdueHint
       : `<input class="tf-input os-delivery-date-input" data-id="${id}" type="date" value="${isoDateOnly(t.deliveryDate)}" style="width:128px">${overdueHint}`;
     const statusCell = readOnly
-      ? `<span class="badge">${esc(t.status)}</span>`
+      ? statusBadge(t.status)
       : `<select class="tf-input os-status-select" data-id="${id}" style="width:96px">
           ${STATUS_OPTIONS.map((s) => `<option value="${s}" ${s === t.status ? "selected" : ""}>${s}</option>`).join("")}
         </select>`;

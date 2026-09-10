@@ -10,11 +10,12 @@
 <p><a asp-page="Index">&larr; Logistics</a></p>
 
 <div class="nx-toolbar" style="margin-bottom:10px">
+    <span class="nx-toolbar-title" id="fmm-count"></span>
     <div class="nx-toolbar-spacer"></div>
     <button type="button" class="btn" id="fmm-add-btn">+ Add Mapping</button>
 </div>
 
-<div id="fmm-list">Loading…</div>
+<div id="fmm-list"><div class="nx-empty">Loading…</div></div>
 
 @section Scripts {
     <script src="~/js/logistics/forwarder-mode-mapping.js"></script>

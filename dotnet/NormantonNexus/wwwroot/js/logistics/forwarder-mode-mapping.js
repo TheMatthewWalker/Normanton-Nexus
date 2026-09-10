@@ -7,11 +7,12 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api");
   const listEl = document.getElementById("fmm-list");
+  const countEl = document.getElementById("fmm-count");
   let rows = [];
   let types = [];
 
   async function load() {
-    listEl.textContent = "Loading…";
+    listEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const [mappings, typesResp] = await Promise.all([api("/forwarder-mode-mapping"), api("/forwarder-mode-mapping/forwarder-types")]);
       rows = mappings.data || [];
@@ -23,6 +24,7 @@
   }
 
   function render() {
+    countEl.textContent = `${rows.length} mapping${rows.length === 1 ? "" : "s"}`;
     if (rows.length === 0) { listEl.innerHTML = '<div class="nx-empty">No mappings.</div>'; return; }
     listEl.innerHTML = `
       <table>

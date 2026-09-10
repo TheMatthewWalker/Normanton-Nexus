@@ -10,11 +10,12 @@
 <p><a asp-page="Index">&larr; Logistics</a></p>
 
 <div class="nx-toolbar" style="margin-bottom:10px">
+    <span class="nx-toolbar-title" id="uf-count"></span>
     <div class="nx-toolbar-spacer"></div>
     <button type="button" class="btn" id="uf-add-btn">+ Add Forwarder</button>
 </div>
 
-<div id="uf-list">Loading…</div>
+<div id="uf-list"><div class="nx-empty">Loading…</div></div>
 
 @section Scripts {
     <script src="~/js/logistics/update-forwarders.js"></script>

@@ -8,10 +8,11 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api");
   const listEl = document.getElementById("uf-list");
+  const countEl = document.getElementById("uf-count");
   let rows = [];
 
   async function load() {
-    listEl.textContent = "Loading…";
+    listEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/forwarders");
       rows = data || [];
@@ -21,15 +22,20 @@
     }
   }
 
+  function approvalBadge(approved) {
+    return approved ? '<span class="badge badge--success">Approved</span>' : '<span class="badge badge--warn">Pending</span>';
+  }
+
   function render() {
+    countEl.textContent = `${rows.length} forwarder${rows.length === 1 ? "" : "s"}`;
     if (rows.length === 0) { listEl.innerHTML = '<div class="nx-empty">No forwarders.</div>'; return; }
     listEl.innerHTML = `
       <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Mode</th><th>Approved</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Mode</th><th>Approval</th><th></th></tr></thead>
         <tbody>${rows.map((r, i) => `
           <tr>
-            <td>${esc(r.forwarderId)}</td><td>${esc(r.forwarderName)}</td><td>${esc(r.forwarderMode || "—")}</td><td>${r.forwarderApproval ? "Yes" : "No"}</td>
+            <td>${esc(r.forwarderId)}</td><td>${esc(r.forwarderName)}</td><td>${esc(r.forwarderMode || "—")}</td><td>${approvalBadge(r.forwarderApproval)}</td>
             <td><button type="button" class="secondary" data-edit="${i}" style="padding:3px 8px;font-size:11px">Edit</button></td>
           </tr>`).join("")}</tbody>
       </table>
