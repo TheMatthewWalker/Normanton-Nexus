@@ -11,18 +11,18 @@
   // ── Meter readings ──────────────────────────────────────────────
   async function loadReadings() {
     const el = document.getElementById("iso-readings");
-    el.textContent = "Loading…";
+    el.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/isopar/readings");
       renderReadings(data || []);
     } catch (err) {
-      el.textContent = "Error: " + err.message;
+      el.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
   function renderReadings(rows) {
     const el = document.getElementById("iso-readings");
-    el.innerHTML = rows.length === 0 ? "<p>No readings.</p>" : `
+    el.innerHTML = rows.length === 0 ? '<div class="nx-empty">No meter readings recorded.</div>' : `
       <table>
         <thead><tr><th>Date</th><th>Reading (L)</th><th>Notes</th><th></th></tr></thead>
         <tbody>
@@ -31,7 +31,7 @@
               <td>${fmtDate(r.readingDate)}</td>
               <td>${esc(r.readingQty)}</td>
               <td>${esc(r.notes)}</td>
-              <td><button type="button" class="btn secondary" data-id="${r.readingId}">Delete</button></td>
+              <td><button type="button" class="secondary" data-id="${r.readingId}" style="color:var(--error)">Delete</button></td>
             </tr>`).join("")}
         </tbody>
       </table>`;
@@ -70,11 +70,11 @@
   // ── Stock risk ──────────────────────────────────────────────────
   async function loadStockRisk() {
     const el = document.getElementById("iso-risk");
-    el.textContent = "Loading…";
+    el.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/isopar/stock-risk");
       if (!data) {
-        el.innerHTML = "<p>No stock risk data available (no readings yet).</p>";
+        el.innerHTML = '<div class="nx-empty">No stock risk data available (no readings yet).</div>';
         return;
       }
       el.innerHTML = `
@@ -83,12 +83,12 @@
             <tr><th>As Of</th><td>${fmtDate(data.asOfDate)}</td></tr>
             <tr><th>Current Stock</th><td>${esc(data.currentStock)} L</td></tr>
             <tr><th>Max Capacity</th><td>${data.maxStockCapacityQty != null ? esc(data.maxStockCapacityQty) + " L" : "—"}</td></tr>
-            <tr><th>Projected Stockout</th><td>${data.stockoutDate ? fmtDate(data.stockoutDate) : "—"}</td></tr>
-            <tr><th>Projected Over-Capacity</th><td>${data.overCapacityDate ? fmtDate(data.overCapacityDate) : "—"}</td></tr>
+            <tr><th>Projected Stockout</th><td>${data.stockoutDate ? `${fmtDate(data.stockoutDate)} <span class="badge badge--warn">Risk</span>` : "—"}</td></tr>
+            <tr><th>Projected Over-Capacity</th><td>${data.overCapacityDate ? `${fmtDate(data.overCapacityDate)} <span class="badge badge--warn">Risk</span>` : "—"}</td></tr>
           </tbody>
         </table>`;
     } catch (err) {
-      el.textContent = "Error: " + err.message;
+      el.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
@@ -97,7 +97,7 @@
 
   async function loadPlanningRate() {
     const el = document.getElementById("iso-rate");
-    el.textContent = "Loading…";
+    el.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/isopar/planning-rate");
       lastRecommendation = data.recommendation || null;
@@ -122,7 +122,7 @@
         document.getElementById("iso-rate-notes").value = cur.notes ?? "";
       }
     } catch (err) {
-      el.textContent = "Error: " + err.message;
+      el.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
@@ -177,7 +177,7 @@
           <tr><th>Received</th><td>${esc(f.receivedQty)} L</td></tr>
           <tr><th>Consumed</th><td>${f.consumedQty != null ? esc(f.consumedQty) + " L" : "—"}</td></tr>
           <tr><th>Deliveries</th><td>${f.deliveries.length}</td></tr>
-          <tr><th>Complete</th><td>${f.complete ? "Yes" : "No — missing opening or closing reading"}</td></tr>
+          <tr><th>Complete</th><td>${f.complete ? '<span class="badge badge--success">Yes</span>' : '<span class="badge badge--warn">No — missing opening or closing reading</span>'}</td></tr>
         </tbody>
       </table>`;
   }
@@ -185,6 +185,8 @@
   async function loadDeclarations() {
     const outEl = document.getElementById("iso-decl-outstanding");
     const histEl = document.getElementById("iso-decl-history");
+    outEl.innerHTML = '<div class="nx-empty">Loading…</div>';
+    histEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const [outstanding, history] = await Promise.all([
         api("/isopar/declarations/outstanding"),
@@ -193,11 +195,11 @@
       document.getElementById("iso-decl-section").style.display = "";
 
       const periods = outstanding.data || [];
-      outEl.innerHTML = periods.length === 0 ? "<p>No outstanding periods.</p>" :
+      outEl.innerHTML = periods.length === 0 ? '<div class="nx-empty">No outstanding periods.</div>' :
         periods.map((p) => `
-          <div class="card" data-idx="${p.index}" style="margin-bottom:0.75rem;">
+          <div data-idx="${p.index}" style="margin-bottom:0.75rem;padding:14px 18px;background:var(--surface);border:1px solid var(--border);border-radius:10px;">
             ${renderPeriodFigures(p.figures)}
-            <button type="button" class="btn secondary" data-submit="${p.index}" ${p.figures.complete ? "" : "disabled"}>Confirm & Submit</button>
+            <button type="button" class="btn" data-submit="${p.index}" ${p.figures.complete ? "" : "disabled"} style="margin-top:8px;">Confirm & Submit</button>
           </div>`).join("");
       periods.forEach((p) => {
         const btn = outEl.querySelector(`button[data-submit="${p.index}"]`);
@@ -218,7 +220,10 @@
       });
 
       const rows = history.data || [];
-      histEl.innerHTML = rows.length === 0 ? "<p>No declarations submitted yet.</p>" : `
+      histEl.innerHTML = rows.length === 0 ? '<div class="nx-empty">No declarations submitted yet.</div>' : `
+        <div class="nx-toolbar" style="margin-bottom:10px">
+          <span class="nx-toolbar-title">${rows.length} declaration${rows.length === 1 ? "" : "s"}</span>
+        </div>
         <table>
           <thead><tr><th>Period</th><th>Opening</th><th>Received</th><th>Closing</th><th>Consumed</th><th>Submitted By</th><th>Submitted</th></tr></thead>
           <tbody>
