@@ -36,6 +36,7 @@
 
       const input = document.createElement("input");
       input.type = "number";
+      input.className = "tf-input";
       input.step = "0.001";
       input.min = "0.001";
       input.max = String(MAX_TUB_WEIGHT_KG);
@@ -95,9 +96,15 @@
     return json;
   }
 
-  function setResult(text, color) {
-    resultEl.style.color = color;
-    resultEl.textContent = text; // clears any previously appended Print Labels link too
+  function setResult(text, kind) {
+    // clears any previously appended Print Labels link too
+    const esc = NexusApi.esc;
+    if (kind === "loading") {
+      resultEl.innerHTML = `<div class="nx-empty">${esc(text)}</div>`;
+    } else {
+      const cls = kind === "error" ? "badge--error" : kind === "warn" ? "badge--warn" : kind === "success" ? "badge--success" : "";
+      resultEl.innerHTML = `<span class="badge ${cls}">${esc(text)}</span>`;
+    }
   }
 
   function appendPrintLabelsLink(recordId) {
@@ -120,25 +127,25 @@
     const overweightIdx = validTubs.findIndex((t) => Number(t.weightKg) > MAX_TUB_WEIGHT_KG);
 
     if (!mixCode) {
-      setResult("Mix Code is required.", "#b91c1c");
+      setResult("Mix Code is required.", "error");
       return;
     }
     if (!supplierBatchNo || !supplierTubNo) {
-      setResult("Supplier batch number and supplier tub number are required.", "#b91c1c");
+      setResult("Supplier batch number and supplier tub number are required.", "error");
       return;
     }
     if (validTubs.length === 0) {
-      setResult("At least one tub weight is required.", "#b91c1c");
+      setResult("At least one tub weight is required.", "error");
       return;
     }
     if (overweightIdx !== -1) {
-      setResult(`Tub ${overweightIdx + 1} cannot exceed ${MAX_TUB_WEIGHT_KG} KG.`, "#b91c1c");
+      setResult(`Tub ${overweightIdx + 1} cannot exceed ${MAX_TUB_WEIGHT_KG} KG.`, "error");
       return;
     }
 
     submitBtn.disabled = true;
     submitBtn.textContent = "Posting to SAP…";
-    setResult(`Inserting record and posting ${validTubs.length} tub(s) to SAP…`, "#6b7280");
+    setResult(`Inserting record and posting ${validTubs.length} tub(s) to SAP…`, "loading");
 
     try {
       const { data } = await api("/mixing/entry", {
@@ -157,13 +164,13 @@
 
       if (data.status === "SAP_FAILED") {
         const failCount = data.tubs.filter((t) => !t.success).length;
-        setResult(`⚠ ${ref} saved but ${failCount} tub(s) failed SAP. See Failed Backflush queue for supervisor retry.`, "#d97706");
+        setResult(`⚠ ${ref} saved but ${failCount} tub(s) failed SAP. See Failed Backflush queue for supervisor retry.`, "warn");
       } else {
         const docs = data.tubs
           .map((t) => t.materialDocument)
           .filter(Boolean)
           .join(", ");
-        setResult(`✓ ${ref} — ${validTubs.length} tub(s) posted · MatDocs: ${docs || "—"}`, "#059669");
+        setResult(`✓ ${ref} — ${validTubs.length} tub(s) posted · MatDocs: ${docs || "—"}`, "success");
         tubs = [{ weightKg: "" }];
         for (const id of ["mx-mixcode", "mx-suppbatch", "mx-supptub", "mx-notes"]) {
           document.getElementById(id).value = "";
@@ -175,7 +182,7 @@
         processCode: "MX", recordId: data.recordId, tubs: (data.tubs || []).map((t) => t.tubSeq),
       });
     } catch (err) {
-      setResult(err.message, "#b91c1c");
+      setResult(err.message, "error");
     } finally {
       submitBtn.disabled = false;
       submitBtn.textContent = "Post to SAP";

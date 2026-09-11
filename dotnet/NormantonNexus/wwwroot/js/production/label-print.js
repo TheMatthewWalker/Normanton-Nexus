@@ -13,7 +13,7 @@ window.ProductionLabels = (function () {
   // "Send All" button is rendered; otherwise a single button with no tub.
   async function mount(containerEl, opts) {
     const esc = NexusApi.esc;
-    containerEl.innerHTML = "Loading printers…";
+    containerEl.innerHTML = `<div class="nx-empty">Loading printers…</div>`;
     let printers = [];
     let userDefault = null;
     try {
@@ -21,12 +21,12 @@ window.ProductionLabels = (function () {
       printers = data.printers || [];
       userDefault = data.userDefault || null;
     } catch (err) {
-      containerEl.innerHTML = `<span style="color:#b91c1c;">Could not load printers: ${esc(err.message)}</span>`;
+      containerEl.innerHTML = `<div class="nx-empty">Could not load printers: ${esc(err.message)}</div>`;
       return;
     }
 
     if (printers.length === 0) {
-      containerEl.innerHTML = "<span style=\"color:#6b7280;\">No printers configured.</span>";
+      containerEl.innerHTML = `<div class="nx-empty">No printers configured.</div>`;
       return;
     }
 
@@ -35,8 +35,8 @@ window.ProductionLabels = (function () {
 
     containerEl.innerHTML = `
       <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; margin-top:0.5rem;">
-        <label for="${selectId}" style="margin:0;">Printer</label>
-        <select id="${selectId}">
+        <label class="tf-label" for="${selectId}" style="margin:0;">Printer</label>
+        <select id="${selectId}" class="tf-input" style="flex:0 0 auto; width:auto;">
           ${printers.map((p) => `<option value="${esc(p.id)}" ${p.id === userDefault ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
         </select>
         <label style="margin:0; font-size:0.8rem; font-weight:400;"><input type="checkbox" id="${selectId}-default"> Set as my default</label>
@@ -53,8 +53,7 @@ window.ProductionLabels = (function () {
         const printerId = select.value;
         const tubVal = btn.dataset.tub ? Number(btn.dataset.tub) : null;
         btn.disabled = true;
-        statusEl.textContent = "Sending…";
-        statusEl.style.color = "#6b7280";
+        statusEl.innerHTML = `<span class="badge">Sending…</span>`;
         try {
           if (document.getElementById(`${selectId}-default`).checked) {
             await api("/printers/default", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ printerId }) });
@@ -62,11 +61,9 @@ window.ProductionLabels = (function () {
           const { data } = await api(`/process/${opts.processCode}/${opts.recordId}/print`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ printerId, tub: tubVal }),
           });
-          statusEl.textContent = data.message || "Sent.";
-          statusEl.style.color = "#059669";
+          statusEl.innerHTML = `<span class="badge badge--success">${esc(data.message || "Sent.")}</span>`;
         } catch (err) {
-          statusEl.textContent = "Error: " + err.message;
-          statusEl.style.color = "#b91c1c";
+          statusEl.innerHTML = `<span class="badge badge--error">Error: ${esc(err.message)}</span>`;
         } finally {
           btn.disabled = false;
         }

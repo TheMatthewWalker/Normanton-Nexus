@@ -31,11 +31,11 @@
   // ── Parent batch / raw material rows (same shape as Complete Run) ──
   function addParentRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <input type="text" placeholder="Process Code (e.g. MX)" class="dw-parent-pc" style="max-width:140px;">
-      <input type="number" placeholder="Record ID" class="dw-parent-rid" style="max-width:120px;">
-      <input type="number" placeholder="Tub ID (optional)" class="dw-parent-tub" style="max-width:120px;">
+      <input type="text" placeholder="Process Code (e.g. MX)" class="dw-parent-pc tf-input" style="max-width:140px;">
+      <input type="number" placeholder="Record ID" class="dw-parent-rid tf-input" style="max-width:120px;">
+      <input type="number" placeholder="Tub ID (optional)" class="dw-parent-tub tf-input" style="max-width:120px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("dw-parent-list").appendChild(row);
@@ -44,10 +44,10 @@
 
   function addRawMatRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <input type="text" placeholder="Material" class="dw-rawmat-material" style="max-width:160px;">
-      <input type="text" placeholder="Batch Number" class="dw-rawmat-batch" style="max-width:160px;">
+      <input type="text" placeholder="Material" class="dw-rawmat-material tf-input" style="max-width:160px;">
+      <input type="text" placeholder="Batch Number" class="dw-rawmat-batch tf-input" style="max-width:160px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("dw-rawmat-list").appendChild(row);
@@ -56,9 +56,9 @@
 
   function addCoilRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <input type="number" placeholder="Length (m)" class="dw-coil-length" step="0.001" style="max-width:140px;">
+      <input type="number" placeholder="Length (m)" class="dw-coil-length tf-input" step="0.001" style="max-width:140px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("dw-coil-list").appendChild(row);
@@ -75,11 +75,11 @@
 
   function addScrapRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <select class="dw-scrap-reason">${scrapReasons.map((r) => `<option value="${r.reasonId}">${esc(r.reasonDescription)}</option>`).join("")}</select>
-      <input type="number" placeholder="KG" class="dw-scrap-kg" step="0.001" style="max-width:100px;">
-      <input type="number" placeholder="Occurrences" class="dw-scrap-occ" style="max-width:120px;">
+      <select class="dw-scrap-reason tf-input" style="max-width:220px;">${scrapReasons.map((r) => `<option value="${r.reasonId}">${esc(r.reasonDescription)}</option>`).join("")}</select>
+      <input type="number" placeholder="KG" class="dw-scrap-kg tf-input" step="0.001" style="max-width:100px;">
+      <input type="number" placeholder="Occurrences" class="dw-scrap-occ tf-input" style="max-width:120px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("dw-scrap-list").appendChild(row);
@@ -114,11 +114,20 @@
     }));
   }
 
+  const resultEl = document.getElementById("dw-result");
+  function setResult(text, kind) {
+    if (kind === "loading") {
+      resultEl.innerHTML = `<div class="nx-empty">${esc(text)}</div>`;
+    } else {
+      const cls = kind === "error" ? "badge--error" : kind === "warn" ? "badge--warn" : kind === "success" ? "badge--success" : "";
+      resultEl.innerHTML = `<span class="badge ${cls}">${esc(text)}</span>`;
+    }
+  }
+
   document.getElementById("dw-submit-btn").addEventListener("click", async () => {
-    const resultEl = document.getElementById("dw-result");
     const type = document.getElementById("dw-type").value;
     const material = document.getElementById("dw-material").value.trim();
-    if (!material) { resultEl.textContent = "Material is required."; resultEl.style.color = "#b91c1c"; return; }
+    if (!material) { setResult("Material is required.", "error"); return; }
 
     const hasScrap = document.getElementById("dw-has-scrap").checked;
     const body = {
@@ -138,21 +147,17 @@
       comments: document.getElementById("dw-comments").value.trim() || null,
     };
 
-    resultEl.textContent = "Posting to SAP…";
-    resultEl.style.color = "#6b7280";
+    setResult("Posting to SAP…", "loading");
     try {
       const { data } = await api(`/drumming/${type}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (data.status === "SAP_FAILED") {
-        resultEl.textContent = `⚠ ${data.batchRef} saved but SAP posting failed: ${data.error}. See Failed Backflush queue for supervisor retry.`;
-        resultEl.style.color = "#d97706";
+        setResult(`⚠ ${data.batchRef} saved but SAP posting failed: ${data.error}. See Failed Backflush queue for supervisor retry.`, "warn");
       } else {
-        resultEl.textContent = `✓ ${data.batchRef} posted — MatDoc: ${data.materialDocument || "—"}${data.warning ? ` (${data.warning})` : ""}${data.bomMismatch ? " — BOM mismatch flagged" : ""}`;
-        resultEl.style.color = "#059669";
+        setResult(`✓ ${data.batchRef} posted — MatDoc: ${data.materialDocument || "—"}${data.warning ? ` (${data.warning})` : ""}${data.bomMismatch ? " — BOM mismatch flagged" : ""}`, "success");
       }
       window.ProductionLabels.mount(document.getElementById("dw-print-widget"), { processCode: "DR", recordId: data.drummingId, tubs: null });
     } catch (err) {
-      resultEl.textContent = "Error: " + err.message;
-      resultEl.style.color = "#b91c1c";
+      setResult("Error: " + err.message, "error");
     }
   });
 

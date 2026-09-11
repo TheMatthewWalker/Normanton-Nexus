@@ -17,17 +17,17 @@
   // ── Open Drafts ─────────────────────────────────────────────────
   async function loadOpenEntries() {
     const el = document.getElementById("cr-open-entries");
-    el.textContent = "Loading…";
+    el.innerHTML = `<div class="nx-empty">Loading…</div>`;
     try {
       const { data } = await api(`/process/${processCode}/open-entries`);
       const rows = data || [];
-      el.innerHTML = rows.length === 0 ? "<p>No open drafts.</p>" : `
+      el.innerHTML = rows.length === 0 ? `<div class="nx-empty">No open drafts.</div>` : `
         <table>
           <thead><tr><th>Batch Ref</th><th>Material</th><th>Machine</th><th>Notes</th><th>Created</th><th></th></tr></thead>
           <tbody>
             ${rows.map((r) => `
               <tr>
-                <td>${esc(r.batchRef)}</td><td>${esc(r.material)}</td><td>${esc(r.machineName || r.machineCode)}</td>
+                <td><span class="badge badge--accent">${esc(r.batchRef)}</span></td><td>${esc(r.material)}</td><td>${esc(r.machineName || r.machineCode)}</td>
                 <td>${esc(r.notes)}</td><td>${new Date(r.createdAt).toLocaleString("en-GB")}</td>
                 <td><button type="button" class="secondary" data-select="${r.recordId}" data-ref="${esc(r.batchRef)}">Complete</button></td>
               </tr>`).join("")}
@@ -37,18 +37,18 @@
         btn.addEventListener("click", () => selectDraft(Number(btn.dataset.select), btn.dataset.ref));
       });
     } catch (err) {
-      el.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
+      el.innerHTML = `<div class="nx-empty">${esc(err.message)}</div>`;
     }
   }
 
   // ── Parent batch / raw material rows ────────────────────────────
   function addParentRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <input type="text" placeholder="Process Code (e.g. MX)" class="cr-parent-pc" style="max-width:140px;">
-      <input type="number" placeholder="Record ID" class="cr-parent-rid" style="max-width:120px;">
-      <input type="number" placeholder="Tub ID (optional)" class="cr-parent-tub" style="max-width:120px;">
+      <input type="text" placeholder="Process Code (e.g. MX)" class="cr-parent-pc tf-input" style="max-width:140px;">
+      <input type="number" placeholder="Record ID" class="cr-parent-rid tf-input" style="max-width:120px;">
+      <input type="number" placeholder="Tub ID (optional)" class="cr-parent-tub tf-input" style="max-width:120px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("cr-parent-list").appendChild(row);
@@ -57,10 +57,10 @@
 
   function addRawMatRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <input type="text" placeholder="Material" class="cr-rawmat-material" style="max-width:160px;">
-      <input type="text" placeholder="Batch Number" class="cr-rawmat-batch" style="max-width:160px;">
+      <input type="text" placeholder="Material" class="cr-rawmat-material tf-input" style="max-width:160px;">
+      <input type="text" placeholder="Batch Number" class="cr-rawmat-batch tf-input" style="max-width:160px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("cr-rawmat-list").appendChild(row);
@@ -82,13 +82,21 @@
     })).filter((r) => r.material || r.batchNumber);
   }
 
+  function setDraftResult(text, kind) {
+    const el = document.getElementById("cr-draft-result");
+    if (kind === "loading") {
+      el.innerHTML = `<div class="nx-empty">${esc(text)}</div>`;
+    } else {
+      const cls = kind === "error" ? "badge--error" : kind === "success" ? "badge--success" : "";
+      el.innerHTML = `<span class="badge ${cls}">${esc(text)}</span>`;
+    }
+  }
+
   // ── Draft creation ──────────────────────────────────────────────
   document.getElementById("cr-draft-submit").addEventListener("click", async () => {
-    const resultEl = document.getElementById("cr-draft-result");
     const material = document.getElementById("cr-material").value.trim();
-    if (!material) { resultEl.textContent = "Material is required."; resultEl.style.color = "#b91c1c"; return; }
-    resultEl.textContent = "Creating draft…";
-    resultEl.style.color = "#6b7280";
+    if (!material) { setDraftResult("Material is required.", "error"); return; }
+    setDraftResult("Creating draft…", "loading");
     try {
       const { data } = await api(`/process/${processCode}/draft`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -100,13 +108,11 @@
           notes: document.getElementById("cr-draft-notes").value.trim() || null,
         }),
       });
-      resultEl.textContent = `✓ Draft ${data.batchRef} created.` + (data.warnings && data.warnings.length ? ` Warnings: ${data.warnings.join("; ")}` : "");
-      resultEl.style.color = "#059669";
+      setDraftResult(`✓ Draft ${data.batchRef} created.` + (data.warnings && data.warnings.length ? ` Warnings: ${data.warnings.join("; ")}` : ""), "success");
       await loadOpenEntries();
       selectDraft(data.recordId, data.batchRef);
     } catch (err) {
-      resultEl.textContent = "Error: " + err.message;
-      resultEl.style.color = "#b91c1c";
+      setDraftResult("Error: " + err.message, "error");
     }
   });
 
@@ -121,11 +127,11 @@
 
   function addScrapRow() {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.25rem;";
+    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
     row.innerHTML = `
-      <select class="cr-scrap-reason">${scrapReasons.map((r) => `<option value="${r.reasonId}">${esc(r.reasonDescription)}</option>`).join("")}</select>
-      <input type="number" placeholder="KG" class="cr-scrap-kg" step="0.001" style="max-width:100px;">
-      <input type="number" placeholder="Occurrences" class="cr-scrap-occ" style="max-width:120px;">
+      <select class="cr-scrap-reason tf-input" style="max-width:220px;">${scrapReasons.map((r) => `<option value="${r.reasonId}">${esc(r.reasonDescription)}</option>`).join("")}</select>
+      <input type="number" placeholder="KG" class="cr-scrap-kg tf-input" step="0.001" style="max-width:100px;">
+      <input type="number" placeholder="Occurrences" class="cr-scrap-occ tf-input" style="max-width:120px;">
       <button type="button" class="secondary" data-remove>&times;</button>`;
     row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
     document.getElementById("cr-scrap-list").appendChild(row);
@@ -150,17 +156,25 @@
     document.getElementById("cr-complete-section").scrollIntoView({ behavior: "smooth" });
   }
 
+  function setCompleteResult(text, kind) {
+    const el = document.getElementById("cr-complete-result");
+    if (kind === "loading") {
+      el.innerHTML = `<div class="nx-empty">${esc(text)}</div>`;
+    } else {
+      const cls = kind === "error" ? "badge--error" : kind === "warn" ? "badge--warn" : kind === "success" ? "badge--success" : "";
+      el.innerHTML = `<span class="badge ${cls}">${esc(text)}</span>`;
+    }
+  }
+
   document.getElementById("cr-complete-submit").addEventListener("click", async () => {
     if (!selectedRecordId) return;
-    const resultEl = document.getElementById("cr-complete-result");
     const lengthMetres = Number(document.getElementById("cr-length").value);
-    if (!(lengthMetres > 0)) { resultEl.textContent = "Length (Metres) must be greater than 0."; resultEl.style.color = "#b91c1c"; return; }
+    if (!(lengthMetres > 0)) { setCompleteResult("Length (Metres) must be greater than 0.", "error"); return; }
 
     const operatorIds = document.getElementById("cr-operators").value.split(",").map((s) => Number(s.trim())).filter((n) => n > 0);
     const hasScrap = document.getElementById("cr-has-scrap").checked;
 
-    resultEl.textContent = "Posting to SAP…";
-    resultEl.style.color = "#6b7280";
+    setCompleteResult("Posting to SAP…", "loading");
     try {
       const { data } = await api(`/process/${processCode}/complete/${selectedRecordId}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -175,21 +189,18 @@
         }),
       });
       if (data.status === "SAP_FAILED") {
-        resultEl.textContent = `⚠ ${data.batchRef} saved but SAP posting failed: ${data.error}. See Failed Backflush queue for supervisor retry.`;
-        resultEl.style.color = "#d97706";
+        setCompleteResult(`⚠ ${data.batchRef} saved but SAP posting failed: ${data.error}. See Failed Backflush queue for supervisor retry.`, "warn");
       } else {
-        resultEl.textContent = `✓ ${data.batchRef} completed — MatDoc: ${data.materialDocument}${data.warning ? ` (${data.warning})` : ""}`;
-        resultEl.style.color = "#059669";
+        setCompleteResult(`✓ ${data.batchRef} completed — MatDoc: ${data.materialDocument}${data.warning ? ` (${data.warning})` : ""}`, "success");
       }
       window.ProductionLabels.mount(document.getElementById("cr-print-widget"), { processCode, recordId: selectedRecordId, tubs: null });
       await loadOpenEntries();
     } catch (err) {
       if (err.message && err.message.toLowerCase().includes("block")) {
-        resultEl.textContent = "Blocked: " + err.message;
+        setCompleteResult("Blocked: " + err.message, "error");
       } else {
-        resultEl.textContent = "Error: " + err.message;
+        setCompleteResult("Error: " + err.message, "error");
       }
-      resultEl.style.color = "#b91c1c";
     }
   });
 

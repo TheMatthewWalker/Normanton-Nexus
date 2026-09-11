@@ -9,14 +9,27 @@
 
 <p><a asp-page="Index">&larr; Production</a></p>
 
-<div style="display:flex; gap:0.5rem; align-items:end; flex-wrap:wrap;">
-    <label>Order Number<input type="text" id="ol-order"></label>
-    <label>Material<input type="text" id="ol-material"></label>
-    <label>Customer<input type="text" id="ol-customer"></label>
-    <button type="button" id="ol-search-btn">Search</button>
+<div class="nx-toolbar">
+    <div class="tf-row" style="flex:1; flex-wrap:wrap; margin-bottom:0;">
+        <div class="tf-field">
+            <label class="tf-label" for="ol-order">Order Number</label>
+            <input type="text" id="ol-order" class="tf-input">
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="ol-material">Material</label>
+            <input type="text" id="ol-material" class="tf-input">
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="ol-customer">Customer</label>
+            <input type="text" id="ol-customer" class="tf-input">
+        </div>
+        <div class="tf-field" style="justify-content:flex-end; flex-direction:row;">
+            <button type="button" id="ol-search-btn" class="btn">Search</button>
+        </div>
+    </div>
 </div>
 
-<div id="ol-results" style="margin-top:1rem;"></div>
+<div id="ol-results" style="margin-top:1rem;"><div class="nx-empty">Enter a search above and click Search.</div></div>
 
 @section Scripts {
     <script src="~/js/production/order-lookup.js"></script>

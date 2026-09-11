@@ -12,13 +12,21 @@
 <div data-process-code="@Model.Code">
     <section class="card">
         <h3>Open Drafts</h3>
-        <div id="cr-open-entries">Loading…</div>
+        <div id="cr-open-entries"><div class="nx-empty">Loading…</div></div>
     </section>
 
     <section class="card" style="margin-top:1rem;" id="cr-draft-section">
         <h3>Start New Draft</h3>
-        <label>Material<input type="text" id="cr-material"></label>
-        <label>Machine ID<input type="number" id="cr-machine"></label>
+        <div class="tf-row">
+            <div class="tf-field">
+                <label class="tf-label" for="cr-material">Material</label>
+                <input type="text" id="cr-material" class="tf-input">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="cr-machine">Machine ID</label>
+                <input type="number" id="cr-machine" class="tf-input">
+            </div>
+        </div>
         <fieldset>
             <legend>Parent Batches (traceability)</legend>
             <div id="cr-parent-list"></div>
@@ -29,31 +37,57 @@
             <div id="cr-rawmat-list"></div>
             <button type="button" class="secondary" id="cr-add-rawmat">+ Add Raw Material Batch</button>
         </fieldset>
-        <label>Notes<input type="text" id="cr-draft-notes"></label>
-        <p id="cr-draft-result" style="margin:0.5rem 0;"></p>
-        <button type="button" id="cr-draft-submit">Create Draft</button>
+        <div class="tf-row" style="margin-top:14px;">
+            <div class="tf-field tf-field--wide">
+                <label class="tf-label" for="cr-draft-notes">Notes</label>
+                <input type="text" id="cr-draft-notes" class="tf-input">
+            </div>
+        </div>
+        <div id="cr-draft-result" style="margin:0.75rem 0;"></div>
+        <button type="button" id="cr-draft-submit" class="btn">Create Draft</button>
     </section>
 
     <section class="card" style="margin-top:1rem; display:none;" id="cr-complete-section">
-        <h3>Complete Run <span id="cr-complete-ref"></span></h3>
-        <label>Length (Metres)<input type="number" id="cr-length" step="0.001" min="0.001"></label>
-        <label>Shift<select id="cr-shift">
-            <option value="1">Days (06:00–14:00)</option>
-            <option value="2">Afternoons (14:00–22:00)</option>
-            <option value="3">Nights (22:00–06:00)</option>
-        </select></label>
-        <label>Additional Operator IDs (comma-separated)<input type="text" id="cr-operators"></label>
+        <h3>Complete Run <span id="cr-complete-ref" class="badge badge--accent"></span></h3>
+        <div class="tf-row">
+            <div class="tf-field">
+                <label class="tf-label" for="cr-length">Length (Metres)</label>
+                <input type="number" id="cr-length" class="tf-input" step="0.001" min="0.001">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="cr-shift">Shift</label>
+                <select id="cr-shift" class="tf-input">
+                    <option value="1">Days (06:00–14:00)</option>
+                    <option value="2">Afternoons (14:00–22:00)</option>
+                    <option value="3">Nights (22:00–06:00)</option>
+                </select>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="cr-operators">Additional Operator IDs (comma-separated)</label>
+                <input type="text" id="cr-operators" class="tf-input">
+            </div>
+        </div>
         <fieldset>
             <legend>Scrap</legend>
             <label><input type="checkbox" id="cr-has-scrap"> Has scrap</label>
-            <label>Total Scrap (KG)<input type="number" id="cr-scrap-total" step="0.001"></label>
+            <div class="tf-row" style="margin-top:8px;">
+                <div class="tf-field">
+                    <label class="tf-label" for="cr-scrap-total">Total Scrap (KG)</label>
+                    <input type="number" id="cr-scrap-total" class="tf-input" step="0.001">
+                </div>
+            </div>
             <div id="cr-scrap-list"></div>
             <button type="button" class="secondary" id="cr-add-scrap">+ Add Scrap Reason</button>
         </fieldset>
-        <label>Notes<input type="text" id="cr-complete-notes"></label>
-        <p id="cr-complete-result" style="margin:0.5rem 0;"></p>
+        <div class="tf-row" style="margin-top:14px;">
+            <div class="tf-field tf-field--wide">
+                <label class="tf-label" for="cr-complete-notes">Notes</label>
+                <input type="text" id="cr-complete-notes" class="tf-input">
+            </div>
+        </div>
+        <div id="cr-complete-result" style="margin:0.75rem 0;"></div>
         <div id="cr-print-widget"></div>
-        <button type="button" id="cr-complete-submit">Complete &amp; Post to SAP</button>
+        <button type="button" id="cr-complete-submit" class="btn">Complete &amp; Post to SAP</button>
     </section>
 </div>
 
