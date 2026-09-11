@@ -7,8 +7,9 @@
   const outputEl = document.getElementById("rpt-output");
 
   async function run(filters) {
+    msgEl.classList.add("hidden");
     msgEl.textContent = "";
-    outputEl.textContent = "Loading…";
+    outputEl.innerHTML = `<div class="nx-empty">Loading…</div>`;
     try {
       const { data } = await R.api(`/reports/output?${R.buildQuery(filters)}`);
 
@@ -45,10 +46,12 @@
         })
       );
     } catch (err) {
-      outputEl.textContent = "";
+      outputEl.innerHTML = "";
       msgEl.textContent = err.message;
+      msgEl.classList.remove("hidden");
     }
   }
 
+  outputEl.innerHTML = `<div class="nx-empty">Choose filters and click Run Report to see results.</div>`;
   R.mountFilterBar(filtersEl, run);
 })();
