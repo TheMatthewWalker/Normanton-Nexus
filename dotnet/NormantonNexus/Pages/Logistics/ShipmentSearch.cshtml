@@ -8,15 +8,44 @@
 }
 
 <p><a asp-page="Index">&larr; Logistics</a></p>
+
 <form id="ss-form">
-    <label>Shipment Ref<input type="text" id="ss-ref"></label>
-    <label>Forwarder<input type="text" id="ss-forwarder"></label>
-    <label>Customer<input type="text" id="ss-customer"></label>
-    <label>Tracking<input type="text" id="ss-tracking"></label>
-    <button type="submit" class="btn secondary">Search</button>
+    <div class="nx-toolbar" style="margin-bottom:10px">
+        <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+            <div class="tf-field">
+                <label class="tf-label" for="ss-ref">Shipment Ref</label>
+                <input type="text" id="ss-ref" class="tf-input" placeholder="e.g. SH-10234">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="ss-forwarder">Forwarder</label>
+                <input type="text" id="ss-forwarder" class="tf-input" placeholder="Forwarder name">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="ss-customer">Customer</label>
+                <input type="text" id="ss-customer" class="tf-input" placeholder="Customer name">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="ss-tracking">Tracking</label>
+                <input type="text" id="ss-tracking" class="tf-input" placeholder="Tracking number">
+            </div>
+            <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+                <button type="submit" class="btn">Search</button>
+                <button type="button" id="ss-clear" class="secondary">Clear</button>
+            </div>
+        </div>
+    </div>
 </form>
-<div id="ss-body" style="margin-top:0.75rem;"></div>
+
+<div id="ss-toolbar" class="nx-toolbar hidden">
+    <span id="ss-toolbar-title" class="nx-toolbar-title"></span>
+    <span class="nx-toolbar-spacer"></span>
+    <span class="nx-toolbar-hint">Click an outbound ref to view full shipment details</span>
+</div>
+
+<div id="ss-body"></div>
 
 @section Scripts {
+    <script src="~/js/logistics/shipment-booking.js"></script>
+    <script src="~/js/logistics/shipment-detail-outbound.js"></script>
     <script src="~/js/logistics/shipment-search.js"></script>
 }

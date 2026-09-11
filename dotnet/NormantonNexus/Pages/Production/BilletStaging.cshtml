@@ -9,20 +9,34 @@
 
 <p><a asp-page="Index">&larr; Production</a></p>
 
-<div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
-    <input type="text" id="bs-scan-ref" placeholder="Scan ticket ref e.g. MX-00000064-T1" style="max-width:260px;" />
-    <button type="button" id="bs-scan-btn" class="secondary">Stage by Scan</button>
+<div class="nx-toolbar" style="margin-bottom:12px;">
+    <div class="tf-row" style="flex:1; flex-wrap:wrap; margin-bottom:0;">
+        <div class="tf-field">
+            <label class="tf-label" for="bs-scan-ref">Scan Ticket Ref</label>
+            <input type="text" id="bs-scan-ref" class="tf-input" placeholder="e.g. MX-00000064-T1" />
+        </div>
+        <div class="tf-field" style="justify-content:flex-end; flex-direction:row;">
+            <button type="button" id="bs-scan-btn" class="secondary">Stage by Scan</button>
+        </div>
+    </div>
 </div>
 
-<p id="bs-msg" style="color:#b91c1c;"></p>
+<div id="bs-msg" style="margin-bottom:0.75rem;"></div>
 
 <h3>Ready to Stage</h3>
-<div id="bs-queue">Loading…</div>
+<div id="bs-queue"><div class="nx-empty">Loading…</div></div>
 
 <h3>Search / Return to Conditioning</h3>
-<div style="display:flex; gap:0.5rem; margin-bottom:0.5rem;">
-    <input type="text" id="bs-search" placeholder="Mix ref, mix code, material or supplier tub…" style="max-width:280px;" />
-    <button type="button" id="bs-search-btn">Search</button>
+<div class="nx-toolbar" style="margin-bottom:10px;">
+    <div class="tf-row" style="flex:1; flex-wrap:wrap; margin-bottom:0;">
+        <div class="tf-field">
+            <label class="tf-label" for="bs-search">Search</label>
+            <input type="text" id="bs-search" class="tf-input" placeholder="Mix ref, mix code, material or supplier tub…" />
+        </div>
+        <div class="tf-field" style="justify-content:flex-end; flex-direction:row;">
+            <button type="button" id="bs-search-btn" class="btn">Search</button>
+        </div>
+    </div>
 </div>
 <div id="bs-search-results"></div>
 

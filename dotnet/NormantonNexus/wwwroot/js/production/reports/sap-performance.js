@@ -6,8 +6,9 @@
   const outputEl = document.getElementById("rpt-output");
 
   async function run(filters) {
+    msgEl.classList.add("hidden");
     msgEl.textContent = "";
-    outputEl.textContent = "Loading…";
+    outputEl.innerHTML = `<div class="nx-empty">Loading…</div>`;
     try {
       const { data } = await R.api(`/reports/sap-performance?${R.buildQuery(filters)}`);
 
@@ -20,11 +21,17 @@
       outputEl.appendChild(
         R.buildTable(["Process", "Total", "Success", "Failed", "Reversed"], data.byProcess, (row) => {
           const tr = document.createElement("tr");
-          for (const val of [R.PROCESS_LABELS[row.processCode] || row.processCode, row.total, row.success, row.failed, row.reversed]) {
-            const td = document.createElement("td");
-            td.textContent = val;
-            tr.appendChild(td);
-          }
+          const tdProcess = document.createElement("td");
+          tdProcess.textContent = R.PROCESS_LABELS[row.processCode] || row.processCode;
+          const tdTotal = document.createElement("td");
+          tdTotal.textContent = row.total;
+          const tdSuccess = document.createElement("td");
+          tdSuccess.appendChild(R.badgeEl(row.success, row.success > 0 ? "success" : undefined));
+          const tdFailed = document.createElement("td");
+          tdFailed.appendChild(R.badgeEl(row.failed, row.failed > 0 ? "error" : undefined));
+          const tdReversed = document.createElement("td");
+          tdReversed.appendChild(R.badgeEl(row.reversed, row.reversed > 0 ? "warn" : undefined));
+          tr.append(tdProcess, tdTotal, tdSuccess, tdFailed, tdReversed);
           return tr;
         })
       );
@@ -35,11 +42,13 @@
       outputEl.appendChild(
         R.buildTable(["Period", "Success", "Failed"], data.timeSeries, (row) => {
           const tr = document.createElement("tr");
-          for (const val of [row.period, row.success, row.failed]) {
-            const td = document.createElement("td");
-            td.textContent = val;
-            tr.appendChild(td);
-          }
+          const tdPeriod = document.createElement("td");
+          tdPeriod.textContent = row.period;
+          const tdSuccess = document.createElement("td");
+          tdSuccess.appendChild(R.badgeEl(row.success, row.success > 0 ? "success" : undefined));
+          const tdFailed = document.createElement("td");
+          tdFailed.appendChild(R.badgeEl(row.failed, row.failed > 0 ? "error" : undefined));
+          tr.append(tdPeriod, tdSuccess, tdFailed);
           return tr;
         })
       );
@@ -50,19 +59,21 @@
       outputEl.appendChild(
         R.buildTable(["Process", "Alerts"], data.alerts, (row) => {
           const tr = document.createElement("tr");
-          for (const val of [R.PROCESS_LABELS[row.processCode] || row.processCode, row.alertCount]) {
-            const td = document.createElement("td");
-            td.textContent = val;
-            tr.appendChild(td);
-          }
+          const tdProcess = document.createElement("td");
+          tdProcess.textContent = R.PROCESS_LABELS[row.processCode] || row.processCode;
+          const tdAlerts = document.createElement("td");
+          tdAlerts.appendChild(R.badgeEl(row.alertCount, row.alertCount > 0 ? "warn" : undefined));
+          tr.append(tdProcess, tdAlerts);
           return tr;
         })
       );
     } catch (err) {
-      outputEl.textContent = "";
+      outputEl.innerHTML = "";
       msgEl.textContent = err.message;
+      msgEl.classList.remove("hidden");
     }
   }
 
+  outputEl.innerHTML = `<div class="nx-empty">Choose filters and click Run Report to see results.</div>`;
   R.mountFilterBar(filtersEl, run);
 })();

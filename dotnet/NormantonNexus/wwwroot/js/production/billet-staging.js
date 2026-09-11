@@ -27,14 +27,21 @@
     return dt ? new Date(dt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
   }
 
-  const BUCKET_COLORS = { "0-24": "#6b7280", "24-48": "#059669", "48-72": "#d97706", "72-96": "#dc2626", expired: "#dc2626" };
+  const BUCKET_BADGE = { "0-24": "", "24-48": "badge--success", "48-72": "badge--warn", "72-96": "badge--error", expired: "badge--error" };
+
+  function setMsg(text, kind) {
+    if (!text) { msgEl.innerHTML = ""; return; }
+    const cls = kind === "error" ? "badge--error" : kind === "success" ? "badge--success" : "";
+    msgEl.innerHTML = `<span class="badge ${cls}"></span>`;
+    msgEl.querySelector(".badge").textContent = text;
+  }
 
   async function loadQueue() {
-    queueEl.textContent = "Loading…";
+    queueEl.innerHTML = `<div class="nx-empty">Loading…</div>`;
     try {
       const { data } = await api("/mixing/staging/queue");
       if (data.length === 0) {
-        queueEl.textContent = "Nothing ready to stage right now.";
+        queueEl.innerHTML = `<div class="nx-empty">Nothing ready to stage right now.</div>`;
         return;
       }
 
@@ -55,7 +62,7 @@
       queueEl.innerHTML = "";
       queueEl.appendChild(table);
     } catch (err) {
-      queueEl.textContent = err.message;
+      queueEl.innerHTML = `<div class="nx-empty">${NexusApi.esc(err.message)}</div>`;
     }
   }
 
@@ -71,8 +78,10 @@
     wtTd.style.textAlign = "right";
     wtTd.textContent = Number(row.tubWeightKg).toFixed(3);
     const ageTd = document.createElement("td");
-    ageTd.style.color = BUCKET_COLORS[row.bucket] || "#6b7280";
-    ageTd.textContent = `${Number(row.ageHours).toFixed(1)}h (${row.bucket})`;
+    const ageBadge = document.createElement("span");
+    ageBadge.className = `badge ${BUCKET_BADGE[row.bucket] || ""}`;
+    ageBadge.textContent = `${Number(row.ageHours).toFixed(1)}h (${row.bucket})`;
+    ageTd.appendChild(ageBadge);
     const completedTd = document.createElement("td");
     completedTd.textContent = fmtDate(row.completedAt);
 
@@ -88,46 +97,42 @@
   }
 
   async function stageTub(tubId, onDone) {
-    msgEl.textContent = "";
+    setMsg("");
     try {
       const { data } = await api(`/mixing/tubs/${tubId}/stage`, { method: "PATCH" });
-      msgEl.style.color = "#059669";
-      msgEl.textContent = `Tub ${data.tubSeq} of ${data.mixRef} staged — ${data.stagedQuantityKg} KG.`;
+      setMsg(`Tub ${data.tubSeq} of ${data.mixRef} staged — ${data.stagedQuantityKg} KG.`, "success");
       await onDone();
     } catch (err) {
-      msgEl.style.color = "#b91c1c";
-      msgEl.textContent = err.message;
+      setMsg(err.message, "error");
     }
   }
 
   document.getElementById("bs-scan-btn").addEventListener("click", async () => {
     const ref = scanRefInput.value.trim();
     if (!ref) return;
-    msgEl.textContent = "";
+    setMsg("");
     try {
       const { data } = await api("/mixing/tubs/stage-by-ref", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ref }),
       });
-      msgEl.style.color = "#059669";
-      msgEl.textContent = `Tub ${data.tubSeq} of ${data.mixRef} staged — ${data.stagedQuantityKg} KG.`;
+      setMsg(`Tub ${data.tubSeq} of ${data.mixRef} staged — ${data.stagedQuantityKg} KG.`, "success");
       scanRefInput.value = "";
       await loadQueue();
     } catch (err) {
-      msgEl.style.color = "#b91c1c";
-      msgEl.textContent = err.message;
+      setMsg(err.message, "error");
     }
   });
 
   async function runSearch() {
-    searchResultsEl.textContent = "Searching…";
+    searchResultsEl.innerHTML = `<div class="nx-empty">Searching…</div>`;
     try {
       const params = new URLSearchParams();
       if (searchInput.value.trim()) params.set("q", searchInput.value.trim());
       const { data } = await api(`/mixing/tubs/search?${params}`);
       if (data.length === 0) {
-        searchResultsEl.textContent = "No tubs found.";
+        searchResultsEl.innerHTML = `<div class="nx-empty">No tubs found.</div>`;
         return;
       }
 
@@ -148,7 +153,7 @@
       searchResultsEl.innerHTML = "";
       searchResultsEl.appendChild(table);
     } catch (err) {
-      searchResultsEl.textContent = err.message;
+      searchResultsEl.innerHTML = `<div class="nx-empty">${NexusApi.esc(err.message)}</div>`;
     }
   }
 
@@ -161,7 +166,10 @@
     const tubTd = document.createElement("td");
     tubTd.textContent = `#${row.tubSeq} — ${row.supplierTubNo}`;
     const statusTd = document.createElement("td");
-    statusTd.textContent = row.isScrapped ? "Scrapped" : row.isStaged ? "Staged" : "Not staged";
+    const statusBadge = document.createElement("span");
+    statusBadge.className = row.isScrapped ? "badge badge--error" : row.isStaged ? "badge badge--success" : "badge";
+    statusBadge.textContent = row.isScrapped ? "Scrapped" : row.isStaged ? "Staged" : "Not staged";
+    statusTd.appendChild(statusBadge);
     const stagedTd = document.createElement("td");
     stagedTd.style.textAlign = "right";
     stagedTd.textContent = row.stagedQuantityKg != null ? Number(row.stagedQuantityKg).toFixed(3) : "—";
@@ -172,6 +180,7 @@
     if (row.isStaged && Number(row.stagedQuantityKg) > 0) {
       const qtyInput = document.createElement("input");
       qtyInput.type = "number";
+      qtyInput.className = "tf-input";
       qtyInput.step = "0.001";
       qtyInput.placeholder = "KG";
       qtyInput.style.maxWidth = "90px";
@@ -188,10 +197,9 @@
   }
 
   async function returnToConditioning(tubId, quantityKg) {
-    msgEl.textContent = "";
+    setMsg("");
     if (!(quantityKg > 0)) {
-      msgEl.style.color = "#b91c1c";
-      msgEl.textContent = "Enter a quantity greater than 0 to return.";
+      setMsg("Enter a quantity greater than 0 to return.", "error");
       return;
     }
     try {
@@ -200,13 +208,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ quantityKg }),
       });
-      msgEl.style.color = "#059669";
-      msgEl.textContent = `Returned ${quantityKg} KG — ${data.stagedQuantityKg} KG still staged.`;
+      setMsg(`Returned ${quantityKg} KG — ${data.stagedQuantityKg} KG still staged.`, "success");
       await runSearch();
       await loadQueue();
     } catch (err) {
-      msgEl.style.color = "#b91c1c";
-      msgEl.textContent = err.message;
+      setMsg(err.message, "error");
     }
   }
 

@@ -1,12 +1,14 @@
 // SAP Reversals — search SAP postings (by material document / batch
 // reference / material / date range / operator) then bulk-reverse the
 // selected backflush documents. Port of the reversal search UI in
-// production-nexus.js. Every dynamic value is built via textContent/DOM
-// APIs, never innerHTML. Node's SSE progress streaming for the bulk
-// reversal is not reproduced (see ReversalHelper.cs's doc comment) — the
-// bulk call here is a single request/response, so the UI just shows a
-// "Reversing…" state until it completes.
+// production-nexus.js. Dynamic values are built via textContent/DOM APIs;
+// badge pills use innerHTML with values run through NexusApi.esc() first.
+// Node's SSE progress streaming for the bulk reversal is not reproduced
+// (see ReversalHelper.cs's doc comment) — the bulk call here is a single
+// request/response, so the UI just shows a "Reversing…" state until it
+// completes.
 (function () {
+  const esc = NexusApi.esc;
   const inputsEl = document.getElementById("rev-search-inputs");
   const msgEl = document.getElementById("rev-msg");
   const resultsEl = document.getElementById("rev-results");
@@ -44,103 +46,156 @@
   function renderSearchBar() {
     inputsEl.innerHTML = "";
 
+    const toolbar = document.createElement("div");
+    toolbar.className = "nx-toolbar";
+    toolbar.style.cssText = "flex-direction:column;align-items:stretch;gap:10px";
+
     const modeRow = document.createElement("div");
-    modeRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px";
+    modeRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap";
     for (const [m, label] of MODES) {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = m === mode ? "" : "secondary";
+      btn.className = m === mode ? "btn" : "secondary";
       btn.textContent = label;
       btn.addEventListener("click", () => { mode = m; renderSearchBar(); });
       modeRow.appendChild(btn);
     }
-    inputsEl.appendChild(modeRow);
+    toolbar.appendChild(modeRow);
 
     const fieldRow = document.createElement("div");
-    fieldRow.style.cssText = "display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap";
+    fieldRow.className = "tf-row";
+    fieldRow.style.marginBottom = "0";
 
     if (mode === "matdoc") {
-      fieldRow.appendChild(makeTextInput("rev-matdoc", "Material document"));
+      fieldRow.appendChild(makeTextField("rev-matdoc", "Material Document", "Material document"));
     } else if (mode === "batch") {
+      const pcField = document.createElement("div");
+      pcField.className = "tf-field";
+      const pcLabel = document.createElement("label");
+      pcLabel.className = "tf-label";
+      pcLabel.htmlFor = "rev-pc";
+      pcLabel.textContent = "Process";
       const select = document.createElement("select");
       select.id = "rev-pc";
+      select.className = "tf-input";
       for (const pc of PROCESS_CODES) {
         const opt = document.createElement("option");
         opt.value = pc;
         opt.textContent = pc;
         select.appendChild(opt);
       }
-      fieldRow.append(select, makeTextInput("rev-rid", "Record ID"));
+      pcField.append(pcLabel, select);
+      fieldRow.append(pcField, makeTextField("rev-rid", "Record ID", "Record ID"));
     } else if (mode === "material") {
-      fieldRow.appendChild(makeTextInput("rev-material", "Material number"));
+      fieldRow.appendChild(makeTextField("rev-material", "Material", "Material number"));
     } else if (mode === "daterange") {
+      const fromField = document.createElement("div");
+      fromField.className = "tf-field";
+      const fromLabel = document.createElement("label");
+      fromLabel.className = "tf-label";
+      fromLabel.htmlFor = "rev-date-from";
+      fromLabel.textContent = "From";
       const fromInput = document.createElement("input");
       fromInput.type = "date";
       fromInput.id = "rev-date-from";
+      fromInput.className = "tf-input";
+      fromField.append(fromLabel, fromInput);
+
+      const toField = document.createElement("div");
+      toField.className = "tf-field";
+      const toLabel = document.createElement("label");
+      toLabel.className = "tf-label";
+      toLabel.htmlFor = "rev-date-to";
+      toLabel.textContent = "To";
       const toInput = document.createElement("input");
       toInput.type = "date";
       toInput.id = "rev-date-to";
-      fieldRow.append(fromInput, toInput);
+      toInput.className = "tf-input";
+      toField.append(toLabel, toInput);
+
+      fieldRow.append(fromField, toField);
     } else if (mode === "operator") {
-      fieldRow.appendChild(makeTextInput("rev-operator", "Operator name"));
+      fieldRow.appendChild(makeTextField("rev-operator", "Operator", "Operator name"));
     }
 
+    const searchField = document.createElement("div");
+    searchField.className = "tf-field";
+    searchField.style.cssText = "justify-content:flex-end;flex-direction:row;gap:8px;flex:0 0 auto";
     const searchBtn = document.createElement("button");
     searchBtn.type = "button";
+    searchBtn.className = "btn";
     searchBtn.textContent = "Search";
     searchBtn.addEventListener("click", doSearch);
-    fieldRow.appendChild(searchBtn);
+    searchField.appendChild(searchBtn);
+    fieldRow.appendChild(searchField);
 
-    inputsEl.appendChild(fieldRow);
+    toolbar.appendChild(fieldRow);
+    inputsEl.appendChild(toolbar);
   }
 
-  function makeTextInput(id, placeholder) {
+  function makeTextField(id, label, placeholder) {
+    const field = document.createElement("div");
+    field.className = "tf-field";
+    const labelEl = document.createElement("label");
+    labelEl.className = "tf-label";
+    labelEl.htmlFor = id;
+    labelEl.textContent = label;
     const input = document.createElement("input");
     input.type = "text";
     input.id = id;
+    input.className = "tf-input";
     input.placeholder = placeholder;
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
-    return input;
+    field.append(labelEl, input);
+    return field;
+  }
+
+  function showEmpty(text) {
+    resultsEl.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "nx-empty";
+    box.textContent = text;
+    resultsEl.appendChild(box);
   }
 
   async function doSearch() {
     msgEl.textContent = "";
-    resultsEl.textContent = "Searching…";
+    showEmpty("Searching…");
 
     try {
       let json;
       if (mode === "matdoc") {
         const doc = document.getElementById("rev-matdoc")?.value.trim();
-        if (!doc) { resultsEl.textContent = "Enter a material document number."; return; }
+        if (!doc) { showEmpty("Enter a material document number."); return; }
         json = await api(`/reversal/search?materialDocument=${encodeURIComponent(doc)}`);
       } else if (mode === "batch") {
         const pc = document.getElementById("rev-pc")?.value;
         const rid = document.getElementById("rev-rid")?.value.trim();
-        if (!pc || !rid) { resultsEl.textContent = "Select a process and enter the record ID."; return; }
+        if (!pc || !rid) { showEmpty("Select a process and enter the record ID."); return; }
         json = await api(`/reversal/by-batch/${encodeURIComponent(pc)}/${encodeURIComponent(rid)}`);
       } else if (mode === "material") {
         const mat = document.getElementById("rev-material")?.value.trim();
-        if (!mat) { resultsEl.textContent = "Enter a material number."; return; }
+        if (!mat) { showEmpty("Enter a material number."); return; }
         json = await api(`/reversal/find?material=${encodeURIComponent(mat)}`);
       } else if (mode === "daterange") {
         const from = document.getElementById("rev-date-from")?.value;
         const to = document.getElementById("rev-date-to")?.value;
-        if (!from && !to) { resultsEl.textContent = "Enter at least one date."; return; }
+        if (!from && !to) { showEmpty("Enter at least one date."); return; }
         const p = new URLSearchParams();
         if (from) p.set("dateFrom", from);
         if (to) p.set("dateTo", to);
         json = await api(`/reversal/find?${p}`);
       } else if (mode === "operator") {
         const op = document.getElementById("rev-operator")?.value.trim();
-        if (!op) { resultsEl.textContent = "Enter an operator name."; return; }
+        if (!op) { showEmpty("Enter an operator name."); return; }
         json = await api(`/reversal/find?operator=${encodeURIComponent(op)}`);
       }
 
       resultRows = json.data || [];
-      if (!resultRows.length) { resultsEl.textContent = "No SAP postings found."; return; }
+      if (!resultRows.length) { showEmpty("No SAP postings found."); return; }
       renderResults();
     } catch (err) {
-      resultsEl.textContent = err.message;
+      showEmpty(err.message);
     }
   }
 
@@ -151,23 +206,29 @@
     resultsEl.innerHTML = "";
 
     const toolbar = document.createElement("div");
-    toolbar.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:10px";
+    toolbar.className = "nx-toolbar";
+
+    const toolbarTitle = document.createElement("span");
+    toolbarTitle.className = "nx-toolbar-title";
+    toolbarTitle.textContent = `${resultRows.length} posting${resultRows.length === 1 ? "" : "s"} found`;
 
     const selectAllLabel = document.createElement("label");
+    selectAllLabel.className = "nx-toolbar-hint";
     const selectAll = document.createElement("input");
     selectAll.type = "checkbox";
     selectAll.checked = true;
     selectAllLabel.append(selectAll, document.createTextNode(" Select All"));
 
     const spacer = document.createElement("span");
-    spacer.style.flex = "1";
+    spacer.className = "nx-toolbar-spacer";
 
     const bulkBtn = document.createElement("button");
     bulkBtn.type = "button";
+    bulkBtn.className = "btn";
     bulkBtn.textContent = "Reverse Selected";
     bulkBtn.disabled = !reversible.length;
 
-    toolbar.append(selectAllLabel, spacer, bulkBtn);
+    toolbar.append(toolbarTitle, selectAllLabel, spacer, bulkBtn);
     resultsEl.appendChild(toolbar);
 
     const table = document.createElement("table");
@@ -197,7 +258,7 @@
 
     bulkBtn.addEventListener("click", async () => {
       const docs = [...tbody.querySelectorAll(".rev-chk:checked")].map((c) => c.dataset.matdoc);
-      if (!docs.length) { bulkMsg.style.color = "#b91c1c"; bulkMsg.textContent = "No entries selected."; return; }
+      if (!docs.length) { setBulkMsg(bulkMsg, "No entries selected.", "error"); return; }
 
       bulkBtn.disabled = true;
       bulkBtn.textContent = `Reversing ${docs.length} document${docs.length === 1 ? "" : "s"}…`;
@@ -215,23 +276,30 @@
           const cell = document.getElementById(`rev-result-${r.materialDocument}`);
           if (r.success) {
             ok++;
-            if (cell) { cell.style.color = "#059669"; cell.textContent = `✓ ${r.reversalDocument || ""}`; }
+            if (cell) cell.innerHTML = `<span class="badge badge--success">✓ ${esc(r.reversalDocument || "")}</span>`;
           } else {
             fail++;
-            if (cell) { cell.style.color = r.synced ? "#d97706" : "#b91c1c"; cell.title = r.error || ""; cell.textContent = r.synced ? "Synced" : "✗ Failed"; }
+            if (cell) {
+              cell.title = r.error || "";
+              cell.innerHTML = r.synced ? '<span class="badge badge--warn">Synced</span>' : '<span class="badge badge--error">✗ Failed</span>';
+            }
           }
         }
 
-        bulkMsg.style.color = fail ? "#d97706" : "#059669";
-        bulkMsg.textContent = fail ? `${ok} reversed, ${fail} failed — see inline results.` : `All ${ok} document${ok === 1 ? "" : "s"} reversed successfully.`;
+        setBulkMsg(bulkMsg, fail ? `${ok} reversed, ${fail} failed — see inline results.` : `All ${ok} document${ok === 1 ? "" : "s"} reversed successfully.`, fail ? "warn" : "success");
       } catch (err) {
-        bulkMsg.style.color = "#b91c1c";
-        bulkMsg.textContent = err.message;
+        setBulkMsg(bulkMsg, err.message, "error");
       } finally {
         bulkBtn.disabled = false;
         bulkBtn.textContent = "Reverse Selected";
       }
     });
+  }
+
+  function setBulkMsg(el, text, kind) {
+    el.className = kind === "error" ? "tf-inline-error" : "";
+    el.style.color = kind === "warn" ? "var(--warn)" : kind === "success" ? "var(--success)" : "";
+    el.textContent = text;
   }
 
   function buildRow(row, showMaterial) {
@@ -269,10 +337,9 @@
     byTd.textContent = row.postedBy || "—";
     const statusTd = document.createElement("td");
     if (row.isReversed) {
-      statusTd.textContent = `Reversed ${row.reversalDocumentSap || ""}`;
-      statusTd.style.color = "#6b7280";
+      statusTd.innerHTML = `<span class="badge badge--success">Reversed ${esc(row.reversalDocumentSap || "")}</span>`;
     } else {
-      statusTd.textContent = "Not Reversed";
+      statusTd.innerHTML = '<span class="badge">Not Reversed</span>';
     }
     const resultTd = document.createElement("td");
     resultTd.id = `rev-result-${row.materialDocumentSap || row.sapPostingId}`;
@@ -283,5 +350,5 @@
   }
 
   renderSearchBar();
-  resultsEl.textContent = "Search for SAP postings to reverse.";
+  showEmpty("Search for SAP postings to reverse.");
 })();

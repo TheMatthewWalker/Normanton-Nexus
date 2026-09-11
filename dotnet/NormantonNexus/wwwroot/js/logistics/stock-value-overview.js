@@ -15,27 +15,35 @@
       const { data } = await api("/turns-valclass/aggregates");
 
       document.getElementById("svo-totals").innerHTML = `
-        <p>Materials: ${esc(data.totals.materialCount)} — Stock Value: ${fmtGbp(data.totals.totalStockValue)} — Book Value: ${fmtGbp(data.totals.totalBookValue)} — Warnings: ${esc(data.totals.warningCount)} — Avg Turns: ${esc(data.totals.avgStockTurns)} — Avg Days in Stock: ${esc(data.totals.avgDaysInStock)}</p>`;
+        <div class="nx-toolbar" style="margin-bottom:14px">
+          <span class="nx-toolbar-title">${esc(data.totals.materialCount)} materials</span>
+          <span class="nx-toolbar-spacer"></span>
+          <span class="nx-toolbar-hint">Stock Value ${fmtGbp(data.totals.totalStockValue)} · Book Value ${fmtGbp(data.totals.totalBookValue)} · Avg Turns ${esc(data.totals.avgStockTurns)} · Avg Days in Stock ${esc(data.totals.avgDaysInStock)}</span>
+          ${Number(data.totals.warningCount) > 0 ? `<span class="badge badge--warn">${esc(data.totals.warningCount)} warning${Number(data.totals.warningCount) === 1 ? "" : "s"}</span>` : '<span class="badge badge--success">No warnings</span>'}
+        </div>`;
 
-      document.getElementById("svo-turnover").innerHTML = `
+      const byTurnover = data.byTurnoverCategory || [];
+      document.getElementById("svo-turnover").innerHTML = byTurnover.length === 0 ? '<div class="nx-empty">No turnover-category data.</div>' : `
         <table>
           <thead><tr><th>Category</th><th>Materials</th><th>Stock Value</th></tr></thead>
-          <tbody>${(data.byTurnoverCategory || []).map((c) => `<tr><td>${esc(c.category)}</td><td>${esc(c.materialCount)}</td><td>${fmtGbp(c.stockValue)}</td></tr>`).join("")}</tbody>
+          <tbody>${byTurnover.map((c) => `<tr><td>${esc(c.category)}</td><td>${esc(c.materialCount)}</td><td>${fmtGbp(c.stockValue)}</td></tr>`).join("")}</tbody>
         </table>`;
 
-      document.getElementById("svo-profit-centre").innerHTML = `
+      const byProfitCentre = data.byProfitCentre || [];
+      document.getElementById("svo-profit-centre").innerHTML = byProfitCentre.length === 0 ? '<div class="nx-empty">No profit-centre data.</div>' : `
         <table>
           <thead><tr><th>Profit Centre</th><th>Materials</th><th>Stock Value</th><th>Book Value</th></tr></thead>
-          <tbody>${(data.byProfitCentre || []).map((c) => `<tr><td>${esc(c.profitCentre || "—")}</td><td>${esc(c.materialCount)}</td><td>${fmtGbp(c.stockValue)}</td><td>${fmtGbp(c.bookValue)}</td></tr>`).join("")}</tbody>
+          <tbody>${byProfitCentre.map((c) => `<tr><td>${esc(c.profitCentre || "—")}</td><td>${esc(c.materialCount)}</td><td>${fmtGbp(c.stockValue)}</td><td>${fmtGbp(c.bookValue)}</td></tr>`).join("")}</tbody>
         </table>`;
 
-      document.getElementById("svo-material-type").innerHTML = `
+      const byMaterialType = data.byMaterialType || [];
+      document.getElementById("svo-material-type").innerHTML = byMaterialType.length === 0 ? '<div class="nx-empty">No material-type data.</div>' : `
         <table>
           <thead><tr><th>Material Type</th><th>Materials</th><th>Stock Value</th></tr></thead>
-          <tbody>${(data.byMaterialType || []).map((c) => `<tr><td>${esc(c.materialType || "—")}</td><td>${esc(c.materialCount)}</td><td>${fmtGbp(c.stockValue)}</td></tr>`).join("")}</tbody>
+          <tbody>${byMaterialType.map((c) => `<tr><td>${esc(c.materialType || "—")}</td><td>${esc(c.materialCount)}</td><td>${fmtGbp(c.stockValue)}</td></tr>`).join("")}</tbody>
         </table>`;
     } catch (err) {
-      document.getElementById("svo-totals").innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
+      document.getElementById("svo-totals").innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   })();
 })();

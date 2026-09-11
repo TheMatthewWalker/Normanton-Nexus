@@ -11,24 +11,60 @@
 
 <h3>Generate Report</h3>
 <p>Upload a Shipments-style .xlsx extract; get back a finished CUSTOMS-format .xlsx.</p>
-<input type="file" id="cr-file" accept=".xlsx">
-<button type="button" class="btn" id="cr-generate">Generate</button>
-<p id="cr-status"></p>
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0;align-items:flex-end">
+        <div class="tf-field" style="flex:2 1 260px">
+            <label class="tf-label" for="cr-file">Shipments Extract (.xlsx)</label>
+            <input type="file" id="cr-file" class="tf-input" accept=".xlsx">
+        </div>
+        <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+            <button type="button" class="btn" id="cr-generate">Generate</button>
+        </div>
+    </div>
+</div>
+<div id="cr-status"></div>
 
 <h3>VAT Overrides</h3>
 <form id="vo-form">
-    <label>Consignee Code<input type="text" id="vo-consignee" required></label>
-    <label>VAT Number<input type="text" id="vo-vat" required></label>
-    <label>Notes<input type="text" id="vo-notes"></label>
-    <button type="submit" class="btn secondary">Add</button>
+    <div class="nx-toolbar" style="margin-bottom:10px">
+        <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+            <div class="tf-field">
+                <label class="tf-label" for="vo-consignee">Consignee Code</label>
+                <input type="text" id="vo-consignee" class="tf-input" required>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="vo-vat">VAT Number</label>
+                <input type="text" id="vo-vat" class="tf-input" required>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="vo-notes">Notes</label>
+                <input type="text" id="vo-notes" class="tf-input">
+            </div>
+            <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+                <button type="submit" class="btn">Add</button>
+            </div>
+        </div>
+    </div>
 </form>
 <div id="vo-body"></div>
 
 <h3>HS Descriptions</h3>
 <form id="hs-form">
-    <label>Commodity Code<input type="text" id="hs-code" required></label>
-    <label>Description<input type="text" id="hs-desc" required></label>
-    <button type="submit" class="btn secondary">Add</button>
+    <div class="nx-toolbar" style="margin-bottom:10px">
+        <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+            <div class="tf-field">
+                <label class="tf-label" for="hs-code">Commodity Code</label>
+                <input type="text" id="hs-code" class="tf-input" required>
+            </div>
+            <div class="tf-field" style="flex:2 1 260px">
+                <label class="tf-label" for="hs-desc">Description</label>
+                <input type="text" id="hs-desc" class="tf-input" required>
+            </div>
+            <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+                <button type="submit" class="btn">Add</button>
+            </div>
+        </div>
+    </div>
 </form>
 <div id="hs-body"></div>
 

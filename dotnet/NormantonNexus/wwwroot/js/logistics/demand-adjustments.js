@@ -21,17 +21,17 @@
   applyMode();
 
   async function load() {
-    bodyEl.textContent = "Loading…";
+    bodyEl.innerHTML = '<div class="nx-toolbar-hint">Loading…</div>';
     try {
       const { data } = await api("/demand-adjustments");
       render(data || []);
     } catch (err) {
-      bodyEl.textContent = "Error: " + err.message;
+      bodyEl.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
   function render(rows) {
-    bodyEl.innerHTML = rows.length === 0 ? "<p>No adjustments.</p>" : `
+    bodyEl.innerHTML = rows.length === 0 ? '<div class="nx-empty">No demand adjustments.</div>' : `
       <table>
         <thead><tr><th>Material</th><th>Start</th><th>End</th><th>Plan</th><th>Reason</th><th></th></tr></thead>
         <tbody>

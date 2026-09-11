@@ -6,13 +6,18 @@
   const api = NexusApi.make("/api/shipmentcost");
   const bodyEl = document.getElementById("pc-body");
 
+  function directionBadge(direction) {
+    const cls = direction === "outbound" ? "badge--accent" : "badge";
+    return `<span class="badge ${cls}">${esc(direction)}</span>`;
+  }
+
   async function load() {
-    bodyEl.innerHTML = '<div class="nx-toolbar-hint">Loading…</div>';
+    bodyEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/processed");
       render(data || []);
     } catch (err) {
-      bodyEl.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
+      bodyEl.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
@@ -20,14 +25,18 @@
     if (rows.length === 0) { bodyEl.innerHTML = '<div class="nx-empty">No processed cost lines.</div>'; return; }
     const total = rows.reduce((sum, r) => sum + (Number(r.actualCost ?? r.expectedCost) || 0), 0);
     bodyEl.innerHTML = `
-      <p style="font-size:12px;color:var(--text-muted)">${rows.length} line(s) — total posted £${total.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+      <div class="nx-toolbar" style="margin-bottom:10px">
+        <span class="nx-toolbar-title">${rows.length} line${rows.length === 1 ? "" : "s"}</span>
+        <span class="nx-toolbar-spacer"></span>
+        <span class="nx-toolbar-hint">Total posted £${total.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+      </div>
       <div style="overflow-x:auto">
       <table>
         <thead><tr><th>Shipment</th><th>Direction</th><th>Forwarder</th><th>Cost Centre</th><th>Cost Element</th><th>Expected</th><th>Actual</th><th>PO</th><th>Material Doc.</th><th></th></tr></thead>
         <tbody>${rows.map((r) => `
           <tr>
             <td>${esc(r.shipmentRef || `#${r.costId}`)}</td>
-            <td>${esc(r.direction)}</td>
+            <td>${directionBadge(r.direction)}</td>
             <td>${esc(r.forwarderName || "—")}</td>
             <td>${esc(r.costCenter || "—")}</td>
             <td>${esc(r.costElement || "—")}</td>

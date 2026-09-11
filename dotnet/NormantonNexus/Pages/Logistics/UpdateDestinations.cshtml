@@ -12,10 +12,11 @@
 <div class="nx-toolbar" style="margin-bottom:10px">
     <input class="tf-input" id="ud-search" type="text" placeholder="Search name or city…" style="max-width:280px">
     <div class="nx-toolbar-spacer"></div>
+    <span class="nx-toolbar-hint" id="ud-count"></span>
     <button type="button" class="btn" id="ud-add-btn">+ Add Destination</button>
 </div>
 
-<div id="ud-list">Loading…</div>
+<div id="ud-list"><div class="nx-empty">Loading…</div></div>
 
 @section Scripts {
     <script src="~/js/logistics/update-destinations.js"></script>

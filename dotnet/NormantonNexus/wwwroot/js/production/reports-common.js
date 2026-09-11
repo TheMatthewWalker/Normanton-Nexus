@@ -39,26 +39,46 @@ window.ProductionReports = (function () {
     return isNaN(v) ? "—" : v.toLocaleString("en-GB", { maximumFractionDigits: 3 });
   }
 
-  // Builds the shared From/To/Process/Group-by filter bar into `container`;
-  // `onRun(filters)` fires when the user clicks Run Report.
+  // Small `.badge` pill for a status-like table cell (a success/fail count,
+  // a shift-name tag, etc.) — mirrors Logistics's own statusBadge/
+  // directionBadge convention (see shipment-search.js). `kind` is one of
+  // success/warn/error/accent, or omitted for the plain default badge.
+  function badgeEl(text, kind) {
+    const span = document.createElement("span");
+    span.className = "badge" + (kind ? ` badge--${kind}` : "");
+    span.textContent = text;
+    return span;
+  }
+
+  // Builds the shared From/To/Process/Group-by filter bar into `container`,
+  // as a `.tf-row`/`.tf-field` bar inside an `.nx-toolbar` (matching
+  // ShipmentSearch's filter-bar convention); `onRun(filters)` fires when the
+  // user clicks Run Report. Purely additive/visual over the original plain
+  // flex-row layout — none of the fields built here carry an `id` any caller
+  // depends on, and `onRun`'s filters shape (dateFrom/dateTo/processCode/
+  // groupBy) is unchanged.
   function mountFilterBar(container, onRun) {
     container.innerHTML = "";
     const today = new Date().toISOString().slice(0, 10);
     const ago30 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
 
-    const wrap = document.createElement("div");
-    wrap.style.display = "flex";
-    wrap.style.gap = "0.75rem";
-    wrap.style.flexWrap = "wrap";
-    wrap.style.alignItems = "end";
-    wrap.style.marginBottom = "0.75rem";
+    const toolbar = document.createElement("div");
+    toolbar.className = "nx-toolbar";
+
+    const row = document.createElement("div");
+    row.className = "tf-row";
+    row.style.flex = "1";
+    row.style.marginBottom = "0";
 
     function field(labelText, el) {
       const div = document.createElement("div");
+      div.className = "tf-field";
       const label = document.createElement("label");
+      label.className = "tf-label";
       label.textContent = labelText;
+      el.classList.add("tf-input");
       div.append(label, el);
-      wrap.appendChild(div);
+      row.appendChild(div);
       return el;
     }
 
@@ -80,12 +100,19 @@ window.ProductionReports = (function () {
     }
     field("Group by", groupBySelect);
 
+    const btnField = document.createElement("div");
+    btnField.className = "tf-field";
+    btnField.style.flex = "0 0 auto";
+    btnField.style.justifyContent = "flex-end";
     const runBtn = document.createElement("button");
     runBtn.type = "button";
+    runBtn.className = "btn";
     runBtn.textContent = "Run Report";
-    wrap.appendChild(runBtn);
+    btnField.appendChild(runBtn);
+    row.appendChild(btnField);
 
-    container.appendChild(wrap);
+    toolbar.appendChild(row);
+    container.appendChild(toolbar);
 
     function collect() {
       return { dateFrom: fromInput.value, dateTo: toInput.value, processCode: pcSelect.value, groupBy: groupBySelect.value };
@@ -103,7 +130,33 @@ window.ProductionReports = (function () {
     return p.toString();
   }
 
+  // Returns a wrapping <div> (still a single appendable element, same as the
+  // bare <table> this used to return — every report's own `outputEl.
+  // appendChild(R.buildTable(...))` call site needs no change) containing a
+  // small `.nx-toolbar` result-count line above the table, or an `.nx-empty`
+  // box instead of the table when there's no data for the current filters.
   function buildTable(headers, rows, rowRenderer) {
+    const wrap = document.createElement("div");
+    wrap.style.marginBottom = "1.25rem";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "nx-toolbar";
+    toolbar.style.padding = "8px 14px";
+    toolbar.style.marginBottom = "8px";
+    const title = document.createElement("span");
+    title.className = "nx-toolbar-title";
+    title.textContent = `${rows.length} result${rows.length === 1 ? "" : "s"}`;
+    toolbar.appendChild(title);
+    wrap.appendChild(toolbar);
+
+    if (rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "nx-empty";
+      empty.textContent = "No data for the selected filters.";
+      wrap.appendChild(empty);
+      return wrap;
+    }
+
     const table = document.createElement("table");
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
@@ -115,18 +168,10 @@ window.ProductionReports = (function () {
     thead.appendChild(headRow);
 
     const tbody = document.createElement("tbody");
-    if (rows.length === 0) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = headers.length;
-      td.textContent = "No data for the selected filters.";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    } else {
-      for (const row of rows) tbody.appendChild(rowRenderer(row));
-    }
+    for (const row of rows) tbody.appendChild(rowRenderer(row));
     table.append(thead, tbody);
-    return table;
+    wrap.appendChild(table);
+    return wrap;
   }
 
   function downloadCsv(rows, filename) {
@@ -152,5 +197,5 @@ window.ProductionReports = (function () {
     return btn;
   }
 
-  return { api, PROCESS_LABELS, fmtNum, mountFilterBar, buildQuery, buildTable, downloadCsv, exportButton };
+  return { api, PROCESS_LABELS, fmtNum, badgeEl, mountFilterBar, buildQuery, buildTable, downloadCsv, exportButton };
 })();

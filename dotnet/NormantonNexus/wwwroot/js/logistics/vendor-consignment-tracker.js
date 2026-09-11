@@ -11,21 +11,26 @@
   const detailEl = document.getElementById("vc-detail");
 
   async function loadVendors() {
-    vendorsEl.textContent = "Loading…";
+    vendorsEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/vendors");
+      const rows = data || [];
+      if (rows.length === 0) { vendorsEl.innerHTML = '<div class="nx-empty">No consignment vendors configured.</div>'; return; }
       vendorsEl.innerHTML = `
+        <div class="nx-toolbar" style="margin-bottom:10px">
+          <span class="nx-toolbar-title">${rows.length} vendor${rows.length === 1 ? "" : "s"}</span>
+        </div>
         <table>
           <thead><tr><th>Vendor</th><th>SAP #</th><th>Currency</th><th>Allocation</th><th>Active</th><th></th></tr></thead>
           <tbody>
-            ${(data || []).map((v) => `
+            ${rows.map((v) => `
               <tr>
                 <td>${esc(v.vendorName)}</td>
                 <td>${esc(v.sapVendorNumber)}</td>
                 <td>${esc(v.currency)}</td>
                 <td>${esc(v.defaultAllocationMethod)}</td>
-                <td>${v.active ? "Yes" : "No"}</td>
-                <td><button type="button" class="btn secondary" data-id="${v.vendorId}">View</button></td>
+                <td>${v.active ? '<span class="badge badge--success">Active</span>' : '<span class="badge">Inactive</span>'}</td>
+                <td><button type="button" class="secondary" data-id="${v.vendorId}">View</button></td>
               </tr>`).join("")}
           </tbody>
         </table>`;
@@ -33,12 +38,20 @@
         btn.addEventListener("click", () => loadDetail(btn.dataset.id));
       });
     } catch (err) {
-      vendorsEl.textContent = "Error: " + err.message;
+      vendorsEl.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 
+  function declStatusBadge(status) {
+    const cls = status === "Confirmed" || status === "Settled" ? "badge--success"
+      : status === "Proposed" ? "badge--accent"
+      : status === "Cancelled" ? "badge--error"
+      : "";
+    return `<span class="badge ${cls}">${esc(status)}</span>`;
+  }
+
   async function loadDetail(vendorId) {
-    detailEl.textContent = "Loading…";
+    detailEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const [balance, deliveries, declarations] = await Promise.all([
         api(`/vendors/${vendorId}/balance`).then((r) => r.data),
@@ -46,35 +59,42 @@
         api(`/vendors/${vendorId}/declarations`).then((r) => r.data),
       ]);
 
+      const materials = balance.materials || [];
+      const delivRows = deliveries || [];
+      const declRows = declarations || [];
+
       detailEl.innerHTML = `
         <h3>Balance — ${esc(balance.vendor.vendorName)}</h3>
+        ${materials.length === 0 ? '<div class="nx-empty">No material balances for this vendor.</div>' : `
         <table>
           <thead><tr><th>Material</th><th>Delivered</th><th>Current Stock</th><th>Declared</th><th>Undeclared</th></tr></thead>
-          <tbody>${(balance.materials || []).map((m) => `<tr><td>${esc(m.material)}</td><td>${esc(m.delivered)}</td><td>${esc(m.currentStock)}</td><td>${esc(m.declared)}</td><td>${esc(m.undeclared)}</td></tr>`).join("")}</tbody>
-        </table>
+          <tbody>${materials.map((m) => `<tr><td>${esc(m.material)}</td><td>${esc(m.delivered)}</td><td>${esc(m.currentStock)}</td><td>${esc(m.declared)}</td><td>${esc(m.undeclared)}</td></tr>`).join("")}</tbody>
+        </table>`}
 
-        <h3>Deliveries</h3>
+        <h3 style="margin-top:1rem;">Deliveries</h3>
+        ${delivRows.length === 0 ? '<div class="nx-empty">No deliveries recorded.</div>' : `
         <table>
           <thead><tr><th>Material</th><th>Qty</th><th>Remaining</th><th>Doc</th><th>Posting Date</th></tr></thead>
-          <tbody>${(deliveries || []).map((d) => `<tr><td>${esc(d.material)}</td><td>${esc(d.quantity)}</td><td>${esc(d.remainingQty)}</td><td>${esc(d.materialDocument)}</td><td>${d.postingDate ? new Date(d.postingDate).toLocaleDateString("en-GB") : ""}</td></tr>`).join("")}</tbody>
-        </table>
+          <tbody>${delivRows.map((d) => `<tr><td>${esc(d.material)}</td><td>${esc(d.quantity)}</td><td>${esc(d.remainingQty)}</td><td>${esc(d.materialDocument)}</td><td>${d.postingDate ? new Date(d.postingDate).toLocaleDateString("en-GB") : ""}</td></tr>`).join("")}</tbody>
+        </table>`}
 
-        <h3>Declarations</h3>
+        <h3 style="margin-top:1rem;">Declarations</h3>
+        ${declRows.length === 0 ? '<div class="nx-empty">No declarations yet.</div>' : `
         <table>
           <thead><tr><th>#</th><th>Status</th><th>Method</th><th>Total Qty</th><th>Created</th><th></th></tr></thead>
-          <tbody>${(declarations || []).map((d) => `
+          <tbody>${declRows.map((d) => `
             <tr>
               <td>${esc(d.declarationId)}</td>
-              <td>${esc(d.status)}</td>
+              <td>${declStatusBadge(d.status)}</td>
               <td>${esc(d.allocationMethod)}</td>
               <td>${esc(d.totalQty)}</td>
               <td>${new Date(d.createdAtUtc).toLocaleDateString("en-GB")}</td>
               <td>
-                ${d.status === "Draft" || d.status === "Proposed" ? `<button type="button" class="btn secondary" data-decl="${d.declarationId}" data-action="confirm">Confirm</button> <button type="button" class="btn secondary" data-decl="${d.declarationId}" data-action="cancel">Cancel</button>` : ""}
+                ${d.status === "Draft" || d.status === "Proposed" ? `<button type="button" class="secondary" data-decl="${d.declarationId}" data-action="confirm">Confirm</button> <button type="button" class="secondary" data-decl="${d.declarationId}" data-action="cancel" style="color:var(--error)">Cancel</button>` : ""}
                 <a href="/api/consignment/declarations/${d.declarationId}/pdf" target="_blank">PDF</a>
               </td>
             </tr>`).join("")}</tbody>
-        </table>`;
+        </table>`}`;
 
       detailEl.querySelectorAll("button[data-action='confirm']").forEach((btn) => {
         btn.addEventListener("click", async () => {
@@ -96,7 +116,7 @@
         });
       });
     } catch (err) {
-      detailEl.textContent = "Error: " + err.message;
+      detailEl.innerHTML = `<div class="nx-empty">Error: ${esc(err.message)}</div>`;
     }
   }
 

@@ -8,6 +8,7 @@
   const resultsEl = document.getElementById("hist-results");
 
   const STATUS_LABELS = { 1: "Open", 2: "Running", 3: "On Hold", 4: "Complete", 5: "Cancelled", 6: "SAP Failed" };
+  const STATUS_BADGE_KIND = { 1: undefined, 2: "accent", 3: "warn", 4: "success", 5: undefined, 6: "error" };
 
   function fmt(dt) {
     if (!dt) return "—";
@@ -23,11 +24,11 @@
     if (fromInput.value) params.set("fromDate", fromInput.value);
     if (toInput.value) params.set("toDate", toInput.value);
 
-    resultsEl.textContent = "Searching…";
+    resultsEl.innerHTML = '<div class="nx-empty">Searching…</div>';
     try {
       const { data } = await R.api(`/history?${params}`);
       if (data.length === 0) {
-        resultsEl.textContent = "No results found.";
+        resultsEl.innerHTML = '<div class="nx-empty">No results found.</div>';
         return;
       }
 
@@ -44,7 +45,7 @@
           const qtyTd = document.createElement("td");
           qtyTd.textContent = `${b.quantity ?? "—"} ${b.uom || ""}`;
           const statusTd = document.createElement("td");
-          statusTd.textContent = STATUS_LABELS[b.status] || String(b.status);
+          statusTd.appendChild(R.badgeEl(STATUS_LABELS[b.status] || String(b.status), STATUS_BADGE_KIND[b.status]));
           const createdTd = document.createElement("td");
           createdTd.textContent = fmt(b.createdAt);
           const completedTd = document.createElement("td");
@@ -54,7 +55,11 @@
         })
       );
     } catch (err) {
-      resultsEl.textContent = err.message;
+      resultsEl.innerHTML = "";
+      const errBox = document.createElement("div");
+      errBox.className = "nx-empty";
+      errBox.textContent = err.message;
+      resultsEl.appendChild(errBox);
     }
   });
 })();

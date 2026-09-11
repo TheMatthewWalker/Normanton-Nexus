@@ -6,8 +6,9 @@
   const outputEl = document.getElementById("rpt-output");
 
   async function run(filters) {
+    msgEl.classList.add("hidden");
     msgEl.textContent = "";
-    outputEl.textContent = "Loading…";
+    outputEl.innerHTML = `<div class="nx-empty">Loading…</div>`;
     try {
       const { data } = await R.api(`/reports/shift-comparison?${R.buildQuery(filters)}`);
 
@@ -20,11 +21,17 @@
       outputEl.appendChild(
         R.buildTable(["Shift", "Process", "UoM", "Batches", "Total Output"], data.output, (row) => {
           const tr = document.createElement("tr");
-          for (const val of [row.shiftName, R.PROCESS_LABELS[row.processCode] || row.processCode, row.uom, row.batchCount, R.fmtNum(row.totalOutput)]) {
-            const td = document.createElement("td");
-            td.textContent = val;
-            tr.appendChild(td);
-          }
+          const tdShift = document.createElement("td");
+          tdShift.appendChild(R.badgeEl(row.shiftName, "accent"));
+          const tdProcess = document.createElement("td");
+          tdProcess.textContent = R.PROCESS_LABELS[row.processCode] || row.processCode;
+          const tdUom = document.createElement("td");
+          tdUom.textContent = row.uom;
+          const tdBatches = document.createElement("td");
+          tdBatches.textContent = row.batchCount;
+          const tdTotal = document.createElement("td");
+          tdTotal.textContent = R.fmtNum(row.totalOutput);
+          tr.append(tdShift, tdProcess, tdUom, tdBatches, tdTotal);
           return tr;
         })
       );
@@ -44,10 +51,12 @@
         })
       );
     } catch (err) {
-      outputEl.textContent = "";
+      outputEl.innerHTML = "";
       msgEl.textContent = err.message;
+      msgEl.classList.remove("hidden");
     }
   }
 
+  outputEl.innerHTML = `<div class="nx-empty">Choose filters and click Run Report to see results.</div>`;
   R.mountFilterBar(filtersEl, run);
 })();

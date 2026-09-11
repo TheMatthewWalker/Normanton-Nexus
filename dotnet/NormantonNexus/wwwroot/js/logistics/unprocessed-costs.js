@@ -30,6 +30,11 @@
       : `${rows.length} unprocessed line(s)`;
   }
 
+  function directionBadge(direction) {
+    const cls = direction === "outbound" ? "badge--accent" : "badge";
+    return `<span class="badge ${cls}">${esc(direction)}</span>`;
+  }
+
   function render() {
     if (rows.length === 0) { bodyEl.innerHTML = '<div class="nx-empty">No unprocessed cost lines.</div>'; updatePostBtn(); return; }
     const total = rows.reduce((sum, r) => sum + (Number(r.expectedCost) || 0), 0);
@@ -42,7 +47,7 @@
           <tr>
             <td><input type="checkbox" class="uc-check" data-id="${r.costId}"></td>
             <td>${esc(r.shipmentRef || `#${r.costId}`)}</td>
-            <td>${esc(r.direction)}</td>
+            <td>${directionBadge(r.direction)}</td>
             <td>${esc(r.forwarderName || "—")}</td>
             <td>${esc(r.costCenter || "—")}</td>
             <td>${esc(r.costElement || "—")}</td>

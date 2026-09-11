@@ -10,22 +10,26 @@
 <p><a asp-page="Index">&larr; Production</a></p>
 
 <div data-process-code="@Model.Code">
-    <div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:flex-end; margin-bottom:0.75rem;">
-        <div>
-            <label for="mpd-material">Material</label>
-            <input type="text" id="mpd-material" placeholder="e.g. K-NBR%" />
+    <div class="nx-toolbar" style="margin-bottom:10px">
+        <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+            <div class="tf-field">
+                <label class="tf-label" for="mpd-material">Material</label>
+                <input type="text" id="mpd-material" class="tf-input" placeholder="e.g. K-NBR%" />
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="mpd-from">From</label>
+                <input type="date" id="mpd-from" class="tf-input" />
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="mpd-to">To</label>
+                <input type="date" id="mpd-to" class="tf-input" />
+            </div>
+            <div class="tf-field" style="justify-content:flex-end;flex-direction:row;">
+                <button type="button" id="mpd-search" class="btn">Search</button>
+            </div>
         </div>
-        <div>
-            <label for="mpd-from">From</label>
-            <input type="date" id="mpd-from" />
-        </div>
-        <div>
-            <label for="mpd-to">To</label>
-            <input type="date" id="mpd-to" />
-        </div>
-        <button type="button" id="mpd-search">Search</button>
     </div>
-    <div id="mpd-results">Enter filters above and click Search.</div>
+    <div id="mpd-results"><div class="nx-empty">Enter filters above and click Search.</div></div>
 </div>
 
 @section Scripts {

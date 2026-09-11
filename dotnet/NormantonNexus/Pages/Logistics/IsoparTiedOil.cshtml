@@ -12,12 +12,27 @@
 <section>
     <h3>Meter Readings</h3>
     <form id="iso-reading-form">
-        <label>Date<input type="date" id="iso-date" required></label>
-        <label>Reading (L)<input type="number" step="0.01" id="iso-qty" required></label>
-        <label>Notes<input type="text" id="iso-notes"></label>
-        <button type="submit" class="btn secondary">Add Reading</button>
+        <div class="nx-toolbar" style="margin-bottom:10px">
+            <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+                <div class="tf-field" style="max-width:160px">
+                    <label class="tf-label" for="iso-date">Date</label>
+                    <input type="date" id="iso-date" class="tf-input" required>
+                </div>
+                <div class="tf-field" style="max-width:140px">
+                    <label class="tf-label" for="iso-qty">Reading (L)</label>
+                    <input type="number" step="0.01" id="iso-qty" class="tf-input" required>
+                </div>
+                <div class="tf-field">
+                    <label class="tf-label" for="iso-notes">Notes</label>
+                    <input type="text" id="iso-notes" class="tf-input">
+                </div>
+                <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+                    <button type="submit" class="btn">Add Reading</button>
+                </div>
+            </div>
+        </div>
     </form>
-    <div id="iso-readings" style="margin-top:0.75rem;"></div>
+    <div id="iso-readings"></div>
 </section>
 
 <section style="margin-top:1.5rem;">
@@ -28,14 +43,35 @@
 <section style="margin-top:1.5rem;">
     <h3>Planning Rate</h3>
     <div id="iso-rate">Loading…</div>
-    <form id="iso-rate-form" style="margin-top:0.5rem;">
-        <label>Weekday (L/day)<input type="number" step="0.01" id="iso-rate-weekday" required></label>
-        <label>Weekend (L/day)<input type="number" step="0.01" id="iso-rate-weekend" required></label>
-        <label>Max Stock Capacity<input type="number" step="0.01" id="iso-rate-capacity"></label>
-        <label>Source<input type="text" id="iso-rate-source"></label>
-        <label>Notes<input type="text" id="iso-rate-notes"></label>
-        <button type="submit" class="btn secondary">Save Rate</button>
-        <button type="button" id="iso-rate-apply-recommended" class="btn">Apply Recommended</button>
+    <form id="iso-rate-form" style="margin-top:0.75rem;">
+        <div class="nx-toolbar" style="margin-bottom:0">
+            <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+                <div class="tf-field" style="max-width:150px">
+                    <label class="tf-label" for="iso-rate-weekday">Weekday (L/day)</label>
+                    <input type="number" step="0.01" id="iso-rate-weekday" class="tf-input" required>
+                </div>
+                <div class="tf-field" style="max-width:150px">
+                    <label class="tf-label" for="iso-rate-weekend">Weekend (L/day)</label>
+                    <input type="number" step="0.01" id="iso-rate-weekend" class="tf-input" required>
+                </div>
+                <div class="tf-field" style="max-width:170px">
+                    <label class="tf-label" for="iso-rate-capacity">Max Stock Capacity</label>
+                    <input type="number" step="0.01" id="iso-rate-capacity" class="tf-input">
+                </div>
+                <div class="tf-field">
+                    <label class="tf-label" for="iso-rate-source">Source</label>
+                    <input type="text" id="iso-rate-source" class="tf-input">
+                </div>
+                <div class="tf-field">
+                    <label class="tf-label" for="iso-rate-notes">Notes</label>
+                    <input type="text" id="iso-rate-notes" class="tf-input">
+                </div>
+                <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+                    <button type="submit" class="btn">Save Rate</button>
+                    <button type="button" id="iso-rate-apply-recommended" class="secondary">Apply Recommended</button>
+                </div>
+            </div>
+        </div>
     </form>
 </section>
 

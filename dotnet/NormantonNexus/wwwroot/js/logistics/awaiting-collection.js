@@ -50,7 +50,7 @@
         <tbody>${rows.map((r) => `
           <tr>
             <td><input type="checkbox" class="ac-check" data-id="${r.shipmentId}"></td>
-            <td>${esc(String(r.shipmentId).padStart(8, "0"))}</td>
+            <td><a href="#" class="ac-open" data-id="${r.shipmentId}">${esc(String(r.shipmentId).padStart(8, "0"))}</a></td>
             <td>${esc(r.destinationName || "")}, ${esc(r.destinationCountry || "")}</td>
             <td>${esc(r.forwarderName || "Unassigned")}</td>
             <td>${esc(r.trackingNumber || "—")}</td>
@@ -63,6 +63,10 @@
       const id = Number(e.target.dataset.id);
       if (e.target.checked) selected.add(id); else selected.delete(id);
       updateHint();
+    }));
+    bodyEl.querySelectorAll(".ac-open").forEach((a) => a.addEventListener("click", (e) => {
+      e.preventDefault();
+      OutboundShipmentDetail.open(Number(a.dataset.id), load);
     }));
     updateHint();
   }

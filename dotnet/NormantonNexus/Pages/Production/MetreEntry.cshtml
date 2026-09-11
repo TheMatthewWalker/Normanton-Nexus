@@ -9,20 +9,26 @@
 
 <p><a asp-page="Index">&larr; Production</a></p>
 
-<div style="max-width:600px;" data-process-code="@Model.Code">
-    <label for="mp-material">Material</label>
-    <input type="text" id="mp-material" placeholder="Material number" />
+<div style="max-width:640px;" data-process-code="@Model.Code">
+    <div class="tf-row">
+        <div class="tf-field">
+            <label class="tf-label" for="mp-material">Material</label>
+            <input type="text" id="mp-material" class="tf-input" placeholder="Material number" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="mp-length">Length (Metres)</label>
+            <input type="number" id="mp-length" class="tf-input" step="0.001" min="0.001" />
+        </div>
+        <div class="tf-field tf-field--wide">
+            <label class="tf-label" for="mp-notes">Notes (optional)</label>
+            <input type="text" id="mp-notes" class="tf-input" placeholder="Any comments…" />
+        </div>
+    </div>
 
-    <label for="mp-length">Length (Metres)</label>
-    <input type="number" id="mp-length" step="0.001" min="0.001" />
-
-    <label for="mp-notes">Notes (optional)</label>
-    <input type="text" id="mp-notes" placeholder="Any comments…" />
-
-    <p id="mp-result" style="margin:0.5rem 0;"></p>
+    <div id="mp-result" style="margin:0.75rem 0;"></div>
     <div id="mp-print-widget"></div>
 
-    <button type="button" id="mp-submit-btn">Post to SAP</button>
+    <button type="button" id="mp-submit-btn" class="btn">Post to SAP</button>
 </div>
 
 <p style="margin-top:1rem;"><a asp-page="CompleteRun" asp-route-code="@Model.Code">Complete a Draft Run (with traceability &amp; scrap) &rarr;</a></p>

@@ -44,14 +44,14 @@
     if (from) params.set("dateFrom", from);
     if (to) params.set("dateTo", to);
 
-    resultsEl.textContent = "Loading…";
+    resultsEl.innerHTML = `<div class="nx-empty">Loading…</div>`;
     try {
       const { data } = await api(`/process/${processCode}/data?${params}`);
       lastRows = data;
-      if (!data.length) { resultsEl.textContent = "No records match the selected filters."; return; }
+      if (!data.length) { resultsEl.innerHTML = `<div class="nx-empty">No records match the selected filters.</div>`; return; }
       renderResults();
     } catch (err) {
-      resultsEl.textContent = err.message;
+      resultsEl.innerHTML = `<div class="nx-empty">Error: ${NexusApi.esc(err.message)}</div>`;
     }
   });
 

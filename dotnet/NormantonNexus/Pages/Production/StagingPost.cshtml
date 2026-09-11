@@ -1,0 +1,64 @@
+@page
+@model NormantonNexus.Pages.Production.StagingPostModel
+@{
+    ViewData["Title"] = "Staging Post";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Staging Post";
+    ViewData["PageSubtitle"] = "Request material from Stores — track status by due date";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="nx-toolbar-spacer"></div>
+    <button type="button" class="btn secondary" id="sp-refresh">Refresh</button>
+</div>
+
+<div id="sp-body"></div>
+
+<div id="sp-deliver-panel" style="display:none;margin-top:1rem;padding:1rem;background:var(--surface);border:1px solid var(--border);border-radius:10px;max-width:560px;">
+    <h3 style="margin-top:0;">Deliver Request</h3>
+    <form id="sp-deliver-form">
+        <div class="tf-row">
+            <div class="tf-field">
+                <label class="tf-label" for="dv-quantity">Quantity</label>
+                <input type="text" id="dv-quantity" class="tf-input" required>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dv-batch">Batch</label>
+                <input type="text" id="dv-batch" class="tf-input">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dv-storage-location">Storage Location</label>
+                <input type="text" id="dv-storage-location" class="tf-input">
+            </div>
+        </div>
+        <div class="tf-row">
+            <div class="tf-field">
+                <label class="tf-label" for="dv-source-type">Source Type</label>
+                <input type="text" id="dv-source-type" class="tf-input">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dv-source-bin">Source Bin</label>
+                <input type="text" id="dv-source-bin" class="tf-input">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dv-dest-type">Destination Type</label>
+                <input type="text" id="dv-dest-type" class="tf-input">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dv-dest-bin">Destination Bin</label>
+                <input type="text" id="dv-dest-bin" class="tf-input">
+            </div>
+        </div>
+        <div class="tf-row" style="margin-top:0.5rem">
+            <button type="submit" class="btn">Deliver</button>
+            <button type="button" class="secondary" id="dv-cancel">Cancel</button>
+        </div>
+    </form>
+    <div id="dv-status"></div>
+</div>
+
+@section Scripts {
+    <script src="~/js/warehouse/staging-post.js"></script>
+}

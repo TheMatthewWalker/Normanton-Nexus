@@ -32,7 +32,7 @@
   }
 
   async function load() {
-    bodyEl.textContent = "Loading scrap data…";
+    bodyEl.innerHTML = '<div class="nx-empty">Loading scrap data…</div>';
     try {
       const [summaryRes, failedRes] = await Promise.all([api("/scrap/summary"), api("/scrap/failed")]);
       const summary = summaryRes.data || [];
@@ -50,7 +50,8 @@
       bodyEl.appendChild(postedHeader);
 
       if (!summary.length) {
-        const empty = document.createElement("p");
+        const empty = document.createElement("div");
+        empty.className = "nx-empty";
         empty.textContent = "No SAP-posted scrap recorded yet.";
         bodyEl.appendChild(empty);
         return;
@@ -66,7 +67,11 @@
         bodyEl.appendChild(buildProcessSummary(pc, rows));
       }
     } catch (err) {
-      bodyEl.textContent = err.message;
+      bodyEl.innerHTML = "";
+      const errBox = document.createElement("div");
+      errBox.className = "nx-empty";
+      errBox.textContent = err.message;
+      bodyEl.appendChild(errBox);
     }
   }
 
@@ -75,14 +80,15 @@
     const uom = rows[0].unitOfMeasure;
 
     const section = document.createElement("div");
-    section.style.cssText = "border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin-bottom:10px";
+    section.className = "sd-section";
+    section.style.marginBottom = "10px";
 
     const header = document.createElement("div");
     header.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px";
     const title = document.createElement("strong");
     title.textContent = PROCESS_LABELS[processCode] || processCode;
     const totalEl = document.createElement("span");
-    totalEl.style.color = "#b91c1c";
+    totalEl.style.color = "var(--error)";
     totalEl.textContent = `${total.toFixed(3)} ${uom} total`;
     header.append(title, totalEl);
     section.appendChild(header);
@@ -108,12 +114,12 @@
       countTd.textContent = r.entryCount;
       const totalTd = document.createElement("td");
       totalTd.style.textAlign = "right";
-      totalTd.style.color = "#b91c1c";
+      totalTd.style.color = "var(--error)";
       totalTd.textContent = Number(r.totalScrap).toFixed(3);
       const uomTd = document.createElement("td");
       uomTd.textContent = r.unitOfMeasure;
       const drillTd = document.createElement("td");
-      drillTd.style.color = "#6b7280";
+      drillTd.style.color = "var(--text-muted)";
       drillTd.style.fontSize = "0.8rem";
       drillTd.textContent = "↗ drill down";
 
@@ -127,7 +133,7 @@
         drillCell.hidden = !drillCell.hidden;
         if (!drillCell.hidden && !drillCell.dataset.loaded) {
           drillCell.dataset.loaded = "1";
-          drillCell.textContent = "Loading…";
+          drillCell.innerHTML = '<div class="nx-empty">Loading…</div>';
           await loadDrilldown(drillCell, processCode, r.reasonCode);
         }
       });
@@ -144,9 +150,9 @@
   async function loadDrilldown(container, processCode, reasonCode) {
     try {
       const { data } = await api(`/scrap/entries?processCode=${encodeURIComponent(processCode)}&reasonCode=${encodeURIComponent(reasonCode)}`);
-      container.textContent = "";
+      container.innerHTML = "";
       if (!data.length) {
-        container.textContent = "No entries found.";
+        container.innerHTML = '<div class="nx-empty">No entries found.</div>';
         return;
       }
 
@@ -179,7 +185,11 @@
       table.append(thead, tbody);
       container.appendChild(table);
     } catch (err) {
-      container.textContent = err.message;
+      container.innerHTML = "";
+      const errBox = document.createElement("div");
+      errBox.className = "nx-empty";
+      errBox.textContent = err.message;
+      container.appendChild(errBox);
     }
   }
 
@@ -188,7 +198,7 @@
     section.style.marginBottom = "24px";
 
     const header = document.createElement("h3");
-    header.style.color = "#b91c1c";
+    header.style.color = "var(--error)";
     header.textContent = `Failed SAP Postings (${failed.length} entr${failed.length !== 1 ? "ies" : "y"} approved but not posted)`;
     section.appendChild(header);
 
@@ -201,7 +211,8 @@
   function buildFailedCard(f, reasons) {
     const card = document.createElement("div");
     card.id = `ps-failed-${f.scrapId}`;
-    card.style.cssText = "border:1px solid #fca5a5;border-radius:8px;padding:12px 14px;margin-bottom:10px";
+    card.className = "sd-section";
+    card.style.marginBottom = "10px";
 
     const titleRow = document.createElement("div");
     titleRow.style.cssText = "display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px";
@@ -209,16 +220,16 @@
     const titleStrong = document.createElement("strong");
     titleStrong.textContent = `${batchRefOf(f)} · ${PROCESS_LABELS[f.processCode] || f.processCode}`;
     const subEl = document.createElement("div");
-    subEl.style.cssText = "font-size:0.8rem;color:#6b7280;margin-top:2px";
+    subEl.style.cssText = "font-size:0.8rem;color:var(--text-muted);margin-top:2px";
     subEl.textContent = `${f.material || "—"} · ${f.reasonDescription || f.reasonCode} · ${Number(f.quantity).toFixed(3)} ${f.unitOfMeasure}`;
     titleEl.append(titleStrong, subEl);
     const badge = document.createElement("span");
-    badge.style.cssText = "color:#b91c1c;font-size:0.75rem;font-weight:600";
+    badge.className = "badge badge--error";
     badge.textContent = "SAP Failed";
     titleRow.append(titleEl, badge);
 
     const errorBox = document.createElement("div");
-    errorBox.style.cssText = "background:#fef2f2;border-radius:6px;padding:6px 8px;font-size:0.8rem;margin-bottom:10px";
+    errorBox.style.cssText = "background:var(--error-dim);color:var(--error);border-radius:6px;padding:6px 8px;font-size:0.8rem;margin-bottom:10px";
     errorBox.textContent = f.sapErrorMessage || "No error message recorded";
 
     const form = document.createElement("div");
@@ -261,7 +272,7 @@
     retryBtn.addEventListener("click", async () => {
       retryBtn.disabled = true;
       retryBtn.textContent = "Retrying…";
-      msgEl.style.color = "#6b7280";
+      msgEl.style.color = "var(--text-muted)";
       msgEl.textContent = "Posting to SAP…";
       try {
         const res = await api(`/scrap/${f.scrapId}/retry`, {
@@ -273,14 +284,14 @@
           }),
         });
         const docs = (res.data?.materialDocuments || []).join(", ") || "—";
-        msgEl.style.color = "#059669";
+        msgEl.style.color = "var(--success)";
         msgEl.textContent = `✓ Posted — MatDocs: ${docs}`;
         retryBtn.disabled = false;
         retryBtn.textContent = "Retry";
         card.style.opacity = "0.4";
         card.style.pointerEvents = "none";
       } catch (err) {
-        msgEl.style.color = "#b91c1c";
+        msgEl.style.color = "var(--error)";
         msgEl.textContent = err.message;
         retryBtn.disabled = false;
         retryBtn.textContent = "Retry";

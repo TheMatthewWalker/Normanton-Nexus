@@ -9,33 +9,43 @@
 
 <p><a asp-page="Index">&larr; Production</a></p>
 
-<div style="max-width:600px;">
-    <p style="color:#6b7280; font-size:0.85rem;">Shift is determined automatically from the current time.</p>
+<div style="max-width:640px;">
+    <p class="nx-toolbar-hint" style="margin:0 0 12px;">Shift is determined automatically from the current time.</p>
 
-    <label for="mx-mixcode">Mix Code / Material</label>
-    <input type="text" id="mx-mixcode" placeholder="e.g. 10101" />
-
-    <label for="mx-suppbatch">Supplier Batch No</label>
-    <input type="text" id="mx-suppbatch" placeholder="Supplier batch ref" />
-
-    <label for="mx-supptub">Supplier Tub No</label>
-    <input type="text" id="mx-supptub" placeholder="Tub reference" />
+    <div class="tf-row">
+        <div class="tf-field">
+            <label class="tf-label" for="mx-mixcode">Mix Code / Material</label>
+            <input type="text" id="mx-mixcode" class="tf-input" placeholder="e.g. 10101" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="mx-suppbatch">Supplier Batch No</label>
+            <input type="text" id="mx-suppbatch" class="tf-input" placeholder="Supplier batch ref" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="mx-supptub">Supplier Tub No</label>
+            <input type="text" id="mx-supptub" class="tf-input" placeholder="Tub reference" />
+        </div>
+    </div>
 
     <div style="display:flex; justify-content:space-between; align-items:center; margin:0.75rem 0 0.25rem;">
         <strong>Tubs</strong>
-        <span id="mx-total">0.000 KG</span>
+        <span id="mx-total" class="badge badge--accent">0.000 KG</span>
     </div>
     <div id="mx-tub-list"></div>
-    <p style="color:#6b7280; font-size:0.8rem;">Maximum 38 KG per tub.</p>
+    <p class="nx-toolbar-hint" style="margin:4px 0 10px;">Maximum 38 KG per tub.</p>
     <button type="button" id="mx-add-tub" class="secondary">+ Add Tub</button>
 
-    <label for="mx-notes">Notes (optional)</label>
-    <input type="text" id="mx-notes" placeholder="Any comments…" />
+    <div class="tf-row" style="margin-top:14px;">
+        <div class="tf-field tf-field--wide">
+            <label class="tf-label" for="mx-notes">Notes (optional)</label>
+            <input type="text" id="mx-notes" class="tf-input" placeholder="Any comments…" />
+        </div>
+    </div>
 
-    <p id="mx-result" style="margin:0.5rem 0;"></p>
+    <div id="mx-result" style="margin:0.75rem 0;"></div>
     <div id="mx-print-widget"></div>
 
-    <button type="button" id="mx-submit-btn">Post to SAP</button>
+    <button type="button" id="mx-submit-btn" class="btn">Post to SAP</button>
 </div>
 
 @section Scripts {

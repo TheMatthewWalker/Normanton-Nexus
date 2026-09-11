@@ -8,10 +8,11 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api");
   const listEl = document.getElementById("mru-list");
+  const countEl = document.getElementById("mru-count");
   let rows = [];
 
   async function load() {
-    listEl.textContent = "Loading…";
+    listEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/material-request-units");
       rows = data || [];
@@ -22,6 +23,7 @@
   }
 
   function render() {
+    countEl.textContent = `${rows.length} request unit${rows.length === 1 ? "" : "s"}`;
     if (rows.length === 0) { listEl.innerHTML = '<div class="nx-empty">No request units.</div>'; return; }
     listEl.innerHTML = `
       <table>

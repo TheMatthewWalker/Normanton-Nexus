@@ -9,15 +9,25 @@
 
 <p><a asp-page="Index">&larr; Production</a></p>
 
-<div style="display:flex; gap:0.5rem; margin-bottom:0.75rem;">
-    <input type="text" id="trace-ref" placeholder="Batch ref e.g. EX00000031" style="max-width:260px;" />
-    <select id="trace-pc" style="max-width:180px;">
-        <option value="">All processes</option>
-    </select>
-    <button type="button" id="trace-btn">Trace</button>
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+        <div class="tf-field">
+            <label class="tf-label" for="trace-ref">Batch Ref</label>
+            <input type="text" id="trace-ref" class="tf-input" placeholder="e.g. EX00000031" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="trace-pc">Process</label>
+            <select id="trace-pc" class="tf-input">
+                <option value="">All processes</option>
+            </select>
+        </div>
+        <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+            <button type="button" id="trace-btn" class="btn">Trace</button>
+        </div>
+    </div>
 </div>
 
-<div id="trace-results">Enter a batch reference to trace its full production history.</div>
+<div id="trace-results"><div class="nx-empty">Enter a batch reference to trace its full production history.</div></div>
 
 @section Scripts {
     <script src="~/js/production/reports-common.js"></script>

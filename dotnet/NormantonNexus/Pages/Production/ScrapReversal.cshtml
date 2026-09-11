@@ -10,51 +10,55 @@
 <p><a asp-page="Index">&larr; Production</a></p>
 
 <h3>Missed Reversals</h3>
-<p style="color:#6b7280; font-size:0.85rem;">
+<p class="nx-toolbar-hint" style="margin-bottom:10px">
     Scrap documents still posted in SAP even though the parent backflush they came from has since been reversed.
 </p>
-<div id="sr-missed">Loading…</div>
+<div id="sr-missed"><div class="nx-empty">Loading…</div></div>
 
 <h3>Search</h3>
-<div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:flex-end; margin-bottom:0.5rem;">
-    <div>
-        <label for="sr-matdoc">Material Document</label>
-        <input type="text" id="sr-matdoc" />
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+        <div class="tf-field">
+            <label class="tf-label" for="sr-matdoc">Material Document</label>
+            <input type="text" id="sr-matdoc" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="sr-batchref">Batch Ref</label>
+            <input type="text" id="sr-batchref" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="sr-material">Material</label>
+            <input type="text" id="sr-material" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="sr-pc">Process</label>
+            <select id="sr-pc" class="tf-input">
+                <option value="">Any</option>
+                <option value="MX">Mixing</option>
+                <option value="EX">Extrusion</option>
+                <option value="CO">Convoluting</option>
+                <option value="BR">Braiding</option>
+                <option value="CL">Coverline</option>
+                <option value="TW">Tape Wrap</option>
+                <option value="DR">Drumming</option>
+            </select>
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="sr-from">From</label>
+            <input type="date" id="sr-from" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="sr-to">To</label>
+            <input type="date" id="sr-to" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="sr-operator">Operator</label>
+            <input type="text" id="sr-operator" class="tf-input" />
+        </div>
+        <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+            <button type="button" id="sr-search-btn" class="btn">Search</button>
+        </div>
     </div>
-    <div>
-        <label for="sr-batchref">Batch Ref</label>
-        <input type="text" id="sr-batchref" />
-    </div>
-    <div>
-        <label for="sr-material">Material</label>
-        <input type="text" id="sr-material" />
-    </div>
-    <div>
-        <label for="sr-pc">Process</label>
-        <select id="sr-pc">
-            <option value="">Any</option>
-            <option value="MX">Mixing</option>
-            <option value="EX">Extrusion</option>
-            <option value="CO">Convoluting</option>
-            <option value="BR">Braiding</option>
-            <option value="CL">Coverline</option>
-            <option value="TW">Tape Wrap</option>
-            <option value="DR">Drumming</option>
-        </select>
-    </div>
-    <div>
-        <label for="sr-from">From</label>
-        <input type="date" id="sr-from" />
-    </div>
-    <div>
-        <label for="sr-to">To</label>
-        <input type="date" id="sr-to" />
-    </div>
-    <div>
-        <label for="sr-operator">Operator</label>
-        <input type="text" id="sr-operator" />
-    </div>
-    <button type="button" id="sr-search-btn">Search</button>
 </div>
 <div id="sr-results"></div>
 

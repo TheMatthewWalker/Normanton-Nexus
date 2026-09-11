@@ -28,9 +28,15 @@
     return json;
   }
 
-  function setResult(text, color) {
-    resultEl.style.color = color;
-    resultEl.textContent = text; // clears any previously appended Print Label link too
+  function setResult(text, kind) {
+    // clears any previously appended Print Label link too
+    const esc = NexusApi.esc;
+    if (kind === "loading") {
+      resultEl.innerHTML = `<div class="nx-empty">${esc(text)}</div>`;
+    } else {
+      const cls = kind === "error" ? "badge--error" : kind === "warn" ? "badge--warn" : kind === "success" ? "badge--success" : "";
+      resultEl.innerHTML = `<span class="badge ${cls}">${esc(text)}</span>`;
+    }
   }
 
   function appendPrintLabelLink(recordId) {
@@ -48,17 +54,17 @@
     const lengthMetres = Number(lengthInput.value);
 
     if (!material) {
-      setResult("Material is required.", "#b91c1c");
+      setResult("Material is required.", "error");
       return;
     }
     if (!(lengthMetres > 0)) {
-      setResult("Length (Metres) must be greater than 0.", "#b91c1c");
+      setResult("Length (Metres) must be greater than 0.", "error");
       return;
     }
 
     submitBtn.disabled = true;
     submitBtn.textContent = "Posting to SAP…";
-    setResult("Inserting record and posting to SAP…", "#6b7280");
+    setResult("Inserting record and posting to SAP…", "loading");
 
     try {
       const { data } = await api(`/process/${processCode}/entry`, {
@@ -72,9 +78,9 @@
       });
 
       if (data.status === "SAP_FAILED") {
-        setResult(`⚠ ${data.batchRef} saved but SAP posting failed: ${data.error}. See Failed Backflush queue for supervisor retry.`, "#d97706");
+        setResult(`⚠ ${data.batchRef} saved but SAP posting failed: ${data.error}. See Failed Backflush queue for supervisor retry.`, "warn");
       } else {
-        setResult(`✓ ${data.batchRef} posted — MatDoc: ${data.materialDocument}${data.warning ? ` (${data.warning})` : ""}`, "#059669");
+        setResult(`✓ ${data.batchRef} posted — MatDoc: ${data.materialDocument}${data.warning ? ` (${data.warning})` : ""}`, "success");
         materialInput.value = "";
         lengthInput.value = "";
         notesInput.value = "";
@@ -82,7 +88,7 @@
       appendPrintLabelLink(data.recordId);
       window.ProductionLabels.mount(document.getElementById("mp-print-widget"), { processCode, recordId: data.recordId, tubs: null });
     } catch (err) {
-      setResult(err.message, "#b91c1c");
+      setResult(err.message, "error");
     } finally {
       submitBtn.disabled = false;
       submitBtn.textContent = "Post to SAP";

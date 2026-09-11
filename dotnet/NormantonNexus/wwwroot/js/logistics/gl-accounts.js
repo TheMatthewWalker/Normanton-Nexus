@@ -5,10 +5,11 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api");
   const listEl = document.getElementById("ga-list");
+  const countEl = document.getElementById("ga-count");
   let rows = [];
 
   async function load() {
-    listEl.textContent = "Loading…";
+    listEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/costelements");
       rows = data || [];
@@ -19,6 +20,7 @@
   }
 
   function render() {
+    countEl.textContent = `${rows.length} GL account${rows.length === 1 ? "" : "s"}`;
     if (rows.length === 0) { listEl.innerHTML = '<div class="nx-empty">No GL accounts.</div>'; return; }
     listEl.innerHTML = `
       <table>

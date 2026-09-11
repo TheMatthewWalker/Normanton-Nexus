@@ -10,27 +10,50 @@
 <p><a asp-page="Index">&larr; Production</a></p>
 <p><a asp-page="OrderLookup">Looking for an existing order to drum instead? Order Lookup &rarr;</a></p>
 
-<div style="max-width:700px;">
-    <label>Type
-        <select id="dw-type">
-            <option value="stock">Make-to-Stock</option>
-            <option value="customer">Make-to-Order</option>
-        </select>
-    </label>
+<div style="max-width:760px;">
+    <div class="tf-row">
+        <div class="tf-field">
+            <label class="tf-label" for="dw-type">Type</label>
+            <select id="dw-type" class="tf-input">
+                <option value="stock">Make-to-Stock</option>
+                <option value="customer">Make-to-Order</option>
+            </select>
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dw-material">Material</label>
+            <input type="text" id="dw-material" class="tf-input">
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dw-shift">Shift</label>
+            <select id="dw-shift" class="tf-input">
+                <option value="1">Days (06:00–14:00)</option>
+                <option value="2">Afternoons (14:00–22:00)</option>
+                <option value="3">Nights (22:00–06:00)</option>
+            </select>
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dw-packaging">Packaging</label>
+            <select id="dw-packaging" class="tf-input"><option value="">Loading…</option></select>
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dw-weight">Weight (KG)</label>
+            <input type="number" id="dw-weight" class="tf-input" step="0.001">
+        </div>
+    </div>
 
-    <label>Material<input type="text" id="dw-material"></label>
-    <label>Shift<select id="dw-shift">
-        <option value="1">Days (06:00–14:00)</option>
-        <option value="2">Afternoons (14:00–22:00)</option>
-        <option value="3">Nights (22:00–06:00)</option>
-    </select></label>
-    <label>Packaging<select id="dw-packaging"><option value="">Loading…</option></select></label>
-    <label>Weight (KG)<input type="number" id="dw-weight" step="0.001"></label>
-
-    <div id="dw-customer-fields" style="display:none;">
-        <label>Customer Number<input type="text" id="dw-customer"></label>
-        <label>Order Number<input type="text" id="dw-order"></label>
-        <label>Order Item<input type="text" id="dw-order-item"></label>
+    <div id="dw-customer-fields" class="tf-row" style="display:none;">
+        <div class="tf-field">
+            <label class="tf-label" for="dw-customer">Customer Number</label>
+            <input type="text" id="dw-customer" class="tf-input">
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dw-order">Order Number</label>
+            <input type="text" id="dw-order" class="tf-input">
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dw-order-item">Order Item</label>
+            <input type="text" id="dw-order-item" class="tf-input">
+        </div>
     </div>
 
     <fieldset>
@@ -54,17 +77,27 @@
     <fieldset>
         <legend>Scrap</legend>
         <label><input type="checkbox" id="dw-has-scrap"> Has scrap</label>
-        <label>Total Scrap (KG)<input type="number" id="dw-scrap-total" step="0.001"></label>
+        <div class="tf-row" style="margin-top:8px;">
+            <div class="tf-field">
+                <label class="tf-label" for="dw-scrap-total">Total Scrap (KG)</label>
+                <input type="number" id="dw-scrap-total" class="tf-input" step="0.001">
+            </div>
+        </div>
         <div id="dw-scrap-list"></div>
         <button type="button" class="secondary" id="dw-add-scrap">+ Add Scrap Reason</button>
     </fieldset>
 
-    <label>Comments<input type="text" id="dw-comments"></label>
+    <div class="tf-row" style="margin-top:14px;">
+        <div class="tf-field tf-field--wide">
+            <label class="tf-label" for="dw-comments">Comments</label>
+            <input type="text" id="dw-comments" class="tf-input">
+        </div>
+    </div>
 
-    <p id="dw-result" style="margin:0.5rem 0;"></p>
+    <div id="dw-result" style="margin:0.75rem 0;"></div>
     <div id="dw-print-widget"></div>
 
-    <button type="button" id="dw-submit-btn">Post to SAP</button>
+    <button type="button" id="dw-submit-btn" class="btn">Post to SAP</button>
 </div>
 
 @section Scripts {

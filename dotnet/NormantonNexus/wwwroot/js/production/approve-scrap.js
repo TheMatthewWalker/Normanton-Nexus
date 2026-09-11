@@ -1,7 +1,9 @@
 // Approve Scrap — supervisor queue reviewing/posting operator scrap
-// entries to SAP. Port of runApproveScrap in production-nexus.js. Every
-// dynamic value is built via textContent/DOM APIs, never innerHTML.
+// entries to SAP. Port of runApproveScrap in production-nexus.js. Dynamic
+// values are built via textContent/DOM APIs; badge pills use innerHTML
+// with values run through NexusApi.esc() first.
 (function () {
+  const esc = NexusApi.esc;
   const bodyEl = document.getElementById("as-body");
 
   const PROCESS_LABELS = { MX: "Mixing", EX: "Extrusion", CO: "Convoluting", BR: "Braiding", CL: "Coverline", TW: "Tape Wrap", DR: "Drumming", EW: "Ewald", HA: "Hose Assembly" };
@@ -28,29 +30,40 @@
     return row.batchRef || `${row.processCode}${String(row.processRecordId).padStart(8, "0")}`;
   }
 
+  function setMsg(msgEl, text, kind) {
+    msgEl.className = kind === "error" ? "tf-inline-error" : "";
+    msgEl.style.color = kind === "warn" ? "var(--warn)" : kind === "success" ? "var(--success)" : "";
+    msgEl.textContent = text;
+  }
+
   async function load() {
-    bodyEl.textContent = "Loading pending scrap…";
+    bodyEl.innerHTML = '<div class="nx-empty">Loading pending scrap…</div>';
     try {
       const { data } = await api("/scrap/pending");
 
       if (data.length === 0) {
-        bodyEl.textContent = "No scrap entries pending approval.";
+        bodyEl.innerHTML = '<div class="nx-empty">No scrap entries pending approval.</div>';
         return;
       }
 
       bodyEl.innerHTML = "";
 
       const toolbar = document.createElement("div");
-      toolbar.style.cssText = "display:flex;align-items:center;gap:12px;margin-bottom:10px";
+      toolbar.className = "nx-toolbar";
+
+      const countTitle = document.createElement("span");
+      countTitle.className = "nx-toolbar-title";
+      countTitle.textContent = `${data.length} pending entr${data.length === 1 ? "y" : "ies"}`;
 
       const selectAllLabel = document.createElement("label");
+      selectAllLabel.className = "nx-toolbar-hint";
       const selectAll = document.createElement("input");
       selectAll.type = "checkbox";
       selectAll.checked = true;
       selectAllLabel.append(selectAll, document.createTextNode(" Select All"));
 
       const spacer = document.createElement("span");
-      spacer.style.flex = "1";
+      spacer.className = "nx-toolbar-spacer";
 
       const rejectBtn = document.createElement("button");
       rejectBtn.type = "button";
@@ -59,9 +72,10 @@
 
       const approveBtn = document.createElement("button");
       approveBtn.type = "button";
+      approveBtn.className = "btn";
       approveBtn.textContent = "Approve && Post Selected to SAP";
 
-      toolbar.append(selectAllLabel, spacer, rejectBtn, approveBtn);
+      toolbar.append(countTitle, selectAllLabel, spacer, rejectBtn, approveBtn);
       bodyEl.appendChild(toolbar);
 
       const table = document.createElement("table");
@@ -88,7 +102,7 @@
 
       approveBtn.addEventListener("click", async () => {
         const checked = [...tbody.querySelectorAll(".as-chk:checked")].map((c) => Number(c.dataset.scrapid));
-        if (!checked.length) { msgEl.style.color = "#b91c1c"; msgEl.textContent = "No entries selected."; return; }
+        if (!checked.length) { setMsg(msgEl, "No entries selected.", "error"); return; }
 
         approveBtn.disabled = true;
         approveBtn.textContent = `Posting ${checked.length} entr${checked.length === 1 ? "y" : "ies"} to SAP…`;
@@ -106,18 +120,16 @@
             const cell = document.getElementById(`as-result-${r.scrapId}`);
             if (r.success) {
               ok++;
-              if (cell) { cell.style.color = "#059669"; cell.textContent = `✓ ${(r.materialDocuments || []).join(", ")}`; }
+              if (cell) cell.innerHTML = `<span class="badge badge--success">✓ ${esc((r.materialDocuments || []).join(", "))}</span>`;
             } else {
               fail++;
-              if (cell) { cell.style.color = "#b91c1c"; cell.title = r.error || ""; cell.textContent = "✗ Failed"; }
+              if (cell) { cell.title = r.error || ""; cell.innerHTML = '<span class="badge badge--error">✗ Failed</span>'; }
             }
           }
 
-          msgEl.style.color = fail ? "#d97706" : "#059669";
-          msgEl.textContent = fail ? `${ok} posted successfully, ${fail} failed — see inline results.` : `All ${ok} entries posted to SAP successfully.`;
+          setMsg(msgEl, fail ? `${ok} posted successfully, ${fail} failed — see inline results.` : `All ${ok} entries posted to SAP successfully.`, fail ? "warn" : "success");
         } catch (err) {
-          msgEl.style.color = "#b91c1c";
-          msgEl.textContent = err.message;
+          setMsg(msgEl, err.message, "error");
         } finally {
           approveBtn.disabled = false;
           approveBtn.textContent = "Approve && Post Selected to SAP";
@@ -127,13 +139,12 @@
       let rejectArmed = false;
       rejectBtn.addEventListener("click", async () => {
         const checked = [...tbody.querySelectorAll(".as-chk:checked")].map((c) => Number(c.dataset.scrapid));
-        if (!checked.length) { msgEl.style.color = "#b91c1c"; msgEl.textContent = "No entries selected."; return; }
+        if (!checked.length) { setMsg(msgEl, "No entries selected.", "error"); return; }
 
         if (!rejectArmed) {
           rejectArmed = true;
           rejectBtn.textContent = `Click again to reject ${checked.length} entr${checked.length === 1 ? "y" : "ies"}`;
-          msgEl.style.color = "#b91c1c";
-          msgEl.textContent = "Rejected entries are removed permanently and can never be posted to SAP.";
+          setMsg(msgEl, "Rejected entries are removed permanently and can never be posted to SAP.", "error");
           setTimeout(() => { rejectArmed = false; rejectBtn.textContent = "Reject Selected"; }, 5000);
           return;
         }
@@ -158,16 +169,14 @@
             } else {
               fail++;
               const cell = document.getElementById(`as-result-${r.scrapId}`);
-              if (cell) { cell.style.color = "#b91c1c"; cell.textContent = `✗ ${r.error || ""}`; }
+              if (cell) { cell.title = r.error || ""; cell.innerHTML = '<span class="badge badge--error">✗ Failed</span>'; }
             }
           }
 
-          msgEl.style.color = fail ? "#d97706" : "#059669";
-          msgEl.textContent = fail ? `${ok} rejected, ${fail} failed — see inline results.` : `${ok} entr${ok === 1 ? "y" : "ies"} rejected.`;
-          if (!tbody.querySelectorAll("tr").length) bodyEl.textContent = "No scrap entries pending approval.";
+          setMsg(msgEl, fail ? `${ok} rejected, ${fail} failed — see inline results.` : `${ok} entr${ok === 1 ? "y" : "ies"} rejected.`, fail ? "warn" : "success");
+          if (!tbody.querySelectorAll("tr").length) bodyEl.innerHTML = '<div class="nx-empty">No scrap entries pending approval.</div>';
         } catch (err) {
-          msgEl.style.color = "#b91c1c";
-          msgEl.textContent = err.message;
+          setMsg(msgEl, err.message, "error");
         } finally {
           rejectBtn.disabled = false;
           rejectBtn.textContent = "Reject Selected";

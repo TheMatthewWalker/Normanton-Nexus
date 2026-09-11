@@ -41,7 +41,7 @@
         <tbody>${rows.map((r) => `
           <tr>
             <td><input type="checkbox" class="it-check" data-id="${r.shipmentId}"></td>
-            <td>${esc(String(r.shipmentId).padStart(8, "0"))}</td>
+            <td><a href="#" class="it-open" data-id="${r.shipmentId}">${esc(String(r.shipmentId).padStart(8, "0"))}</a></td>
             <td>${esc(r.destinationName || "")}, ${esc(r.destinationCountry || "")}</td>
             <td>${esc(r.forwarderName || "Unassigned")}</td>
             <td>${esc(r.trackingNumber || "—")}</td>
@@ -57,6 +57,10 @@
       updateHint();
     }));
     bodyEl.querySelectorAll(".it-deliver-one").forEach((btn) => btn.addEventListener("click", () => openMarkDeliveredModal([Number(btn.dataset.id)])));
+    bodyEl.querySelectorAll(".it-open").forEach((a) => a.addEventListener("click", (e) => {
+      e.preventDefault();
+      OutboundShipmentDetail.open(Number(a.dataset.id), load);
+    }));
     updateHint();
   }
 

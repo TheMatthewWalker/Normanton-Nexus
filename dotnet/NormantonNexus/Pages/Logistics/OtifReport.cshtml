@@ -8,9 +8,20 @@
 }
 
 <p><a asp-page="Index">&larr; Logistics</a></p>
-<label>Months<input type="number" id="or-months" value="12" min="1" max="60" style="width:80px;"></label>
-<button type="button" class="btn secondary" id="or-refresh">Refresh</button>
-<div id="or-body" style="margin-top:0.75rem;"></div>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+        <div class="tf-field" style="max-width:120px">
+            <label class="tf-label" for="or-months">Months</label>
+            <input type="number" id="or-months" class="tf-input" value="12" min="1" max="60">
+        </div>
+        <div class="tf-field" style="justify-content:flex-end;flex-direction:row;gap:8px">
+            <button type="button" class="btn secondary" id="or-refresh">Refresh</button>
+        </div>
+    </div>
+</div>
+
+<div id="or-body"></div>
 
 @section Scripts {
     <script src="~/js/logistics/otif-report.js"></script>
