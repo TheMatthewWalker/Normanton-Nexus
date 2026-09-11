@@ -7,8 +7,10 @@
 // functionality — every filter Node supports is still here). Node's SSE
 // progress streaming for bulk reversal is not reproduced (see
 // ScrapReversalHelper.cs's doc comment) — the bulk call here is a single
-// request/response.
+// request/response. Badge pills use innerHTML with values run through
+// NexusApi.esc() first; everything else uses textContent/DOM APIs.
 (function () {
+  const esc = NexusApi.esc;
   const missedEl = document.getElementById("sr-missed");
   const resultsEl = document.getElementById("sr-results");
 
@@ -36,18 +38,26 @@
     return row.batchRef || `${row.processCode}${String(row.processRecordId).padStart(8, "0")}`;
   }
 
+  function showEmpty(container, text) {
+    container.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "nx-empty";
+    box.textContent = text;
+    container.appendChild(box);
+  }
+
   async function loadMissed() {
-    missedEl.textContent = "Loading…";
+    showEmpty(missedEl, "Loading…");
     try {
       const { data } = await api("/scrap-reversal/missed");
       if (!data.length) {
-        missedEl.textContent = "No missed reversals — every reversed backflush's scrap has been cleaned up.";
+        showEmpty(missedEl, "No missed reversals — every reversed backflush's scrap has been cleaned up.");
         return;
       }
       missedEl.innerHTML = "";
       missedEl.appendChild(buildTable(data, true));
     } catch (err) {
-      missedEl.textContent = err.message;
+      showEmpty(missedEl, err.message);
     }
   }
 
@@ -70,18 +80,18 @@
     if (operator) params.set("operator", operator);
 
     if (![...params.keys()].length) {
-      resultsEl.textContent = "Enter at least one search parameter.";
+      showEmpty(resultsEl, "Enter at least one search parameter.");
       return;
     }
 
-    resultsEl.textContent = "Searching…";
+    showEmpty(resultsEl, "Searching…");
     try {
       const { data } = await api(`/scrap-reversal/search?${params}`);
-      if (!data.length) { resultsEl.textContent = "No scrap documents found."; return; }
+      if (!data.length) { showEmpty(resultsEl, "No scrap documents found."); return; }
       resultsEl.innerHTML = "";
       resultsEl.appendChild(buildTable(data, false));
     } catch (err) {
-      resultsEl.textContent = err.message;
+      showEmpty(resultsEl, err.message);
     }
   });
 
@@ -89,18 +99,23 @@
     const wrap = document.createElement("div");
 
     const toolbar = document.createElement("div");
-    toolbar.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:10px";
+    toolbar.className = "nx-toolbar";
+    const toolbarTitle = document.createElement("span");
+    toolbarTitle.className = "nx-toolbar-title";
+    toolbarTitle.textContent = `${rows.length} document${rows.length === 1 ? "" : "s"}`;
     const selectAllLabel = document.createElement("label");
+    selectAllLabel.className = "nx-toolbar-hint";
     const selectAll = document.createElement("input");
     selectAll.type = "checkbox";
     selectAll.checked = true;
     selectAllLabel.append(selectAll, document.createTextNode(" Select All"));
     const spacer = document.createElement("span");
-    spacer.style.flex = "1";
+    spacer.className = "nx-toolbar-spacer";
     const bulkBtn = document.createElement("button");
     bulkBtn.type = "button";
+    bulkBtn.className = "btn";
     bulkBtn.textContent = "Reverse Selected";
-    toolbar.append(selectAllLabel, spacer, bulkBtn);
+    toolbar.append(toolbarTitle, selectAllLabel, spacer, bulkBtn);
     wrap.appendChild(toolbar);
 
     const table = document.createElement("table");
@@ -129,7 +144,7 @@
         scrapDocumentId: Number(c.dataset.scrapdocid),
         materialDocument: c.dataset.matdoc,
       }));
-      if (!items.length) { msgEl.style.color = "#b91c1c"; msgEl.textContent = "No entries selected."; return; }
+      if (!items.length) { setMsg(msgEl, "No entries selected.", "error"); return; }
 
       bulkBtn.disabled = true;
       bulkBtn.textContent = `Reversing ${items.length} document${items.length === 1 ? "" : "s"}…`;
@@ -147,18 +162,16 @@
           const cell = document.getElementById(`sr-result-${r.scrapDocumentId}`);
           if (r.success) {
             ok++;
-            if (cell) { cell.style.color = "#059669"; cell.textContent = r.synced ? "Synced" : `✓ ${r.reversalDocument || ""}`; }
+            if (cell) cell.innerHTML = `<span class="badge badge--success">${r.synced ? "Synced" : `✓ ${esc(r.reversalDocument || "")}`}</span>`;
           } else {
             fail++;
-            if (cell) { cell.style.color = "#b91c1c"; cell.title = r.error || ""; cell.textContent = "✗ Failed"; }
+            if (cell) { cell.title = r.error || ""; cell.innerHTML = '<span class="badge badge--error">✗ Failed</span>'; }
           }
         }
 
-        msgEl.style.color = fail ? "#d97706" : "#059669";
-        msgEl.textContent = fail ? `${ok} reversed, ${fail} failed — see inline results.` : `All ${ok} document${ok === 1 ? "" : "s"} reversed successfully.`;
+        setMsg(msgEl, fail ? `${ok} reversed, ${fail} failed — see inline results.` : `All ${ok} document${ok === 1 ? "" : "s"} reversed successfully.`, fail ? "warn" : "success");
       } catch (err) {
-        msgEl.style.color = "#b91c1c";
-        msgEl.textContent = err.message;
+        setMsg(msgEl, err.message, "error");
       } finally {
         bulkBtn.disabled = false;
         bulkBtn.textContent = "Reverse Selected";
@@ -166,6 +179,12 @@
     });
 
     return wrap;
+  }
+
+  function setMsg(el, text, kind) {
+    el.className = kind === "error" ? "tf-inline-error" : "";
+    el.style.color = kind === "warn" ? "var(--warn)" : kind === "success" ? "var(--success)" : "";
+    el.textContent = text;
   }
 
   function buildRow(row) {
@@ -200,11 +219,16 @@
     const byTd = document.createElement("td");
     byTd.textContent = row.postedBy || "—";
     const backflushTd = document.createElement("td");
-    backflushTd.textContent = row.backflushReversed ? "Reversed" : "—";
-    if (row.backflushReversed && !row.isReversed) backflushTd.style.color = "#d97706";
+    if (row.backflushReversed) {
+      backflushTd.innerHTML = row.isReversed
+        ? '<span class="badge">Reversed</span>'
+        : '<span class="badge badge--warn">Reversed</span>';
+    } else {
+      backflushTd.textContent = "—";
+    }
     const resultTd = document.createElement("td");
     resultTd.id = `sr-result-${row.scrapDocumentId}`;
-    if (row.isReversed) { resultTd.textContent = `Reversed ${row.reversalDocument || ""}`; resultTd.style.color = "#6b7280"; }
+    if (row.isReversed) resultTd.innerHTML = `<span class="badge badge--success">Reversed ${esc(row.reversalDocument || "")}</span>`;
 
     tr.append(chkTd, docTd, refTd, pcTd, matTd, reasonTd, qtyTd, postedTd, byTd, backflushTd, resultTd);
     return tr;

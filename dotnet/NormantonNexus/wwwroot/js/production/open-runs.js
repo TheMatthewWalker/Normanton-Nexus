@@ -26,14 +26,25 @@
   }
 
   async function load() {
+    msgEl.className = "";
     msgEl.textContent = "";
-    listEl.textContent = "Loading…";
+    listEl.innerHTML = '<div class="nx-empty">Loading…</div>';
     try {
       const { data } = await api("/open-runs");
       if (data.length === 0) {
-        listEl.textContent = "No open runs.";
+        listEl.innerHTML = '<div class="nx-empty">No open runs.</div>';
         return;
       }
+
+      listEl.innerHTML = "";
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "nx-toolbar";
+      const toolbarTitle = document.createElement("span");
+      toolbarTitle.className = "nx-toolbar-title";
+      toolbarTitle.textContent = `${data.length} open run${data.length === 1 ? "" : "s"}`;
+      toolbar.appendChild(toolbarTitle);
+      listEl.appendChild(toolbar);
 
       const table = document.createElement("table");
       const thead = document.createElement("thead");
@@ -49,10 +60,13 @@
         tbody.appendChild(buildRow(row));
       }
       table.append(thead, tbody);
-      listEl.innerHTML = "";
       listEl.appendChild(table);
     } catch (err) {
-      listEl.textContent = err.message;
+      listEl.innerHTML = "";
+      const errBox = document.createElement("div");
+      errBox.className = "nx-empty";
+      errBox.textContent = err.message;
+      listEl.appendChild(errBox);
     }
   }
 
@@ -84,6 +98,7 @@
   async function cancelRun(processCode, recordId) {
     const reason = prompt("Reason for cancelling this open run (optional):") || "";
     if (!(await NexusModal.confirm("Cancel this open run?", { danger: true, confirmLabel: "Cancel Run", cancelLabel: "Back" }))) return;
+    msgEl.className = "";
     msgEl.textContent = "";
     try {
       await api(`/open-runs/${processCode}/${recordId}/cancel`, {
@@ -93,6 +108,7 @@
       });
       await load();
     } catch (err) {
+      msgEl.className = "tf-inline-error";
       msgEl.textContent = err.message;
     }
   }

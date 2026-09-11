@@ -23,14 +23,14 @@
     const pc = pcSelect.value;
     if (!ref && !pc) return;
 
-    resultsEl.textContent = "Tracing…";
+    resultsEl.innerHTML = '<div class="nx-empty">Tracing…</div>';
     try {
       const params = new URLSearchParams({ ref });
       if (pc) params.set("processCode", pc);
       const hist = await R.api(`/history?${params}`);
       const batch = (hist.data || [])[0];
       if (!batch) {
-        resultsEl.textContent = "Batch not found.";
+        resultsEl.innerHTML = '<div class="nx-empty">Batch not found.</div>';
         return;
       }
 
@@ -57,10 +57,16 @@
         R.buildTable(["Level", "Process", "Batch Ref", "Material", "Quantity", "Created", "Operator"], nodes, (n, i) => {
           const d = details[n.key] || {};
           const tr = document.createElement("tr");
-          if (n === nodes[0]) tr.style.background = "rgba(37,99,235,0.06)";
+          if (n === nodes[0]) tr.style.background = "var(--accent-dim)";
 
           const levelTd = document.createElement("td");
-          levelTd.textContent = n === nodes[0] ? `${n.depth} (searched)` : n === nodes[nodes.length - 1] && nodes.length > 1 ? `${n.depth} (root)` : String(n.depth);
+          if (n === nodes[0]) {
+            levelTd.appendChild(R.badgeEl(`${n.depth} — searched`, "accent"));
+          } else if (n === nodes[nodes.length - 1] && nodes.length > 1) {
+            levelTd.appendChild(R.badgeEl(`${n.depth} — root`, "success"));
+          } else {
+            levelTd.textContent = String(n.depth);
+          }
           const pcTd = document.createElement("td");
           pcTd.textContent = R.PROCESS_LABELS[n.pc] || n.pc;
           const refTd = document.createElement("td");
@@ -80,13 +86,16 @@
 
       if (chain.length === 0) {
         const note = document.createElement("p");
-        note.style.color = "#6b7280";
-        note.style.fontSize = "0.8rem";
+        note.className = "nx-toolbar-hint";
         note.textContent = "No trace links recorded — showing batch details only.";
         resultsEl.appendChild(note);
       }
     } catch (err) {
-      resultsEl.textContent = err.message;
+      resultsEl.innerHTML = "";
+      const errBox = document.createElement("div");
+      errBox.className = "nx-empty";
+      errBox.textContent = err.message;
+      resultsEl.appendChild(errBox);
     }
   });
 })();
