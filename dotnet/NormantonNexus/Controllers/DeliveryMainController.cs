@@ -130,6 +130,22 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
         return Ok(ApiResponse<IReadOnlyList<LinkSearchRow>>.Ok(rows));
     }
 
+    [HttpPost("{deliveryId:long}/link/{otherDeliveryId:long}")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> LinkPicksheet(long deliveryId, long otherDeliveryId, CancellationToken ct)
+    {
+        await WarehousePicksheetHelper.LinkPicksheetAsync(nexusOperationsDb, deliveryId, otherDeliveryId, GetUserId(), ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(null));
+    }
+
+    [HttpDelete("{deliveryId:long}/link/{otherDeliveryId:long}")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> UnlinkPicksheet(long deliveryId, long otherDeliveryId, CancellationToken ct)
+    {
+        await WarehousePicksheetHelper.UnlinkPicksheetAsync(nexusOperationsDb, deliveryId, otherDeliveryId, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
     [HttpPatch("{deliveryId:long}/complete")]
     [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
     public async Task<IActionResult> Complete(long deliveryId, CancellationToken ct)

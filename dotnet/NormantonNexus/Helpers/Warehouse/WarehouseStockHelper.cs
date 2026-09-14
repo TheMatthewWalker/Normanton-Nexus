@@ -116,4 +116,20 @@ internal static class WarehouseStockHelper
     internal static async Task<StockAdjustmentResponse> CreateStockAdjustmentAsync(ISapServerClient sap, int userId, StockAdjustmentRequest body, CancellationToken ct) =>
         await sap.PostAsync<StockAdjustmentResponse>("api/warehouse/stock-adjustment", body, userId, ct: ct)
             ?? throw new NexusBadGatewayException("SapServer returned an empty stock-adjustment response.");
+
+    /// <summary>
+    /// Port of Node's POST /warehouse/consignment-mb1b — used when consignment
+    /// stock (LQUA SOBKZ 'K') moves into a production bin (destination type
+    /// SA): a plain transfer order can't move consignment-owned stock, so
+    /// this posts a real goods-issue-from-consignment (MB1B) followed by the
+    /// LT01 non-consign/consign transfer pair, all in one SapServer call.
+    /// Same assertTransfersAllowed(StorageLocation) guard as
+    /// CreateTransferOrderAsync — Node applies it identically to both routes.
+    /// </summary>
+    internal static async Task<ConsignmentMb1bResponse> CreateConsignmentMb1bAsync(INexusOperationsDb db, ISapServerClient sap, int userId, ConsignmentMb1bRequest body, CancellationToken ct)
+    {
+        await StockCountHelper.AssertTransfersAllowedAsync(db, body.StorageLocation, ct);
+        return await sap.PostAsync<ConsignmentMb1bResponse>("api/warehouse/consignment-mb1b", body, userId, longRunning: true, ct: ct)
+            ?? throw new NexusBadGatewayException("SapServer returned an empty consignment-mb1b response.");
+    }
 }

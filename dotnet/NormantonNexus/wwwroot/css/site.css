@@ -536,6 +536,13 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .ps-chevron { font-size: 10px; color: var(--text-muted); transition: transform 0.2s; }
 .ps-section--collapsed .ps-chevron { transform: rotate(-90deg); }
+.ps-table { width: 100%; border-collapse: collapse; }
+.ps-table th { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 8px 16px; background: var(--surface2); color: var(--text-muted); text-align: left; }
+.ps-table td { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid var(--border); }
+.ps-table tbody tr { cursor: pointer; transition: background 0.1s; }
+.ps-table tbody tr:hover { background: var(--accent-dim); }
+.ps-table tbody tr:last-child td { border-bottom: none; }
+.ps-priority-flag { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #DC2626; box-shadow: 0 0 4px rgba(220,38,38,0.5); margin-right: 6px; vertical-align: middle; }
 .ps-section--collapsed .ps-section-body { display: none; }
 .ps-sections--nested { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
 .ps-section--nested .ps-section-header { padding: 7px 12px; }
@@ -1269,3 +1276,335 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
   .rpt-charts { grid-template-columns: 1fr; }
   .rpt-chart-card--wide { grid-column: auto; }
 }
+
+/* ── Stock Management / Stock Investigations (Warehouse) ───────────────────
+   Ported verbatim from private/css/warehouse.css's .wsm-*/.tf-*/.sap-*
+   families — this app's own .tf-row/.tf-field/.tf-input etc. above are the
+   lighter modal-body variant used by AdminEditModal; these are Node's real,
+   fuller Transfer-Order-form styling (prefill grid, success card, locked
+   badge) reused as-is for Stock Management's split-screen panel and Stock
+   Investigations' resolve modals, per explicit user direction to match
+   Node's actual look rather than reuse the lighter modal variant. */
+.sap-loading {
+  display: flex; align-items: center; gap: 12px;
+  padding: 40px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-muted);
+}
+.sap-error {
+  padding: 40px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--error);
+}
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+.row-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  padding: 4px 10px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(124,58,237,0.25);
+  border-radius: 5px;
+  color: var(--accent);
+}
+
+.btn-submit {
+  font-family: 'Manrope', sans-serif;
+  font-size: 13px; font-weight: 700;
+  padding: 10px 28px;
+  background: var(--accent);
+  border: none; border-radius: 7px;
+  color: #fff; cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  white-space: nowrap;
+}
+.btn-submit:hover    { background: var(--accent2); }
+.btn-submit:disabled { opacity: 0.55; cursor: default; }
+
+.btn-secondary {
+  font-family: 'Manrope', sans-serif;
+  font-size: 13px; font-weight: 600;
+  padding: 9px 20px;
+  background: transparent;
+  border: 1.5px solid var(--border2);
+  border-radius: 7px;
+  color: var(--text-dim); cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+.btn-secondary:disabled { opacity: 0.55; cursor: default; }
+
+.tf-req { color: var(--error); }
+.tf-optional { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-muted); }
+.tf-actions { display: flex; align-items: center; gap: 16px; padding-top: 4px; }
+.tf-input[readonly] { background: var(--surface); color: var(--text-dim); cursor: default; }
+
+.tf-success {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px;
+  background: rgba(5,150,105,0.08);
+  border: 1px solid rgba(5,150,105,0.3);
+  border-radius: 8px;
+  color: var(--success);
+}
+.tf-success svg { width: 28px; height: 28px; flex-shrink: 0; }
+.tf-success-title { font-size: 13px; font-weight: 700; }
+.tf-success-to { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.04em; margin-top: 2px; }
+
+.tf-prefill-grid {
+  display: flex; flex-wrap: wrap; gap: 14px;
+  padding: 14px 16px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.tf-prefill-value { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; color: var(--text); padding: 6px 0 2px; }
+.tf-muted { color: var(--text-muted); font-weight: 400; }
+.tf-locked {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  vertical-align: middle;
+}
+
+.wsm-layout { display: grid; grid-template-columns: 1fr 440px; gap: 20px; align-items: start; }
+.wsm-list-panel { min-width: 0; }
+.wsm-filters {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;
+  padding: 14px 16px; margin-bottom: 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.wsm-filter-field { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 130px; }
+.wsm-clear-btn, .wsm-export-btn { padding: 8px 16px; }
+
+.wsm-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+.wsm-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+.wsm-table th, .wsm-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.wsm-table th { background: var(--surface2); color: var(--text-dim); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; position: sticky; top: 0; }
+.wsm-table tbody tr { cursor: pointer; transition: background 0.1s; }
+.wsm-table tbody tr:hover { background: var(--accent-dim); }
+.wsm-table tbody tr:last-child td { border-bottom: none; }
+.wsm-td-check { width: 32px; text-align: center !important; }
+.wsm-table th:nth-child(2), .wsm-table td:nth-child(2),
+.wsm-table th:nth-child(3), .wsm-table td:nth-child(3) { width: 60px; }
+.wsm-table th:nth-child(8), .wsm-table td:nth-child(8),
+.wsm-table th:nth-child(9), .wsm-table td:nth-child(9) { width: 46px; }
+.wsm-row--negative td { color: var(--error); font-weight: 700; }
+.wsm-neg-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--error);
+  background: rgba(220,38,38,0.08);
+  border: 1px solid rgba(220,38,38,0.3);
+  border-radius: 4px;
+  padding: 1px 5px; margin-left: 6px;
+  vertical-align: middle;
+}
+.wsm-empty { padding: 40px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
+
+.wsm-transfer-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  position: sticky; top: 0;
+  max-height: 80vh; overflow-y: auto;
+}
+.wsm-panel-empty { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); text-align: center; padding: 24px 8px; }
+.wsm-panel-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.wsm-panel-sub { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); margin-bottom: 14px; }
+
+.wsm-mass-mode { display: flex; gap: 16px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-bottom: 12px; }
+.wsm-mass-mode label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.wsm-mass-shared { margin-bottom: 14px; }
+.wsm-mass-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px; }
+.wsm-mass-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+.wsm-mass-table th, .wsm-mass-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+.wsm-mass-table th { background: var(--surface); color: var(--text-dim); font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.wsm-mass-table .tf-input { padding: 5px 7px; font-size: 11px; min-width: 60px; }
+.wsm-mono { color: var(--text-dim); }
+.wsm-mass-dest-cell { display: flex; gap: 6px; }
+.wsm-mass-dest-cell .tf-input { width: 70px; }
+.wsm-mass-result { font-size: 10px; white-space: nowrap; }
+.wsm-mass-ok   { color: var(--success); }
+.wsm-mass-fail { color: var(--error); }
+
+/* Batch Discrepancies dashboard (Stock Investigations) */
+.wsm-disc-btn { border-color: var(--accent); color: var(--accent); }
+.wsm-disc-toolbar { display: flex; gap: 10px; margin-bottom: 16px; }
+.wsm-disc-cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 4px 0 20px; }
+.wsm-disc-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.wsm-disc-card-num { font-size: 28px; font-weight: 800; color: var(--accent); font-family: 'JetBrains Mono', monospace; }
+.wsm-disc-card-label { font-size: 12px; color: var(--text-dim); flex: 1; }
+.wsm-disc-card .btn-submit { align-self: flex-start; }
+.wsm-disc-warn { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--error); background: rgba(220,38,38,0.06); border: 1px solid rgba(220,38,38,0.25); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
+.wsm-disc-warn ul { margin: 6px 0 0 18px; padding: 0; }
+.wsm-disc-note { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--success); background: rgba(22,163,74,0.06); border: 1px solid rgba(22,163,74,0.25); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
+
+.wsm-resolve-box { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+.wsm-resolve-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(15,25,45,0.6);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(3px);
+  animation: fadeIn 0.12s ease;
+  padding: 24px;
+}
+.wsm-resolve-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px;
+  max-width: 720px; width: 100%;
+  max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(15,25,45,0.35);
+  animation: fadeUp 0.15s ease both;
+}
+.wsm-resolve-modal-hdr { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.wsm-resolve-close { background: transparent; border: none; cursor: pointer; font-size: 20px; line-height: 1; color: var(--text-dim); padding: 2px 4px; }
+.wsm-resolve-close:hover { color: var(--accent); }
+.wsm-row--holding td { color: var(--text-muted); font-style: italic; }
+.wsm-resolve-modal--wide { max-width: 920px; }
+.wsm-bulk-bins { white-space: normal; }
+.wsm-bulk-bin-opt { display: inline-flex; align-items: center; gap: 4px; margin: 2px 14px 2px 0; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.wsm-bulk-bin-opt input { cursor: pointer; }
+
+.wsm-progress-banner { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+.wsm-progress-head { display: flex; align-items: center; justify-content: space-between; font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 700; color: var(--text-dim); margin-bottom: 8px; }
+.wsm-progress-label { color: var(--text-dim); }
+.wsm-progress-count-wrap { display: flex; align-items: baseline; gap: 8px; font-family: 'JetBrains Mono', monospace; }
+.wsm-progress-count { font-size: 12px; font-weight: 700; color: var(--text); }
+.wsm-progress-pct   { font-size: 11px; color: var(--text-muted); }
+.wsm-progress-track { height: 8px; border-radius: 4px; background: rgba(255,255,255,0.08); overflow: hidden; }
+.wsm-progress-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 4px; transition: width 0.2s ease; }
+.wsm-progress-bar--warn { background: var(--error); }
+.wsm-progress-summary { margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); }
+.wsm-progress-summary--ok   { color: var(--success); }
+.wsm-progress-summary--warn { color: var(--error); }
+
+@media (max-width: 900px) {
+  .wsm-layout { grid-template-columns: 1fr; }
+  .wsm-transfer-panel { position: static; max-height: none; }
+}
+
+/* ── Picked Pallets / delivery-picker modal (Open Picksheets) ──────────────
+   Ported from private/css/warehouse.css's .ps-linked-*/.lp-* families. */
+.ps-linked-section { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.ps-linked-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  padding: 5px 10px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(124,58,237,0.25);
+  border-radius: 6px;
+  color: var(--accent);
+}
+.ps-linked-unlink {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text-muted); font-size: 12px; line-height: 1;
+  padding: 2px; border-radius: 3px;
+}
+.ps-linked-unlink:hover { color: var(--error); background: rgba(220,38,38,0.1); }
+.ps-link-btn { padding: 6px 14px; font-size: 12px; }
+.lp-results { max-height: 260px; overflow-y: auto; margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.lp-results:empty { border: none; margin-top: 0; }
+.lp-row { padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.lp-row:last-child { border-bottom: none; }
+.lp-row:hover { background: var(--surface2); }
+.lp-empty { padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
+
+/* Generic confirm/prompt overlay — Node's private/css/nexus-common.css .wc-*
+   family, shared across the whole app for a simple modal dialog. */
+.wc-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(15,25,45,0.6);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(3px);
+  animation: fadeIn 0.12s ease;
+}
+.wc-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px 28px 20px; max-width: 420px; width: 90%; box-shadow: 0 20px 60px rgba(15,25,45,0.35); }
+.wc-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; color: var(--text); }
+.wc-message { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 20px; white-space: pre-line; }
+.wc-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.wc-btn-cancel { font-family: 'Manrope', sans-serif; font-size: 13px; font-weight: 500; padding: 8px 18px; background: transparent; border: 1.5px solid var(--border2); border-radius: 7px; color: var(--text-dim); cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.wc-btn-cancel:hover { border-color: var(--accent); color: var(--accent); }
+.wc-btn-confirm { font-family: 'Manrope', sans-serif; font-size: 13px; font-weight: 600; padding: 8px 20px; background: var(--accent); border: none; border-radius: 7px; color: #fff; cursor: pointer; transition: opacity 0.15s; }
+.wc-btn-confirm:hover { opacity: 0.88; }
+.wc-btn-confirm--danger  { background: #DC2626; }
+.wc-btn-confirm--success { background: #059669; }
+
+/* ── Picked Pallets modal (Open Picksheets row click) ───────────────────────
+   Node's real .ps-modal-*/.ps-pcard-* families (private/css/warehouse.css)
+   — the actual "Picked Pallets" popup shown when a picksheet row is
+   clicked, distinct from the (not yet ported) full Pallet Builder wizard's
+   own .pb-overlay. */
+.ps-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(15,25,45,0.6);
+  z-index: 2000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(3px);
+}
+.ps-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(15,25,45,0.35);
+  width: 100%; max-width: 860px;
+  max-height: 80vh;
+  display: flex; flex-direction: column;
+  animation: fadeUp 0.2s ease both;
+}
+.ps-modal-header { display: flex; align-items: flex-start; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.ps-modal-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.ps-modal-sub { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+.ps-modal-close { background: none; border: none; font-size: 18px; color: var(--text-muted); cursor: pointer; padding: 4px 8px; line-height: 1; transition: color 0.15s; }
+.ps-modal-close:hover { color: var(--error); }
+.ps-modal-body { flex: 1; overflow: auto; padding: 20px 24px; }
+.ps-modal-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 12px 24px; border-top: 1px solid var(--border); background: var(--surface2); flex-shrink: 0; }
+
+.ps-pcard-list { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
+.ps-pcard { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.ps-pcard-hdr { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; user-select: none; background: var(--surface2); transition: background 0.1s; flex-wrap: wrap; }
+.ps-pcard-hdr:hover { background: var(--accent-dim); }
+.ps-pcard-type { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; background: var(--surface2); color: var(--accent); padding: 2px 8px; border-radius: 4px; flex-shrink: 0; }
+.ps-pcard-dims, .ps-pcard-wt, .ps-pcard-loc { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+.ps-pcard-badge { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 10px; flex-shrink: 0; }
+.ps-pcard-badge--done { background: rgba(5,150,105,0.12); color: var(--success); }
+.ps-pcard-badge--wip  { background: rgba(124,58,237,0.1); color: var(--accent); }
+.ps-pcard-chevron { margin-left: auto; font-size: 10px; color: var(--text-muted); transition: transform 0.2s; flex-shrink: 0; }
+.ps-pcard.open .ps-pcard-chevron { transform: rotate(180deg); }
+.ps-pcard-btn { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; padding: 3px 10px; background: transparent; border: 1px solid var(--border2); border-radius: 4px; color: var(--text-dim); cursor: pointer; transition: border-color 0.15s, color 0.15s; flex-shrink: 0; }
+.ps-pcard-btn:hover              { border-color: var(--accent); color: var(--accent); }
+.ps-pcard-btn--finish:hover      { border-color: var(--success); color: var(--success); }
+.ps-pcard-btn--delete            { border-color: var(--error); color: var(--error); }
+.ps-pcard-btn--delete:hover      { background: rgba(220,38,38,0.08); }
+.ps-pcard-body { border-top: 1px solid var(--border); }
+.ps-pcard-tbl { width: 100%; border-collapse: collapse; }
+.ps-pcard-tbl th { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 7px 12px; background: var(--bg); color: var(--text-muted); text-align: left; }
+.ps-pcard-tbl td { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 7px 12px; border-bottom: 1px solid var(--border); }
+.ps-pcard-tbl tbody tr:last-child td { border-bottom: none; }
+.ps-pcard-mono { font-family: 'JetBrains Mono', monospace; }
+.ps-pcard-del { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 3px; transition: color 0.15s, background 0.15s; }
+.ps-pcard-del:hover { color: var(--error); background: rgba(220,38,38,0.08); }
+.ps-pcard-empty { padding: 16px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }

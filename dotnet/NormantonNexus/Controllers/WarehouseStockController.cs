@@ -108,4 +108,11 @@ public sealed class WarehouseStockController(INexusOperationsDb nexusOperationsD
         var result = await WarehouseStockHelper.CreateStockAdjustmentAsync(sapServerClient, GetUserId(), body, ct);
         return Ok(ApiResponse<StockAdjustmentResponse>.Ok(result));
     }
+
+    [HttpPost("consignment-mb1b")]
+    public async Task<IActionResult> CreateConsignmentMb1b([FromBody] ConsignmentMb1bRequest body, CancellationToken ct)
+    {
+        var result = await WarehouseStockHelper.CreateConsignmentMb1bAsync(nexusOperationsDb, sapServerClient, GetUserId(), body, ct);
+        return Ok(ApiResponse<ConsignmentMb1bResponse>.Ok(result));
+    }
 }

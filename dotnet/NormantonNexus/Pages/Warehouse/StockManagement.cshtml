@@ -4,21 +4,12 @@
     ViewData["Title"] = "Stock Management";
     ViewData["Department"] = "Warehouse";
     ViewData["PageTitle"] = "Stock Management";
-    ViewData["PageSubtitle"] = "Search stock and create a Transfer Order";
+    ViewData["PageSubtitle"] = "Search stock by material, batch, bin & more — select rows to create Transfer Orders, one at a time or as a mass movement";
 }
 
 <p><a asp-page="Index">&larr; Warehouse</a></p>
 
-<form id="sm-search-form">
-    <label>Material<input type="text" id="sm-material"></label>
-    <label>Storage Type<input type="text" id="sm-storage-type"></label>
-    <label>Bin<input type="text" id="sm-bin"></label>
-    <label>Batch<input type="text" id="sm-batch"></label>
-    <label>Storage Location<input type="text" id="sm-storage-location"></label>
-    <button type="submit" class="btn">Search</button>
-</form>
-
-<div id="sm-results" style="margin-top:1rem;"></div>
+<div id="sm-root"></div>
 
 @section Scripts {
     <script src="~/js/warehouse/stock-management.js"></script>

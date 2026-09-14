@@ -143,6 +143,83 @@ internal static partial class WarehousePicksheetHelper
     }
 
     /// <summary>
+    /// POST :deliveryId/link/:otherDeliveryId — links two open picksheets so
+    /// a shared physical pallet can carry packages for both (the delivery
+    /// picker modal on the Picked Pallets view). Both sides must be open
+    /// (not completed/cancelled) and share the same customer — a shared
+    /// pallet is one physical unit going to one destination, so linking
+    /// across customers is never valid regardless of anything else, checked
+    /// here even though LinkSearchAsync already filters to the same
+    /// customer (nothing stops a direct API call bypassing that search UI).
+    /// The link row is written both directions (A->B and B->A) so either
+    /// side's own linked-picksheets read finds the other without a UNION.
+    /// </summary>
+    internal static async Task LinkPicksheetAsync(INexusOperationsDb db, long deliveryId, long otherDeliveryId, int? userId, CancellationToken ct)
+    {
+        if (deliveryId == otherDeliveryId)
+            throw new NexusValidationException("Cannot link a picksheet to itself.");
+
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var rows = (await connection.QueryAsync<(long DeliveryId, long CustomerId, bool CompletionStatus, bool DeliveryCancelled)>(new CommandDefinition("""
+            SELECT deliveryID AS DeliveryId, customerID AS CustomerId, completionStatus AS CompletionStatus, ISNULL(deliveryCancelled, 0) AS DeliveryCancelled
+            FROM log.DeliveryMain
+            WHERE deliveryID IN (@deliveryId, @otherDeliveryId)
+            """, new { deliveryId, otherDeliveryId }, cancellationToken: ct))).ToList();
+        var a = rows.FirstOrDefault(r => r.DeliveryId == deliveryId);
+        var b = rows.FirstOrDefault(r => r.DeliveryId == otherDeliveryId);
+        if (a == default || b == default) throw new NexusNotFoundException("Delivery not found.");
+        if (a.CompletionStatus || a.DeliveryCancelled || b.CompletionStatus || b.DeliveryCancelled)
+            throw new NexusValidationException("Both picksheets must be open (not completed or cancelled) to link.");
+        if (a.CustomerId != b.CustomerId)
+            throw new NexusValidationException("Picksheets can only be linked when they share the same customer.");
+
+        var existing = await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
+            "SELECT 1 FROM log.DeliveryPicksheetLink WHERE deliveryID = @deliveryId AND linkedDeliveryID = @otherDeliveryId",
+            new { deliveryId, otherDeliveryId }, cancellationToken: ct));
+        if (existing is not null) throw new NexusConflictException("These picksheets are already linked.");
+
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO log.DeliveryPicksheetLink (deliveryID, linkedDeliveryID, linkedByUserID) VALUES (@deliveryId, @otherDeliveryId, @userId);
+            INSERT INTO log.DeliveryPicksheetLink (deliveryID, linkedDeliveryID, linkedByUserID) VALUES (@otherDeliveryId, @deliveryId, @userId);
+            """, new { deliveryId, otherDeliveryId, userId }, cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// DELETE :deliveryId/link/:otherDeliveryId — blocked once real
+    /// cross-staging has actually happened: a batch staged under one side's
+    /// sapDelivery, sitting on a pallet the OTHER side owns via
+    /// log.DeliveryLink, since unlinking would silently strand that side's
+    /// already-staged packages with no UI able to see or manage the pallet
+    /// they're sitting on any more. Mirrors Node's crossStagedRes query
+    /// exactly (checks both directions in one EXISTS-shaped count).
+    /// </summary>
+    internal static async Task UnlinkPicksheetAsync(INexusOperationsDb db, long deliveryId, long otherDeliveryId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+
+        var crossStagedCount = await connection.QuerySingleAsync<int>(new CommandDefinition("""
+            SELECT COUNT(*) AS Cnt
+            FROM   log.PalletPackages pp
+            JOIN   log.PalletMain pm ON pm.palletID = pp.palletID
+            JOIN   log.DeliveryLink dl ON dl.palletID = pm.palletID
+            WHERE  pm.palletRemoved = 0
+              AND  (
+                  (pp.sapDelivery = @deliveryIdStr AND dl.deliveryID = @otherDeliveryId) OR
+                  (pp.sapDelivery = @otherDeliveryIdStr AND dl.deliveryID = @deliveryId)
+              )
+            """, new { deliveryId, otherDeliveryId, deliveryIdStr = deliveryId.ToString(), otherDeliveryIdStr = otherDeliveryId.ToString() }, cancellationToken: ct));
+        if (crossStagedCount > 0)
+            throw new NexusConflictException("These picksheets have batches staged onto each other's pallets — resolve those packages before unlinking.");
+
+        await connection.ExecuteAsync(new CommandDefinition("""
+            DELETE FROM log.DeliveryPicksheetLink
+            WHERE (deliveryID = @deliveryId AND linkedDeliveryID = @otherDeliveryId)
+               OR (deliveryID = @otherDeliveryId AND linkedDeliveryID = @deliveryId)
+            """, new { deliveryId, otherDeliveryId }, cancellationToken: ct));
+    }
+
+    /// <summary>
     /// GET completed-unshipped — Create Outbound Shipment's own delivery
     /// picker. A completed, active picksheet only ever leaves this list by
     /// being linked to a real shipment (log.ShipmentLink) — genuinely

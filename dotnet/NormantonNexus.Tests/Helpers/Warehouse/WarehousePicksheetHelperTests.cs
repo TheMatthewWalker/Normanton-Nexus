@@ -47,4 +47,21 @@ public class WarehousePicksheetHelperTests
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    // LinkPicksheetAsync's self-link guard — mirrors Node's own
+    // `if (String(deliveryId) === String(otherDeliveryId))` check, run
+    // before any query. Every other guard (open/not-cancelled, same
+    // customer, already-linked) needs the two rows' real data, so isn't
+    // testable without a live SQL Server, same ceiling as most of this
+    // migration's DB-backed Helpers.
+    [Fact]
+    public async Task LinkPicksheetAsync_rejects_linking_a_delivery_to_itself_without_opening_a_connection()
+    {
+        var db = UnreachableDb();
+
+        await Assert.ThrowsAsync<NexusValidationException>(() =>
+            WarehousePicksheetHelper.LinkPicksheetAsync(db.Object, 12345, 12345, userId: 1, CancellationToken.None));
+
+        db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
 }
