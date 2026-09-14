@@ -14,6 +14,8 @@
   // material -> materialText, survives search refreshes.
   const selected = new Map();
   let debounceTimer = null;
+  let materials = [];
+  let pager = null;
 
   async function api(path, opts) {
     const r = await fetch("/api/packaging" + path, opts);
@@ -29,38 +31,54 @@
     return json;
   }
 
-  function renderResults(materials) {
+  function renderResults(newMaterials) {
+    materials = newMaterials;
     resultsEl.innerHTML = "";
     if (materials.length === 0) {
       resultsEl.textContent = "No materials found.";
+      pager = null;
       return;
     }
 
     const table = document.createElement("table");
     const tbody = document.createElement("tbody");
-    for (const m of materials) {
-      const tr = document.createElement("tr");
-      const checkboxTd = document.createElement("td");
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = selected.has(m.material);
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) selected.set(m.material, m.materialText);
-        else selected.delete(m.material);
-        updateSelectedCount();
-      });
-      checkboxTd.appendChild(checkbox);
-
-      const materialTd = document.createElement("td");
-      materialTd.textContent = m.material;
-      const textTd = document.createElement("td");
-      textTd.textContent = m.materialText;
-
-      tr.append(checkboxTd, materialTd, textTd);
-      tbody.appendChild(tr);
-    }
     table.appendChild(tbody);
     resultsEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    resultsEl.appendChild(pagerEl);
+
+    pager = NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const m of pageRows) {
+          const tr = document.createElement("tr");
+          const checkboxTd = document.createElement("td");
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selected.has(m.material);
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) selected.set(m.material, m.materialText);
+            else selected.delete(m.material);
+            updateSelectedCount();
+          });
+          checkboxTd.appendChild(checkbox);
+
+          const materialTd = document.createElement("td");
+          materialTd.textContent = m.material;
+          const textTd = document.createElement("td");
+          textTd.textContent = m.materialText;
+
+          tr.append(checkboxTd, materialTd, textTd);
+          tbodyEl.appendChild(tr);
+        }
+      },
+    });
+    pager.setRows(materials);
   }
 
   function updateSelectedCount() {
@@ -83,17 +101,21 @@
     debounceTimer = setTimeout(runSearch, 250);
   });
 
+  // Select All/Clear act on the whole (paginated) result set, not just the
+  // checkboxes on the current page — selection is tracked in `selected`
+  // independent of the DOM, so re-rendering the current page (via
+  // pager.goTo, not pager.setRows — that would reset to page 1) picks up
+  // the new state without losing which page the user is on.
   document.getElementById("mu-select-all").addEventListener("click", () => {
-    resultsEl.querySelectorAll("input[type=checkbox]").forEach((cb) => {
-      cb.checked = true;
-      cb.dispatchEvent(new Event("change"));
-    });
+    for (const m of materials) selected.set(m.material, m.materialText);
+    updateSelectedCount();
+    if (pager) pager.goTo(pager.currentPage);
   });
 
   document.getElementById("mu-clear").addEventListener("click", () => {
     selected.clear();
     updateSelectedCount();
-    resultsEl.querySelectorAll("input[type=checkbox]").forEach((cb) => (cb.checked = false));
+    if (pager) pager.goTo(pager.currentPage);
   });
 
   function renderResultTable(results) {

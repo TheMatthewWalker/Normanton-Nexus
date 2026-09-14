@@ -74,41 +74,54 @@
     thead.appendChild(headRow);
 
     const tbody = document.createElement("tbody");
-    for (const row of rows) {
-      const tr = document.createElement("tr");
-
-      const custTd = document.createElement("td");
-      custTd.textContent = row.customerName ? `${row.customer} — ${row.customerName}` : row.customer;
-
-      const instrTd = document.createElement("td");
-      instrTd.style.whiteSpace = "pre-wrap";
-      instrTd.textContent = row.instructions;
-
-      const updatedTd = document.createElement("td");
-      updatedTd.style.fontSize = "0.8rem";
-      updatedTd.style.color = "#6b7280";
-      const when = row.lastUpdatedUtc ? new Date(row.lastUpdatedUtc).toLocaleString("en-GB") : "—";
-      updatedTd.textContent = row.updatedByUsername ? `${when} · ${row.updatedByUsername}` : when;
-
-      const actionsTd = document.createElement("td");
-      const editBtn = document.createElement("button");
-      editBtn.type = "button";
-      editBtn.className = "secondary";
-      editBtn.textContent = "Edit";
-      editBtn.addEventListener("click", () => openForm(row));
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "secondary";
-      delBtn.style.marginLeft = "0.4rem";
-      delBtn.textContent = "Delete";
-      delBtn.addEventListener("click", () => deleteRow(row.customer));
-      actionsTd.append(editBtn, delBtn);
-
-      tr.append(custTd, instrTd, updatedTd, actionsTd);
-      tbody.appendChild(tr);
-    }
     table.append(thead, tbody);
     tableEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    tableEl.appendChild(pagerEl);
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const row of pageRows) {
+          const tr = document.createElement("tr");
+
+          const custTd = document.createElement("td");
+          custTd.textContent = row.customerName ? `${row.customer} — ${row.customerName}` : row.customer;
+
+          const instrTd = document.createElement("td");
+          instrTd.style.whiteSpace = "pre-wrap";
+          instrTd.textContent = row.instructions;
+
+          const updatedTd = document.createElement("td");
+          updatedTd.style.fontSize = "0.8rem";
+          updatedTd.style.color = "#6b7280";
+          const when = row.lastUpdatedUtc ? new Date(row.lastUpdatedUtc).toLocaleString("en-GB") : "—";
+          updatedTd.textContent = row.updatedByUsername ? `${when} · ${row.updatedByUsername}` : when;
+
+          const actionsTd = document.createElement("td");
+          const editBtn = document.createElement("button");
+          editBtn.type = "button";
+          editBtn.className = "secondary";
+          editBtn.textContent = "Edit";
+          editBtn.addEventListener("click", () => openForm(row));
+          const delBtn = document.createElement("button");
+          delBtn.type = "button";
+          delBtn.className = "secondary";
+          delBtn.style.marginLeft = "0.4rem";
+          delBtn.textContent = "Delete";
+          delBtn.addEventListener("click", () => deleteRow(row.customer));
+          actionsTd.append(editBtn, delBtn);
+
+          tr.append(custTd, instrTd, updatedTd, actionsTd);
+          tbodyEl.appendChild(tr);
+        }
+      },
+    }).setRows(rows);
   }
 
   async function deleteRow(customer) {

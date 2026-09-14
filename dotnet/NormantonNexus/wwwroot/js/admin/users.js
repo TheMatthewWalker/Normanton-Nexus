@@ -78,22 +78,34 @@
     const q = document.getElementById("ua-search").value.trim().toLowerCase();
     const rows = q ? usersRows.filter((u) => [u.username, u.firstName, u.lastName, u.email].some((f) => (f || "").toLowerCase().includes(q))) : usersRows;
     const el = document.getElementById("ua-users");
-    el.innerHTML = rows.length === 0 ? "<p>No users.</p>" : `
+    if (rows.length === 0) {
+      el.innerHTML = "<p>No users.</p>";
+      return;
+    }
+    el.innerHTML = `
       <table>
         <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Departments</th><th>Active</th><th>Locked</th><th>Last Login</th><th></th></tr></thead>
-        <tbody>
-          ${rows.map((u) => `
+        <tbody id="ua-tbody"></tbody>
+      </table>
+      <div class="nx-pager" id="ua-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("ua-tbody"),
+      pagerContainer: document.getElementById("ua-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((u) => `
             <tr>
               <td>${esc(u.username)}</td><td>${esc(u.firstName)} ${esc(u.lastName)}</td><td>${esc(u.role)}</td>
               <td>${esc((u.departments || []).join(", "))}</td><td>${u.isActive ? "Yes" : "No"}</td><td>${u.isLocked ? "Yes" : "No"}</td>
               <td>${u.lastLogin ? new Date(u.lastLogin).toLocaleString("en-GB") : "—"}</td>
               <td><button type="button" class="btn secondary" data-open="${u.userId}">Manage</button></td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
-    el.querySelectorAll("button[data-open]").forEach((btn) => {
-      btn.addEventListener("click", () => openDetail(Number(btn.dataset.open)));
-    });
+            </tr>`).join(""),
+      onRendered: () => {
+        el.querySelectorAll("button[data-open]").forEach((btn) => {
+          btn.addEventListener("click", () => openDetail(Number(btn.dataset.open)));
+        });
+      },
+    }).setRows(rows);
   }
 
   document.getElementById("ua-search").addEventListener("input", renderUsers);

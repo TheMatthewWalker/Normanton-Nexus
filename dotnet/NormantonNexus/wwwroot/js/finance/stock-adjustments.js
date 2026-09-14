@@ -335,6 +335,13 @@
     historyHeading.textContent = "Count History";
     bodyEl.appendChild(historyHeading);
 
+    if (counts.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No completed counts yet.";
+      bodyEl.appendChild(empty);
+      return;
+    }
+
     const table = document.createElement("table");
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
@@ -345,36 +352,40 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    if (counts.length === 0) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 6;
-      td.textContent = "No completed counts yet.";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    } else {
-      for (const c of counts) {
-        const tr = document.createElement("tr");
-        const idTd = document.createElement("td");
-        idTd.textContent = `#${c.countId}`;
-        const typeTd = document.createElement("td");
-        typeTd.textContent = c.countType.replace("_", " ");
-        const locTd = document.createElement("td");
-        locTd.textContent = c.storageLocation || "—";
-        const statusTd = document.createElement("td");
-        statusTd.textContent = c.status;
-        const decidedTd = document.createElement("td");
-        decidedTd.textContent = scfFormatDate(c.decidedAtUtc);
-        const netTd = document.createElement("td");
-        netTd.style.color = scfColor(c.netValue);
-        netTd.style.fontWeight = "700";
-        netTd.textContent = scfMoney(c.netValue);
-        tr.append(idTd, typeTd, locTd, statusTd, decidedTd, netTd);
-        tbody.appendChild(tr);
-      }
-    }
     table.append(thead, tbody);
     bodyEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    bodyEl.appendChild(pagerEl);
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const c of pageRows) {
+          const tr = document.createElement("tr");
+          const idTd = document.createElement("td");
+          idTd.textContent = `#${c.countId}`;
+          const typeTd = document.createElement("td");
+          typeTd.textContent = c.countType.replace("_", " ");
+          const locTd = document.createElement("td");
+          locTd.textContent = c.storageLocation || "—";
+          const statusTd = document.createElement("td");
+          statusTd.textContent = c.status;
+          const decidedTd = document.createElement("td");
+          decidedTd.textContent = scfFormatDate(c.decidedAtUtc);
+          const netTd = document.createElement("td");
+          netTd.style.color = scfColor(c.netValue);
+          netTd.style.fontWeight = "700";
+          netTd.textContent = scfMoney(c.netValue);
+          tr.append(idTd, typeTd, locTd, statusTd, decidedTd, netTd);
+          tbodyEl.appendChild(tr);
+        }
+      },
+    }).setRows(counts);
   }
 
   document.getElementById("scf-reports-btn").addEventListener("click", renderHistoryReport);

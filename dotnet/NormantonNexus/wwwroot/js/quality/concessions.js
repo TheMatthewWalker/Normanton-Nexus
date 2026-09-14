@@ -68,54 +68,65 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
+    table.append(thead, tbody);
+    tableEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    tableEl.appendChild(pagerEl);
 
     // component/actualMaterial/reason/raisedByUsername are free text
     // (reason in particular is typed by a Production user raising the
     // concession) — every cell is built via textContent, never innerHTML,
     // so none of it is ever parsed as markup.
-    for (const c of rows) {
-      const tr = document.createElement("tr");
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const c of pageRows) {
+          const tr = document.createElement("tr");
 
-      const jobTd = document.createElement("td");
-      jobTd.textContent = jobLabel(c.processCode, c.recordId);
-      const batchTd = document.createElement("td");
-      batchTd.textContent = jobLabel(c.parentProcessCode, c.parentRecordId);
-      const componentTd = document.createElement("td");
-      componentTd.textContent = c.component;
-      const actualMaterialTd = document.createElement("td");
-      actualMaterialTd.textContent = c.actualMaterial;
-      const reasonTd = document.createElement("td");
-      reasonTd.textContent = c.reason;
-      const raisedByTd = document.createElement("td");
-      raisedByTd.textContent = c.raisedByUsername || "—";
-      const raisedAtTd = document.createElement("td");
-      raisedAtTd.textContent = formatDate(c.raisedAt);
+          const jobTd = document.createElement("td");
+          jobTd.textContent = jobLabel(c.processCode, c.recordId);
+          const batchTd = document.createElement("td");
+          batchTd.textContent = jobLabel(c.parentProcessCode, c.parentRecordId);
+          const componentTd = document.createElement("td");
+          componentTd.textContent = c.component;
+          const actualMaterialTd = document.createElement("td");
+          actualMaterialTd.textContent = c.actualMaterial;
+          const reasonTd = document.createElement("td");
+          reasonTd.textContent = c.reason;
+          const raisedByTd = document.createElement("td");
+          raisedByTd.textContent = c.raisedByUsername || "—";
+          const raisedAtTd = document.createElement("td");
+          raisedAtTd.textContent = formatDate(c.raisedAt);
 
-      const actionTd = document.createElement("td");
-      if (c.status === "PENDING") {
-        const approveBtn = document.createElement("button");
-        approveBtn.type = "button";
-        approveBtn.className = "qc-approve";
-        approveBtn.textContent = "Approve";
-        approveBtn.addEventListener("click", () => reviewConcession(c.concessionId, "approve"));
+          const actionTd = document.createElement("td");
+          if (c.status === "PENDING") {
+            const approveBtn = document.createElement("button");
+            approveBtn.type = "button";
+            approveBtn.className = "qc-approve";
+            approveBtn.textContent = "Approve";
+            approveBtn.addEventListener("click", () => reviewConcession(c.concessionId, "approve"));
 
-        const rejectBtn = document.createElement("button");
-        rejectBtn.type = "button";
-        rejectBtn.className = "secondary qc-reject";
-        rejectBtn.textContent = "Reject";
-        rejectBtn.addEventListener("click", () => reviewConcession(c.concessionId, "reject"));
+            const rejectBtn = document.createElement("button");
+            rejectBtn.type = "button";
+            rejectBtn.className = "secondary qc-reject";
+            rejectBtn.textContent = "Reject";
+            rejectBtn.addEventListener("click", () => reviewConcession(c.concessionId, "reject"));
 
-        actionTd.append(approveBtn, rejectBtn);
-      } else {
-        actionTd.textContent = c.reviewedByUsername || "—";
-      }
+            actionTd.append(approveBtn, rejectBtn);
+          } else {
+            actionTd.textContent = c.reviewedByUsername || "—";
+          }
 
-      tr.append(jobTd, batchTd, componentTd, actualMaterialTd, reasonTd, raisedByTd, raisedAtTd, actionTd);
-      tbody.appendChild(tr);
-    }
-
-    table.append(thead, tbody);
-    tableEl.appendChild(table);
+          tr.append(jobTd, batchTd, componentTd, actualMaterialTd, reasonTd, raisedByTd, raisedAtTd, actionTd);
+          tbodyEl.appendChild(tr);
+        }
+      },
+    }).setRows(rows);
   }
 
   async function reviewConcession(id, action) {

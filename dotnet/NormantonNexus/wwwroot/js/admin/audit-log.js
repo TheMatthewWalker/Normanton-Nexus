@@ -20,21 +20,31 @@
     try {
       const { data } = await api(`/audit?${params.toString()}`);
       const rows = data || [];
-      el.innerHTML = rows.length === 0 ? "<p>No matching events.</p>" : `
+      if (rows.length === 0) {
+        el.innerHTML = "<p>No matching events.</p>";
+        return;
+      }
+      el.innerHTML = `
         <p>${rows.length} event(s)</p>
         <table>
           <thead><tr><th>Time</th><th>Username</th><th>Event</th><th>Detail</th><th>IP</th></tr></thead>
-          <tbody>
-            ${rows.map((r) => `
+          <tbody id="al-tbody"></tbody>
+        </table>
+        <div class="nx-pager" id="al-pager"></div>`;
+
+      NexusTable.paginate({
+        container: document.getElementById("al-tbody"),
+        pagerContainer: document.getElementById("al-pager"),
+        pageSize: 25,
+        renderRows: (pageRows) => pageRows.map((r) => `
               <tr>
                 <td>${new Date(r.eventTime).toLocaleString("en-GB")}</td>
                 <td>${esc(r.username)}</td>
                 <td>${esc(r.eventType)}</td>
                 <td>${esc(r.detail)}</td>
                 <td>${esc(r.ipAddress)}</td>
-              </tr>`).join("")}
-          </tbody>
-        </table>`;
+              </tr>`).join(""),
+      }).setRows(rows);
     } catch (err) {
       el.innerHTML = `<div class="sap-error">${esc(err.message)}</div>`;
     }
