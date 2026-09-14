@@ -1,0 +1,31 @@
+@page
+@model NormantonNexus.Pages.Logistics.ChangeValuationClassModel
+@{
+    ViewData["Title"] = "Change Valuation Class";
+    ViewData["Department"] = "Logistics";
+    ViewData["PageTitle"] = "Change Valuation Class";
+    ViewData["PageSubtitle"] = "Search materials, pick a new valuation class per row, and post a real SAP change — moves stock to an order, runs MM02, moves stock back";
+}
+
+<p><a asp-page="Index">&larr; Logistics</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap">
+        <div class="tf-field"><label class="tf-label">SAP Order</label><input class="tf-input" type="text" id="cvc-order" style="width:130px"></div>
+        <div class="tf-field"><label class="tf-label">Plant (optional)</label><input class="tf-input" type="text" id="cvc-plant" style="width:70px"></div>
+        <div class="tf-field" style="flex:1;min-width:220px"><label class="tf-label">Search materials</label><input class="tf-input" type="text" id="cvc-search" placeholder="Material or description…"></div>
+        <div class="tf-field" style="justify-content:flex-end"><button type="button" class="btn" id="cvc-search-btn">Search</button></div>
+    </div>
+</div>
+
+<div id="cvc-materials-body"></div>
+
+<div id="cvc-submit-row" style="margin-top:10px" hidden>
+    <button type="button" class="btn" id="cvc-submit-btn">Submit Change</button>
+</div>
+
+<div id="cvc-results-body" style="margin-top:16px"></div>
+
+@section Scripts {
+    <script src="~/js/logistics/change-valuation-class.js"></script>
+}

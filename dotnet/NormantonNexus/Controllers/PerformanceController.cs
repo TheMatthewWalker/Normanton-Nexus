@@ -124,6 +124,40 @@ public sealed class PerformanceController(INexusDb nexusDb, INexusOperationsDb n
     public async Task<IActionResult> GetValuationClasses([FromQuery] string? materialType, CancellationToken ct) =>
         Ok(ApiResponse<IReadOnlyList<ValuationClassCatalogRow>>.Ok(await PerformanceDashboardHelper.GetValuationClassesAsync(nexusOperationsDb, materialType, ct)));
 
+    // Change Valuation Class — a genuine, confirmed live SAP write (moves
+    // stock to an order, runs MM02, moves stock back). Found missing by a
+    // later gap audit against the Node tile inventory (dotnet/CLAUDE.md's
+    // Sub-phase 8b.1 section already listed the read-only /valuation-classes
+    // route above, but this write route was never ported). No local
+    // SapServer checkout exists in this session to confirm the response
+    // shape against — see ChangeValuationClassResponse's own header comment.
+    [HttpPost("turns-valclass/change-valuation-class")]
+    [Authorize(Policy = "Perm:LOG_MRP")]
+    public async Task<IActionResult> ChangeValuationClass([FromBody] ChangeValuationClassRequest? body, CancellationToken ct)
+    {
+        if (body is null || string.IsNullOrWhiteSpace(body.Order) || body.Changes is not { Count: > 0 })
+            return BadRequest(ApiResponse<object>.Fail("VALIDATION", "order and at least one change are required."));
+
+        try
+        {
+            var result = await PerformanceDashboardHelper.PostChangeValuationClassAsync(sapServerClient, body, GetUserId(), ct)
+                ?? throw new NexusBadGatewayException("SapServer returned an empty response.");
+            await PerformanceDashboardHelper.LogValuationClassChangeBatchAsync(
+                nexusOperationsDb, body.Order, body.Plant, GetUserId(), GetUsername(), result.Success, result.TotalValueChange, result.ErrorMessage, result.Results, ct);
+            await audit.LogAsync("VALCLASS_CHANGE", GetUsername(), $"Order {body.Order}: {body.Changes.Count} material(s), success={result.Success}", GetIpAddress(), ct);
+            return Ok(ApiResponse<ChangeValuationClassResponse>.Ok(result));
+        }
+        catch (SapProxyException sapEx) when (sapEx.ResponseData is ChangeValuationClassResponse rejected)
+        {
+            // SapServer's own pre-check rejected the batch before attempting any SAP call
+            // (e.g. an order/material mismatch) — still log it, matching Node's own
+            // `if (err.data) { ...log the rejected batch... }` branch, then 422.
+            await PerformanceDashboardHelper.LogValuationClassChangeBatchAsync(
+                nexusOperationsDb, body.Order, body.Plant, GetUserId(), GetUsername(), rejected.Success, rejected.TotalValueChange, rejected.ErrorMessage ?? sapEx.Message, rejected.Results, ct);
+            return StatusCode(422, new ApiResponse<ChangeValuationClassResponse>(false, rejected, new ApiError("VALCLASS_REJECTED", sapEx.Message)));
+        }
+    }
+
     // ── Sub-phase 8b.2: Vendor master data (log.Vendor/log.VendorMaterial) ──
 
     [HttpGet("vendors")]

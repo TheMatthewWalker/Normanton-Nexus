@@ -107,3 +107,29 @@ public sealed record UpsertConsignmentCustomerRequest(string? CustomerName);
 public sealed record OrderBookLineNote(string? Risk, string? Reason, string? WontGet, string? LastDay, string? LastDayTime, string? BringForward, decimal? PlannedProductionQty);
 
 public sealed record ProductionPlanLine(string Time, string Customer, string Material, string? MaterialText, decimal Quantity, decimal Value);
+
+// ── Logistics: Change Valuation Class (POST /turns-valclass/change-valuation-class) ──
+// A genuine, confirmed live SAP write — moves stock to an order, runs MM02
+// to change the material's valuation class, then moves stock back (see
+// routes/performancesap.js's postChangeValuationClass, which posts to
+// SapServer's real api/performance/turns-valclass/change-valuation-class).
+// This repo has no local SapServer checkout to confirm the exact response
+// field set against (unlike most other real-SAP-write DTOs in this
+// migration) — modelled directly off routes/performance.js's own
+// logValuationClassChangeBatch call shape and routes/performancesap.js's
+// error-handling code instead. Verify against a live SapServer before
+// trusting a real valuation-class change through this route.
+
+public sealed record ChangeValuationClassChangeItem(string Material, string? NewValuationClass);
+
+public sealed record ChangeValuationClassRequest(string Order, string? Plant, IReadOnlyList<ChangeValuationClassChangeItem> Changes);
+
+public sealed record ChangeValuationClassResultItem(
+    string Material, string? MaterialText, string? Plant, decimal? StockQty,
+    string? OldValuationClass, string? NewValuationClass,
+    decimal? OldBookValue, decimal? NewBookValue, decimal? ValueChange,
+    bool Success, string? Message);
+
+public sealed record ChangeValuationClassResponse(
+    bool Success, decimal? TotalValueChange, string? ErrorMessage,
+    IReadOnlyList<ChangeValuationClassResultItem>? Results);

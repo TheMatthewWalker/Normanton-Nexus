@@ -559,6 +559,46 @@ internal static class PerformanceDashboardHelper
         return rows.AsList();
     }
 
+    // ── Change Valuation Class (POST /turns-valclass/change-valuation-class) ──
+    // See ChangeValuationClassRequest/Response's own header comment in
+    // PerformanceModels.cs for the unverified-against-live-SapServer caveat.
+    // The SapServer call itself throws SapProxyException on any non-success
+    // response (see ISapServerClient/SapProxyException) — the controller
+    // catches that to log the rejected batch and return a structured 422,
+    // matching routes/performance.js's own `if (err.data) {...}` branch.
+
+    internal static Task<ChangeValuationClassResponse?> PostChangeValuationClassAsync(
+        ISapServerClient sap, ChangeValuationClassRequest request, int userId, CancellationToken ct) =>
+        sap.PostAsync<ChangeValuationClassResponse>(
+            "api/performance/turns-valclass/change-valuation-class",
+            new { order = request.Order, plant = request.Plant, changes = request.Changes },
+            userId, ct: ct);
+
+    internal static async Task LogValuationClassChangeBatchAsync(
+        INexusOperationsDb db, string orderNumber, string? plant, int userId, string? userName,
+        bool success, decimal? totalValueChange, string? errorMessage,
+        IReadOnlyList<ChangeValuationClassResultItem>? results, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var batchId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
+            INSERT INTO log.ValuationClassChangeBatch
+                (OrderNumber, Plant, RequestedByUserID, RequestedByName, Success, TotalValueChange, ErrorMessage)
+            OUTPUT INSERTED.BatchID
+            VALUES (@orderNumber, @plant, @userId, @userName, @success, @totalValueChange, @errorMessage)
+            """, new { orderNumber, plant, userId, userName, success, totalValueChange, errorMessage }, cancellationToken: ct));
+
+        if (results is not { Count: > 0 }) return;
+
+        foreach (var r in results)
+        {
+            await connection.ExecuteAsync(new CommandDefinition("""
+                INSERT INTO log.ValuationClassChangeDetail
+                    (BatchID, Material, MaterialText, Plant, StockQty, OldValuationClass, NewValuationClass, OldBookValue, NewBookValue, ValueChange, Success, Message)
+                VALUES (@batchId, @Material, @MaterialText, @Plant, @StockQty, @OldValuationClass, @NewValuationClass, @OldBookValue, @NewBookValue, @ValueChange, @Success, @Message)
+                """, new { batchId, r.Material, r.MaterialText, r.Plant, r.StockQty, r.OldValuationClass, r.NewValuationClass, r.OldBookValue, r.NewBookValue, r.ValueChange, r.Success, r.Message }, cancellationToken: ct));
+        }
+    }
+
     // ── Consignment customers (log.ConsignmentCustomer) — Sub-phase 8b.6 ────
     // Customers on a consignment stock agreement, excluded from
     // GetOrderBookSummaryAsync/GetOrderBookBreakdownAsync above (see those
