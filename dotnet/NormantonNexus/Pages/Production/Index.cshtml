@@ -12,14 +12,17 @@
     private/production-nexus.html exactly (Production Entry / Production
     Data / Staging Post / Supervisor / Reports) rather than this page's own
     earlier ad-hoc grouping — restored for navigation parity. A later gap
-    audit against the Node tile inventory found Mixing Data, Drumming Data
-    and Failed Backflush were genuinely missing (not deliberately deferred)
-    and they're now built and listed below — Mixing Data needed its backend
-    route built too (GetDataAsync/mixing/data), Drumming Data's and Failed
-    Backflush's backends already existed. "Expired Mix Batches" is still a
-    real, tracked gap (no backend port found anywhere in this migration) —
-    deliberately NOT listed rather than linking to a page that doesn't
-    exist. Billet Staging and Order Lookup are dotnet-only additions with no
+    audit against the Node tile inventory found Mixing Data, Drumming Data,
+    Failed Backflush and Expired Mix Batches were all genuinely missing (not
+    deliberately deferred) and they're now all built and listed below —
+    Mixing Data and Expired Mix Batches both needed real backend work too
+    (MixingHelper.GetDataAsync/mixing/data; BilletStagingHelper.
+    GetExpiredAsync/ScrapExpiredTubAsync/OverrideExpiryAsync — gated with the
+    literal legacy PROD_SUPERVISOR code rather than a new per-tile one, since
+    minting one needs the dotnet ef migration tooling this session doesn't
+    have — see ProductionNexusController's own comment on the three new
+    mixing/expired* routes), Drumming Data's and Failed Backflush's backends
+    already existed. Billet Staging and Order Lookup are dotnet-only additions with no
     top-level Node tile of their own (Node reaches both through the
     Extrusion/Drumming wizards' own pickers) — kept in Production Entry since
     that's where they belong conceptually, not removed just to match Node
@@ -149,6 +152,10 @@
     <a class="tile" asp-page="FailedBackflush">
         <p class="tile-title">Failed Backflush</p>
         <p class="tile-hint">Records saved locally but rejected by SAP — retry or cancel</p>
+    </a>
+    <a class="tile" asp-page="ExpiredMixBatches">
+        <p class="tile-title">Expired Mix Batches</p>
+        <p class="tile-hint">Unstaged mix tubs over 96 hours old — approve scrap, or override and stage anyway</p>
     </a>
 </div>
 

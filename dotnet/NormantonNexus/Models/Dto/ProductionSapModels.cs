@@ -88,3 +88,21 @@ public sealed record FindBackflushDocumentRequest(string Batch);
 
 /// <summary>Mirrors SapServer's BackflushDocumentRow field-for-field — the original 131 (backflush) movement for a batch, found via MSEG. SapServer returns HTTP 400 (not a 200 with an empty row) when no matching movement exists — see RedrumReversalHelper's catch on SapProxyException.StatusCode == 400 for the normal, non-redrum case.</summary>
 public sealed record BackflushDocumentRow(string MaterialDocument, string Material, decimal Quantity, string StorageLocation);
+
+/// <summary>
+/// POST /api/production/mixing-scrap (BAPI_GOODSMVT_CREATE, movement 551) —
+/// the mix-expiry finished-good scrap endpoint, distinct from
+/// ScrapPostRequest (which explodes a BOM and posts one line per
+/// component). Node's own parseMixingScrapResponse comment describes the
+/// response as "StockAdjustmentResponse-shaped" (materialDocument + a
+/// computed success flag), with a Messages list for the failure-message
+/// join Node's own error branch does — this repo has no local checkout of
+/// SapServer to confirm the exact field set against, so this DTO is
+/// modelled directly off that Node-side contract description rather than
+/// SapServer's own C# source; verify against a live SapServer/SAP system
+/// before trusting a real scrap posting through it, same caveat class as
+/// every other real-SAP-write DTO in this migration.
+/// </summary>
+public sealed record MixingScrapRequest(string Material, decimal Quantity, string ScrapReason, string Header);
+
+public sealed record MixingScrapResponse(string? MaterialDocument, bool Success, List<SapReturnMessage>? Messages);

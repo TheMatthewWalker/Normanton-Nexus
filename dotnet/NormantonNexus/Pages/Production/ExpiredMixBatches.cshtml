@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Production.ExpiredMixBatchesModel
+@{
+    ViewData["Title"] = "Expired Mix Batches";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Expired Mix Batches";
+    ViewData["PageSubtitle"] = "Unstaged mix tubs over 96 hours old — approve scrap, or override and stage anyway";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div id="emb-body"><div class="nx-empty">Loading…</div></div>
+
+@section Scripts {
+    <script src="~/js/production/expired-mix-batches.js"></script>
+}

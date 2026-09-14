@@ -90,6 +90,43 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return Ok(ApiResponse<IReadOnlyList<TubSearchRow>>.Ok(rows));
     }
 
+    // Expired Mix Batches — a real, working Node tile with no prior C# port
+    // at all (backend or frontend), found by a later gap audit against the
+    // Node tile inventory rather than scoped into Sub-phase 6b's original
+    // Billet Staging slice. Gated with the literal legacy PROD_SUPERVISOR
+    // code, matching Node's own requirePermission('PROD_SUPERVISOR') exactly
+    // — Phase 10 Slice 5 split that code into 9 per-tile codes for every
+    // tile that already existed at the time, but minting a matching new
+    // per-tile code here would need a real SeedProductionPermissions-style
+    // EF migration (dotnet ef migrations add, updating the model snapshot),
+    // which isn't possible in this session (no dotnet SDK available) —
+    // PROD_SUPERVISOR itself is still registered and still held by every
+    // existing supervisor for exactly this reason (see
+    // ProductionReportsHelper.cs's own Phase 10 Slice 5 notes).
+    [HttpGet("mixing/expired")]
+    [Authorize(Policy = "Perm:PROD_SUPERVISOR")]
+    public async Task<IActionResult> ExpiredMixBatches(CancellationToken ct)
+    {
+        var rows = await BilletStagingHelper.GetExpiredAsync(nexusOperationsDb, ct);
+        return Ok(ApiResponse<IReadOnlyList<ExpiredMixTubRow>>.Ok(rows));
+    }
+
+    [HttpPost("mixing/tubs/{tubId:int}/expiry/scrap")]
+    [Authorize(Policy = "Perm:PROD_SUPERVISOR")]
+    public async Task<IActionResult> ScrapExpiredTub(int tubId, [FromBody] ScrapExpiredTubRequest body, CancellationToken ct)
+    {
+        var result = await BilletStagingHelper.ScrapExpiredTubAsync(nexusOperationsDb, sapServerClient, auditLogger, tubId, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<ScrapExpiredTubResult>.Ok(result));
+    }
+
+    [HttpPost("mixing/tubs/{tubId:int}/expiry/override")]
+    [Authorize(Policy = "Perm:PROD_SUPERVISOR")]
+    public async Task<IActionResult> OverrideExpiry(int tubId, [FromBody] OverrideExpiryRequest body, CancellationToken ct)
+    {
+        var result = await BilletStagingHelper.OverrideExpiryAsync(nexusOperationsDb, tubId, body, GetUserId(), ct);
+        return Ok(ApiResponse<OverrideExpiryResult>.Ok(result));
+    }
+
     [HttpGet("failed-backflush")]
     [Authorize(Policy = "Perm:" + ProductionReportsHelper.FnFailedBackflush)]
     public async Task<IActionResult> FailedBackflushQueue(CancellationToken ct)

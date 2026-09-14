@@ -3,6 +3,8 @@ using Dapper;
 using Microsoft.Data.SqlClient;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
+using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Production;
@@ -184,5 +186,168 @@ internal static partial class BilletStagingHelper
             ORDER BY m.CompletedAt DESC
             """, new { like }, cancellationToken: ct));
         return rows.ToArray();
+    }
+
+    /// <summary>
+    /// GET mixing/expired — mixes produced but not (or no longer) staged
+    /// into Billet, over the 96h expiry window and not already scrapped or
+    /// expiry-overridden. Mirrors GetQueueAsync's own filter with the
+    /// AgeHoursSql comparison flipped (&gt;96 here vs &lt;=96 there) — the
+    /// two queues are deliberately disjoint, matching Node's own comment on
+    /// GET /mixing/staging/queue ("Expired (&gt;96h) tubs are deliberately
+    /// excluded here — they only ever surface on the supervisor 'Expired Mix
+    /// Batches' queue").
+    /// </summary>
+    internal static async Task<IReadOnlyList<ExpiredMixTubRow>> GetExpiredAsync(INexusOperationsDb db, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<ExpiredMixTubRow>(new CommandDefinition($"""
+            SELECT t.TubID AS TubId, t.MixingID AS MixingId, t.TubSeq, t.SupplierTubNo, t.TubWeightKG AS TubWeightKg,
+                   m.Material, m.MixCode, m.MixRef, m.CompletedAt, {AgeHoursSql} AS AgeHours
+            FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+            WHERE {AgeHoursSql} > 96 AND t.IsStaged = 0 AND t.IsScrapped = 0
+              AND t.ExpiryOverrideAt IS NULL AND t.SAPSuccess = 1
+              AND m.IsReversed = 0 AND m.Status NOT IN (5, 6)
+            ORDER BY m.CompletedAt ASC
+            """, cancellationToken: ct));
+        return rows.ToArray();
+    }
+
+    private sealed record TubForExpiry(int MixingId, decimal TubWeightKg, bool IsStaged, bool IsScrapped, DateTime? ExpiryOverrideAt, string? MixCode, string? MixRef, decimal AgeHours);
+
+    /// <summary>
+    /// POST mixing/tubs/:tubId/expiry/scrap — approve scrapping an expired,
+    /// unstaged tub. Posts a real SAP scrap movement against the mix
+    /// material itself (MixingScrapRequest — see that DTO's own header
+    /// comment for the "unverified against a live SapServer" caveat), then
+    /// reuses the existing prod.ScrapEntries approve/post shape (same
+    /// fields Approve Scrap's own ApproveOneAsync writes) so Posted
+    /// Scrap/Scrap Reversal pick this up for free. On a SAP failure the
+    /// scrap entry is left recorded (SAPPosted=0, error message attached)
+    /// rather than rolled back — same "the record was saved, only the SAP
+    /// posting failed" convention as every other Production write action —
+    /// and the tub itself is NOT marked scrapped, so a supervisor can retry.
+    /// </summary>
+    internal static async Task<ScrapExpiredTubResult> ScrapExpiredTubAsync(
+        INexusOperationsDb db, ISapServerClient sap, IAuditLogger audit, int tubId, ScrapExpiredTubRequest body,
+        string? username, string? ipAddress, int userId, CancellationToken ct)
+    {
+        var reasonId = body.ReasonId ?? 241; // default: "Out of date polymer mix" (AppliesTo='MX')
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var tub = await connection.QuerySingleOrDefaultAsync<TubForExpiry?>(new CommandDefinition($"""
+            SELECT t.MixingID AS MixingId, t.TubWeightKG AS TubWeightKg, t.IsStaged, t.IsScrapped, t.ExpiryOverrideAt,
+                   m.MixCode, m.MixRef, {AgeHoursSql} AS AgeHours
+            FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+            WHERE t.TubID = @tubId
+            """, new { tubId }, cancellationToken: ct));
+
+        if (tub is null) throw new NexusNotFoundException("Tub not found.");
+        if (tub.IsScrapped) throw new NexusConflictException("This tub has already been scrapped.");
+        if (tub.IsStaged) throw new NexusConflictException("This tub is already staged into Billet — scrapping is only for unstaged, expired tubs.");
+        if (tub.ExpiryOverrideAt is not null) throw new NexusConflictException("This tub's expiry has already been overridden.");
+        if (tub.AgeHours <= 96) throw new NexusConflictException("This tub is not yet expired.");
+
+        var mixRef = tub.MixRef ?? $"MX{tub.MixingId:D8}";
+
+        var scrapId = await connection.QuerySingleAsync<int>(new CommandDefinition("""
+            INSERT INTO prod.ScrapEntries (ProcessCode, ProcessRecordID, ReasonID, Quantity, UnitOfMeasure, EnteredByUserID)
+            OUTPUT INSERTED.ScrapID
+            VALUES ('MX', @mixingId, @reasonId, @qty, 'KG', @userId)
+            """, new { mixingId = tub.MixingId, reasonId, qty = tub.TubWeightKg, userId }, cancellationToken: ct));
+
+        try
+        {
+            var sapResponse = await sap.PostAsync<MixingScrapResponse>("api/production/mixing-scrap",
+                new MixingScrapRequest(tub.MixCode ?? "", tub.TubWeightKg, "4917", mixRef), userId, ct: ct)
+                ?? throw new NexusBadGatewayException("SapServer returned no scrap posting result.");
+
+            if (!sapResponse.Success)
+            {
+                var msg = sapResponse.Messages is { Count: > 0 } msgs
+                    ? string.Join(" ", msgs.Select(m => m.Message).Where(m => !string.IsNullOrEmpty(m)))
+                    : "";
+                throw new InvalidOperationException(string.IsNullOrEmpty(msg) ? "SAP rejected the mixing scrap posting." : msg);
+            }
+
+            var sapMatDoc = sapResponse.MaterialDocument;
+
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE prod.ScrapEntries SET IsApproved = 1, ApprovedAt = GETDATE(), ApprovedByUserID = @userId,
+                       SAPPosted = 1, SAPMaterialDocument = @sapMatDoc, SAPErrorMessage = NULL
+                WHERE ScrapID = @scrapId
+                """, new { userId, sapMatDoc, scrapId }, cancellationToken: ct));
+
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE prod.MixingTubs SET IsScrapped = 1, ScrappedAt = GETDATE(), ScrappedByUserID = @userId,
+                       ScrapReasonID = @reasonId, ScrapMaterialDocumentSAP = @sapMatDoc, ScrapSAPErrorMessage = NULL
+                WHERE TubID = @tubId
+                """, new { userId, reasonId, sapMatDoc, tubId }, cancellationToken: ct));
+
+            await connection.ExecuteAsync(new CommandDefinition("""
+                INSERT INTO prod.SAPPostings (ProcessCode, ProcessRecordID, PostingType, Quantity, UnitOfMeasure, MaterialDocumentSAP, IsSuccess, PostedByUserID)
+                VALUES ('MX', @mixingId, 'SCRAP', @qty, 'KG', @sapMatDoc, 1, @userId)
+                """, new { mixingId = tub.MixingId, qty = tub.TubWeightKg, sapMatDoc, userId }, cancellationToken: ct));
+
+            await audit.LogAsync("SAP_OK", username, $"Mixing tub {tubId} SCRAP POSTED - Material Document = '{sapMatDoc}'", ipAddress, ct);
+            await ProductionEventLogHelper.WriteEventAsync(connection, "MX", tub.MixingId, "SCRAP",
+                $"Tub {tubId} scrapped (expired, {tub.AgeHours:F1}h) — MatDoc: {sapMatDoc}", 1, userId, ct);
+
+            return new ScrapExpiredTubResult(tubId, scrapId, sapMatDoc);
+        }
+        catch (Exception sapErr) when (sapErr is not NexusApiException)
+        {
+            var errMsg = sapErr.Message;
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE prod.ScrapEntries SET IsApproved = 1, ApprovedAt = GETDATE(), ApprovedByUserID = @userId,
+                       SAPPosted = 0, SAPErrorMessage = @errMsg
+                WHERE ScrapID = @scrapId
+                """, new { userId, errMsg, scrapId }, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE prod.MixingTubs SET ScrapSAPErrorMessage = @errMsg WHERE TubID = @tubId",
+                new { errMsg, tubId }, cancellationToken: ct));
+
+            await audit.LogAsync("SAP_ERROR", username, $"Mixing tub {tubId} SCRAP FAILED - Message = \"{errMsg}\"", ipAddress, ct);
+            throw new NexusBadGatewayException($"SAP scrap posting failed: {errMsg}");
+        }
+    }
+
+    private sealed record TubForOverride(int MixingId, decimal TubWeightKg, bool IsStaged, bool IsScrapped, decimal AgeHours, decimal ReturnedKg);
+
+    /// <summary>POST mixing/tubs/:tubId/expiry/override — supervisor override, moves an expired, unstaged tub into Billet anyway with a required reason, unblocking backflush for anything linked to it. No SAP call at all.</summary>
+    internal static async Task<OverrideExpiryResult> OverrideExpiryAsync(INexusOperationsDb db, int tubId, OverrideExpiryRequest body, int userId, CancellationToken ct)
+    {
+        var reason = (body.Reason ?? "").Trim();
+        if (reason.Length == 0)
+        {
+            throw new NexusValidationException("A reason is required to override expiry.");
+        }
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var tub = await connection.QuerySingleOrDefaultAsync<TubForOverride?>(new CommandDefinition($"""
+            SELECT t.MixingID AS MixingId, t.TubWeightKG AS TubWeightKg, t.IsStaged, t.IsScrapped,
+                   {AgeHoursSql} AS AgeHours,
+                   (SELECT ISNULL(SUM(QuantityKG), 0) FROM prod.MixingTubReturns WHERE TubID = t.TubID) AS ReturnedKg
+            FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID
+            WHERE t.TubID = @tubId
+            """, new { tubId }, cancellationToken: ct));
+
+        if (tub is null) throw new NexusNotFoundException("Tub not found.");
+        if (tub.IsScrapped) throw new NexusConflictException("This tub has been scrapped.");
+        if (tub.IsStaged) throw new NexusConflictException("This tub is already staged.");
+        if (tub.AgeHours <= 96) throw new NexusConflictException("This tub is not yet expired — use the normal staging action.");
+
+        var balance = Math.Round((tub.TubWeightKg - tub.ReturnedKg) * 1000) / 1000;
+        await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE prod.MixingTubs
+            SET IsStaged = 1, StagedAt = GETDATE(), ConditioningTimeHours = @ageHours, StagedByUserID = @userId, StagedQuantityKG = @balance,
+                ExpiryOverrideAt = GETDATE(), ExpiryOverrideByUserID = @userId, ExpiryOverrideReason = @reason
+            WHERE TubID = @tubId
+            """, new { ageHours = tub.AgeHours, userId, balance, reason, tubId }, cancellationToken: ct));
+
+        await ProductionEventLogHelper.WriteEventAsync(connection, "MX", tub.MixingId, "NOTE",
+            $"Expiry overridden by supervisor for tub {tubId} ({tub.AgeHours:F1}h) — {reason}", 1, userId, ct);
+
+        return new OverrideExpiryResult(tubId, balance);
     }
 }

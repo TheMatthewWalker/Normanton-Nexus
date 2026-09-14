@@ -25,3 +25,24 @@ public sealed record TubSearchRow(
     int TubId, int MixingId, int TubSeq, string SupplierTubNo, decimal TubWeightKg,
     bool IsStaged, decimal? StagedQuantityKg, decimal? ConditioningTimeHours, bool IsScrapped,
     string Material, string MixCode, string? MixRef, DateTime? CompletedAt, decimal AgeHours, string Bucket);
+
+// Expired Mix Batches — GET mixing/expired + the two supervisor actions
+// (scrap the expired tub for real via SAP, or override the expiry and
+// stage it anyway). Genuinely missing from every prior slice of this
+// migration — found by a later gap audit against the Node tile inventory,
+// not a deliberate deferral. Reuses GetQueueAsync's AgeHoursSql fragment
+// but with the opposite >96h filter, matching Node's own GET
+// /mixing/expired query exactly.
+
+public sealed record ExpiredMixTubRow(
+    int TubId, int MixingId, int TubSeq, string SupplierTubNo, decimal TubWeightKg,
+    string Material, string MixCode, string? MixRef, DateTime? CompletedAt, decimal AgeHours);
+
+/// <summary>ReasonId defaults to 241 ("Out of date polymer mix", AppliesTo='MX') when omitted, matching Node's `Number(req.body?.reasonID) || 241`.</summary>
+public sealed record ScrapExpiredTubRequest(int? ReasonId);
+
+public sealed record ScrapExpiredTubResult(int TubId, int ScrapId, string? MaterialDocument);
+
+public sealed record OverrideExpiryRequest(string? Reason);
+
+public sealed record OverrideExpiryResult(int TubId, decimal StagedQuantityKg);
