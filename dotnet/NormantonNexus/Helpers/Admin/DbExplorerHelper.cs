@@ -98,7 +98,7 @@ internal static class DbExplorerHelper
                 c.column_id AS ColumnId, c.name AS ColumnName, ty.name AS DataType, c.max_length AS MaxLength,
                 c.precision AS Precision, c.scale AS Scale, c.is_nullable AS IsNullable, c.is_identity AS IsIdentity,
                 dc.definition AS DefaultValue,
-                CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS IsPrimaryKey
+                CAST(CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS BIT) AS IsPrimaryKey
             FROM {dbBracket}.sys.columns c
             JOIN {dbBracket}.sys.types ty ON ty.user_type_id = c.user_type_id
             JOIN {dbBracket}.sys.tables t ON t.object_id = c.object_id

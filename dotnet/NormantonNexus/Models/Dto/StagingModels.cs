@@ -83,3 +83,6 @@ public sealed record StagingStockRow(
 public sealed record RequestStockResult(IReadOnlyList<StagingStockRow> Stock, bool HasRestrictions, string? RequestedBatch);
 
 public sealed record MaterialRequestUnitRow(int RequestUnitId, string Material, string Unit, decimal ConversionQty);
+
+/// <summary>The admin-list shape (GET /api/material-request-units) — genuinely wider than MaterialRequestUnitRow's GET /by-material/:material shape in Node's own two routes, not a naming accident; kept as a separate record rather than widening MaterialRequestUnitRow itself, since Dapper's strict record-constructor binding needs the query's actual column count to match the target type's constructor exactly, and the two routes return different column counts by design.</summary>
+public sealed record MaterialRequestUnitAdminRow(int RequestUnitId, string Material, string Unit, decimal ConversionQty, string? CreatedBy, DateTime CreatedAtUtc, DateTime? UpdatedAtUtc);

@@ -49,7 +49,7 @@ internal static class ScrapReversalHelper
                sr.ReasonCode, sr.ReasonDescription,
                pu.Username AS PostedBy,
                prc.BatchRef, prc.Material,
-               CASE WHEN ISNULL(prc.ProcRev, 0) = 1
+               CAST(CASE WHEN ISNULL(prc.ProcRev, 0) = 1
                       OR EXISTS (
                            SELECT 1 FROM prod.SAPPostings sp2
                            WHERE  sp2.ProcessCode      = se.ProcessCode
@@ -57,7 +57,7 @@ internal static class ScrapReversalHelper
                              AND  sp2.IsReversed       = 1
                              AND  sp2.MaterialDocumentSAP IS NOT NULL
                          )
-                    THEN 1 ELSE 0 END AS BackflushReversed
+                    THEN 1 ELSE 0 END AS BIT) AS BackflushReversed
         FROM   prod.ScrapMaterialDocuments smd
         JOIN   prod.ScrapEntries se ON se.ScrapID = smd.ScrapID
         LEFT JOIN prod.ScrapReasons sr ON sr.ReasonID = se.ReasonID

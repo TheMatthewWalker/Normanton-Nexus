@@ -327,7 +327,7 @@ public sealed class LogisticsReferenceController(INexusOperationsDb nexusOperati
 
     [HttpGet("material-request-units")]
     public async Task<IActionResult> ListMaterialRequestUnits(CancellationToken ct) =>
-        Ok(ApiResponse<IReadOnlyList<MaterialRequestUnitRow>>.Ok(await MaterialRequestUnitsHelper.ListAllAsync(nexusOperationsDb, ct)));
+        Ok(ApiResponse<IReadOnlyList<MaterialRequestUnitAdminRow>>.Ok(await MaterialRequestUnitsHelper.ListAllAsync(nexusOperationsDb, ct)));
 
     [HttpGet("material-request-units/by-material/{material}")]
     public async Task<IActionResult> GetMaterialRequestUnitsByMaterial(string material, CancellationToken ct) =>

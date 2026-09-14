@@ -135,7 +135,7 @@ internal static class DeliveryCompletionHelper
             // SAP under two different VBELNs).
             var pallets = (await connection.QueryAsync<ZdelflagPalletRow>(new CommandDefinition("""
                 SELECT pm.palletID AS PalletId, pm.palletType AS PalletType, pm.grossWeight AS GrossWeight, pm.packagingWeight AS PackagingWeight,
-                       CASE WHEN dl.deliveryID = @deliveryId THEN 1 ELSE 0 END AS IsOwned
+                       CAST(CASE WHEN dl.deliveryID = @deliveryId THEN 1 ELSE 0 END AS BIT) AS IsOwned
                 FROM log.PalletMain pm
                 INNER JOIN log.DeliveryLink dl ON pm.palletID = dl.palletID
                 WHERE pm.palletRemoved = 0

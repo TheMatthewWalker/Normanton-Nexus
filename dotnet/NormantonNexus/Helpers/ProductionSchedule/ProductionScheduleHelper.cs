@@ -227,7 +227,16 @@ internal static class ProductionScheduleHelper
 
         var trackedSql = "SELECT TrackingID AS TrackingId, ReferenceDocument, Item, DueDate FROM log.OrderFulfillmentTracking WHERE Status = 'OPEN'";
         var trackedRows = (await connection.QueryAsync<TrackedRow>(new CommandDefinition(trackedSql, cancellationToken: ct))).ToList();
-        var trackedMap = trackedRows.ToDictionary(r => (r.ReferenceDocument, r.Item));
+        // Built via a manual last-wins loop, not .ToDictionary() — mirrors Node's own
+        // `new Map(trackedOpen.map(r => [key, r]))` exactly. A JS Map silently keeps the
+        // last entry on a duplicate key; .ToDictionary() throws ArgumentException instead,
+        // which is exactly what crashed this job for real (two OPEN OrderFulfillmentTracking
+        // rows sharing a (ReferenceDocument, Item) key, most likely a downstream symptom of
+        // RunFullRefreshAsync's own now-fixed overlap race duplicating AgreementSnapshot rows
+        // on a prior run). Not a Node behavior worth preserving as a "bug" — a straightforward
+        // ToDictionary-vs-Map semantic mismatch from the port, fixed by construction.
+        var trackedMap = new Dictionary<(string ReferenceDocument, string Item), TrackedRow>();
+        foreach (var r in trackedRows) trackedMap[(r.ReferenceDocument, r.Item)] = r;
 
         var inserted = 0;
         foreach (var row in openRows)

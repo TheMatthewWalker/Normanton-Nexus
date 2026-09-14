@@ -50,7 +50,7 @@ public sealed record BulkStatusResult(IReadOnlyList<BulkStatusRowResult> Results
 
 public sealed record AuditLogQuery(string? Event, string? Username, string? Detail, DateTime? From, DateTime? To);
 
-public sealed record AuditLogRow(long LogId, DateTime EventTime, string? Username, string EventType, string? Detail, string? IpAddress);
+public sealed record AuditLogRow(int LogId, DateTime EventTime, string? Username, string EventType, string? Detail, string? IpAddress);
 
 public sealed record PermissionDefinitionRow(string PermissionCode, string PermissionName, string? Description, string Category, DateTime CreatedAt);
 

@@ -19,10 +19,10 @@ namespace NormantonNexus.Helpers.Logistics;
 /// </summary>
 internal static class MaterialRequestUnitsHelper
 {
-    internal static async Task<IReadOnlyList<MaterialRequestUnitRow>> ListAllAsync(INexusOperationsDb db, CancellationToken ct)
+    internal static async Task<IReadOnlyList<MaterialRequestUnitAdminRow>> ListAllAsync(INexusOperationsDb db, CancellationToken ct)
     {
         using var connection = await db.CreateConnectionAsync(ct);
-        var rows = await connection.QueryAsync<MaterialRequestUnitRow>(new CommandDefinition("""
+        var rows = await connection.QueryAsync<MaterialRequestUnitAdminRow>(new CommandDefinition("""
             SELECT RequestUnitId, Material, Unit, ConversionQty, CreatedBy, CreatedAtUtc, UpdatedAtUtc
             FROM log.MaterialRequestUnits ORDER BY Material, Unit
             """, cancellationToken: ct));
