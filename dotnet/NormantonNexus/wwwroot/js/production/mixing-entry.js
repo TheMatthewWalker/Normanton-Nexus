@@ -23,42 +23,40 @@
       total += Number(tub.weightKg) || 0;
 
       const row = document.createElement("div");
-      row.style.display = "flex";
-      row.style.alignItems = "center";
-      row.style.gap = "0.5rem";
-      row.style.padding = "0.25rem 0";
+      row.className = "item-row";
 
-      const label = document.createElement("span");
-      label.style.width = "1.5rem";
-      label.style.textAlign = "right";
-      label.style.color = "#6b7280";
-      label.textContent = `${idx + 1}.`;
+      const index = document.createElement("span");
+      index.className = "item-row-index";
+      index.textContent = String(idx + 1);
+
+      const fields = document.createElement("div");
+      fields.className = "item-row-fields";
 
       const input = document.createElement("input");
       input.type = "number";
-      input.className = "tf-input";
+      input.className = "tf-input tf-input--sm";
       input.step = "0.001";
       input.min = "0.001";
       input.max = String(MAX_TUB_WEIGHT_KG);
       input.placeholder = "Weight (KG)";
       input.value = tub.weightKg;
-      input.style.maxWidth = "160px";
       input.addEventListener("input", () => {
         tub.weightKg = input.value;
         renderTotal();
       });
 
       const unit = document.createElement("span");
-      unit.style.fontSize = "0.8rem";
-      unit.style.color = "#6b7280";
+      unit.className = "item-row-unit";
       unit.textContent = "KG";
 
-      row.append(label, input, unit);
+      fields.append(input, unit);
+      row.append(index, fields);
 
       if (tubs.length > 1) {
         const removeBtn = document.createElement("button");
         removeBtn.type = "button";
-        removeBtn.className = "secondary";
+        removeBtn.className = "item-row-remove";
+        removeBtn.title = "Remove tub";
         removeBtn.textContent = "×";
         removeBtn.addEventListener("click", () => {
           tubs.splice(idx, 1);

@@ -1114,3 +1114,97 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 .lg-doc-links { display: flex; flex-direction: column; gap: 4px; }
 .lg-doc-links a { font-size: 11.5px; }
 @media (max-width: 640px) { .lg-post-grid { grid-template-columns: 1fr; } }
+
+/* ── PRODUCTION ENTRY: REPEATING LINE-ITEM PANELS (tubs, parent batches,
+   raw material batches, coil lengths, scrap reasons) ───────────────────────
+   Design approved via the /design canvas "Mixing Entry Template" — one
+   reusable card+row pattern for every dynamic list Production's entry pages
+   build (Mixing's tubs, Drumming's parent batches/coil lengths/scrap
+   reasons, the Complete Run wizard's parent/raw-material/scrap batches),
+   replacing the earlier ad-hoc flexbox divs with inline styles per row. */
+.item-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 8px; }
+.item-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+.item-panel-head-text { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.item-panel-title { font-size: 14px; font-weight: 800; color: var(--night); }
+.item-panel-hint { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
+.item-list { display: flex; flex-direction: column; }
+.item-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.item-row:last-child { border-bottom: none; }
+.item-row:nth-child(even) { background: var(--surface2); }
+.item-row-index {
+  flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+  color: var(--text-dim); background: var(--bg); border-radius: 7px;
+}
+.item-row-fields { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 10px; }
+.item-row-fields .tf-input { flex: 1 1 140px; }
+.item-row-fields .tf-input--sm { flex: 0 1 150px; }
+.item-row-unit { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; color: var(--text-muted); white-space: nowrap; }
+.item-row-remove {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center; transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.item-row-remove:hover { border-color: var(--error); color: var(--error); background: var(--error-dim); }
+.item-panel-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; background: var(--surface2); border-top: 1px solid var(--border); }
+
+/* Conditional sub-block (e.g. Drumming's Make-to-Order fields, revealed
+   when a selection changes what the rest of the form needs) — a tinted
+   callout rather than another plain row, so it reads as "extra fields
+   because of that choice" rather than part of the base form. */
+.conditional-row { background: var(--accent-dim); border: 1px solid rgba(37,99,235,0.25); border-radius: 10px; padding: 14px 16px 4px; margin: 0 0 14px; }
+.conditional-row-label { display: flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; color: var(--accent2); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+/* A resolved-not-typed field value (e.g. Drumming's Material once an order
+   item has been picked) — visually distinct from a normal editable
+   .tf-input so an operator never mistakes it for something to type into. */
+.tf-input--resolved { background: var(--bg); border-style: dashed; color: var(--text-dim); cursor: default; }
+
+/* ── PROGRESSIVE STEPPER (multi-section entry wizards) ──────────────────────
+   Design approved via the /design canvas "Mixing Entry Template" —
+   Drumming's Details/Traceability/Coil Lengths/Scrap/Review steps and the
+   Complete Run wizard's Open Drafts/New Draft/Complete Run steps both use
+   this. Two tab-state variants, deliberately different: a linear wizard
+   (Drumming) marks passed steps "done" with a checkmark (.step-tab.is-done)
+   since it genuinely only progresses one way; a branching wizard (Complete
+   Run — pick an existing draft OR create one) only ever shows active/
+   enabled/disabled, since a completed tick would misrepresent a flow with
+   more than one path through it. */
+.stepper { display: flex; align-items: flex-start; margin-bottom: 8px; }
+.step-tab {
+  appearance: none; border: none; background: none; padding: 4px 2px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  flex: 1 1 0; min-width: 0; font-family: 'Manrope', sans-serif; cursor: pointer;
+}
+.step-tab:disabled, .step-tab.is-disabled { cursor: not-allowed; }
+.step-tab:disabled .step-circle, .step-tab.is-disabled .step-circle,
+.step-tab:disabled .step-label, .step-tab.is-disabled .step-label { opacity: 0.45; }
+.step-circle {
+  width: 30px; height: 30px; border-radius: 50%; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 11.5px;
+  border: 2px solid var(--border); background: var(--surface); color: var(--text-muted);
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.step-tab.is-active .step-circle { border-color: var(--accent); background: var(--accent); color: #fff; }
+.step-tab.is-done .step-circle { border-color: var(--accent3); background: var(--accent-dim); color: var(--accent2); }
+.step-tab.is-done .step-circle svg { width: 14px; height: 14px; }
+.step-label { font-size: 11px; font-weight: 700; color: var(--text-muted); text-align: center; line-height: 1.2; }
+.step-tab.is-active .step-label { color: var(--night); }
+.step-tab.is-done .step-label { color: var(--accent2); }
+.step-connector { flex: 1 1 20px; height: 2px; background: var(--border); margin-top: 15px; transition: background 0.15s; }
+.step-connector.is-done { background: var(--accent3); }
+.progress-line { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin: 2px 0 20px; font-weight: 500; }
+.step-nav { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+.step-nav-spacer { flex: 1; }
+
+/* Toggle switch (e.g. Drumming/Complete Run's "Has scrap") — a section-level
+   on/off that also shows/hides content, clearer at a glance than a bare
+   checkbox for that role. */
+.toggle-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-family: 'Manrope', sans-serif; font-size: 12.5px; font-weight: 700; color: var(--text-dim); user-select: none; }
+.toggle-track { width: 34px; height: 20px; border-radius: 999px; position: relative; flex: 0 0 auto; transition: background 0.15s; }
+.toggle-track.is-on { background: var(--accent); }
+.toggle-track.is-off { background: var(--border); }
+.toggle-thumb { position: absolute; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.25); transition: left 0.15s; }
+.toggle-track.is-on .toggle-thumb { left: 16px; }
+.toggle-track.is-off .toggle-thumb { left: 2px; }

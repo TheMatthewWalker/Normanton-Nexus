@@ -11,93 +11,141 @@
 <p><a asp-page="OrderLookup">Looking for an existing order to drum instead? Order Lookup &rarr;</a></p>
 
 <div style="max-width:760px;">
-    <div class="tf-row">
-        <div class="tf-field">
-            <label class="tf-label" for="dw-type">Type</label>
-            <select id="dw-type" class="tf-input">
-                <option value="stock">Make-to-Stock</option>
-                <option value="customer">Make-to-Order</option>
-            </select>
-        </div>
-        <div class="tf-field">
-            <label class="tf-label" for="dw-material">Material</label>
-            <input type="text" id="dw-material" class="tf-input">
-        </div>
-        <div class="tf-field">
-            <label class="tf-label" for="dw-shift">Shift</label>
-            <select id="dw-shift" class="tf-input">
-                <option value="1">Days (06:00–14:00)</option>
-                <option value="2">Afternoons (14:00–22:00)</option>
-                <option value="3">Nights (22:00–06:00)</option>
-            </select>
-        </div>
-        <div class="tf-field">
-            <label class="tf-label" for="dw-packaging">Packaging</label>
-            <select id="dw-packaging" class="tf-input"><option value="">Loading…</option></select>
-        </div>
-        <div class="tf-field">
-            <label class="tf-label" for="dw-weight">Weight (KG)</label>
-            <input type="number" id="dw-weight" class="tf-input" step="0.001">
-        </div>
-    </div>
+    <div class="stepper" id="dw-stepper"></div>
+    <p class="progress-line" id="dw-progress"></p>
 
-    <div id="dw-customer-fields" class="tf-row" style="display:none;">
-        <div class="tf-field">
-            <label class="tf-label" for="dw-customer">Customer Number</label>
-            <input type="text" id="dw-customer" class="tf-input">
-        </div>
-        <div class="tf-field">
-            <label class="tf-label" for="dw-order">Order Number</label>
-            <input type="text" id="dw-order" class="tf-input">
-        </div>
-        <div class="tf-field">
-            <label class="tf-label" for="dw-order-item">Order Item</label>
-            <input type="text" id="dw-order-item" class="tf-input">
-        </div>
-    </div>
-
-    <fieldset>
-        <legend>Parent Batches (traceability)</legend>
-        <div id="dw-parent-list"></div>
-        <button type="button" class="secondary" id="dw-add-parent">+ Add Parent Batch</button>
-    </fieldset>
-
-    <fieldset>
-        <legend>Raw Material Batches</legend>
-        <div id="dw-rawmat-list"></div>
-        <button type="button" class="secondary" id="dw-add-rawmat">+ Add Raw Material Batch</button>
-    </fieldset>
-
-    <fieldset>
-        <legend>Coil Lengths (m)</legend>
-        <div id="dw-coil-list"></div>
-        <button type="button" class="secondary" id="dw-add-coil">+ Add Coil Length</button>
-    </fieldset>
-
-    <fieldset>
-        <legend>Scrap</legend>
-        <label><input type="checkbox" id="dw-has-scrap"> Has scrap</label>
-        <div class="tf-row" style="margin-top:8px;">
+    <div id="dw-step-0">
+        <div class="tf-row">
             <div class="tf-field">
-                <label class="tf-label" for="dw-scrap-total">Total Scrap (KG)</label>
-                <input type="number" id="dw-scrap-total" class="tf-input" step="0.001">
+                <label class="tf-label" for="dw-type">Type</label>
+                <select id="dw-type" class="tf-input">
+                    <option value="stock">Make-to-Stock</option>
+                    <option value="customer">Make-to-Order</option>
+                </select>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dw-material">Material</label>
+                <input type="text" id="dw-material" class="tf-input">
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dw-shift">Shift</label>
+                <select id="dw-shift" class="tf-input">
+                    <option value="1">Days (06:00–14:00)</option>
+                    <option value="2">Afternoons (14:00–22:00)</option>
+                    <option value="3">Nights (22:00–06:00)</option>
+                </select>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dw-packaging">Packaging</label>
+                <select id="dw-packaging" class="tf-input"><option value="">Loading…</option></select>
+            </div>
+            <div class="tf-field">
+                <label class="tf-label" for="dw-weight">Weight (KG)</label>
+                <input type="number" id="dw-weight" class="tf-input" step="0.001">
             </div>
         </div>
-        <div id="dw-scrap-list"></div>
-        <button type="button" class="secondary" id="dw-add-scrap">+ Add Scrap Reason</button>
-    </fieldset>
 
-    <div class="tf-row" style="margin-top:14px;">
-        <div class="tf-field tf-field--wide">
-            <label class="tf-label" for="dw-comments">Comments</label>
-            <input type="text" id="dw-comments" class="tf-input">
+        <div id="dw-customer-fields" class="conditional-row hidden">
+            <div class="conditional-row-label">Make-to-Order — resolve material from the order</div>
+            <div class="tf-row">
+                <div class="tf-field">
+                    <label class="tf-label" for="dw-customer">Customer Number</label>
+                    <input type="text" id="dw-customer" class="tf-input">
+                </div>
+                <div class="tf-field">
+                    <label class="tf-label" for="dw-order">Order Number</label>
+                    <input type="text" id="dw-order" class="tf-input">
+                </div>
+                <div class="tf-field" style="flex:0 0 auto;">
+                    <label class="tf-label">&nbsp;</label>
+                    <button type="button" id="dw-find-order" class="secondary">Find</button>
+                </div>
+                <div class="tf-field">
+                    <label class="tf-label" for="dw-order-item">Order Item</label>
+                    <select id="dw-order-item" class="tf-input"><option value="">—</option></select>
+                </div>
+            </div>
+            <div id="dw-order-result" style="margin:0 0 12px;"></div>
         </div>
     </div>
 
-    <div id="dw-result" style="margin:0.75rem 0;"></div>
-    <div id="dw-print-widget"></div>
+    <div id="dw-step-1" class="hidden">
+        <div class="item-panel">
+            <div class="item-panel-head">
+                <div class="item-panel-head-text">
+                    <span class="item-panel-title">Parent Batches</span>
+                    <span class="item-panel-hint">Traceability</span>
+                </div>
+            </div>
+            <div id="dw-parent-list" class="item-list"></div>
+            <div class="item-panel-foot">
+                <span class="item-panel-hint">Link the batch(es) this drum was produced from.</span>
+                <button type="button" class="secondary" id="dw-add-parent">+ Add Parent Batch</button>
+            </div>
+        </div>
+    </div>
 
-    <button type="button" id="dw-submit-btn" class="btn">Post to SAP</button>
+    <div id="dw-step-2" class="hidden">
+        <div class="item-panel">
+            <div class="item-panel-head">
+                <div class="item-panel-head-text">
+                    <span class="item-panel-title">Coil Lengths</span>
+                    <span class="item-panel-hint">Metres</span>
+                </div>
+            </div>
+            <div id="dw-coil-list" class="item-list"></div>
+            <div class="item-panel-foot">
+                <span class="item-panel-hint">One row per coil.</span>
+                <button type="button" class="secondary" id="dw-add-coil">+ Add Coil Length</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="dw-step-3" class="hidden">
+        <label class="toggle-switch">
+            <span class="toggle-track is-off" id="dw-scrap-track"><span class="toggle-thumb"></span></span>
+            <input type="checkbox" id="dw-has-scrap" class="hidden">
+            Has scrap
+        </label>
+        <div id="dw-scrap-body" class="hidden" style="margin-top:12px;">
+            <div class="tf-row">
+                <div class="tf-field">
+                    <label class="tf-label" for="dw-scrap-total">Total Scrap (KG)</label>
+                    <input type="number" id="dw-scrap-total" class="tf-input" step="0.001">
+                </div>
+            </div>
+            <div class="item-panel">
+                <div class="item-panel-head">
+                    <span class="item-panel-title">Scrap Reasons</span>
+                </div>
+                <div id="dw-scrap-list" class="item-list"></div>
+                <div class="item-panel-foot">
+                    <span class="item-panel-hint">Occurrence counts split the total proportionally.</span>
+                    <button type="button" class="secondary" id="dw-add-scrap">+ Add Scrap Reason</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="dw-step-4" class="hidden">
+        <div class="tf-row">
+            <div class="tf-field tf-field--wide">
+                <label class="tf-label" for="dw-comments">Comments</label>
+                <input type="text" id="dw-comments" class="tf-input">
+            </div>
+        </div>
+        <div id="dw-result" style="margin:0.75rem 0;"></div>
+        <div id="dw-print-widget"></div>
+    </div>
+
+    <div id="dw-step-error"></div>
+
+    <div class="step-nav">
+        <button type="button" id="dw-back-btn" class="secondary">&larr; Back</button>
+        <span class="step-nav-spacer"></span>
+        <button type="button" id="dw-next-btn" class="btn">Continue &rarr;</button>
+        <button type="button" id="dw-submit-btn" class="btn hidden">Post to SAP</button>
+    </div>
 </div>
 
 @section Scripts {
