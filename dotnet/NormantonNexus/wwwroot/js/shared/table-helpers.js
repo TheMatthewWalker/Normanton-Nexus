@@ -16,6 +16,13 @@
 //     renderRows: (pageRows) => pageRows.map(r => `<tr>...</tr>`).join(''),
 //   });
 //   pager.setRows(allRows); // call this whenever the underlying data changes
+//
+// `renderRows` may instead build DOM nodes itself (for a page whose row
+// renderer returns a `<tr>` element rather than an HTML string, e.g. a
+// shared table builder that appends `rowRenderer(row)` results directly) —
+// take `(pageRows, container)`, clear/populate `container` yourself, and
+// return nothing. A string return still shortcuts to `container.innerHTML`
+// as before, so every existing string-returning caller needs no change.
 window.NexusTable = {
   paginate({ container, pagerContainer, renderRows, pageSize = 25 }) {
     let rows = [];
@@ -52,7 +59,8 @@ window.NexusTable = {
     function renderPage() {
       const start = (page - 1) * pageSize;
       const pageRows = rows.slice(start, start + pageSize);
-      container.innerHTML = renderRows(pageRows);
+      const html = renderRows(pageRows, container);
+      if (html !== undefined) container.innerHTML = html;
       renderPager();
     }
 

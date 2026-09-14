@@ -135,6 +135,8 @@ window.ProductionReports = (function () {
   // appendChild(R.buildTable(...))` call site needs no change) containing a
   // small `.nx-toolbar` result-count line above the table, or an `.nx-empty`
   // box instead of the table when there's no data for the current filters.
+  // Paginated via the shared NexusTable helper (25/page) — a wide date range
+  // at daily granularity can otherwise run to hundreds of unbroken rows.
   function buildTable(headers, rows, rowRenderer) {
     const wrap = document.createElement("div");
     wrap.style.marginBottom = "1.25rem";
@@ -168,9 +170,23 @@ window.ProductionReports = (function () {
     thead.appendChild(headRow);
 
     const tbody = document.createElement("tbody");
-    for (const row of rows) tbody.appendChild(rowRenderer(row));
     table.append(thead, tbody);
     wrap.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    wrap.appendChild(pagerEl);
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const row of pageRows) tbodyEl.appendChild(rowRenderer(row));
+      },
+    }).setRows(rows);
+
     return wrap;
   }
 

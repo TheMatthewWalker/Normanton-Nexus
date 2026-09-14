@@ -4,8 +4,21 @@
 // simplified here to an inline expand under the clicked reason row (no
 // shared modal component exists yet in this port — visual-polish
 // simplification, same precedent as reports-common.js skipping charts).
+// Failed postings and each process's own summary now render as the shared
+// `.ps-section` collapsible-bucket pattern (see order-suggestions.js's
+// Tracked Orders for the original) rather than the hand-styled `.sd-section`
+// cards this used before — same component, applied consistently.
 (function () {
   const bodyEl = document.getElementById("ps-body");
+
+  function wireCollapseToggles(root) {
+    root.querySelectorAll(".ps-section-header").forEach((h) => {
+      h.addEventListener("click", (e) => {
+        if (e.target.closest("button, input, select, a")) return;
+        h.closest(".ps-section").classList.toggle("ps-section--collapsed");
+      });
+    });
+  }
 
   const PROCESS_LABELS = { MX: "Mixing", EX: "Extrusion", CO: "Convoluting", BR: "Braiding", CL: "Coverline", TW: "Tape Wrap", DR: "Drumming", EW: "Ewald", HA: "Hose Assembly" };
 
@@ -42,7 +55,11 @@
 
       if (failed.length) {
         const reasons = (await api("/scrap-reasons")).data || [];
-        bodyEl.appendChild(buildFailedSection(failed, reasons));
+        const failedWrap = document.createElement("div");
+        failedWrap.className = "ps-sections";
+        failedWrap.style.marginBottom = "16px";
+        failedWrap.appendChild(buildFailedSection(failed, reasons));
+        bodyEl.appendChild(failedWrap);
       }
 
       const postedHeader = document.createElement("h3");
@@ -54,6 +71,7 @@
         empty.className = "nx-empty";
         empty.textContent = "No SAP-posted scrap recorded yet.";
         bodyEl.appendChild(empty);
+        wireCollapseToggles(bodyEl);
         return;
       }
 
@@ -63,9 +81,15 @@
         byProcess.get(r.processCode).push(r);
       }
 
+      const sectionsWrap = document.createElement("div");
+      sectionsWrap.className = "ps-sections";
+      let first = true;
       for (const [pc, rows] of byProcess) {
-        bodyEl.appendChild(buildProcessSummary(pc, rows));
+        sectionsWrap.appendChild(buildProcessSummary(pc, rows, first));
+        first = false;
       }
+      bodyEl.appendChild(sectionsWrap);
+      wireCollapseToggles(bodyEl);
     } catch (err) {
       bodyEl.innerHTML = "";
       const errBox = document.createElement("div");
@@ -75,23 +99,35 @@
     }
   }
 
-  function buildProcessSummary(processCode, rows) {
+  function buildProcessSummary(processCode, rows, isFirst) {
     const total = rows.reduce((s, r) => s + Number(r.totalScrap || 0), 0);
     const uom = rows[0].unitOfMeasure;
 
     const section = document.createElement("div");
-    section.className = "sd-section";
-    section.style.marginBottom = "10px";
+    section.className = "ps-section" + (isFirst ? "" : " ps-section--collapsed");
 
     const header = document.createElement("div");
-    header.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px";
-    const title = document.createElement("strong");
+    header.className = "ps-section-header";
+    const dot = document.createElement("span");
+    dot.className = "ps-section-dot ps-section-dot--backlog";
+    const title = document.createElement("span");
+    title.className = "ps-section-title";
     title.textContent = PROCESS_LABELS[processCode] || processCode;
     const totalEl = document.createElement("span");
-    totalEl.style.color = "var(--error)";
+    totalEl.style.cssText = "color:var(--error);font-size:11px;font-weight:700";
     totalEl.textContent = `${total.toFixed(3)} ${uom} total`;
-    header.append(title, totalEl);
+    const count = document.createElement("span");
+    count.className = "ps-section-count";
+    count.textContent = String(rows.length);
+    const chevron = document.createElement("span");
+    chevron.className = "ps-chevron";
+    chevron.innerHTML = "&#9660;";
+    header.append(dot, title, totalEl, count, chevron);
     section.appendChild(header);
+
+    const body = document.createElement("div");
+    body.className = "ps-section-body";
+    section.appendChild(body);
 
     const table = document.createElement("table");
     const thead = document.createElement("thead");
@@ -143,7 +179,7 @@
     }
 
     table.append(thead, tbody);
-    section.appendChild(table);
+    body.appendChild(table);
     return section;
   }
 
@@ -195,16 +231,32 @@
 
   function buildFailedSection(failed, reasons) {
     const section = document.createElement("div");
-    section.style.marginBottom = "24px";
+    section.className = "ps-section";
 
-    const header = document.createElement("h3");
-    header.style.color = "var(--error)";
-    header.textContent = `Failed SAP Postings (${failed.length} entr${failed.length !== 1 ? "ies" : "y"} approved but not posted)`;
+    const header = document.createElement("div");
+    header.className = "ps-section-header";
+    const dot = document.createElement("span");
+    dot.className = "ps-section-dot ps-section-dot--priority";
+    const title = document.createElement("span");
+    title.className = "ps-section-title";
+    title.style.color = "var(--error)";
+    title.textContent = "Failed SAP Postings — approved but not posted";
+    const count = document.createElement("span");
+    count.className = "ps-section-count";
+    count.textContent = String(failed.length);
+    const chevron = document.createElement("span");
+    chevron.className = "ps-chevron";
+    chevron.innerHTML = "&#9660;";
+    header.append(dot, title, count, chevron);
     section.appendChild(header);
 
+    const body = document.createElement("div");
+    body.className = "ps-section-body";
+    body.style.padding = "12px 14px";
     for (const f of failed) {
-      section.appendChild(buildFailedCard(f, reasons));
+      body.appendChild(buildFailedCard(f, reasons));
     }
+    section.appendChild(body);
     return section;
   }
 

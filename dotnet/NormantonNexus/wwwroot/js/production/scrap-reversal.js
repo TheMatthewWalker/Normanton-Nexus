@@ -128,13 +128,30 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    for (const row of rows) tbody.appendChild(buildRow(row));
     table.append(thead, tbody);
     wrap.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    wrap.appendChild(pagerEl);
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const row of pageRows) tbodyEl.appendChild(buildRow(row));
+      },
+    }).setRows(rows);
 
     const msgEl = document.createElement("p");
     wrap.appendChild(msgEl);
 
+    // "Select All" / "Reverse Selected" both scope to whatever's currently
+    // rendered in tbody — after pagination that's the current page only,
+    // the same "select all (this page)" semantics any paginated bulk-action
+    // table has; tbody itself is never replaced, only its innerHTML per page.
     selectAll.addEventListener("change", () => {
       tbody.querySelectorAll(".sr-chk").forEach((c) => { c.checked = selectAll.checked; });
     });

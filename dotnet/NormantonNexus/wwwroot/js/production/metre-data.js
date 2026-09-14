@@ -76,11 +76,24 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    for (const row of lastRows) {
-      tbody.append(buildRow(row), buildDetailRow(row));
-    }
     table.append(thead, tbody);
     resultsEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    resultsEl.appendChild(pagerEl);
+
+    // Paginate by record, not by <tr> — each record renders as a pair
+    // (the summary row plus its initially-hidden expand-detail row).
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const row of pageRows) tbodyEl.append(buildRow(row), buildDetailRow(row));
+      },
+    }).setRows(lastRows);
   }
 
   function buildRow(row) {

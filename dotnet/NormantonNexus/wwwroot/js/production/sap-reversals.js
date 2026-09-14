@@ -244,14 +244,29 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    for (const row of resultRows) tbody.appendChild(buildRow(row, showMaterial));
     table.append(thead, tbody);
     resultsEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    resultsEl.appendChild(pagerEl);
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 25,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const row of pageRows) tbodyEl.appendChild(buildRow(row, showMaterial));
+      },
+    }).setRows(resultRows);
 
     const bulkMsg = document.createElement("p");
     bulkMsg.id = "rev-bulk-msg";
     resultsEl.appendChild(bulkMsg);
 
+    // "Select All"/"Reverse Selected" scope to tbody's current page — see
+    // the identical note in scrap-reversal.js's buildTable.
     selectAll.addEventListener("change", () => {
       tbody.querySelectorAll(".rev-chk").forEach((c) => { c.checked = selectAll.checked; });
     });

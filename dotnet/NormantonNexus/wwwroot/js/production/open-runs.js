@@ -1,11 +1,22 @@
 // Open Runs tile — port of runOpenRuns in production-nexus.js. Cross-
 // process supervisor view of every record stuck at Status=1 (open, not
-// yet completed), with a cancel action.
+// yet completed), with a cancel action. Grouped into the shared
+// `.ps-section` collapsible-bucket pattern by process — see
+// order-suggestions.js's Tracked Orders for the original.
 (function () {
   const msgEl = document.getElementById("or-msg");
   const listEl = document.getElementById("or-list");
 
   const PROCESS_LABELS = { MX: "Mixing", EX: "Extrusion", CO: "Convoluting", BR: "Braiding", CL: "Coverline", TW: "Tape Wrap", DR: "Drumming", EW: "Ewald", HA: "Hose Assembly" };
+
+  function wireCollapseToggles(root) {
+    root.querySelectorAll(".ps-section-header").forEach((h) => {
+      h.addEventListener("click", (e) => {
+        if (e.target.closest("button, input, select, a")) return;
+        h.closest(".ps-section").classList.toggle("ps-section--collapsed");
+      });
+    });
+  }
 
   async function api(path, opts) {
     const r = await fetch("/api/productionnexus" + path, opts);
@@ -46,21 +57,21 @@
       toolbar.appendChild(toolbarTitle);
       listEl.appendChild(toolbar);
 
-      const table = document.createElement("table");
-      const thead = document.createElement("thead");
-      const headRow = document.createElement("tr");
-      for (const label of ["Process", "Ref", "Material", "Created", "Created By", ""]) {
-        const th = document.createElement("th");
-        th.textContent = label;
-        headRow.appendChild(th);
-      }
-      thead.appendChild(headRow);
-      const tbody = document.createElement("tbody");
+      const byProcess = new Map();
       for (const row of data) {
-        tbody.appendChild(buildRow(row));
+        if (!byProcess.has(row.processCode)) byProcess.set(row.processCode, []);
+        byProcess.get(row.processCode).push(row);
       }
-      table.append(thead, tbody);
-      listEl.appendChild(table);
+
+      const sectionsWrap = document.createElement("div");
+      sectionsWrap.className = "ps-sections";
+      let first = true;
+      for (const [pc, rows] of byProcess) {
+        sectionsWrap.appendChild(buildProcessSection(pc, rows, first));
+        first = false;
+      }
+      listEl.appendChild(sectionsWrap);
+      wireCollapseToggles(listEl);
     } catch (err) {
       listEl.innerHTML = "";
       const errBox = document.createElement("div");
@@ -70,10 +81,48 @@
     }
   }
 
+  function buildProcessSection(processCode, rows, isFirst) {
+    const section = document.createElement("div");
+    section.className = "ps-section" + (isFirst ? "" : " ps-section--collapsed");
+
+    const header = document.createElement("div");
+    header.className = "ps-section-header";
+    const dot = document.createElement("span");
+    dot.className = "ps-section-dot ps-section-dot--backlog";
+    const title = document.createElement("span");
+    title.className = "ps-section-title";
+    title.textContent = PROCESS_LABELS[processCode] || processCode;
+    const count = document.createElement("span");
+    count.className = "ps-section-count";
+    count.textContent = String(rows.length);
+    const chevron = document.createElement("span");
+    chevron.className = "ps-chevron";
+    chevron.innerHTML = "&#9660;";
+    header.append(dot, title, count, chevron);
+    section.appendChild(header);
+
+    const body = document.createElement("div");
+    body.className = "ps-section-body";
+
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const label of ["Ref", "Material", "Created", "Created By", ""]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    const tbody = document.createElement("tbody");
+    for (const row of rows) tbody.appendChild(buildRow(row));
+    table.append(thead, tbody);
+    body.appendChild(table);
+    section.appendChild(body);
+    return section;
+  }
+
   function buildRow(row) {
     const tr = document.createElement("tr");
-    const pcTd = document.createElement("td");
-    pcTd.textContent = PROCESS_LABELS[row.processCode] || row.processCode;
     const refTd = document.createElement("td");
     refTd.textContent = row.batchRef;
     const matTd = document.createElement("td");
@@ -91,7 +140,7 @@
     cancelBtn.addEventListener("click", () => cancelRun(row.processCode, row.recordId));
     actionTd.appendChild(cancelBtn);
 
-    tr.append(pcTd, refTd, matTd, createdTd, byTd, actionTd);
+    tr.append(refTd, matTd, createdTd, byTd, actionTd);
     return tr;
   }
 
