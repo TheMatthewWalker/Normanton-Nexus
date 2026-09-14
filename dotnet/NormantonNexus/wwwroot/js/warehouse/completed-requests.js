@@ -29,8 +29,15 @@
       <p>${rows.length} completed request(s)</p>
       <table>
         <thead><tr><th>#</th><th>Material</th><th>Qty</th><th>Location</th><th>Completed By</th><th>Completed At</th></tr></thead>
-        <tbody>
-          ${rows.map((r) => `
+        <tbody id="cr-tbody"></tbody>
+      </table>
+      <div class="nx-pager" id="cr-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("cr-tbody"),
+      pagerContainer: document.getElementById("cr-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((r) => `
             <tr>
               <td>${esc(r.requestId)}</td>
               <td>${esc(r.material)} ${esc(r.materialText)}</td>
@@ -38,9 +45,8 @@
               <td>${esc(r.location)}</td>
               <td>${esc(r.completedBy)}</td>
               <td>${r.completedAtUtc ? new Date(r.completedAtUtc).toLocaleString("en-GB") : ""}</td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
+            </tr>`).join(""),
+    }).setRows(rows);
   }
 
   document.getElementById("cr-filter").addEventListener("submit", (e) => { e.preventDefault(); load(); });

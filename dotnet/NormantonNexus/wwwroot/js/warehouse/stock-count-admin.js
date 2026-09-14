@@ -28,8 +28,15 @@
       <p>${rows.length} count(s)</p>
       <table>
         <thead><tr><th>#</th><th>Type</th><th>Location</th><th>Status</th><th>Created By</th><th>Created At</th></tr></thead>
-        <tbody>
-          ${rows.map((r) => `
+        <tbody id="sca-tbody"></tbody>
+      </table>
+      <div class="nx-pager" id="sca-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("sca-tbody"),
+      pagerContainer: document.getElementById("sca-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((r) => `
             <tr>
               <td>${esc(r.countId)}</td>
               <td>${esc(r.countType)}</td>
@@ -37,9 +44,8 @@
               <td>${esc(r.status)}</td>
               <td>${esc(r.createdBy)}</td>
               <td>${r.createdAtUtc ? new Date(r.createdAtUtc).toLocaleString("en-GB") : ""}</td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
+            </tr>`).join(""),
+    }).setRows(rows);
   }
 
   document.getElementById("sca-status").addEventListener("change", load);

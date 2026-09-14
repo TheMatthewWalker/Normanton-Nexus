@@ -32,8 +32,15 @@
       <p>${rows.length} open TR(s)</p>
       <table>
         <thead><tr><th>TR</th><th>Material</th><th>Batch</th><th>Qty</th><th>UoM</th><th>Storage Loc</th><th>MRP Ctrl</th><th>Created</th><th></th></tr></thead>
-        <tbody>
-          ${rows.map((r, i) => `
+        <tbody id="tr-tbody"></tbody>
+      </table>
+      <div class="nx-pager" id="tr-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("tr-tbody"),
+      pagerContainer: document.getElementById("tr-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((r) => `
             <tr>
               <td>${esc(r.trNumber)}</td>
               <td>${esc(r.material)}</td>
@@ -43,13 +50,17 @@
               <td>${esc(r.storageLocation)}</td>
               <td>${esc(r.mrpController)}</td>
               <td>${esc(r.createdDate)} ${esc(r.createdTime)}</td>
-              <td><button type="button" class="btn secondary" data-idx="${i}">LT04</button></td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
-    bodyEl.querySelectorAll("button[data-idx]").forEach((btn) => {
-      btn.addEventListener("click", () => openPanel(rows[Number(btn.dataset.idx)]));
-    });
+              <td><button type="button" class="btn secondary" data-tr="${esc(r.trNumber)}">LT04</button></td>
+            </tr>`).join(""),
+      onRendered: () => {
+        bodyEl.querySelectorAll("button[data-tr]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const row = rows.find((r) => String(r.trNumber) === btn.dataset.tr);
+            if (row) openPanel(row);
+          });
+        });
+      },
+    }).setRows(rows);
   }
 
   let current = null;

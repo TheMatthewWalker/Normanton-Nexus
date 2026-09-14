@@ -23,8 +23,15 @@
       <p>${rows.length} open delivery(s)</p>
       <table>
         <thead><tr><th>Delivery</th><th>Customer</th><th>Destination</th><th>Dispatch Date</th><th>Service</th><th>Priority</th><th>Incoterms</th><th>Comment</th></tr></thead>
-        <tbody>
-          ${rows.map((r) => `
+        <tbody id="op-tbody"></tbody>
+      </table>
+      <div class="nx-pager" id="op-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("op-tbody"),
+      pagerContainer: document.getElementById("op-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((r) => `
             <tr>
               <td>${esc(r.deliveryId)}</td>
               <td>${esc(r.customerId)}</td>
@@ -34,9 +41,8 @@
               <td>${esc(r.deliveryPriority)}</td>
               <td>${esc(r.incoterms)}</td>
               <td>${esc(r.picksheetComment)}</td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
+            </tr>`).join(""),
+    }).setRows(rows);
   }
 
   document.getElementById("op-refresh").addEventListener("click", load);

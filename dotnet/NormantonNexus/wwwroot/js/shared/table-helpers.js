@@ -23,8 +23,13 @@
 // take `(pageRows, container)`, clear/populate `container` yourself, and
 // return nothing. A string return still shortcuts to `container.innerHTML`
 // as before, so every existing string-returning caller needs no change.
+//
+// Optional `onRendered(pageRows)` fires after every render (initial and
+// on Prev/Next) — for a string-based `renderRows` whose markup carries
+// its own per-row event listeners (a button, a checkbox), since those need
+// re-binding against the fresh DOM each time the page changes.
 window.NexusTable = {
-  paginate({ container, pagerContainer, renderRows, pageSize = 25 }) {
+  paginate({ container, pagerContainer, renderRows, pageSize = 25, onRendered }) {
     let rows = [];
     let page = 1;
 
@@ -62,6 +67,7 @@ window.NexusTable = {
       const html = renderRows(pageRows, container);
       if (html !== undefined) container.innerHTML = html;
       renderPager();
+      if (onRendered) onRendered(pageRows);
     }
 
     function goTo(newPage) {
