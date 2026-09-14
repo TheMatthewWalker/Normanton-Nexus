@@ -3,7 +3,10 @@
 // split out of the old combined shipment-queue.js. Mark Collected reproduces
 // Node's real modal (Operator/Driver/Vehicle Reg/Trailer, mixed-haulier
 // warning) — the four fields are folded into one description string, same
-// as private/js/logistics.js's submitMarkCollected.
+// as private/js/logistics.js's submitMarkCollected. Rows render grouped
+// into the shared `.ps-section` collapsible-bucket pattern by haulier
+// (with an "Unassigned" bucket) — see order-suggestions.js's Tracked
+// Orders for the original.
 (function () {
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/shipmentmain");
@@ -14,6 +17,15 @@
   const unbookBtn = document.getElementById("ac-unbook-btn");
   let rows = [];
   const selected = new Set();
+
+  function wireCollapseToggles(root) {
+    root.querySelectorAll(".ps-section-header").forEach((h) => {
+      h.addEventListener("click", (e) => {
+        if (e.target.closest("button, input, select, a")) return;
+        h.closest(".ps-section").classList.toggle("ps-section--collapsed");
+      });
+    });
+  }
 
   async function load() {
     bodyEl.innerHTML = '<div class="nx-toolbar-hint">Loading…</div>';
@@ -43,21 +55,47 @@
 
   function render() {
     if (rows.length === 0) { bodyEl.innerHTML = '<div class="nx-empty">No shipments are currently awaiting collection.</div>'; updateHint(); return; }
-    bodyEl.innerHTML = `
-      <div style="overflow-x:auto">
-      <table>
-        <thead><tr><th></th><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Tracking</th><th>Planned Collection</th></tr></thead>
-        <tbody>${rows.map((r) => `
-          <tr>
-            <td><input type="checkbox" class="ac-check" data-id="${r.shipmentId}"></td>
-            <td><a href="#" class="ac-open" data-id="${r.shipmentId}">${esc(String(r.shipmentId).padStart(8, "0"))}</a></td>
-            <td>${esc(r.destinationName || "")}, ${esc(r.destinationCountry || "")}</td>
-            <td>${esc(r.forwarderName || "Unassigned")}</td>
-            <td>${esc(r.trackingNumber || "—")}</td>
-            <td>${r.plannedCollection ? new Date(r.plannedCollection).toLocaleDateString("en-GB") : "—"}</td>
-          </tr>`).join("")}</tbody>
-      </table>
-      </div>`;
+
+    const buckets = new Map();
+    for (const r of rows) {
+      const label = r.forwarderName || "Unassigned";
+      if (!buckets.has(label)) buckets.set(label, []);
+      buckets.get(label).push(r);
+    }
+
+    const sectionsWrap = document.createElement("div");
+    sectionsWrap.className = "ps-sections";
+    let first = true;
+    for (const [label, bucketRows] of buckets) {
+      const section = document.createElement("div");
+      section.className = "ps-section" + (first ? "" : " ps-section--collapsed");
+      section.innerHTML = `
+        <div class="ps-section-header">
+          <span class="ps-section-dot ps-section-dot--${label === "Unassigned" ? "other" : "week"}"></span>
+          <span class="ps-section-title">${esc(label)}</span>
+          <span class="ps-section-count">${bucketRows.length}</span>
+          <span class="ps-chevron">&#9660;</span>
+        </div>
+        <div class="ps-section-body"><div style="overflow-x:auto">
+        <table>
+          <thead><tr><th></th><th>Shipment</th><th>Destination</th><th>Tracking</th><th>Planned Collection</th></tr></thead>
+          <tbody>${bucketRows.map((r) => `
+            <tr>
+              <td><input type="checkbox" class="ac-check" data-id="${r.shipmentId}"></td>
+              <td><a href="#" class="ac-open" data-id="${r.shipmentId}">${esc(String(r.shipmentId).padStart(8, "0"))}</a></td>
+              <td>${esc(r.destinationName || "")}, ${esc(r.destinationCountry || "")}</td>
+              <td>${esc(r.trackingNumber || "—")}</td>
+              <td>${r.plannedCollection ? new Date(r.plannedCollection).toLocaleDateString("en-GB") : "—"}</td>
+            </tr>`).join("")}</tbody>
+        </table>
+        </div></div>`;
+      sectionsWrap.appendChild(section);
+      first = false;
+    }
+
+    bodyEl.innerHTML = "";
+    bodyEl.appendChild(sectionsWrap);
+    wireCollapseToggles(bodyEl);
 
     bodyEl.querySelectorAll(".ac-check").forEach((cb) => cb.addEventListener("change", (e) => {
       const id = Number(e.target.dataset.id);

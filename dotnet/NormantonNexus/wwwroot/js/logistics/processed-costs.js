@@ -33,7 +33,32 @@
       <div style="overflow-x:auto">
       <table>
         <thead><tr><th>Shipment</th><th>Direction</th><th>Forwarder</th><th>Cost Centre</th><th>Cost Element</th><th>Expected</th><th>Actual</th><th>PO</th><th>Material Doc.</th><th></th></tr></thead>
-        <tbody>${rows.map((r) => `
+        <tbody id="pc-tbody"></tbody>
+      </table>
+      </div>
+      <div class="nx-pager" id="pc-pager"></div>`;
+
+    function wireReverseButtons() {
+      bodyEl.querySelectorAll(".pc-reverse-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!(await NexusModal.confirm("Reverse this goods receipt in SAP? This posts a real reversal.", { danger: true, confirmLabel: "Reverse" }))) return;
+          btn.disabled = true; btn.textContent = "Reversing…";
+          try {
+            await api(`/${btn.dataset.id}/reverse`, { method: "POST" });
+            await load();
+          } catch (err) {
+            await NexusModal.alert(err.message);
+            btn.disabled = false; btn.textContent = "Reverse";
+          }
+        });
+      });
+    }
+
+    NexusTable.paginate({
+      container: document.getElementById("pc-tbody"),
+      pagerContainer: document.getElementById("pc-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((r) => `
           <tr>
             <td>${esc(r.shipmentRef || `#${r.costId}`)}</td>
             <td>${directionBadge(r.direction)}</td>
@@ -45,23 +70,9 @@
             <td>${esc(r.purchaseOrder || "—")}</td>
             <td>${esc(r.materialDocument || "—")}</td>
             <td><button type="button" class="secondary pc-reverse-btn" data-id="${r.costId}" style="padding:3px 8px;font-size:11px;color:var(--error)">Reverse</button></td>
-          </tr>`).join("")}</tbody>
-      </table>
-      </div>`;
-
-    bodyEl.querySelectorAll(".pc-reverse-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        if (!(await NexusModal.confirm("Reverse this goods receipt in SAP? This posts a real reversal.", { danger: true, confirmLabel: "Reverse" }))) return;
-        btn.disabled = true; btn.textContent = "Reversing…";
-        try {
-          await api(`/${btn.dataset.id}/reverse`, { method: "POST" });
-          await load();
-        } catch (err) {
-          await NexusModal.alert(err.message);
-          btn.disabled = false; btn.textContent = "Reverse";
-        }
-      });
-    });
+          </tr>`).join(""),
+      onRendered: wireReverseButtons,
+    }).setRows(rows);
   }
 
   load();

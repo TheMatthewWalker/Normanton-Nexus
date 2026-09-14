@@ -2,7 +2,10 @@
 // .../mark-delivered (single, per-row) and .../mark-delivered-bulk, split
 // out of the old combined shipment-queue.js. Both modals are the same real
 // Node modal (Actual Delivery Date, defaulting to today) — bulk just applies
-// one date to every selected shipment.
+// one date to every selected shipment. Rows render grouped into the shared
+// `.ps-section` collapsible-bucket pattern by haulier (with an
+// "Unassigned" bucket) — see order-suggestions.js's Tracked Orders for
+// the original.
 (function () {
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/shipmentmain");
@@ -11,6 +14,15 @@
   const deliverBtn = document.getElementById("it-deliver-btn");
   let rows = [];
   const selected = new Set();
+
+  function wireCollapseToggles(root) {
+    root.querySelectorAll(".ps-section-header").forEach((h) => {
+      h.addEventListener("click", (e) => {
+        if (e.target.closest("button, input, select, a")) return;
+        h.closest(".ps-section").classList.toggle("ps-section--collapsed");
+      });
+    });
+  }
 
   async function load() {
     bodyEl.innerHTML = '<div class="nx-toolbar-hint">Loading…</div>';
@@ -34,22 +46,48 @@
 
   function render() {
     if (rows.length === 0) { bodyEl.innerHTML = '<div class="nx-empty">No outbound shipments are currently in transit.</div>'; updateHint(); return; }
-    bodyEl.innerHTML = `
-      <div style="overflow-x:auto">
-      <table>
-        <thead><tr><th></th><th>Shipment</th><th>Destination</th><th>Haulier</th><th>Tracking</th><th>Planned Delivery</th><th></th></tr></thead>
-        <tbody>${rows.map((r) => `
-          <tr>
-            <td><input type="checkbox" class="it-check" data-id="${r.shipmentId}"></td>
-            <td><a href="#" class="it-open" data-id="${r.shipmentId}">${esc(String(r.shipmentId).padStart(8, "0"))}</a></td>
-            <td>${esc(r.destinationName || "")}, ${esc(r.destinationCountry || "")}</td>
-            <td>${esc(r.forwarderName || "Unassigned")}</td>
-            <td>${esc(r.trackingNumber || "—")}</td>
-            <td>${r.plannedMovement ? new Date(r.plannedMovement).toLocaleDateString("en-GB") : "—"}</td>
-            <td><button type="button" class="secondary it-deliver-one" data-id="${r.shipmentId}" style="padding:3px 8px;font-size:11px">Mark Delivered</button></td>
-          </tr>`).join("")}</tbody>
-      </table>
-      </div>`;
+
+    const buckets = new Map();
+    for (const r of rows) {
+      const label = r.forwarderName || "Unassigned";
+      if (!buckets.has(label)) buckets.set(label, []);
+      buckets.get(label).push(r);
+    }
+
+    const sectionsWrap = document.createElement("div");
+    sectionsWrap.className = "ps-sections";
+    let first = true;
+    for (const [label, bucketRows] of buckets) {
+      const section = document.createElement("div");
+      section.className = "ps-section" + (first ? "" : " ps-section--collapsed");
+      section.innerHTML = `
+        <div class="ps-section-header">
+          <span class="ps-section-dot ps-section-dot--${label === "Unassigned" ? "other" : "week"}"></span>
+          <span class="ps-section-title">${esc(label)}</span>
+          <span class="ps-section-count">${bucketRows.length}</span>
+          <span class="ps-chevron">&#9660;</span>
+        </div>
+        <div class="ps-section-body"><div style="overflow-x:auto">
+        <table>
+          <thead><tr><th></th><th>Shipment</th><th>Destination</th><th>Tracking</th><th>Planned Delivery</th><th></th></tr></thead>
+          <tbody>${bucketRows.map((r) => `
+            <tr>
+              <td><input type="checkbox" class="it-check" data-id="${r.shipmentId}"></td>
+              <td><a href="#" class="it-open" data-id="${r.shipmentId}">${esc(String(r.shipmentId).padStart(8, "0"))}</a></td>
+              <td>${esc(r.destinationName || "")}, ${esc(r.destinationCountry || "")}</td>
+              <td>${esc(r.trackingNumber || "—")}</td>
+              <td>${r.plannedMovement ? new Date(r.plannedMovement).toLocaleDateString("en-GB") : "—"}</td>
+              <td><button type="button" class="secondary it-deliver-one" data-id="${r.shipmentId}" style="padding:3px 8px;font-size:11px">Mark Delivered</button></td>
+            </tr>`).join("")}</tbody>
+        </table>
+        </div></div>`;
+      sectionsWrap.appendChild(section);
+      first = false;
+    }
+
+    bodyEl.innerHTML = "";
+    bodyEl.appendChild(sectionsWrap);
+    wireCollapseToggles(bodyEl);
 
     bodyEl.querySelectorAll(".it-check").forEach((cb) => cb.addEventListener("change", (e) => {
       const id = Number(e.target.dataset.id);

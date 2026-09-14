@@ -66,8 +66,15 @@
     bodyEl.innerHTML = `
       <table>
         <thead><tr><th>Ref</th><th>Direction</th><th>Customer</th><th>Forwarder</th><th>Tracking</th><th>Status</th></tr></thead>
-        <tbody>
-          ${rows.map((r) => `
+        <tbody id="ss-tbody"></tbody>
+      </table>
+      <div class="nx-pager" id="ss-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("ss-tbody"),
+      pagerContainer: document.getElementById("ss-pager"),
+      pageSize: 25,
+      renderRows: (pageRows) => pageRows.map((r) => `
             <tr>
               <td>${r.direction === "outbound" ? `<a href="#" class="ss-open" data-id="${r.shipmentId}">${esc(r.refDisplay)}</a>` : esc(r.refDisplay)}</td>
               <td>${directionBadge(r.direction)}</td>
@@ -75,13 +82,13 @@
               <td>${esc(r.forwarderName)}</td>
               <td>${esc(r.trackingNumber)}</td>
               <td>${statusBadge(r)}</td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
-
-    bodyEl.querySelectorAll(".ss-open").forEach((a) => a.addEventListener("click", (e) => {
-      e.preventDefault();
-      OutboundShipmentDetail.open(Number(a.dataset.id), () => formEl.requestSubmit());
-    }));
+            </tr>`).join(""),
+      onRendered: () => {
+        bodyEl.querySelectorAll(".ss-open").forEach((a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          OutboundShipmentDetail.open(Number(a.dataset.id), () => formEl.requestSubmit());
+        }));
+      },
+    }).setRows(rows);
   }
 })();

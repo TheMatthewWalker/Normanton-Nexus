@@ -6,8 +6,6 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/performance");
 
-  const ROW_CAP = 500;
-
   function fmtNum(n, dp) {
     if (n === null || n === undefined || n === "") return "—";
     return Number(n).toLocaleString(undefined, { maximumFractionDigits: dp ?? 2, minimumFractionDigits: 0 });
@@ -85,13 +83,9 @@
       bodyEl.innerHTML = '<div class="nx-empty">No materials match these filters.</div>';
       return;
     }
-    const shown = rows.slice(0, ROW_CAP);
-    const cap = rows.length > ROW_CAP
-      ? `<p style="font-size:12px;color:var(--text-muted)">Showing first ${ROW_CAP.toLocaleString()} of ${rows.length.toLocaleString()} — narrow your filters to see more specific results.</p>`
-      : `<p style="font-size:12px;color:var(--text-muted)">${rows.length.toLocaleString()} material(s)</p>`;
 
     bodyEl.innerHTML = `
-      ${cap}
+      <p style="font-size:12px;color:var(--text-muted)">${rows.length.toLocaleString()} material(s)</p>
       <div style="overflow-x:auto">
         <table class="table--compact">
           <thead><tr>
@@ -99,9 +93,17 @@
             <th>Stock Qty</th><th>Stock Value</th><th>Unit Price</th><th>Book Value</th>
             <th>Turns</th><th>Days in Stock</th><th>Turnover Cat.</th><th>Last Receipt</th><th>Last Consumption</th><th>Warning</th>
           </tr></thead>
-          <tbody>${shown.map(renderRow).join("")}</tbody>
+          <tbody id="tv-tbody"></tbody>
         </table>
-      </div>`;
+      </div>
+      <div class="nx-pager" id="tv-pager"></div>`;
+
+    NexusTable.paginate({
+      container: document.getElementById("tv-tbody"),
+      pagerContainer: document.getElementById("tv-pager"),
+      pageSize: 50,
+      renderRows: (pageRows) => pageRows.map(renderRow).join(""),
+    }).setRows(rows);
   }
 
   function renderRow(r) {

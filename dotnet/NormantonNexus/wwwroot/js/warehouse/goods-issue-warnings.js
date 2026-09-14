@@ -10,7 +10,7 @@
 
   const STATUS_ORDER = [
     ["Failed", "priority"],
-    ["Warning", "warn"],
+    ["Warning", "backlog"],
   ];
 
   function wireCollapseToggles(root) {
