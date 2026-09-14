@@ -1,11 +1,20 @@
 // Shared helpers for the 7 Production report pages — port of the common
 // pieces of private/js/production-nexus.js's "REPORTS — shared helpers"
-// section (rptFiltersHtml/rptWireFilters/rptParams/rptTable/wireExport).
-// Loaded as a classic (non-module) script before each report page's own
-// dedicated script, same load-order convention as session-guard.js.
-// Charts are deliberately not ported (visual polish, same simplification
-// every earlier department's report-adjacent tiles made) — every report
-// still shows its real data as tables, CSV-exportable.
+// section (rptFiltersHtml/rptWireFilters/rptParams/rptTable/wireExport,
+// and now also mkChart/RPT_PALETTE/kpiCard). Loaded as a classic
+// (non-module) script before each report page's own dedicated script and
+// before the Chart.js CDN <script> tag those pages now also load, same
+// load-order convention as session-guard.js.
+//
+// Charts were originally left deliberately unported here (visual polish,
+// same simplification every earlier department's report-adjacent tiles
+// made) — every report just showed its real data as tables, CSV-exportable.
+// Reversed per explicit user direction: real usage showed tables alone
+// don't communicate trends the way Node's own Chart.js dashboards did.
+// kpiRow()/chartsGrid() below are new DOM builders (not a port of a single
+// Node function — Node built this markup inline per report via template
+// literals) that each report's own JS now calls alongside the untouched
+// buildTable() calls, matching Node's own KPI-row → charts → table order.
 window.ProductionReports = (function () {
   async function api(path, opts) {
     const r = await fetch("/api/productionnexus" + path, opts);
@@ -213,5 +222,81 @@ window.ProductionReports = (function () {
     return btn;
   }
 
-  return { api, PROCESS_LABELS, fmtNum, badgeEl, mountFilterBar, buildQuery, buildTable, downloadCsv, exportButton };
+  // ── Charts (Chart.js) — mirrors production-nexus.js's own mkChart/
+  // RPT_PALETTE/RPT_SUCCESS/RPT_WARN/RPT_ERR/RPT_MUT exactly, including the
+  // destroy-before-recreate registry (each report's own Run Report click
+  // re-renders the same canvas IDs, and Chart.js throws "Canvas is already
+  // in use" if the previous instance on that canvas isn't destroyed first).
+  const _charts = {};
+  function mkChart(canvasId, config) {
+    if (_charts[canvasId]) {
+      try { _charts[canvasId].destroy(); } catch { /* already gone */ }
+      delete _charts[canvasId];
+    }
+    const el = document.getElementById(canvasId);
+    if (!el || typeof Chart === "undefined") return null;
+    _charts[canvasId] = new Chart(el, config);
+    return _charts[canvasId];
+  }
+
+  const RPT_PALETTE = ["#0D9488", "#14B8A6", "#2563EB", "#7C3AED", "#DB2777", "#D97706", "#059669", "#0891B2", "#DC2626", "#6B7280"];
+  const RPT_SUCCESS = "#059669";
+  const RPT_WARN = "#D97706";
+  const RPT_ERR = "#DC2626";
+  const RPT_MUT = "#6B7280";
+
+  // Builds a `.rpt-kpi-row` of `.rpt-kpi` cards — cards is [{label, value, sub}].
+  function kpiRow(cards) {
+    const row = document.createElement("div");
+    row.className = "rpt-kpi-row";
+    for (const { label, value, sub } of cards) {
+      const card = document.createElement("div");
+      card.className = "rpt-kpi";
+      const labelEl = document.createElement("div");
+      labelEl.className = "rpt-kpi-label";
+      labelEl.textContent = label;
+      const valEl = document.createElement("div");
+      valEl.className = "rpt-kpi-val";
+      valEl.textContent = value;
+      card.append(labelEl, valEl);
+      if (sub) {
+        const subEl = document.createElement("div");
+        subEl.className = "rpt-kpi-sub";
+        subEl.textContent = sub;
+        card.appendChild(subEl);
+      }
+      row.appendChild(card);
+    }
+    return row;
+  }
+
+  // Builds a `.rpt-charts` grid of `.rpt-chart-card` cards, each wrapping a
+  // <canvas id="canvasId"> for a later mkChart(canvasId, ...) call — cards
+  // is [{title, canvasId, wide, tall}]. Returns the grid element; caller
+  // appends it, then calls mkChart for each canvasId once it's in the DOM
+  // (a canvas needs real layout dimensions before Chart.js can size onto it).
+  function chartsGrid(cards) {
+    const grid = document.createElement("div");
+    grid.className = "rpt-charts";
+    for (const { title, canvasId, wide, tall } of cards) {
+      const card = document.createElement("div");
+      card.className = "rpt-chart-card" + (wide ? " rpt-chart-card--wide" : "");
+      const eyebrow = document.createElement("div");
+      eyebrow.className = "rpt-chart-eyebrow";
+      eyebrow.textContent = title;
+      const wrap = document.createElement("div");
+      wrap.className = "rpt-chart-wrap" + (tall ? " rpt-chart-wrap--tall" : "");
+      const canvas = document.createElement("canvas");
+      canvas.id = canvasId;
+      wrap.appendChild(canvas);
+      card.append(eyebrow, wrap);
+      grid.appendChild(card);
+    }
+    return grid;
+  }
+
+  return {
+    api, PROCESS_LABELS, fmtNum, badgeEl, mountFilterBar, buildQuery, buildTable, downloadCsv, exportButton,
+    mkChart, kpiRow, chartsGrid, RPT_PALETTE, RPT_SUCCESS, RPT_WARN, RPT_ERR, RPT_MUT,
+  };
 })();

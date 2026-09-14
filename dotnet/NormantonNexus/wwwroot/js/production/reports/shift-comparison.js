@@ -15,6 +15,37 @@
       outputEl.innerHTML = "";
       outputEl.appendChild(R.exportButton(() => data.output, `shift-performance-${new Date().toISOString().slice(0, 10)}.csv`));
 
+      const shifts = [...new Set(data.output.map((r) => r.shiftName))].sort();
+      const procs = [...new Set(data.output.map((r) => r.processCode))].sort();
+      const mRows = data.output.filter((r) => r.uom === "M");
+      const shiftTotals = {};
+      for (const s of shifts) {
+        shiftTotals[s] = {
+          m: mRows.filter((r) => r.shiftName === s).reduce((a, r) => a + Number(r.totalOutput), 0),
+          batches: data.output.filter((r) => r.shiftName === s).reduce((a, r) => a + r.batchCount, 0),
+        };
+      }
+
+      outputEl.appendChild(R.kpiRow(shifts.map((s) => ({ label: s, value: `${R.fmtNum(shiftTotals[s].m)} M`, sub: `${shiftTotals[s].batches} batches` }))));
+
+      outputEl.appendChild(R.chartsGrid([{ title: "Output (Metres) by Shift & Process", canvasId: "ch-shf-out", wide: true, tall: true }]));
+      R.mkChart("ch-shf-out", {
+        type: "bar",
+        data: {
+          labels: procs.map((p) => R.PROCESS_LABELS[p] || p),
+          datasets: shifts.map((s, i) => ({
+            label: s,
+            data: procs.map((p) => {
+              const r = mRows.find((x) => x.shiftName === s && x.processCode === p);
+              return r ? Number(r.totalOutput) : 0;
+            }),
+            backgroundColor: R.RPT_PALETTE[i % R.RPT_PALETTE.length] + "cc",
+            borderRadius: 3,
+          })),
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } },
+      });
+
       const outputHeading = document.createElement("h3");
       outputHeading.textContent = "Output by Shift";
       outputEl.appendChild(outputHeading);

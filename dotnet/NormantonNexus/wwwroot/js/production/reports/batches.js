@@ -14,6 +14,30 @@
 
       outputEl.innerHTML = "";
       outputEl.appendChild(R.exportButton(() => data, `batch-summary-${new Date().toISOString().slice(0, 10)}.csv`));
+
+      outputEl.appendChild(
+        R.kpiRow([
+          { label: "Completed", value: data.reduce((s, r) => s + (r.complete || 0), 0) },
+          { label: "SAP Failed", value: data.reduce((s, r) => s + (r.sapFailed || 0), 0), sub: "Pending retry" },
+          { label: "Reversed", value: data.reduce((s, r) => s + (r.reversed || 0), 0) },
+        ])
+      );
+
+      outputEl.appendChild(R.chartsGrid([{ title: "Batches by Status per Process", canvasId: "ch-bat-stacked", wide: true, tall: true }]));
+      R.mkChart("ch-bat-stacked", {
+        type: "bar",
+        data: {
+          labels: data.map((r) => R.PROCESS_LABELS[r.processCode] || r.processCode),
+          datasets: [
+            { label: "Complete", data: data.map((r) => r.complete || 0), backgroundColor: R.RPT_SUCCESS + "cc", borderRadius: 3 },
+            { label: "SAP Failed", data: data.map((r) => r.sapFailed || 0), backgroundColor: R.RPT_ERR + "cc", borderRadius: 3 },
+            { label: "Reversed", data: data.map((r) => r.reversed || 0), backgroundColor: R.RPT_MUT + "99", borderRadius: 3 },
+            { label: "Cancelled", data: data.map((r) => r.cancelled || 0), backgroundColor: R.RPT_WARN + "99", borderRadius: 3 },
+          ],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } },
+      });
+
       outputEl.appendChild(
         R.buildTable(["Process", "Complete", "SAP Failed", "Cancelled", "Reversed", "Total"], data, (row) => {
           const tr = document.createElement("tr");

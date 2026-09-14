@@ -15,6 +15,61 @@
       outputEl.innerHTML = "";
       outputEl.appendChild(R.exportButton(() => data.byProcess, `sap-performance-${new Date().toISOString().slice(0, 10)}.csv`));
 
+      const total = data.byProcess.reduce((s, r) => s + r.total, 0);
+      const success = data.byProcess.reduce((s, r) => s + r.success, 0);
+      const failed = data.byProcess.reduce((s, r) => s + r.failed, 0);
+      const reversed = data.byProcess.reduce((s, r) => s + r.reversed, 0);
+      const alertCount = data.alerts.reduce((s, r) => s + r.alertCount, 0);
+      const rate = total > 0 ? ((success / total) * 100).toFixed(1) : "—";
+
+      outputEl.appendChild(
+        R.kpiRow([
+          { label: "Total Backflushes", value: total },
+          { label: "Success Rate", value: `${rate}%`, sub: `${success} posted` },
+          { label: "Failed", value: failed, sub: "Status 6 records" },
+          { label: "Reversed", value: reversed },
+          { label: "190 Alerts", value: alertCount, sub: "No component consumption" },
+        ])
+      );
+
+      outputEl.appendChild(
+        R.chartsGrid([
+          { title: "Overall Status Split", canvasId: "ch-sap-donut" },
+          { title: "Success vs Failed by Process", canvasId: "ch-sap-proc" },
+          { title: "Success vs Failed over Time", canvasId: "ch-sap-ts", wide: true },
+        ])
+      );
+
+      R.mkChart("ch-sap-donut", {
+        type: "doughnut",
+        data: { labels: ["Success", "Failed", "Reversed"], datasets: [{ data: [success, failed, reversed], backgroundColor: [R.RPT_SUCCESS, R.RPT_ERR, R.RPT_MUT] }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right" } } },
+      });
+
+      R.mkChart("ch-sap-proc", {
+        type: "bar",
+        data: {
+          labels: data.byProcess.map((r) => R.PROCESS_LABELS[r.processCode] || r.processCode),
+          datasets: [
+            { label: "Success", data: data.byProcess.map((r) => r.success), backgroundColor: R.RPT_SUCCESS + "cc", borderRadius: 3 },
+            { label: "Failed", data: data.byProcess.map((r) => r.failed), backgroundColor: R.RPT_ERR + "cc", borderRadius: 3 },
+          ],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } },
+      });
+
+      R.mkChart("ch-sap-ts", {
+        type: "line",
+        data: {
+          labels: data.timeSeries.map((r) => r.period),
+          datasets: [
+            { label: "Success", data: data.timeSeries.map((r) => r.success), borderColor: R.RPT_SUCCESS, backgroundColor: "transparent", tension: 0.3 },
+            { label: "Failed", data: data.timeSeries.map((r) => r.failed), borderColor: R.RPT_ERR, backgroundColor: "transparent", tension: 0.3 },
+          ],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } },
+      });
+
       const byProcessHeading = document.createElement("h3");
       byProcessHeading.textContent = "By Process";
       outputEl.appendChild(byProcessHeading);

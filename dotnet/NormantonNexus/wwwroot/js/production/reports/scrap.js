@@ -18,6 +18,49 @@
       outputEl.innerHTML = "";
       outputEl.appendChild(R.exportButton(() => data.byReason, `scrap-analysis-${new Date().toISOString().slice(0, 10)}.csv`));
 
+      outputEl.appendChild(
+        R.kpiRow([
+          { label: "Total Scrap (KG)", value: `${R.fmtNum(data.totals.totalKg)} KG` },
+          { label: "Scrap Entries", value: data.totals.entryCount },
+          { label: "Top Reason", value: data.totals.topReason || "—" },
+        ])
+      );
+
+      outputEl.appendChild(
+        R.chartsGrid([
+          { title: "Scrap by Reason (KG)", canvasId: "ch-scr-reason" },
+          { title: "Scrap by Process (KG)", canvasId: "ch-scr-proc" },
+          { title: "Scrap Trend (KG)", canvasId: "ch-scr-ts", wide: true },
+        ])
+      );
+
+      R.mkChart("ch-scr-reason", {
+        type: "doughnut",
+        data: {
+          labels: data.byReason.map((r) => r.reasonDescription),
+          datasets: [{ data: data.byReason.map((r) => Number(r.totalKg)), backgroundColor: R.RPT_PALETTE.slice(0, data.byReason.length) }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right" } } },
+      });
+
+      R.mkChart("ch-scr-proc", {
+        type: "bar",
+        data: {
+          labels: data.byProcess.map((r) => R.PROCESS_LABELS[r.processCode] || r.processCode),
+          datasets: [{ label: "Scrap (KG)", data: data.byProcess.map((r) => Number(r.totalKg)), backgroundColor: R.RPT_ERR + "cc", borderRadius: 4 }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+      });
+
+      R.mkChart("ch-scr-ts", {
+        type: "bar",
+        data: {
+          labels: data.timeSeries.map((r) => r.period),
+          datasets: [{ label: "Scrap (KG)", data: data.timeSeries.map((r) => Number(r.totalKg)), backgroundColor: R.RPT_WARN + "99", borderRadius: 3 }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+      });
+
       const summary = document.createElement("p");
       summary.textContent = `Total: ${R.fmtNum(data.totals.totalKg)} KG across ${data.totals.entryCount} entries — top reason: ${data.totals.topReason}`;
       outputEl.appendChild(summary);
