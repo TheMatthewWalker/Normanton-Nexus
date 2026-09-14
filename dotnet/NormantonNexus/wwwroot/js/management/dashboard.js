@@ -161,13 +161,33 @@
     const thead = table.querySelector("thead");
     const tbody = table.querySelector("tbody");
     thead.innerHTML = "<tr><th>Date</th><th>PTFE Daily</th><th>PTFE Cum</th><th>PV Daily</th><th>PV Cum</th><th>Total Cum</th></tr>";
+
+    // Cumulative totals must be computed over the FULL row set before
+    // paginating — each page can't recompute its own running total from
+    // zero, or every page after the first would show the wrong cumulative
+    // figures.
     let ptfeRunning = 0, pvRunning = 0;
-    tbody.innerHTML = data.map((row) => {
+    const enriched = data.map((row) => {
       const ptfe = row.streams?.PTFE?.invoiced || 0;
       const pv = row.streams?.PV?.invoiced || 0;
       ptfeRunning += ptfe; pvRunning += pv;
-      return `<tr><td>${esc(row.date)}</td><td>${formatCurrency(ptfe)}</td><td>${formatCurrency(ptfeRunning)}</td><td>${formatCurrency(pv)}</td><td>${formatCurrency(pvRunning)}</td><td>${formatCurrency(ptfeRunning + pvRunning)}</td></tr>`;
-    }).join("");
+      return { date: row.date, ptfe, pv, ptfeCum: ptfeRunning, pvCum: pvRunning };
+    });
+
+    let pagerEl = document.getElementById("dataTablePager");
+    if (!pagerEl) {
+      pagerEl = document.createElement("div");
+      pagerEl.id = "dataTablePager";
+      pagerEl.className = "nx-pager";
+      table.insertAdjacentElement("afterend", pagerEl);
+    }
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 31,
+      renderRows: (pageRows) => pageRows.map((row) => `<tr><td>${esc(row.date)}</td><td>${formatCurrency(row.ptfe)}</td><td>${formatCurrency(row.ptfeCum)}</td><td>${formatCurrency(row.pv)}</td><td>${formatCurrency(row.pvCum)}</td><td>${formatCurrency(row.ptfeCum + row.pvCum)}</td></tr>`).join(""),
+    }).setRows(enriched);
   }
 
   function renderKpis(valueData, otifData) {
@@ -314,14 +334,9 @@
     container.innerHTML = `
       <table>
         <thead><tr>${cols.map((c) => `<th style="cursor:pointer;" data-sort="${c.key}">${c.label}${breakdownSortKey === c.key ? (breakdownSortDir === 1 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead>
-        <tbody>
-          ${sorted.map((r) => `<tr>
-            <td>${esc(r.customer)}</td><td>${esc(r.customerName)}</td><td>${esc(r.referenceDocument)}</td>
-            <td>${esc(r.material)}</td><td>${esc(r.materialText)}</td><td>${esc(r.requestDate)}</td><td>${esc(r.valueStream)}</td>
-            <td>${currencyCell(r.orderValue)}</td><td>${currencyCell(r.stockValue)}</td><td>${currencyCell(r.pickedValue)}</td>
-          </tr>`).join("")}
-        </tbody>
-      </table>`;
+        <tbody id="breakdownTbody"></tbody>
+      </table>
+      <div class="nx-pager" id="breakdownPager"></div>`;
     container.querySelectorAll("th[data-sort]").forEach((th) => {
       th.addEventListener("click", () => {
         const key = th.dataset.sort;
@@ -330,6 +345,17 @@
         renderBreakdownTable();
       });
     });
+
+    NexusTable.paginate({
+      container: document.getElementById("breakdownTbody"),
+      pagerContainer: document.getElementById("breakdownPager"),
+      pageSize: 50,
+      renderRows: (pageRows) => pageRows.map((r) => `<tr>
+            <td>${esc(r.customer)}</td><td>${esc(r.customerName)}</td><td>${esc(r.referenceDocument)}</td>
+            <td>${esc(r.material)}</td><td>${esc(r.materialText)}</td><td>${esc(r.requestDate)}</td><td>${esc(r.valueStream)}</td>
+            <td>${currencyCell(r.orderValue)}</td><td>${currencyCell(r.stockValue)}</td><td>${currencyCell(r.pickedValue)}</td>
+          </tr>`).join(""),
+    }).setRows(sorted);
   }
 
   document.getElementById("fullBreakdownBtn").addEventListener("click", () => openBreakdown("full"));

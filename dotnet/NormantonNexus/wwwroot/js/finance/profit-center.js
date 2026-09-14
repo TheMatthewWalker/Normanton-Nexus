@@ -223,24 +223,37 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    for (const r of enriched) {
-      const tr = document.createElement("tr");
-      for (const c of cols) {
-        const td = document.createElement("td");
-        if (c.key === "companyCodeValue") {
-          const val = Number(r.companyCodeValue) || 0;
-          td.style.textAlign = "right";
-          td.style.color = val >= 0 ? "#059669" : "#dc2626";
-          td.textContent = fmtGBP(val);
-        } else {
-          td.textContent = r[c.key] ?? "";
-        }
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
     table.append(thead, tbody);
     detailEl.appendChild(table);
+
+    const pagerEl = document.createElement("div");
+    pagerEl.className = "nx-pager";
+    detailEl.appendChild(pagerEl);
+
+    NexusTable.paginate({
+      container: tbody,
+      pagerContainer: pagerEl,
+      pageSize: 50,
+      renderRows: (pageRows, tbodyEl) => {
+        tbodyEl.innerHTML = "";
+        for (const r of pageRows) {
+          const tr = document.createElement("tr");
+          for (const c of cols) {
+            const td = document.createElement("td");
+            if (c.key === "companyCodeValue") {
+              const val = Number(r.companyCodeValue) || 0;
+              td.style.textAlign = "right";
+              td.style.color = val >= 0 ? "#059669" : "#dc2626";
+              td.textContent = fmtGBP(val);
+            } else {
+              td.textContent = r[c.key] ?? "";
+            }
+            tr.appendChild(td);
+          }
+          tbodyEl.appendChild(tr);
+        }
+      },
+    }).setRows(enriched);
   }
 
   runBtn.addEventListener("click", async () => {
