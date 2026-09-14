@@ -53,3 +53,17 @@ public sealed class NexusPayloadTooLargeException(string message) : NexusApiExce
 {
     public override int StatusCode => StatusCodes.Status413PayloadTooLarge;
 }
+
+/// <summary>
+/// A raw SQL Console query executed but SQL Server rejected it (bad syntax,
+/// a constraint violation, etc.) — 500, but unlike every other generic
+/// Exception path (which ApiExceptionMiddleware masks to "An unexpected
+/// error occurred") this carries the real SQL error text through, matching
+/// routes/sqlqueries.js's own res.status(500).json({success:false, error:
+/// err.message}) exactly. Seeing the actual SQL error is the whole point of
+/// a raw SQL console — masking it here would make the tool useless.
+/// </summary>
+public sealed class NexusSqlExecutionException(string message) : NexusApiException("SQL_ERROR", message)
+{
+    public override int StatusCode => StatusCodes.Status500InternalServerError;
+}

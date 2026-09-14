@@ -1,0 +1,25 @@
+@page
+@model NormantonNexus.Pages.Admin.SqlConsoleModel
+@{
+    ViewData["Title"] = "SQL Console";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "SQL Console";
+    ViewData["PageSubtitle"] = "Run a raw SQL query against the portal database — destructive statements (DELETE/DROP/UPDATE/INSERT/ALTER/TRUNCATE/EXEC/MERGE) require superadmin";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<textarea id="sql-input" rows="8" style="width:100%; box-sizing:border-box; font-family:monospace;" placeholder="SELECT TOP 100 * FROM dbo.PortalUsers"></textarea>
+
+<div class="nx-toolbar" style="margin-top:8px">
+    <button type="button" class="btn" id="sql-run">Run (Ctrl+Enter)</button>
+    <button type="button" class="secondary" id="sql-clear">Clear</button>
+    <button type="button" class="secondary" id="sql-export" style="display:none">Export CSV</button>
+    <span id="sql-row-count" class="nx-toolbar-hint" style="display:none"></span>
+</div>
+
+<div id="sql-result" style="margin-top:12px"></div>
+
+@section Scripts {
+    <script src="~/js/admin/sql-console.js"></script>
+}
