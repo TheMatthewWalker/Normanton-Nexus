@@ -1,22 +1,16 @@
 // GL Account Groups tile — pure CRUD over /api/finance/gl-groups. Node's
 // original (private/js/finance.js's showGlGroupConfig()/openGlGroupModal())
-// used a floating modal with chip-style account tags; simplified here to an
-// in-page form (same pattern as Sales's Customer Standard Instructions
-// page) with accounts entered one-per-line rather than dynamic add/remove
-// input rows — same behavior, less markup. Every dynamic value is built
-// via textContent/DOM APIs, never innerHTML.
+// used a floating modal with chip-style account tags; this now opens via
+// the shared AdminEditModal (same generic "edit a flat record" convention
+// already used by Logistics's reference-data tiles), accounts entered
+// one-per-line rather than dynamic add/remove input rows — same behavior,
+// less markup than reproducing Node's chip UI. Every dynamic value in the
+// list itself is still built via textContent/DOM APIs, never innerHTML.
 (function () {
   const listEl = document.getElementById("gg-list");
   const msgEl = document.getElementById("gg-msg");
 
-  const formEl = document.getElementById("gg-form");
-  const formTitleEl = document.getElementById("gg-form-title");
-  const labelInput = document.getElementById("gg-label");
-  const accountsInput = document.getElementById("gg-accounts");
-  const formMsgEl = document.getElementById("gg-form-msg");
-
   let groups = [];
-  let editingId = null;
 
   async function api(path, opts) {
     const r = await fetch("/api/finance" + path, opts);
@@ -101,33 +95,23 @@
     }
   }
 
+  const FIELDS = [
+    { key: "label", label: "Label" },
+    { key: "accounts", label: "GL Accounts (one per line)", multiline: true, wide: true },
+  ];
+
   function openForm(existing) {
-    editingId = existing ? existing.id : null;
-    formTitleEl.textContent = existing ? "Edit Group" : "Add Group";
-    labelInput.value = existing ? existing.label : "";
-    accountsInput.value = existing ? existing.accounts.join("\n") : "";
-    formMsgEl.textContent = "";
-    formEl.style.display = "";
-  }
+    const record = existing
+      ? { label: existing.label, accounts: existing.accounts.join("\n") }
+      : { label: "", accounts: "" };
 
-  document.getElementById("gg-add-btn").addEventListener("click", () => openForm(null));
-  document.getElementById("gg-cancel-btn").addEventListener("click", () => {
-    formEl.style.display = "none";
-  });
+    AdminEditModal.open(existing ? "Edit Group" : "Add Group", "", FIELDS, record, async (values) => {
+      const label = values.label.trim();
+      const accounts = values.accounts.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (!label) throw new Error("Label is required.");
 
-  document.getElementById("gg-save-btn").addEventListener("click", async () => {
-    const label = labelInput.value.trim();
-    const accounts = accountsInput.value
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (!label) {
-      formMsgEl.textContent = "Label is required.";
-      return;
-    }
-    try {
-      if (editingId) {
-        await api(`/gl-groups/${editingId}`, {
+      if (existing) {
+        await api(`/gl-groups/${existing.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ label, accounts }),
@@ -139,12 +123,11 @@
           body: JSON.stringify({ label, accounts }),
         });
       }
-      formEl.style.display = "none";
       await load();
-    } catch (err) {
-      formMsgEl.textContent = err.message;
-    }
-  });
+    });
+  }
+
+  document.getElementById("gg-add-btn").addEventListener("click", () => openForm(null));
 
   load();
 })();

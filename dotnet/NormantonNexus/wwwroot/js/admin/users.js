@@ -110,16 +110,21 @@
 
   document.getElementById("ua-search").addEventListener("input", renderUsers);
 
+  // Opened in the shared NexusModal shell rather than injected as a section
+  // at the bottom of the page (below the user list, above Bulk Operations)
+  // — the previous layout meant "Manage" on any row pushed everything else
+  // down the page and needed scrolling to find, on every single click.
   function openDetail(userId) {
     const u = usersRows.find((x) => x.userId === userId);
     if (!u) return;
-    const el = document.getElementById("ua-detail");
-    el.style.display = "";
-    el.innerHTML = `
-      <div class="card">
-        <h4>Edit ${esc(u.username)}</h4>
-        <button type="button" class="btn" id="ua-detail-close">Close</button>
-        <form id="ua-edit-form" style="margin-top:0.5rem;">
+
+    const card = NexusModal.open(`
+      <div class="ps-modal-header">
+        <div class="ps-modal-title">Edit ${esc(u.username)}</div>
+        <button type="button" class="ps-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="ps-modal-body">
+        <form id="ua-edit-form">
           <label>Username<input type="text" id="uae-username" value="${esc(u.username)}"></label>
           <label>First Name<input type="text" id="uae-first" value="${esc(u.firstName)}"></label>
           <label>Last Name<input type="text" id="uae-last" value="${esc(u.lastName)}"></label>
@@ -137,51 +142,54 @@
             ${DEPARTMENTS.map((d) => `<label style="display:inline-block; margin-right:0.75rem;"><input type="checkbox" value="${d}" class="uae-dept" ${(u.departments || []).includes(d) ? "checked" : ""}> ${d}</label>`).join("")}
           </fieldset>
           <label>Notes<textarea id="uae-notes" rows="2" style="width:100%;">${esc(u.notes)}</textarea></label>
-          <button type="submit" class="btn secondary">Save</button>
+          <div id="uae-result" style="margin:0.5rem 0;font-size:13px"></div>
+          <button type="submit" class="btn">Save</button>
         </form>
 
-        <h4 style="margin-top:1rem;">Permissions</h4>
+        <h4 style="margin-top:1.25rem;">Permissions</h4>
         <div id="ua-perms">Loading…</div>
         <form id="ua-grant-form" style="margin-top:0.5rem;">
           <label>Permission Code<input type="text" id="uae-grant-code" required></label>
           <button type="submit" class="btn secondary">Grant</button>
         </form>
-      </div>`;
+      </div>`, { wide: true });
 
-    document.getElementById("ua-detail-close").addEventListener("click", () => { el.style.display = "none"; el.innerHTML = ""; });
+    card.querySelector(".ps-modal-close").addEventListener("click", () => NexusModal.close());
 
-    document.getElementById("ua-edit-form").addEventListener("submit", async (e) => {
+    card.querySelector("#ua-edit-form").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const departments = Array.from(el.querySelectorAll(".uae-dept:checked")).map((c) => c.value);
+      const departments = Array.from(card.querySelectorAll(".uae-dept:checked")).map((c) => c.value);
+      const resultEl = card.querySelector("#uae-result");
       try {
         await api(`/users/${userId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            role: document.getElementById("uae-role").value,
-            isActive: document.getElementById("uae-active").checked,
-            isLocked: document.getElementById("uae-locked").checked,
-            notes: document.getElementById("uae-notes").value || null,
+            role: card.querySelector("#uae-role").value,
+            isActive: card.querySelector("#uae-active").checked,
+            isLocked: card.querySelector("#uae-locked").checked,
+            notes: card.querySelector("#uae-notes").value || null,
             departments,
-            username: document.getElementById("uae-username").value || null,
-            firstName: document.getElementById("uae-first").value || null,
-            lastName: document.getElementById("uae-last").value || null,
-            email: document.getElementById("uae-email").value || null,
-            shortIdleTimeout: document.getElementById("uae-idle").checked,
+            username: card.querySelector("#uae-username").value || null,
+            firstName: card.querySelector("#uae-first").value || null,
+            lastName: card.querySelector("#uae-last").value || null,
+            email: card.querySelector("#uae-email").value || null,
+            shortIdleTimeout: card.querySelector("#uae-idle").checked,
           }),
         });
         await loadUsers();
         openDetail(userId);
       } catch (err) {
-        alert("Error: " + err.message);
+        resultEl.style.color = "var(--error)";
+        resultEl.textContent = err.message;
       }
     });
 
     loadUserPermissions(userId);
 
-    document.getElementById("ua-grant-form").addEventListener("submit", async (e) => {
+    card.querySelector("#ua-grant-form").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const code = document.getElementById("uae-grant-code").value.trim();
+      const code = card.querySelector("#uae-grant-code").value.trim();
       if (!code) return;
       try {
         await api(`/users/${userId}/permissions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ permissionCode: code }) });

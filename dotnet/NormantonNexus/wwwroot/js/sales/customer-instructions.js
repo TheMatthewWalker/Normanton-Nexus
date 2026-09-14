@@ -11,13 +11,6 @@
   const tableEl = document.getElementById("ci-table");
   const msgEl = document.getElementById("ci-msg");
 
-  const formEl = document.getElementById("ci-form");
-  const formTitleEl = document.getElementById("ci-form-title");
-  const custInput = document.getElementById("ci-cust");
-  const nameInput = document.getElementById("ci-name");
-  const instrInput = document.getElementById("ci-instr");
-  const formMsgEl = document.getElementById("ci-form-msg");
-
   const importPanelEl = document.getElementById("ci-import-panel");
   const importPasteEl = document.getElementById("ci-import-paste");
   const importPreviewEl = document.getElementById("ci-import-preview");
@@ -25,7 +18,6 @@
   const importGoBtn = document.getElementById("ci-import-go-btn");
 
   let rows = [];
-  let editingCustomer = null; // null = adding, otherwise editing this customer
   let parsedImportRows = [];
 
   async function api(path, opts) {
@@ -136,46 +128,34 @@
 
   // ── Add / Edit form ──────────────────────────────────────────────────
   function openForm(existing) {
-    editingCustomer = existing ? existing.customer : null;
-    formTitleEl.textContent = existing ? "Edit Customer" : "Add Customer";
-    custInput.value = existing ? existing.customer : "";
-    custInput.disabled = !!existing;
-    nameInput.value = existing ? existing.customerName ?? "" : "";
-    instrInput.value = existing ? existing.instructions : "";
-    formMsgEl.textContent = "";
-    formEl.style.display = "";
     importPanelEl.style.display = "none";
-  }
 
-  document.getElementById("ci-add-btn").addEventListener("click", () => openForm(null));
-  document.getElementById("ci-cancel-btn").addEventListener("click", () => {
-    formEl.style.display = "none";
-  });
+    const fields = [
+      { key: "customer", label: "Customer Number", readonly: !!existing },
+      { key: "customerName", label: "Customer Name" },
+      { key: "instructions", label: "Instructions", multiline: true, wide: true },
+    ];
+    const record = existing
+      ? { customer: existing.customer, customerName: existing.customerName ?? "", instructions: existing.instructions }
+      : { customer: "", customerName: "", instructions: "" };
 
-  document.getElementById("ci-save-btn").addEventListener("click", async () => {
-    const customer = editingCustomer ?? custInput.value.trim();
-    const customerName = nameInput.value.trim();
-    const instructions = instrInput.value.trim();
-    if (!customer) {
-      formMsgEl.textContent = "Customer number is required.";
-      return;
-    }
-    if (!instructions) {
-      formMsgEl.textContent = "Instructions text is required.";
-      return;
-    }
-    try {
+    AdminEditModal.open(existing ? "Edit Customer" : "Add Customer", "", fields, record, async (values) => {
+      const customer = existing ? existing.customer : values.customer.trim();
+      const customerName = values.customerName.trim();
+      const instructions = values.instructions.trim();
+      if (!customer) throw new Error("Customer number is required.");
+      if (!instructions) throw new Error("Instructions text is required.");
+
       await api(`/customer-instructions/${encodeURIComponent(customer)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ customerName, instructions }),
       });
-      formEl.style.display = "none";
       await load();
-    } catch (err) {
-      formMsgEl.textContent = err.message;
-    }
-  });
+    });
+  }
+
+  document.getElementById("ci-add-btn").addEventListener("click", () => openForm(null));
 
   // ── Bulk import ──────────────────────────────────────────────────────
   // Minimal RFC4180-style parser, tab-delimited (pasting from Excel produces
@@ -254,7 +234,6 @@
     importGoBtn.disabled = true;
     parsedImportRows = [];
     importPanelEl.style.display = "";
-    formEl.style.display = "none";
   });
   document.getElementById("ci-import-cancel-btn").addEventListener("click", () => {
     importPanelEl.style.display = "none";
