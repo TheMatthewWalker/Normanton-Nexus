@@ -40,14 +40,7 @@
     el.querySelectorAll("button[data-edit]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const r = rows.find((x) => x.permissionCode === btn.dataset.edit);
-        if (!r) return;
-        document.getElementById("pd-form-title").textContent = `Edit ${r.permissionCode}`;
-        document.getElementById("pd-code-hidden").value = r.permissionCode;
-        document.getElementById("pd-code").value = r.permissionCode;
-        document.getElementById("pd-code").disabled = true;
-        document.getElementById("pd-name").value = r.permissionName || "";
-        document.getElementById("pd-desc").value = r.description || "";
-        document.getElementById("pd-category").value = r.category || "";
+        if (r) openForm(r);
       });
     });
     el.querySelectorAll("button[data-delete]").forEach((btn) => {
@@ -63,48 +56,44 @@
     });
   }
 
-  const form = document.getElementById("pd-form");
-  if (form) {
-    document.getElementById("pd-cancel").addEventListener("click", resetForm);
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const editingCode = document.getElementById("pd-code-hidden").value;
-      try {
-        if (editingCode) {
-          await api(`/permissions/${encodeURIComponent(editingCode)}`, {
-            method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              permissionName: document.getElementById("pd-name").value,
-              description: document.getElementById("pd-desc").value || null,
-              category: document.getElementById("pd-category").value || null,
-            }),
-          });
-        } else {
-          await api("/permissions", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              permissionCode: document.getElementById("pd-code").value,
-              permissionName: document.getElementById("pd-name").value,
-              description: document.getElementById("pd-desc").value || null,
-              category: document.getElementById("pd-category").value || null,
-            }),
-          });
-        }
-        resetForm();
-        await load();
-      } catch (err) {
-        alert("Error: " + err.message);
+  const FIELDS = [
+    { key: "code", label: "Code" },
+    { key: "name", label: "Name" },
+    { key: "description", label: "Description" },
+    { key: "category", label: "Category" },
+  ];
+
+  function openForm(existing) {
+    const fields = existing ? FIELDS.map((f) => (f.key === "code" ? { ...f, readonly: true } : f)) : FIELDS;
+    const record = existing
+      ? { code: existing.permissionCode, name: existing.permissionName || "", description: existing.description || "", category: existing.category || "" }
+      : { code: "", name: "", description: "", category: "" };
+
+    AdminEditModal.open(existing ? `Edit ${existing.permissionCode}` : "Add Permission", "", fields, record, async (values) => {
+      const description = values.description || null;
+      const category = values.category || null;
+
+      if (existing) {
+        await api(`/permissions/${encodeURIComponent(existing.permissionCode)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ permissionName: values.name, description, category }),
+        });
+      } else {
+        const code = values.code.trim();
+        if (!code) throw new Error("Code is required.");
+        await api("/permissions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ permissionCode: code, permissionName: values.name, description, category }),
+        });
       }
+      await load();
     });
   }
 
-  function resetForm() {
-    if (!form) return;
-    form.reset();
-    document.getElementById("pd-form-title").textContent = "Add Permission";
-    document.getElementById("pd-code-hidden").value = "";
-    document.getElementById("pd-code").disabled = false;
-  }
+  const addBtn = document.getElementById("pd-add-btn");
+  if (addBtn) addBtn.addEventListener("click", () => openForm(null));
 
   load();
 })();

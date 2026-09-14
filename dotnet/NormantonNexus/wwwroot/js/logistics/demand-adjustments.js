@@ -8,17 +8,6 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/performance");
   const bodyEl = document.getElementById("da-body");
-  const modeSelect = document.getElementById("da-mode");
-  const usageField = document.getElementById("da-usage-field");
-  const overrideField = document.getElementById("da-override-field");
-
-  function applyMode() {
-    const isOverride = modeSelect.value === "override";
-    usageField.classList.toggle("hidden", isOverride);
-    overrideField.classList.toggle("hidden", !isOverride);
-  }
-  modeSelect.addEventListener("change", applyMode);
-  applyMode();
 
   async function load() {
     bodyEl.innerHTML = '<div class="nx-toolbar-hint">Loading…</div>';
@@ -55,46 +44,120 @@
     });
   }
 
-  document.getElementById("da-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const errorEl = document.getElementById("da-form-error");
-    errorEl.innerHTML = "";
+  function openForm(initialMaterial) {
+    const card = NexusModal.open(`
+      <div class="ps-modal-header">
+        <div>
+          <div class="ps-modal-title">Add Demand Adjustment</div>
+        </div>
+        <button type="button" class="ps-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="ps-modal-body">
+        <form id="da-modal-form">
+          <div class="tf-row">
+            <div class="tf-field">
+              <label class="tf-label">Material</label>
+              <input class="tf-input" type="text" id="da-material" required>
+            </div>
+            <div class="tf-field">
+              <label class="tf-label">Start Date</label>
+              <input class="tf-input" type="date" id="da-start">
+            </div>
+            <div class="tf-field">
+              <label class="tf-label">End Date</label>
+              <input class="tf-input" type="date" id="da-end">
+            </div>
+          </div>
+          <div class="tf-row">
+            <div class="tf-field">
+              <label class="tf-label">Mode</label>
+              <select class="tf-input" id="da-mode">
+                <option value="percentage">Percentage increase/decrease</option>
+                <option value="override">Fixed override quantity</option>
+              </select>
+            </div>
+            <div class="tf-field" id="da-usage-field">
+              <label class="tf-label">Usage % <span style="font-weight:400;color:var(--text-muted)">(100 = no change, &lt;100 decrease, &gt;100 increase)</span></label>
+              <input class="tf-input" type="number" id="da-usage" value="100">
+            </div>
+            <div class="tf-field hidden" id="da-override-field">
+              <label class="tf-label">Override Total Quantity <span style="font-weight:400;color:var(--text-muted)">(planned across the whole window, spread evenly per day — needs both dates)</span></label>
+              <input class="tf-input" type="number" id="da-override" min="0">
+            </div>
+          </div>
+          <div class="tf-row">
+            <div class="tf-field tf-field--wide">
+              <label class="tf-label">Reason</label>
+              <input class="tf-input" type="text" id="da-reason">
+            </div>
+          </div>
+          <div id="da-form-error"></div>
+        </form>
+      </div>
+      <div class="ps-modal-actions">
+        <button type="button" class="btn secondary" id="da-cancel">Cancel</button>
+        <button type="submit" form="da-modal-form" class="btn">Add</button>
+      </div>
+    `, { wide: true });
 
-    const isOverride = modeSelect.value === "override";
-    const startDate = document.getElementById("da-start").value || null;
-    const endDate = document.getElementById("da-end").value || null;
+    const modeSelect = card.querySelector("#da-mode");
+    const usageField = card.querySelector("#da-usage-field");
+    const overrideField = card.querySelector("#da-override-field");
+    const errorEl = card.querySelector("#da-form-error");
 
-    if (isOverride && (!startDate || !endDate)) {
-      errorEl.innerHTML = '<div class="tf-inline-error">A fixed override quantity needs both a start and end date.</div>';
-      return;
+    function applyMode() {
+      const isOverride = modeSelect.value === "override";
+      usageField.classList.toggle("hidden", isOverride);
+      overrideField.classList.toggle("hidden", !isOverride);
     }
+    modeSelect.addEventListener("change", applyMode);
+    applyMode();
 
-    const body = {
-      material: document.getElementById("da-material").value.trim(),
-      startDate,
-      endDate,
-      reason: document.getElementById("da-reason").value || null,
-      usagePercent: isOverride ? null : Number(document.getElementById("da-usage").value),
-      overrideQty: isOverride ? Number(document.getElementById("da-override").value) : null,
-    };
+    if (initialMaterial) card.querySelector("#da-material").value = initialMaterial;
 
-    try {
-      await api("/demand-adjustments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      e.target.reset();
-      applyMode();
-      await load();
-    } catch (err) {
-      errorEl.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
-    }
-  });
+    card.querySelector("#da-cancel").addEventListener("click", () => NexusModal.close());
+
+    card.querySelector("#da-modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorEl.innerHTML = "";
+
+      const isOverride = modeSelect.value === "override";
+      const startDate = card.querySelector("#da-start").value || null;
+      const endDate = card.querySelector("#da-end").value || null;
+
+      if (isOverride && (!startDate || !endDate)) {
+        errorEl.innerHTML = '<div class="tf-inline-error">A fixed override quantity needs both a start and end date.</div>';
+        return;
+      }
+
+      const body = {
+        material: card.querySelector("#da-material").value.trim(),
+        startDate,
+        endDate,
+        reason: card.querySelector("#da-reason").value || null,
+        usagePercent: isOverride ? null : Number(card.querySelector("#da-usage").value),
+        overrideQty: isOverride ? Number(card.querySelector("#da-override").value) : null,
+      };
+
+      try {
+        await api("/demand-adjustments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        NexusModal.close();
+        await load();
+      } catch (err) {
+        errorEl.innerHTML = `<div class="tf-inline-error">${esc(err.message)}</div>`;
+      }
+    });
+  }
+
+  document.getElementById("da-add-btn").addEventListener("click", () => openForm(null));
 
   // Deep-link from Stock History & Forecast's "+ Add Demand Adjustment" link.
   if (window.__daInitialMaterial) {
-    document.getElementById("da-material").value = window.__daInitialMaterial;
+    openForm(window.__daInitialMaterial);
   }
 
   load();
