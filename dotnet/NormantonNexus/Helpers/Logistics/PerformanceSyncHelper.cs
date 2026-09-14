@@ -164,8 +164,35 @@ internal static class PerformanceSyncHelper
         }
     }
 
-    /// <summary>Runs Stock/Agreements/Invoicing/Otif — the 30-min cron's dataset set, and the manual "Refresh Now" trigger on the Management page. Unlike TurnsValClass/MrpHistory below, Node's own runFullRefresh has no shared-in-flight-run guard, so neither does this port — an overlapping call is a latent, pre-existing risk carried across unchanged, not a regression introduced here.</summary>
-    internal static async Task<IReadOnlyList<RefreshDatasetOutcome>> RunFullRefreshAsync(INexusDb nexusDb, INexusOperationsDb opsDb, ISapServerClient sap, int userId, CancellationToken ct)
+    // Guards against two overlapping runs — same shape as the TurnsValClass/MrpHistory guards
+    // below, added here after a real, confirmed duplicate-row incident: log.AgreementSnapshot
+    // (which Order Lookup/Drumming Ticket read directly, no JOIN — so a duplicate row in the
+    // table shows as a literal duplicate order/line in the UI) is TRUNCATE+batch-INSERT'd with
+    // no lock (see SnapshotTableWriter's header comment); the 30-min Quartz job and a manual
+    // "Refresh Now" click on the Management page landing at the same time — or someone
+    // double-clicking Refresh Now — interleaves as TRUNCATE, TRUNCATE, INSERT, INSERT, leaving
+    // every row doubled until the next single, non-overlapping refresh clears it. Node's own
+    // runFullRefresh has this identical gap (confirmed by reading it directly) — this was
+    // ported faithfully at first per that precedent, but is a real enough operational hazard
+    // that it's worth closing here rather than leaving it live only because Node also has it.
+    private static Task<IReadOnlyList<RefreshDatasetOutcome>>? _fullRefreshTask;
+    private static readonly object FullRefreshLock = new();
+
+    /// <summary>Runs Stock/Agreements/Invoicing/Otif — the 30-min cron's dataset set, and the manual "Refresh Now" trigger on the Management page. A second overlapping caller (the cron firing mid-manual-refresh, or vice versa) now shares the same in-flight Task instead of racing it — see the guard fields above for why this was added after Node's own gap-carried-forward design produced a real duplicate-row incident in log.AgreementSnapshot.</summary>
+    internal static Task<IReadOnlyList<RefreshDatasetOutcome>> RunFullRefreshAsync(INexusDb nexusDb, INexusOperationsDb opsDb, ISapServerClient sap, int userId, CancellationToken ct)
+    {
+        lock (FullRefreshLock)
+        {
+            if (_fullRefreshTask is { IsCompleted: false }) return _fullRefreshTask;
+
+            var task = DoRunFullRefreshAsync(nexusDb, opsDb, sap, userId, ct);
+            _fullRefreshTask = task;
+            _ = task.ContinueWith(t => { lock (FullRefreshLock) { if (_fullRefreshTask == t) _fullRefreshTask = null; } }, TaskScheduler.Default);
+            return task;
+        }
+    }
+
+    private static async Task<IReadOnlyList<RefreshDatasetOutcome>> DoRunFullRefreshAsync(INexusDb nexusDb, INexusOperationsDb opsDb, ISapServerClient sap, int userId, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
 
