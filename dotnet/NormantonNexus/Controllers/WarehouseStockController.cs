@@ -29,7 +29,7 @@ namespace NormantonNexus.Controllers;
 /// </summary>
 [Route("api/warehouse")]
 [Authorize(Policy = "Dept:" + NexusDepartments.Warehouse)]
-public sealed class WarehouseStockController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient) : NexusControllerBase
+public sealed class WarehouseStockController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient, IAuditLogger auditLogger) : NexusControllerBase
 {
     [HttpGet("stock")]
     public async Task<IActionResult> GetStock(
@@ -114,5 +114,32 @@ public sealed class WarehouseStockController(INexusOperationsDb nexusOperationsD
     {
         var result = await WarehouseStockHelper.CreateConsignmentMb1bAsync(nexusOperationsDb, sapServerClient, GetUserId(), body, ct);
         return Ok(ApiResponse<ConsignmentMb1bResponse>.Ok(result));
+    }
+
+    [HttpPost("stock-adjustment-bulk")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> CreateStockAdjustmentsBulk([FromBody] BulkStockAdjustmentRequest body, CancellationToken ct)
+    {
+        var results = await WarehouseStockHelper.CreateStockAdjustmentsBulkAsync(sapServerClient, GetUserId(), body.Items, ct);
+        return Ok(ApiResponse<IReadOnlyList<BulkItemResult<StockAdjustmentResponse>>>.Ok(results));
+    }
+
+    /// <summary>Stock Investigations' Batch Discrepancies tool — see WarehouseBatchCleanupHelper's own header comment for why this is a separate, LOG_SUPER-gated wrapper rather than reusing transfer-order/consignment-mb1b directly.</summary>
+    [HttpPost("batch-cleanup-transfer")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> BatchCleanupTransfer([FromBody] BatchCleanupItem body, CancellationToken ct)
+    {
+        var result = await WarehouseBatchCleanupHelper.ExecuteAsync(nexusOperationsDb, sapServerClient, auditLogger, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return result.Success
+            ? Ok(ApiResponse<BatchCleanupItemResult>.Ok(result))
+            : StatusCode(422, new ApiResponse<BatchCleanupItemResult>(false, result, new ApiError("UNPROCESSABLE_ENTITY", result.Message ?? "Batch clean-up transfer failed.")));
+    }
+
+    [HttpPost("batch-cleanup-transfer-bulk")]
+    [Authorize(Policy = "Perm:LOG_SUPER")]
+    public async Task<IActionResult> BatchCleanupTransferBulk([FromBody] BatchCleanupItemsRequest body, CancellationToken ct)
+    {
+        var results = await WarehouseBatchCleanupHelper.ExecuteBulkAsync(nexusOperationsDb, sapServerClient, auditLogger, body.Items, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<IReadOnlyList<BatchCleanupItemResult>>.Ok(results));
     }
 }

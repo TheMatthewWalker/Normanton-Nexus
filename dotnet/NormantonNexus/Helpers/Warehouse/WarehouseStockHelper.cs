@@ -118,6 +118,30 @@ internal static class WarehouseStockHelper
             ?? throw new NexusBadGatewayException("SapServer returned an empty stock-adjustment response.");
 
     /// <summary>
+    /// Port of Node's POST /warehouse/stock-adjustment-bulk — Stock
+    /// Investigations' "Create Stock Adjustment" action on the Stock in
+    /// Investigation card, posting a whole page of write-off/correction
+    /// movements as one request rather than one round trip per row. Same
+    /// per-item try/catch + Task.WhenAll concurrency as CreateTransferOrdersBulkAsync.
+    /// </summary>
+    internal static async Task<IReadOnlyList<BulkItemResult<StockAdjustmentResponse>>> CreateStockAdjustmentsBulkAsync(ISapServerClient sap, int userId, IReadOnlyList<StockAdjustmentRequest> items, CancellationToken ct)
+    {
+        var tasks = items.Select(async item =>
+        {
+            try
+            {
+                var result = await CreateStockAdjustmentAsync(sap, userId, item, ct);
+                return new BulkItemResult<StockAdjustmentResponse>(true, result, null);
+            }
+            catch (Exception ex)
+            {
+                return new BulkItemResult<StockAdjustmentResponse>(false, null, ex.Message);
+            }
+        });
+        return await Task.WhenAll(tasks);
+    }
+
+    /// <summary>
     /// Port of Node's POST /warehouse/consignment-mb1b — used when consignment
     /// stock (LQUA SOBKZ 'K') moves into a production bin (destination type
     /// SA): a plain transfer order can't move consignment-owned stock, so

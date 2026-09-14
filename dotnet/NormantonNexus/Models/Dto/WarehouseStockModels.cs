@@ -54,5 +54,21 @@ public sealed record BulkTransferOrderRequest(List<CreateTransferOrderRequest> I
 
 public sealed record BulkCreateLt04Request(List<CreateLt04Request> Items);
 
+/// <summary>Stock Investigations' Stock in Investigation card "Create Stock Adjustment" action — a whole page of write-off/correction movements sent as one request rather than one round trip per row.</summary>
+public sealed record BulkStockAdjustmentRequest(List<StockAdjustmentRequest> Items);
+
 /// <summary>One item's outcome from a bulk call — success/data on success, error message on failure, matching Node's per-item try/catch (one failure must never abort the rest — Promise.all over independently-caught promises, not a single all-or-nothing call).</summary>
 public sealed record BulkItemResult<T>(bool Success, T? Data, string? Error);
+
+// ── Batch Discrepancies (Stock Investigations) — batch-cleanup-transfer ────
+// Mirrors Node's routes/sap.js `{ kind: 'transfer' | 'consignment', payload }`
+// item shape exactly, just modelled as two mutually-exclusive typed payload
+// properties (only the one matching Kind is populated) rather than JS's
+// loosely-typed single `payload` — see WarehouseBatchCleanupHelper.
+
+public sealed record BatchCleanupItem(string Kind, CreateTransferOrderRequest? Transfer, ConsignmentMb1bRequest? Consignment);
+
+public sealed record BatchCleanupItemsRequest(List<BatchCleanupItem> Items);
+
+/// <summary>TransferOrderNumber is only ever populated for a successful 'transfer' kind — null for 'consignment' (no single TO number to report — see wsmInterpretCleanupResult's own consignment branch) and for any failure.</summary>
+public sealed record BatchCleanupItemResult(bool Success, string? Message, string? TransferOrderNumber);

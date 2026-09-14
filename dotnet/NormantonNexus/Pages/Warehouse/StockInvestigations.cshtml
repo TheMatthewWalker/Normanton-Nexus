@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Warehouse.StockInvestigationsModel
+@{
+    ViewData["Title"] = "Stock Investigations";
+    ViewData["Department"] = "Warehouse";
+    ViewData["PageTitle"] = "Stock Investigations";
+    ViewData["PageSubtitle"] = "Supervisor tools — batch discrepancies and holding-bin corrections";
+}
+
+<p><a asp-page="Index">&larr; Warehouse</a></p>
+
+<div id="si-root"></div>
+
+@section Scripts {
+    <script src="~/js/warehouse/stock-investigations.js"></script>
+}
