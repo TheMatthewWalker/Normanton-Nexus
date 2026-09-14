@@ -1,6 +1,7 @@
 using Dapper;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Logistics;
