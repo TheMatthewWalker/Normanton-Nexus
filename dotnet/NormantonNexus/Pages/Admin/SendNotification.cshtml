@@ -1,0 +1,58 @@
+@page
+@model NormantonNexus.Pages.Admin.SendNotificationModel
+@{
+    ViewData["Title"] = "Send Notification";
+    ViewData["Department"] = "Admin";
+    ViewData["PageTitle"] = "Send Notification";
+    ViewData["PageSubtitle"] = "Broadcast an in-app notification to a user, department, permission, role, or everyone";
+}
+
+<p><a asp-page="Index">&larr; Admin</a></p>
+
+<h3>Compose</h3>
+<div class="tf-row" style="flex-wrap:wrap;gap:10px;max-width:640px">
+    <div class="tf-field" style="flex:1;min-width:220px"><label class="tf-label">Title</label><input class="tf-input" type="text" id="notif-title" maxlength="120" placeholder="Short headline…"></div>
+    <div class="tf-field" style="width:120px"><label class="tf-label">Severity</label>
+        <select class="tf-input" id="notif-severity">
+            <option value="1">Info</option>
+            <option value="2">Warning</option>
+            <option value="3">Critical</option>
+        </select>
+    </div>
+    <div class="tf-field" style="width:160px"><label class="tf-label">Category (optional)</label><input class="tf-input" type="text" id="notif-category" placeholder="system, production…"></div>
+
+    <div class="tf-field" style="flex-basis:100%"><label class="tf-label">Message</label><textarea class="tf-input" id="notif-body" rows="3" style="width:100%;box-sizing:border-box" placeholder="Full notification text…"></textarea></div>
+
+    <div class="tf-field" style="width:160px"><label class="tf-label">Target</label>
+        <select class="tf-input" id="notif-target-type">
+            <option value="all">All users</option>
+            <option value="user">Specific user</option>
+            <option value="department">Department</option>
+            <option value="permission">Permission</option>
+            <option value="role">Role</option>
+        </select>
+    </div>
+    <div class="tf-field" id="notif-target-value-wrap" style="width:200px"><label class="tf-label">&nbsp;</label>
+        <input class="tf-input" type="text" id="notif-target-value" placeholder="Username" style="display:none">
+        <select class="tf-input" id="notif-target-select" style="display:none"></select>
+    </div>
+
+    <div class="tf-field" style="width:180px"><label class="tf-label">Action Label (optional)</label><input class="tf-input" type="text" id="notif-action-label" maxlength="60" placeholder="e.g. View Queue"></div>
+    <div class="tf-field" style="width:200px"><label class="tf-label">Action URL (optional)</label><input class="tf-input" type="text" id="notif-action-url" placeholder="/Production"></div>
+    <div class="tf-field" style="width:200px"><label class="tf-label">Expires (optional)</label><input class="tf-input" type="datetime-local" id="notif-expires"></div>
+</div>
+
+<div class="nx-toolbar" style="margin-top:10px">
+    <button type="button" class="btn" id="notif-send-btn">Send Notification</button>
+    <span id="notif-send-result" style="font-size:13px"></span>
+</div>
+
+<h3 style="margin-top:24px">History</h3>
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <button type="button" class="secondary" id="notif-refresh-btn">Refresh</button>
+</div>
+<div id="notif-history-wrap">Loading…</div>
+
+@section Scripts {
+    <script src="~/js/admin/send-notification.js"></script>
+}
