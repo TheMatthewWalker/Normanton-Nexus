@@ -13,8 +13,6 @@
   const api = NexusApi.make("/api/warehouse");
 
   const resultsEl = document.getElementById("sm-results");
-  const toPanel = document.getElementById("sm-to-panel");
-  const toStatus = document.getElementById("to-status");
 
   document.getElementById("sm-search-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -67,48 +65,46 @@
     });
   }
 
-  let currentRow = null;
+  const TRANSFER_FIELDS = [
+    { key: "material", label: "Material", readonly: true },
+    { key: "batch", label: "Batch", readonly: true },
+    { key: "quantity", label: "Quantity" },
+    { key: "sourceType", label: "Source Type", readonly: true },
+    { key: "sourceBin", label: "Source Bin", readonly: true },
+    { key: "storageLocation", label: "Storage Location", readonly: true },
+    { key: "destType", label: "Destination Type" },
+    { key: "destBin", label: "Destination Bin" },
+  ];
 
   function openTransferPanel(row) {
-    currentRow = row;
-    document.getElementById("to-material").value = row.material;
-    document.getElementById("to-batch").value = row.batch;
-    document.getElementById("to-quantity").value = row.availableQty;
-    document.getElementById("to-source-type").value = row.storageType;
-    document.getElementById("to-source-bin").value = row.bin;
-    document.getElementById("to-storage-location").value = row.storageLocation;
-    document.getElementById("to-dest-type").value = "";
-    document.getElementById("to-dest-bin").value = "";
-    toStatus.textContent = "";
-    toPanel.style.display = "block";
-    toPanel.scrollIntoView({ behavior: "smooth" });
-  }
+    const record = {
+      material: row.material,
+      batch: row.batch || "",
+      quantity: String(row.availableQty),
+      sourceType: row.storageType,
+      sourceBin: row.bin,
+      storageLocation: row.storageLocation,
+      destType: "",
+      destBin: "",
+    };
 
-  document.getElementById("to-cancel").addEventListener("click", () => { toPanel.style.display = "none"; });
-
-  document.getElementById("sm-to-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!currentRow) return;
-    toStatus.textContent = "Creating…";
-    try {
+    AdminEditModal.open("Create Transfer Order", `${row.material} — Batch ${row.batch || "N/A"}`, TRANSFER_FIELDS, record, async (values) => {
       const body = {
-        storageLocation: currentRow.storageLocation,
-        material: currentRow.material,
-        quantity: Number(document.getElementById("to-quantity").value),
-        sourceType: currentRow.storageType,
-        sourceBin: currentRow.bin,
-        destinationType: document.getElementById("to-dest-type").value.trim(),
-        destinationBin: document.getElementById("to-dest-bin").value.trim(),
-        batch: currentRow.batch || null,
+        storageLocation: row.storageLocation,
+        material: row.material,
+        quantity: Number(values.quantity),
+        sourceType: row.storageType,
+        sourceBin: row.bin,
+        destinationType: values.destType.trim(),
+        destinationBin: values.destBin.trim(),
+        batch: row.batch || null,
       };
       const { data } = await api("/transfer-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      toStatus.textContent = data?.success ? `Transfer Order ${data.transferOrderNumber} created.` : "Transfer order did not succeed — check messages.";
-    } catch (err) {
-      toStatus.textContent = "Error: " + err.message;
-    }
-  });
+      if (!data?.success) throw new Error("Transfer order did not succeed — check messages.");
+    });
+  }
 })();

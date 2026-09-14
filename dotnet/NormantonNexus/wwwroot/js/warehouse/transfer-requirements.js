@@ -8,8 +8,6 @@
   const api = NexusApi.make("/api/warehouse");
 
   const bodyEl = document.getElementById("tr-body");
-  const panel = document.getElementById("lt04-panel");
-  const statusEl = document.getElementById("lt04-status");
   let rows = [];
 
   async function load() {
@@ -63,47 +61,44 @@
     }).setRows(rows);
   }
 
-  let current = null;
+  const LT04_FIELDS = [
+    { key: "trNumber", label: "TR Number", readonly: true },
+    { key: "material", label: "Material", readonly: true },
+    { key: "quantity", label: "Quantity" },
+    { key: "destType", label: "Destination Type" },
+    { key: "destBin", label: "Destination Bin" },
+    { key: "pallet", label: "Pallet/Batch" },
+  ];
+
   function openPanel(row) {
-    current = row;
-    document.getElementById("lt04-tr").value = row.trNumber;
-    document.getElementById("lt04-material").value = row.material;
-    document.getElementById("lt04-quantity").value = row.quantity;
-    document.getElementById("lt04-dest-type").value = "";
-    document.getElementById("lt04-dest-bin").value = "";
-    document.getElementById("lt04-pallet").value = row.batch || "";
-    statusEl.textContent = "";
-    panel.style.display = "block";
-    panel.scrollIntoView({ behavior: "smooth" });
-  }
+    const record = {
+      trNumber: row.trNumber,
+      material: row.material,
+      quantity: String(row.quantity),
+      destType: "",
+      destBin: "",
+      pallet: row.batch || "",
+    };
 
-  document.getElementById("lt04-cancel").addEventListener("click", () => { panel.style.display = "none"; });
-
-  document.getElementById("lt04-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!current) return;
-    statusEl.textContent = "Confirming…";
-    try {
+    AdminEditModal.open("Confirm via LT04", `TR ${row.trNumber}`, LT04_FIELDS, record, async (values) => {
       const body = {
-        trNumber: current.trNumber,
-        material: current.material,
-        quantity: Number(document.getElementById("lt04-quantity").value),
-        destinationType: document.getElementById("lt04-dest-type").value.trim(),
-        destinationBin: document.getElementById("lt04-dest-bin").value.trim(),
-        palletOrBatch: document.getElementById("lt04-pallet").value.trim(),
-        storageLocation: current.storageLocation,
+        trNumber: row.trNumber,
+        material: row.material,
+        quantity: Number(values.quantity),
+        destinationType: values.destType.trim(),
+        destinationBin: values.destBin.trim(),
+        palletOrBatch: values.pallet.trim(),
+        storageLocation: row.storageLocation,
       };
       const { data } = await api("/create-lt04", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      statusEl.textContent = data?.type === "S" ? `LT04 confirmed: ${data.message}` : `Result: ${data?.message || "unknown"}`;
       await load();
-    } catch (err) {
-      statusEl.textContent = "Error: " + err.message;
-    }
-  });
+      if (data?.type !== "S") throw new Error(`Result: ${data?.message || "unknown"}`);
+    });
+  }
 
   document.getElementById("tr-refresh").addEventListener("click", load);
   load();

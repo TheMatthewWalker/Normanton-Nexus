@@ -7,10 +7,7 @@
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/staging");
   const bodyEl = document.getElementById("sp-body");
-  const panel = document.getElementById("sp-deliver-panel");
-  const statusEl = document.getElementById("dv-status");
   let rows = [];
-  let current = null;
 
   const DUE_SOON_HOURS = 24;
 
@@ -137,47 +134,49 @@
     }
   }
 
+  const DELIVER_FIELDS = [
+    { key: "quantity", label: "Quantity" },
+    { key: "batch", label: "Batch" },
+    { key: "storageLocation", label: "Storage Location" },
+    { key: "sourceType", label: "Source Type" },
+    { key: "sourceBin", label: "Source Bin" },
+    { key: "destType", label: "Destination Type" },
+    { key: "destBin", label: "Destination Bin" },
+  ];
+
   function openDeliver(row) {
-    current = row;
-    document.getElementById("dv-quantity").value = row.quantityRequested - row.quantityDelivered;
-    document.getElementById("dv-batch").value = row.requestedBatch || "";
-    document.getElementById("dv-storage-location").value = "";
-    document.getElementById("dv-source-type").value = "";
-    document.getElementById("dv-source-bin").value = "";
-    document.getElementById("dv-dest-type").value = "";
-    document.getElementById("dv-dest-bin").value = "";
-    statusEl.textContent = "";
-    panel.style.display = "block";
-    panel.scrollIntoView({ behavior: "smooth" });
-  }
+    const record = {
+      quantity: String(row.quantityRequested - row.quantityDelivered),
+      batch: row.requestedBatch || "",
+      storageLocation: "",
+      sourceType: "",
+      sourceBin: "",
+      destType: "",
+      destBin: "",
+    };
 
-  document.getElementById("dv-cancel").addEventListener("click", () => { panel.style.display = "none"; });
+    AdminEditModal.open("Deliver Request", `Request #${row.requestId}`, DELIVER_FIELDS, record, async (values) => {
+      const quantity = Number(values.quantity);
+      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("Quantity must be greater than zero.");
 
-  document.getElementById("sp-deliver-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!current) return;
-    statusEl.textContent = "Delivering…";
-    try {
       const body = {
-        quantity: Number(document.getElementById("dv-quantity").value),
-        batch: document.getElementById("dv-batch").value || null,
-        storageLocation: document.getElementById("dv-storage-location").value || null,
-        sourceStorageType: document.getElementById("dv-source-type").value || null,
-        sourceBin: document.getElementById("dv-source-bin").value || null,
-        destinationStorageType: document.getElementById("dv-dest-type").value || null,
-        destinationBin: document.getElementById("dv-dest-bin").value || null,
+        quantity,
+        batch: values.batch || null,
+        storageLocation: values.storageLocation || null,
+        sourceStorageType: values.sourceType || null,
+        sourceBin: values.sourceBin || null,
+        destinationStorageType: values.destType || null,
+        destinationBin: values.destBin || null,
       };
-      const { data } = await api(`/requests/${current.requestId}/deliver`, {
+      const { data } = await api(`/requests/${row.requestId}/deliver`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      statusEl.textContent = `Status: ${data.status}${data.error ? " — " + data.error : ""}`;
       await load();
-    } catch (err) {
-      statusEl.textContent = "Error: " + err.message;
-    }
-  });
+      if (data.error) throw new Error(`Status: ${data.status} — ${data.error}`);
+    });
+  }
 
   document.getElementById("sp-refresh").addEventListener("click", load);
   load();
