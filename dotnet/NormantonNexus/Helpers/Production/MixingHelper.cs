@@ -172,4 +172,33 @@ internal static class MixingHelper
             Status: anyFailed ? "SAP_FAILED" : "COMPLETE", TotalWeightKg: totalWeightKg, Tubs: tubResults,
             Warning: anyFailed ? "Some tubs failed SAP posting. See failed backflush queue." : null);
     }
+
+    /// <summary>GET mixing/data — filtered query for analysts, same shape/precedent as DrummingHelper.GetDataAsync.</summary>
+    internal static async Task<IReadOnlyList<MixingDataRow>> GetDataAsync(INexusOperationsDb db, MixingDataQuery query, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rows = await connection.QueryAsync<MixingDataRow>(new CommandDefinition("""
+            SELECT m.MixingID AS MixingId, m.MixRef, m.ShiftID AS ShiftId, s.ShiftName,
+                   m.Material, m.MixCode, m.TotalWeightKG AS TotalWeightKg,
+                   m.SupplierBatchNo, m.SupplierTubNo,
+                   m.Status, m.IsReversed, sc.StatusName, m.StartedAt, m.CompletedAt, m.Notes,
+                   pu.Username AS CreatedBy
+            FROM prod.Mixing m
+            LEFT JOIN prod.Shifts s ON s.ShiftID = m.ShiftID
+            LEFT JOIN prod.StatusCodes sc ON sc.StatusID = m.Status
+            LEFT JOIN Nexus.dbo.PortalUsers pu ON pu.UserID = m.CreatedByUserID
+            WHERE (@mat IS NULL OR m.Material LIKE @mat)
+              AND (@from IS NULL OR m.StartedAt >= @from)
+              AND (@to IS NULL OR m.StartedAt <= @to)
+              AND (@sbn IS NULL OR m.SupplierBatchNo LIKE @sbn)
+            ORDER BY m.StartedAt DESC
+            """, new
+        {
+            mat = string.IsNullOrWhiteSpace(query.Material) ? null : $"%{query.Material}%",
+            from = DateTime.TryParse(query.DateFrom, out var from) ? from : (DateTime?)null,
+            to = DateTime.TryParse(query.DateTo, out var to) ? to : (DateTime?)null,
+            sbn = string.IsNullOrWhiteSpace(query.SupplierBatchNo) ? null : $"%{query.SupplierBatchNo}%",
+        }, cancellationToken: ct));
+        return rows.ToArray();
+    }
 }

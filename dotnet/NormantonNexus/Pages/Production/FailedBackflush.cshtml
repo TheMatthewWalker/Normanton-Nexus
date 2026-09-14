@@ -1,0 +1,16 @@
+@page
+@model NormantonNexus.Pages.Production.FailedBackflushModel
+@{
+    ViewData["Title"] = "Failed Backflush";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Failed Backflush";
+    ViewData["PageSubtitle"] = "Records saved locally but rejected by SAP — retry or cancel";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div id="fb-body"><div class="nx-empty">Loading…</div></div>
+
+@section Scripts {
+    <script src="~/js/production/failed-backflush.js"></script>
+}

@@ -48,6 +48,13 @@ public sealed class ProductionNexusController(INexusOperationsDb nexusOperations
         return StatusCode(201, ApiResponse<MixingEntryResult>.Ok(result));
     }
 
+    [HttpGet("mixing/data")]
+    public async Task<IActionResult> MixingData([FromQuery] MixingDataQuery query, CancellationToken ct)
+    {
+        var rows = await MixingHelper.GetDataAsync(nexusOperationsDb, query, ct);
+        return Ok(ApiResponse<IReadOnlyList<MixingDataRow>>.Ok(rows));
+    }
+
     [HttpGet("mixing/staging/queue")]
     public async Task<IActionResult> BilletStagingQueue(CancellationToken ct)
     {

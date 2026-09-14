@@ -1,0 +1,40 @@
+@page
+@model NormantonNexus.Pages.Production.MixingDataModel
+@{
+    ViewData["Title"] = "Mixing Data";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Mixing Data";
+    ViewData["PageSubtitle"] = "Search completed/cancelled Mixing records";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+        <div class="tf-field">
+            <label class="tf-label" for="mxd-material">Material</label>
+            <input type="text" id="mxd-material" class="tf-input" placeholder="e.g. K-NBR%" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="mxd-sbn">Supplier Batch</label>
+            <input type="text" id="mxd-sbn" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="mxd-from">From</label>
+            <input type="date" id="mxd-from" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="mxd-to">To</label>
+            <input type="date" id="mxd-to" class="tf-input" />
+        </div>
+        <div class="tf-field" style="justify-content:flex-end;flex-direction:row;">
+            <button type="button" id="mxd-search" class="btn">Search</button>
+        </div>
+    </div>
+</div>
+<div id="mxd-results"><div class="nx-empty">Enter filters above and click Search.</div></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/mixing-data.js"></script>
+}

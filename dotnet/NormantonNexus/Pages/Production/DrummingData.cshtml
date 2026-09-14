@@ -1,0 +1,44 @@
+@page
+@model NormantonNexus.Pages.Production.DrummingDataModel
+@{
+    ViewData["Title"] = "Drumming Data";
+    ViewData["Department"] = "Production";
+    ViewData["PageTitle"] = "Drumming Data";
+    ViewData["PageSubtitle"] = "Search completed/cancelled Drumming records";
+}
+
+<p><a asp-page="Index">&larr; Production</a></p>
+
+<div class="nx-toolbar" style="margin-bottom:10px">
+    <div class="tf-row" style="flex:1;flex-wrap:wrap;margin-bottom:0">
+        <div class="tf-field">
+            <label class="tf-label" for="dd-material">Material</label>
+            <input type="text" id="dd-material" class="tf-input" placeholder="e.g. K-NBR%" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dd-customer">Customer</label>
+            <input type="text" id="dd-customer" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dd-order">Sales Order</label>
+            <input type="text" id="dd-order" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dd-from">From</label>
+            <input type="date" id="dd-from" class="tf-input" />
+        </div>
+        <div class="tf-field">
+            <label class="tf-label" for="dd-to">To</label>
+            <input type="date" id="dd-to" class="tf-input" />
+        </div>
+        <div class="tf-field" style="justify-content:flex-end;flex-direction:row;">
+            <button type="button" id="dd-search" class="btn">Search</button>
+        </div>
+    </div>
+</div>
+<div id="dd-results"><div class="nx-empty">Enter filters above and click Search.</div></div>
+
+@section Scripts {
+    <script src="~/js/production/reports-common.js"></script>
+    <script src="~/js/production/drumming-data.js"></script>
+}

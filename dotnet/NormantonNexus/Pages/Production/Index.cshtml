@@ -11,15 +11,14 @@
     Section order/grouping mirrors the original Node app's
     private/production-nexus.html exactly (Production Entry / Production
     Data / Staging Post / Supervisor / Reports) rather than this page's own
-    earlier ad-hoc grouping — restored for navigation parity. Two Node tiles
-    with no dotnet frontend yet are deliberately NOT listed (real, flagged
-    gaps, not oversights): "Failed Backflush" (backend fully built in
-    ProductionNexusController/FailedBackflushHelper, PROD_FAILED_BACKFLUSH
-    already seeded for it — just needs its own page) and "Expired Mix
-    Batches" (no backend port found anywhere in this migration yet). Mixing
-    Data and Drumming Data are Node tiles with no dotnet Data page built
-    either (Drumming's own `GET drumming/data` backend route exists; Mixing's
-    does not) — also omitted rather than linking to a page that doesn't
+    earlier ad-hoc grouping — restored for navigation parity. A later gap
+    audit against the Node tile inventory found Mixing Data, Drumming Data
+    and Failed Backflush were genuinely missing (not deliberately deferred)
+    and they're now built and listed below — Mixing Data needed its backend
+    route built too (GetDataAsync/mixing/data), Drumming Data's and Failed
+    Backflush's backends already existed. "Expired Mix Batches" is still a
+    real, tracked gap (no backend port found anywhere in this migration) —
+    deliberately NOT listed rather than linking to a page that doesn't
     exist. Billet Staging and Order Lookup are dotnet-only additions with no
     top-level Node tile of their own (Node reaches both through the
     Extrusion/Drumming wizards' own pickers) — kept in Production Entry since
@@ -95,6 +94,14 @@
         <p class="tile-title">Tape Wrap Data</p>
         <p class="tile-hint">Search completed/cancelled Tape Wrap records</p>
     </a>
+    <a class="tile" asp-page="MixingData">
+        <p class="tile-title">Mixing Data</p>
+        <p class="tile-hint">Search completed/cancelled Mixing records</p>
+    </a>
+    <a class="tile" asp-page="DrummingData">
+        <p class="tile-title">Drumming Data</p>
+        <p class="tile-hint">Search completed/cancelled Drumming records</p>
+    </a>
 </div>
 
 <h3>Staging Post</h3>
@@ -138,6 +145,10 @@
     <a class="tile" asp-page="ProductionSchedule">
         <p class="tile-title">Production Schedule</p>
         <p class="tile-hint">Open PTFE order lines due in the next 5 working days — comments, ETA and OTIF KPI</p>
+    </a>
+    <a class="tile" asp-page="FailedBackflush">
+        <p class="tile-title">Failed Backflush</p>
+        <p class="tile-hint">Records saved locally but rejected by SAP — retry or cancel</p>
     </a>
 </div>
 
