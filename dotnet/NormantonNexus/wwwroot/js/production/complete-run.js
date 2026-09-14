@@ -1,10 +1,23 @@
 // Complete Run — the draft->complete two-step wizard for the metre
 // processes (EX/CO/BR/CL/TW). Port of the "Draft"/"Complete" halves of
 // runMeterProcessEntry's draft flow in production-nexus.js.
+//
+// Presented as a 3-step BRANCHING wizard (Open Drafts / New Draft /
+// Complete Run) — deliberately plain active/enabled/disabled tab styling
+// (no checkmarks, unlike Drumming's linear stepper) since this flow
+// genuinely branches: an operator can jump straight from an existing open
+// draft to Complete Run, or go via New Draft first. Retains Raw Material
+// Batches (unlike Drumming) — real raw-material traceability applies to
+// these metre processes.
 (function () {
   const esc = NexusApi.esc;
   const api = NexusApi.make("/api/productionnexus");
   const processCode = document.querySelector("[data-process-code]").dataset.processCode;
+
+  const STEPS = ["Open Drafts", "New Draft", "Complete Run"];
+  let step = 0;
+  let completeUnlocked = false;
+  let cameFromStep = 0;
 
   function shiftFromHour() {
     const h = new Date().getHours();
@@ -13,6 +26,57 @@
     return 3;
   }
   document.getElementById("cr-shift").value = String(shiftFromHour());
+
+  // ── Stepper controller (branching — no checkmarks) ──
+  function renderStepper() {
+    const stepperEl = document.getElementById("cr-stepper");
+    stepperEl.innerHTML = "";
+    STEPS.forEach((label, i) => {
+      if (i > 0) {
+        const connector = document.createElement("span");
+        connector.className = "step-connector";
+        stepperEl.appendChild(connector);
+      }
+      const disabled = i === 2 && !completeUnlocked;
+      const active = i === step;
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "step-tab" + (active ? " is-active" : "") + (disabled ? " is-disabled" : "");
+      tab.disabled = disabled;
+      tab.innerHTML = `<span class="step-circle">${i + 1}</span><span class="step-label">${esc(label)}</span>`;
+      tab.addEventListener("click", () => { if (!disabled) goTo(i); });
+      stepperEl.appendChild(tab);
+    });
+    document.getElementById("cr-progress").textContent = STEPS[step];
+  }
+
+  function showStep(n) {
+    for (let i = 0; i < STEPS.length; i++) {
+      document.getElementById(`cr-step-${i}`).classList.toggle("hidden", i !== n);
+    }
+  }
+
+  function updateNav() {
+    document.getElementById("cr-back-btn").disabled = step === 0;
+    document.getElementById("cr-draft-submit").classList.toggle("hidden", step !== 1);
+    document.getElementById("cr-complete-submit").classList.toggle("hidden", step !== 2);
+  }
+
+  function goTo(n) {
+    step = n;
+    renderStepper();
+    showStep(step);
+    updateNav();
+    if (n === 0) loadOpenEntries();
+  }
+
+  document.getElementById("cr-back-btn").addEventListener("click", () => {
+    goTo(step === 2 ? cameFromStep : 0);
+  });
+  document.getElementById("cr-goto-new-draft").addEventListener("click", (e) => {
+    e.preventDefault();
+    goTo(1);
+  });
 
   // ── Open Drafts ─────────────────────────────────────────────────
   async function loadOpenEntries() {
@@ -42,28 +106,45 @@
   }
 
   // ── Parent batch / raw material rows ────────────────────────────
+  function renumber(listEl) {
+    Array.from(listEl.children).forEach((row, idx) => {
+      const idxEl = row.querySelector(".item-row-index");
+      if (idxEl) idxEl.textContent = String(idx + 1);
+    });
+  }
+
   function addParentRow() {
+    const listEl = document.getElementById("cr-parent-list");
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
+    row.className = "item-row";
     row.innerHTML = `
-      <input type="text" placeholder="Process Code (e.g. MX)" class="cr-parent-pc tf-input" style="max-width:140px;">
-      <input type="number" placeholder="Record ID" class="cr-parent-rid tf-input" style="max-width:120px;">
-      <input type="number" placeholder="Tub ID (optional)" class="cr-parent-tub tf-input" style="max-width:120px;">
-      <button type="button" class="secondary" data-remove>&times;</button>`;
-    row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
-    document.getElementById("cr-parent-list").appendChild(row);
+      <span class="item-row-index"></span>
+      <div class="item-row-fields">
+        <input type="text" placeholder="Process Code (e.g. MX)" class="cr-parent-pc tf-input tf-input--sm">
+        <input type="number" placeholder="Record ID" class="cr-parent-rid tf-input tf-input--sm">
+        <input type="number" placeholder="Tub ID (optional)" class="cr-parent-tub tf-input tf-input--sm">
+      </div>
+      <button type="button" class="item-row-remove" title="Remove parent batch" data-remove>&times;</button>`;
+    row.querySelector("[data-remove]").addEventListener("click", () => { row.remove(); renumber(listEl); });
+    listEl.appendChild(row);
+    renumber(listEl);
   }
   document.getElementById("cr-add-parent").addEventListener("click", addParentRow);
 
   function addRawMatRow() {
+    const listEl = document.getElementById("cr-rawmat-list");
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
+    row.className = "item-row";
     row.innerHTML = `
-      <input type="text" placeholder="Material" class="cr-rawmat-material tf-input" style="max-width:160px;">
-      <input type="text" placeholder="Batch Number" class="cr-rawmat-batch tf-input" style="max-width:160px;">
-      <button type="button" class="secondary" data-remove>&times;</button>`;
-    row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
-    document.getElementById("cr-rawmat-list").appendChild(row);
+      <span class="item-row-index"></span>
+      <div class="item-row-fields">
+        <input type="text" placeholder="Material" class="cr-rawmat-material tf-input tf-input--sm">
+        <input type="text" placeholder="Batch Number" class="cr-rawmat-batch tf-input tf-input--sm">
+      </div>
+      <button type="button" class="item-row-remove" title="Remove raw material batch" data-remove>&times;</button>`;
+    row.querySelector("[data-remove]").addEventListener("click", () => { row.remove(); renumber(listEl); });
+    listEl.appendChild(row);
+    renumber(listEl);
   }
   document.getElementById("cr-add-rawmat").addEventListener("click", addRawMatRow);
 
@@ -109,7 +190,7 @@
         }),
       });
       setDraftResult(`✓ Draft ${data.batchRef} created.` + (data.warnings && data.warnings.length ? ` Warnings: ${data.warnings.join("; ")}` : ""), "success");
-      await loadOpenEntries();
+      loadOpenEntries();
       selectDraft(data.recordId, data.batchRef);
     } catch (err) {
       setDraftResult("Error: " + err.message, "error");
@@ -126,15 +207,20 @@
   }
 
   function addScrapRow() {
+    const listEl = document.getElementById("cr-scrap-list");
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;";
+    row.className = "item-row";
     row.innerHTML = `
-      <select class="cr-scrap-reason tf-input" style="max-width:220px;">${scrapReasons.map((r) => `<option value="${r.reasonId}">${esc(r.reasonDescription)}</option>`).join("")}</select>
-      <input type="number" placeholder="KG" class="cr-scrap-kg tf-input" step="0.001" style="max-width:100px;">
-      <input type="number" placeholder="Occurrences" class="cr-scrap-occ tf-input" style="max-width:120px;">
-      <button type="button" class="secondary" data-remove>&times;</button>`;
-    row.querySelector("[data-remove]").addEventListener("click", () => row.remove());
-    document.getElementById("cr-scrap-list").appendChild(row);
+      <span class="item-row-index"></span>
+      <div class="item-row-fields">
+        <select class="cr-scrap-reason tf-input tf-input--sm">${scrapReasons.map((r) => `<option value="${r.reasonId}">${esc(r.reasonDescription)}</option>`).join("")}</select>
+        <input type="number" placeholder="KG" class="cr-scrap-kg tf-input tf-input--sm" step="0.001">
+        <input type="number" placeholder="Occurrences" class="cr-scrap-occ tf-input tf-input--sm">
+      </div>
+      <button type="button" class="item-row-remove" title="Remove scrap reason" data-remove>&times;</button>`;
+    row.querySelector("[data-remove]").addEventListener("click", () => { row.remove(); renumber(listEl); });
+    listEl.appendChild(row);
+    renumber(listEl);
   }
   document.getElementById("cr-add-scrap").addEventListener("click", addScrapRow);
 
@@ -146,14 +232,25 @@
     }));
   }
 
+  // ── Scrap toggle ──
+  const scrapCheckbox = document.getElementById("cr-has-scrap");
+  const scrapTrack = document.getElementById("cr-scrap-track");
+  const scrapBody = document.getElementById("cr-scrap-body");
+  scrapCheckbox.addEventListener("change", () => {
+    scrapTrack.classList.toggle("is-on", scrapCheckbox.checked);
+    scrapTrack.classList.toggle("is-off", !scrapCheckbox.checked);
+    scrapBody.classList.toggle("hidden", !scrapCheckbox.checked);
+  });
+
   // ── Complete step ────────────────────────────────────────────────
   let selectedRecordId = null;
 
   function selectDraft(recordId, batchRef) {
     selectedRecordId = recordId;
+    cameFromStep = step === 2 ? cameFromStep : step;
+    completeUnlocked = true;
     document.getElementById("cr-complete-ref").textContent = `(${batchRef})`;
-    document.getElementById("cr-complete-section").style.display = "";
-    document.getElementById("cr-complete-section").scrollIntoView({ behavior: "smooth" });
+    goTo(2);
   }
 
   function setCompleteResult(text, kind) {
@@ -194,7 +291,7 @@
         setCompleteResult(`✓ ${data.batchRef} completed — MatDoc: ${data.materialDocument}${data.warning ? ` (${data.warning})` : ""}`, "success");
       }
       window.ProductionLabels.mount(document.getElementById("cr-print-widget"), { processCode, recordId: selectedRecordId, tubs: null });
-      await loadOpenEntries();
+      loadOpenEntries();
     } catch (err) {
       if (err.message && err.message.toLowerCase().includes("block")) {
         setCompleteResult("Blocked: " + err.message, "error");
@@ -204,6 +301,9 @@
     }
   });
 
+  renderStepper();
+  showStep(0);
+  updateNav();
   addParentRow();
   addRawMatRow();
   loadScrapReasons().then(addScrapRow);

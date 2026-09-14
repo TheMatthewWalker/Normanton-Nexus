@@ -27,13 +27,17 @@
         </div>
     </div>
 
-    <div style="display:flex; justify-content:space-between; align-items:center; margin:0.75rem 0 0.25rem;">
-        <strong>Tubs</strong>
-        <span id="mx-total" class="badge badge--accent">0.000 KG</span>
+    <div class="item-panel" style="margin-top:14px;">
+        <div class="item-panel-head">
+            <span class="item-panel-title">Tubs</span>
+            <span id="mx-total" class="badge badge--accent">0.000 KG</span>
+        </div>
+        <div id="mx-tub-list" class="item-list"></div>
+        <div class="item-panel-foot">
+            <span class="item-panel-hint">Maximum 38 KG per tub.</span>
+            <button type="button" id="mx-add-tub" class="secondary">+ Add Tub</button>
+        </div>
     </div>
-    <div id="mx-tub-list"></div>
-    <p class="nx-toolbar-hint" style="margin:4px 0 10px;">Maximum 38 KG per tub.</p>
-    <button type="button" id="mx-add-tub" class="secondary">+ Add Tub</button>
 
     <div class="tf-row" style="margin-top:14px;">
         <div class="tf-field tf-field--wide">

@@ -9,14 +9,16 @@
 
 <p><a asp-page="MetreEntry" asp-route-code="@Model.Code">&larr; @Model.ProcessLabel Entry</a></p>
 
-<div data-process-code="@Model.Code">
-    <section class="card">
-        <h3>Open Drafts</h3>
-        <div id="cr-open-entries"><div class="nx-empty">Loading…</div></div>
-    </section>
+<div data-process-code="@Model.Code" style="max-width:760px;">
+    <div class="stepper" id="cr-stepper"></div>
+    <p class="progress-line" id="cr-progress"></p>
 
-    <section class="card" style="margin-top:1rem;" id="cr-draft-section">
-        <h3>Start New Draft</h3>
+    <div id="cr-step-0">
+        <div id="cr-open-entries"><div class="nx-empty">Loading…</div></div>
+        <p class="nx-toolbar-hint" style="margin-top:10px;">Don't see the run you need? <a href="#" id="cr-goto-new-draft">Start a New Draft &rarr;</a></p>
+    </div>
+
+    <div id="cr-step-1" class="hidden">
         <div class="tf-row">
             <div class="tf-field">
                 <label class="tf-label" for="cr-material">Material</label>
@@ -27,16 +29,32 @@
                 <input type="number" id="cr-machine" class="tf-input">
             </div>
         </div>
-        <fieldset>
-            <legend>Parent Batches (traceability)</legend>
-            <div id="cr-parent-list"></div>
-            <button type="button" class="secondary" id="cr-add-parent">+ Add Parent Batch</button>
-        </fieldset>
-        <fieldset>
-            <legend>Raw Material Batches</legend>
-            <div id="cr-rawmat-list"></div>
-            <button type="button" class="secondary" id="cr-add-rawmat">+ Add Raw Material Batch</button>
-        </fieldset>
+
+        <div class="item-panel">
+            <div class="item-panel-head">
+                <div class="item-panel-head-text">
+                    <span class="item-panel-title">Parent Batches</span>
+                    <span class="item-panel-hint">Traceability</span>
+                </div>
+            </div>
+            <div id="cr-parent-list" class="item-list"></div>
+            <div class="item-panel-foot">
+                <span class="item-panel-hint">Link the batch(es) this run was produced from.</span>
+                <button type="button" class="secondary" id="cr-add-parent">+ Add Parent Batch</button>
+            </div>
+        </div>
+
+        <div class="item-panel">
+            <div class="item-panel-head">
+                <span class="item-panel-title">Raw Material Batches</span>
+            </div>
+            <div id="cr-rawmat-list" class="item-list"></div>
+            <div class="item-panel-foot">
+                <span class="item-panel-hint">Batches consumed by this run.</span>
+                <button type="button" class="secondary" id="cr-add-rawmat">+ Add Raw Material Batch</button>
+            </div>
+        </div>
+
         <div class="tf-row" style="margin-top:14px;">
             <div class="tf-field tf-field--wide">
                 <label class="tf-label" for="cr-draft-notes">Notes</label>
@@ -44,11 +62,10 @@
             </div>
         </div>
         <div id="cr-draft-result" style="margin:0.75rem 0;"></div>
-        <button type="button" id="cr-draft-submit" class="btn">Create Draft</button>
-    </section>
+    </div>
 
-    <section class="card" style="margin-top:1rem; display:none;" id="cr-complete-section">
-        <h3>Complete Run <span id="cr-complete-ref" class="badge badge--accent"></span></h3>
+    <div id="cr-step-2" class="hidden">
+        <p><span id="cr-complete-ref" class="badge badge--accent"></span></p>
         <div class="tf-row">
             <div class="tf-field">
                 <label class="tf-label" for="cr-length">Length (Metres)</label>
@@ -67,18 +84,31 @@
                 <input type="text" id="cr-operators" class="tf-input">
             </div>
         </div>
-        <fieldset>
-            <legend>Scrap</legend>
-            <label><input type="checkbox" id="cr-has-scrap"> Has scrap</label>
-            <div class="tf-row" style="margin-top:8px;">
+
+        <label class="toggle-switch">
+            <span class="toggle-track is-off" id="cr-scrap-track"><span class="toggle-thumb"></span></span>
+            <input type="checkbox" id="cr-has-scrap" class="hidden">
+            Has scrap
+        </label>
+        <div id="cr-scrap-body" class="hidden" style="margin-top:12px;">
+            <div class="tf-row">
                 <div class="tf-field">
                     <label class="tf-label" for="cr-scrap-total">Total Scrap (KG)</label>
                     <input type="number" id="cr-scrap-total" class="tf-input" step="0.001">
                 </div>
             </div>
-            <div id="cr-scrap-list"></div>
-            <button type="button" class="secondary" id="cr-add-scrap">+ Add Scrap Reason</button>
-        </fieldset>
+            <div class="item-panel">
+                <div class="item-panel-head">
+                    <span class="item-panel-title">Scrap Reasons</span>
+                </div>
+                <div id="cr-scrap-list" class="item-list"></div>
+                <div class="item-panel-foot">
+                    <span class="item-panel-hint">Occurrence counts split the total proportionally.</span>
+                    <button type="button" class="secondary" id="cr-add-scrap">+ Add Scrap Reason</button>
+                </div>
+            </div>
+        </div>
+
         <div class="tf-row" style="margin-top:14px;">
             <div class="tf-field tf-field--wide">
                 <label class="tf-label" for="cr-complete-notes">Notes</label>
@@ -87,8 +117,14 @@
         </div>
         <div id="cr-complete-result" style="margin:0.75rem 0;"></div>
         <div id="cr-print-widget"></div>
-        <button type="button" id="cr-complete-submit" class="btn">Complete &amp; Post to SAP</button>
-    </section>
+    </div>
+
+    <div class="step-nav">
+        <button type="button" id="cr-back-btn" class="secondary">&larr; Back</button>
+        <span class="step-nav-spacer"></span>
+        <button type="button" id="cr-draft-submit" class="btn hidden">Create Draft</button>
+        <button type="button" id="cr-complete-submit" class="btn hidden">Complete &amp; Post to SAP</button>
+    </div>
 </div>
 
 @section Scripts {
