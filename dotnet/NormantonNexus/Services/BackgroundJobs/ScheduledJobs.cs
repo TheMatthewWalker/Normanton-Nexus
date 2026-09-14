@@ -2,6 +2,7 @@ using NormantonNexus.Helpers.Logistics;
 using NormantonNexus.Helpers.ProductionSchedule;
 using NormantonNexus.Helpers.StockCount;
 using NormantonNexus.Helpers.Warehouse;
+using NormantonNexus.Services;
 using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Notifications;
 using NormantonNexus.Services.Sql;
