@@ -20,12 +20,22 @@ internal static class ProductionHelper
         var pageSize = query.PageSize <= 0 ? 50 : query.PageSize;
         var offset = (Math.Max(query.Page, 1) - 1) * pageSize;
 
+        // DateTime.TryParse's out parameter defaults to DateTime.MinValue (0001-01-01) on
+        // a failed parse (i.e. whenever no date filter was supplied at all — the common
+        // case) — Dapper sends that straight through as a SQL `datetime` parameter value,
+        // and SQL Server's `datetime` range starts at 1753-01-01, so an unfiltered search
+        // threw SqlTypeException: SqlDateTime overflow on every call. Parse into a nullable
+        // DateTime? instead so an absent/unparseable filter sends SQL NULL, matching every
+        // other Production Data query's already-correct `DateTime.TryParse(...) ? x : (DateTime?)null` pattern.
+        DateTime? fromDate = DateTime.TryParse(query.FromDate, out var parsedFrom) ? parsedFrom : null;
+        DateTime? toDate = DateTime.TryParse(query.ToDate, out var parsedTo) ? parsedTo : null;
+
         var conditions = new List<string>();
         if (!string.IsNullOrWhiteSpace(query.ProcessCode)) conditions.Add("PC = @pc");
         if (!string.IsNullOrWhiteSpace(query.Material)) conditions.Add("Material = @mat");
         if (!string.IsNullOrWhiteSpace(query.Ref)) conditions.Add("BatchRef LIKE @refLike");
-        if (DateTime.TryParse(query.FromDate, out var fromDate)) conditions.Add("CreatedAt >= @from");
-        if (DateTime.TryParse(query.ToDate, out var toDate)) conditions.Add("CreatedAt <= @to");
+        if (fromDate is not null) conditions.Add("CreatedAt >= @from");
+        if (toDate is not null) conditions.Add("CreatedAt <= @to");
         var innerWhere = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
 
         var sql = $"""
