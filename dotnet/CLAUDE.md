@@ -906,6 +906,37 @@ Local smoke-testing: `dotnet run --urls http://127.0.0.1:<port>` then `curl`/bro
 
 **`NormantonNexus/web.config` is now a committed template (`stdoutLogEnabled="true"`, overriding the SDK's own generated default of `false`)** rather than left to `Microsoft.NET.Sdk.Web`'s from-scratch generation — confirmed via a real `dotnet publish` that a pre-existing `web.config` in the project only has its `processPath`/`arguments`/`hostingModel` tokens replaced, not the whole file regenerated, so the rest of this template (including the flipped flag) survives every publish. This captures ASP.NET Core Module v2's own early-startup diagnostic text — the ANCM-level equivalent of the "instant crash, zero log output" failure class SapServer hit for real under IIS — into `publish\logs\stdout_<timestamp>_<pid>.log`, which also happens to be where the default console logging provider's own output lands for the life of that worker process, since recycling is now disabled (see above) and there's no dedicated Serilog-style file sink in this app the way SapServer has one. `status.ps1`/`watch-log.ps1` both tail whichever `stdout*.log` was written most recently rather than a fixed daily filename, since that's this app's actual log-rotation unit (one file per worker-process start) in the absence of a real structured file sink — building one (matching SapServer's Serilog precedent) is real, separately-scoped follow-up work, not done as part of this pass.
 
+## Real-database bug class found and fixed: `tinyint` columns crash Dapper's record-constructor binding
+
+The first time this app ran against a real, live SQL Server (rather than the mocked connections every unit test uses), several Production pages threw a generic 500 ("An unexpected error occurred"). The real exception, recovered from the IIS stdout log, was:
+
+```
+System.InvalidOperationException: A parameterless default constructor or one matching signature
+(... System.Byte ShiftId ... System.Byte Status ...) is required for
+NormantonNexus.Models.Dto.MixingDataRow materialization
+```
+
+**Root cause**: `prod.Mixing.ShiftID`, `prod.Mixing.Status`, and the equivalent columns on every other `prod.*` process table (Extrusion/Convoluting/Braiding/Coverline/TapeWrap/Drumming) are real SQL Server `tinyint` columns — confirmed by this exact stack trace, not guessed. ADO.NET surfaces `tinyint` as `System.Byte`, not `System.Int32`. Dapper's normal query-mapping path (property-setter binding, used for a mutable class with a parameterless constructor) tolerates this fine via implicit coercion — but every DTO in this codebase is a C# `record` (or a `ValueTuple`), which has *only* a positional constructor, forcing Dapper into its much stricter constructor-matching path. That path requires an exact CLR type match per parameter and has no `byte`→`int`/`int?` widening — so any `record`/tuple with an `int`/`int?` property fed by a raw `tinyint` column throws exactly this exception, on every single row, not just some.
+
+This had been silently latent since Sub-phase 6a/6b — every one of this migration's ~700 unit tests mocks the SQL connection, so no test could ever have caught a real ADO.NET type mismatch like this one; `dotnet/CLAUDE.md`'s own repeated "not yet verified against a live SQL Server" caveat was exactly this risk materializing for real.
+
+**Fixed by explicit `CAST(x AS INT)` in the SQL text** (not by changing the C# property types to `byte`/`byte?`) at every confirmed raw-selection site — a deliberate choice: it's the same discipline this codebase already used for ambiguous-width numeric columns elsewhere (`CAST(TotalWeightKG AS DECIMAL(12,3))` was already present in `ProductionHelper.GetHistoryAsync`'s own UNION, right next to the columns that turned out to need the same treatment), it doesn't require knowing every table's real nullability semantics to get right, and it keeps every DTO's `int`/`int?` properties exactly as every other Production feature already expects them (arithmetic, comparisons like `Status == 4`, JSON serialization to the frontend — all unaffected either way, but changing 10+ DTOs' declared types would have been a much larger, riskier diff for no behavioral gain over just fixing the SQL).
+
+Found via a full sweep of every raw `.Status`/`ShiftID`/`MachineID` selection across `Helpers/Production/*.cs` (not just the pages the user had already hit), checking each one against its target DTO's field types and whether it's a `WHERE`/`JOIN` condition (safe — comparing `tinyint` to `tinyint`/a literal needs no cast) versus an actual output column bound into a `record`/tuple (unsafe). Fixed in:
+- `MixingHelper.GetDataAsync` (`ShiftId`, `Status`) — Mixing Data
+- `DrummingHelper.GetDataAsync` (`ShiftId`, `Status`) — Drumming Data
+- `MetreProcessHelper.GetOpenEntriesAsync` (`MachineId`), `.GetDataAsync` (`ShiftId`, `MachineId`, `Status`) — the 5 metre-process Data tiles
+- `MetreProcessHelper.CompleteAsync`'s open-record check (`Status`) — Complete Run would have thrown the identical exception on its very first `Status != 1` guard, before ever reaching SAP
+- `ProductionHelper.GetHistoryAsync`'s 9-way UNION (`Status`) — Batch History (this is the same method the `DateTime.MinValue` fix above landed in; both bugs were independently real and both had to be fixed for this route to work at all)
+- `LabelDataHelper.FetchLabelDataAsync` (both the Mixing and generic-process branches) and `.FetchMixingTicketsDataAsync` (`Status` in all three) — label printing/preview, not yet reported broken by name but a confirmed latent instance of the identical bug, found by the sweep rather than by a user report
+- `BilletStagingHelper.StageTubAsync`'s `TubForStaging` row (`Status`) — Billet Staging's manual-stage and scan-to-stage paths, same situation as `LabelDataHelper`: not yet reported, found by the sweep
+
+Swept the rest of the app too (`ShiftID` and `int`/`int?` `Status`/`ShiftId`-named record properties) and found no matching pattern outside `Helpers/Production/` — this `tinyint`-for-small-enumerations convention appears specific to the `prod.*` schema; other departments' schemas showed no equivalent evidence and were deliberately left untouched rather than "fixed" speculatively.
+
+**`MachineID` was cast defensively everywhere it's selected raw, without direct confirming evidence it's `tinyint`** — unlike `ShiftID`/`Status`, no stack trace has yet confirmed `MachineID`'s real column type. `CAST(x AS INT)` is a safe no-op if the column is already `int`, and the fix if it turns out to also be `tinyint`/`smallint` — cheap insurance with no downside, applied precisely because the failure mode (a total 500 on first use) is severe enough to be worth guarding against pre-emptively here, unlike lower-stakes columns (e.g. `TestPressurePSI`) that were deliberately left alone with no evidence either way.
+
+**Not build-verified against a live SQL Server from this session** (no dotnet SDK, no DB access here) — the fix is a direct, mechanical response to a real stack trace from the user's own environment, not a guess; the user should re-test each affected page and report back if any further "Invalid column"/constructor-signature errors surface (a sign of an unrelated `tinyint`/`smallint` column this sweep didn't have direct evidence for yet).
+
 ## Project layout
 
 ```

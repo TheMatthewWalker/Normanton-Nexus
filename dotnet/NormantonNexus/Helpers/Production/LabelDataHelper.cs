@@ -48,7 +48,7 @@ internal static class LabelDataHelper
         {
             r = await connection.QuerySingleOrDefaultAsync<LabelRawRow>(new CommandDefinition($"""
                 SELECT m.Material, m.TotalWeightKG AS Quantity,
-                       m.Status, m.CreatedAt, m.CompletedAt, m.Notes,
+                       CAST(m.Status AS INT) AS Status, m.CreatedAt, m.CompletedAt, m.Notes,
                        CAST(NULL AS NVARCHAR(100)) AS MachineName, CAST(NULL AS NVARCHAR(20)) AS MachineCode,
                        {DisplayNameSql},
                        m.MixRef AS BatchRef, m.SupplierBatchNo, m.SupplierTubNo
@@ -61,7 +61,7 @@ internal static class LabelDataHelper
         {
             r = await connection.QuerySingleOrDefaultAsync<LabelRawRow>(new CommandDefinition($"""
                 SELECT t.Material, t.{cfg.QtyCol} AS Quantity,
-                       t.Status, t.CreatedAt, t.CompletedAt, t.Notes,
+                       CAST(t.Status AS INT) AS Status, t.CreatedAt, t.CompletedAt, t.Notes,
                        mc.MachineName, mc.MachineCode,
                        {DisplayNameSql},
                        CAST(NULL AS NVARCHAR(10)) AS BatchRef, CAST(NULL AS NVARCHAR(50)) AS SupplierBatchNo, CAST(NULL AS NVARCHAR(20)) AS SupplierTubNo
@@ -142,7 +142,7 @@ internal static class LabelDataHelper
 
         var rec = await connection.QuerySingleOrDefaultAsync<(string? BatchRef, string? Material, int Status, DateTime? CreatedAt, DateTime? CompletedAt, string? Notes, string? SupplierBatchNo)?>(
             new CommandDefinition("""
-                SELECT m.MixRef AS BatchRef, m.Material, m.Status, m.CreatedAt, m.CompletedAt, m.Notes, m.SupplierBatchNo
+                SELECT m.MixRef AS BatchRef, m.Material, CAST(m.Status AS INT) AS Status, m.CreatedAt, m.CompletedAt, m.Notes, m.SupplierBatchNo
                 FROM   prod.Mixing m
                 WHERE  m.MixingID = @recordId
                 """, new { recordId }, cancellationToken: ct));

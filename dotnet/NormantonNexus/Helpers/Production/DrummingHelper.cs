@@ -537,10 +537,10 @@ internal static class DrummingHelper
     {
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<DrummingDataRow>(new CommandDefinition("""
-            SELECT d.DrummingID AS DrummingId, d.DrumRef, d.ShiftID AS ShiftId, s.ShiftName,
+            SELECT d.DrummingID AS DrummingId, d.DrumRef, CAST(d.ShiftID AS INT) AS ShiftId, s.ShiftName,
                    d.Material, d.LengthMetres, d.PackagingType, d.TestPressurePSI AS TestPressurePsi,
                    d.SalesOrderSAP AS SalesOrderSap, d.CustomerID AS CustomerId, d.CustomerOrderNo,
-                   d.Status, d.IsReversed, sc.StatusName, d.StartedAt, d.CompletedAt, d.Notes,
+                   CAST(d.Status AS INT) AS Status, d.IsReversed, sc.StatusName, d.StartedAt, d.CompletedAt, d.Notes,
                    pu.Username AS CreatedBy
             FROM prod.Drumming d
             LEFT JOIN prod.Shifts s ON s.ShiftID = d.ShiftID

@@ -178,10 +178,10 @@ internal static class MixingHelper
     {
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<MixingDataRow>(new CommandDefinition("""
-            SELECT m.MixingID AS MixingId, m.MixRef, m.ShiftID AS ShiftId, s.ShiftName,
+            SELECT m.MixingID AS MixingId, m.MixRef, CAST(m.ShiftID AS INT) AS ShiftId, s.ShiftName,
                    m.Material, m.MixCode, m.TotalWeightKG AS TotalWeightKg,
                    m.SupplierBatchNo, m.SupplierTubNo,
-                   m.Status, m.IsReversed, sc.StatusName, m.StartedAt, m.CompletedAt, m.Notes,
+                   CAST(m.Status AS INT) AS Status, m.IsReversed, sc.StatusName, m.StartedAt, m.CompletedAt, m.Notes,
                    pu.Username AS CreatedBy
             FROM prod.Mixing m
             LEFT JOIN prod.Shifts s ON s.ShiftID = m.ShiftID

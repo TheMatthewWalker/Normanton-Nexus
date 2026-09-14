@@ -61,7 +61,7 @@ internal static partial class BilletStagingHelper
     {
         var tub = await connection.QuerySingleOrDefaultAsync<TubForStaging?>(new CommandDefinition($"""
             SELECT t.MixingID AS MixingId, t.TubSeq, t.TubWeightKG AS TubWeightKg, t.IsStaged, t.IsScrapped, t.ExpiryOverrideAt,
-                   m.MixRef, m.IsReversed, m.Status,
+                   m.MixRef, m.IsReversed, CAST(m.Status AS INT) AS Status,
                    {AgeHoursSql} AS AgeHours,
                    (SELECT ISNULL(SUM(QuantityKG), 0) FROM prod.MixingTubReturns WHERE TubID = t.TubID) AS ReturnedKg
             FROM prod.MixingTubs t JOIN prod.Mixing m ON m.MixingID = t.MixingID

@@ -202,7 +202,7 @@ internal static class MetreProcessHelper
 
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<OpenEntryRow>(new CommandDefinition($"""
-            SELECT t.{pk} AS RecordId, t.{refCol} AS BatchRef, t.Material, t.MachineID AS MachineId, m.MachineCode, m.MachineName,
+            SELECT t.{pk} AS RecordId, t.{refCol} AS BatchRef, t.Material, CAST(t.MachineID AS INT) AS MachineId, m.MachineCode, m.MachineName,
                    t.Notes, t.CreatedAt, pu.Username AS CreatedBy
             FROM {table} t
             LEFT JOIN prod.Machines m ON m.MachineID = t.MachineID
@@ -219,9 +219,9 @@ internal static class MetreProcessHelper
 
         using var connection = await db.CreateConnectionAsync(ct);
         var rows = await connection.QueryAsync<MetreProcessDataRow>(new CommandDefinition($"""
-            SELECT t.{pk} AS RecordId, t.{refCol} AS BatchRef, t.ShiftID AS ShiftId, s.ShiftName,
-                   t.MachineID AS MachineId, m.MachineCode, m.MachineName,
-                   t.Material, t.LengthMetres, t.Status, t.IsReversed, sc.StatusName,
+            SELECT t.{pk} AS RecordId, t.{refCol} AS BatchRef, CAST(t.ShiftID AS INT) AS ShiftId, s.ShiftName,
+                   CAST(t.MachineID AS INT) AS MachineId, m.MachineCode, m.MachineName,
+                   t.Material, t.LengthMetres, CAST(t.Status AS INT) AS Status, t.IsReversed, sc.StatusName,
                    t.StartedAt, t.CompletedAt, t.Notes, pu.Username AS CreatedBy
             FROM {table} t
             LEFT JOIN prod.Shifts s ON s.ShiftID = t.ShiftID
@@ -423,7 +423,7 @@ internal static class MetreProcessHelper
         using var connection = await db.CreateConnectionAsync(ct);
 
         var check = await connection.QuerySingleOrDefaultAsync<(string Material, int Status)?>(new CommandDefinition(
-            $"SELECT Material, Status FROM {table} WHERE {pk} = @recordId", new { recordId }, cancellationToken: ct));
+            $"SELECT Material, CAST(Status AS INT) AS Status FROM {table} WHERE {pk} = @recordId", new { recordId }, cancellationToken: ct));
 
         if (check is null) throw new NexusNotFoundException("Record not found.");
         if (check.Value.Status != 1) throw new NexusConflictException("Record is not open — it may already be complete or cancelled.");

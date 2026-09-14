@@ -44,15 +44,15 @@ internal static class ProductionHelper
                 SELECT ROW_NUMBER() OVER (ORDER BY CreatedAt DESC) AS RowNum,
                        PC AS ProcessCode, RID AS RecordID, BatchRef, Material, Qty AS Quantity, UOM, Status, CreatedAt, CompletedAt
                 FROM (
-                    SELECT N'MX' AS PC, MixingID AS RID, MixRef AS BatchRef, Material, CAST(TotalWeightKG AS DECIMAL(12,3)) AS Qty, N'KG' AS UOM, Status, CreatedAt, CompletedAt FROM prod.Mixing
-                    UNION ALL SELECT N'EX', ExtrusionID, ExtRef, Material, LengthMetres, N'M', Status, CreatedAt, CompletedAt FROM prod.Extrusion
-                    UNION ALL SELECT N'CO', ConvolutingID, ConvRef, Material, LengthMetres, N'M', Status, CreatedAt, CompletedAt FROM prod.Convoluting
-                    UNION ALL SELECT N'BR', BraidingID, BraidRef, Material, LengthMetres, N'M', Status, CreatedAt, CompletedAt FROM prod.Braiding
-                    UNION ALL SELECT N'CL', CoverlineID, CovRef, Material, LengthMetres, N'M', Status, CreatedAt, CompletedAt FROM prod.Coverline
-                    UNION ALL SELECT N'TW', TapeWrapID, TWRef, Material, LengthMetres, N'M', Status, CreatedAt, CompletedAt FROM prod.TapeWrap
-                    UNION ALL SELECT N'DR', DrummingID, DrumRef, Material, LengthMetres, N'M', Status, CreatedAt, CompletedAt FROM prod.Drumming
-                    UNION ALL SELECT N'EW', EwaldID, EwaldRef, Material, CAST(TotalPiecesEA AS DECIMAL(12,3)), N'EA', Status, CreatedAt, CompletedAt FROM prod.Ewald
-                    UNION ALL SELECT N'HA', HoseAssemblyID, HARef, Material, CAST(QuantityEA AS DECIMAL(12,3)), N'EA', Status, CreatedAt, CompletedAt FROM prod.HoseAssembly
+                    SELECT N'MX' AS PC, MixingID AS RID, MixRef AS BatchRef, Material, CAST(TotalWeightKG AS DECIMAL(12,3)) AS Qty, N'KG' AS UOM, CAST(Status AS INT) AS Status, CreatedAt, CompletedAt FROM prod.Mixing
+                    UNION ALL SELECT N'EX', ExtrusionID, ExtRef, Material, LengthMetres, N'M', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.Extrusion
+                    UNION ALL SELECT N'CO', ConvolutingID, ConvRef, Material, LengthMetres, N'M', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.Convoluting
+                    UNION ALL SELECT N'BR', BraidingID, BraidRef, Material, LengthMetres, N'M', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.Braiding
+                    UNION ALL SELECT N'CL', CoverlineID, CovRef, Material, LengthMetres, N'M', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.Coverline
+                    UNION ALL SELECT N'TW', TapeWrapID, TWRef, Material, LengthMetres, N'M', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.TapeWrap
+                    UNION ALL SELECT N'DR', DrummingID, DrumRef, Material, LengthMetres, N'M', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.Drumming
+                    UNION ALL SELECT N'EW', EwaldID, EwaldRef, Material, CAST(TotalPiecesEA AS DECIMAL(12,3)), N'EA', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.Ewald
+                    UNION ALL SELECT N'HA', HoseAssemblyID, HARef, Material, CAST(QuantityEA AS DECIMAL(12,3)), N'EA', CAST(Status AS INT), CreatedAt, CompletedAt FROM prod.HoseAssembly
                 ) AS AllBatches
                 {innerWhere}
             ) AS Paged
