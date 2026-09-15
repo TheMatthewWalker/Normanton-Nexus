@@ -273,13 +273,13 @@
         <div class="tf-section-label">${isNegative ? "Bin to Pull Stock From" : "Destination Bin"}</div>
         <div class="tf-row">
           <div class="tf-field">
-            <label class="tf-label">${isNegative ? "Type" : "Dest. Bin Type"} <span class="tf-req">*</span></label>
-            <input class="tf-input" id="wsm-desttype" type="text" placeholder="Auto from bin" required>
-            <div id="wsm-destchoice"></div>
-          </div>
-          <div class="tf-field">
             <label class="tf-label">${isNegative ? "Bin" : "Dest. Bin"} <span class="tf-req">*</span></label>
             <input class="tf-input" id="wsm-destbin" type="text" placeholder="e.g. B-02-03" required>
+          </div>
+          <div class="tf-field">
+            <label class="tf-label">${isNegative ? "Type" : "Dest. Bin Type"} <span class="tf-req">*</span></label>
+            <input class="tf-input" id="wsm-desttype" type="text" placeholder="Auto from bin" required disabled>
+            <div id="wsm-destchoice"></div>
           </div>
         </div>
 
@@ -341,8 +341,9 @@
           <td class="wsm-mono">${esc(row.storageType)}/${esc(row.bin)}${row.batch ? ` · ${esc(row.batch)}` : ""}</td>
           <td><input class="tf-input wsm-mass-qty" type="number" step="any" value="${esc(Math.abs(row.availableQty))}" data-id="${esc(id)}"></td>
           <td class="wsm-mass-dest-cell" data-id="${esc(id)}">
-            <input class="tf-input wsm-mass-desttype" type="text" placeholder="Type" data-id="${esc(id)}">
             <input class="tf-input wsm-mass-destbin" type="text" placeholder="Bin" data-id="${esc(id)}">
+             <input class="tf-input wsm-mass-desttype" type="text" placeholder="Type" data-id="${esc(id)}" disabled>
+             <div class="wsm-mass-destchoice" data-id="${esc(id)}"></div>
           </td>
           <td class="wsm-mass-result" id="wsm-mass-result-${esc(id)}"></td>
         </tr>`;
@@ -361,13 +362,13 @@
       <div class="wsm-mass-shared" id="wsm-mass-shared">
         <div class="tf-row">
           <div class="tf-field">
-            <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
-            <input class="tf-input" id="wsm-mass-shared-type" type="text" placeholder="Auto from bin">
-            <div id="wsm-mass-shared-choice"></div>
-          </div>
-          <div class="tf-field">
             <label class="tf-label">Dest. Bin <span class="tf-req">*</span></label>
             <input class="tf-input" id="wsm-mass-shared-bin" type="text" placeholder="e.g. B-02-03">
+          </div>
+        <div class="tf-field">
+            <label class="tf-label">Dest. Bin Type <span class="tf-req">*</span></label>
+            <input class="tf-input" id="wsm-mass-shared-type" type="text" placeholder="Auto from bin" disabled>
+            <div id="wsm-mass-shared-choice"></div>
           </div>
         </div>
       </div>
@@ -436,11 +437,14 @@
     const modeRadios = document.querySelectorAll('input[name="wsm-mass-mode"]');
     const sharedFields = document.getElementById("wsm-mass-shared");
     const destCells = document.querySelectorAll(".wsm-mass-dest-cell");
+    const massTable = document.querySelector(".wsm-mass-table");
 
     function applyMode() {
       const mode = document.querySelector('input[name="wsm-mass-mode"]:checked').value;
       sharedFields.style.display = mode === "shared" ? "" : "none";
       destCells.forEach((td) => { td.style.display = mode === "perrow" ? "" : "none"; });
+      document.querySelector(".wsm-layout")?.classList.toggle("wsm-layout--mass", mode === "perrow");
+      massTable?.classList.toggle("wsm-mass-table--shared", mode === "shared");
     }
     modeRadios.forEach((r) => r.addEventListener("change", applyMode));
     applyMode();
@@ -452,7 +456,10 @@
       const id = rowId(row);
       wireBinTypeAutoLookup(
         document.querySelector(`.wsm-mass-destbin[data-id="${CSS.escape(id)}"]`),
-        document.querySelector(`.wsm-mass-desttype[data-id="${CSS.escape(id)}"]`)
+        document.querySelector(`.wsm-mass-desttype[data-id="${CSS.escape(id)}"]`),
+        {
+          choiceEl: document.querySelector(`.wsm-mass-destchoice[data-id="${CSS.escape(id)}"]`),
+        }
       );
     });
 
@@ -658,34 +665,57 @@
   function wireBinTypeAutoLookup(binInputEl, typeInputEl, opts = {}) {
     const { choiceEl, onResolved } = opts;
     if (!binInputEl || !typeInputEl) return;
+    let lookupTimer;
+    let lookupVersion = 0;
 
     async function run() {
       const bin = binInputEl.value.trim();
+      const version = ++lookupVersion;
+      typeInputEl.disabled = true;
       typeInputEl.readOnly = false;
+      typeInputEl.value = "";
       if (choiceEl) choiceEl.innerHTML = "";
       if (!bin) return;
 
       let types;
       try { types = await fetchBinStorageTypes(bin); }
       catch { return; }
+      if (version !== lookupVersion) return;
 
       if (types.length === 1) {
         typeInputEl.value = types[0];
-        typeInputEl.readOnly = true;
+        typeInputEl.disabled = true;
         onResolved?.(types[0]);
       } else if (types.length > 1 && choiceEl) {
         choiceEl.innerHTML = `<div class="tf-locked">Choose storage type</div>` +
           types.map((t) => `<label><input type="radio" name="bintype-${esc(binInputEl.id)}" value="${esc(t)}"> ${esc(t)}</label>`).join(" ");
         choiceEl.querySelectorAll("input[type=radio]").forEach((r) => r.addEventListener("change", () => {
           typeInputEl.value = r.value;
-          typeInputEl.readOnly = true;
+          typeInputEl.disabled = true;
           onResolved?.(r.value);
         }));
       }
     }
 
-    binInputEl.addEventListener("blur", run);
-    binInputEl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); run(); } });
+    binInputEl.addEventListener("input", () => {
+      clearTimeout(lookupTimer);
+      lookupVersion++;
+      typeInputEl.disabled = true;
+      typeInputEl.value = "";
+      if (choiceEl) choiceEl.innerHTML = "";
+      lookupTimer = setTimeout(run, 300);
+    });
+    binInputEl.addEventListener("blur", () => {
+      clearTimeout(lookupTimer);
+      run();
+    });
+    binInputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        clearTimeout(lookupTimer);
+        run();
+      }
+    });
   }
 
   renderLayout();

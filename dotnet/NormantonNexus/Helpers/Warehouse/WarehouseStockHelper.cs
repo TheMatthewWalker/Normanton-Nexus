@@ -3,6 +3,7 @@ using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
 using NormantonNexus.Services.Sql;
+using Microsoft.AspNetCore.WebUtilities;
 
 namespace NormantonNexus.Helpers.Warehouse;
 
@@ -25,15 +26,41 @@ namespace NormantonNexus.Helpers.Warehouse;
 internal static class WarehouseStockHelper
 {
     internal static async Task<IReadOnlyList<WarehouseStockRow>> GetStockAsync(ISapServerClient sap, int userId, StockQuery query, CancellationToken ct) =>
-        await sap.GetAsync<List<WarehouseStockRow>>("api/warehouse/stock", userId, query, ct: ct) ?? [];
+        await sap.GetAsync<List<WarehouseStockRow>>(QueryHelpers.AddQueryString("api/warehouse/stock", ToQueryString(query)), userId, ct: ct) ?? [];
 
     internal static async Task<IReadOnlyList<OpenTransferRequirementRow>> GetOpenTransferRequirementsAsync(ISapServerClient sap, int userId, OpenTransferRequirementsQuery query, CancellationToken ct) =>
-        await sap.GetAsync<List<OpenTransferRequirementRow>>("api/warehouse/open-transfer-requirements", userId, query, ct: ct) ?? [];
+        await sap.GetAsync<List<OpenTransferRequirementRow>>(QueryHelpers.AddQueryString("api/warehouse/open-transfer-requirements", ToQueryString(query)), userId, ct: ct) ?? [];
+
+    private static Dictionary<string, string?> ToQueryString(StockQuery query) =>
+        new()
+        {
+            ["material"] = query.Material,
+            ["storageType"] = query.StorageType,
+            ["excludeStorageType"] = query.ExcludeStorageType,
+            ["bin"] = query.Bin,
+            ["batch"] = query.Batch,
+            ["storageLocation"] = query.StorageLocation,
+            ["stockCategory"] = query.StockCategory,
+            ["profitCentre"] = query.ProfitCentre,
+            ["rowCount"] = query.RowCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+
+    private static Dictionary<string, string?> ToQueryString(OpenTransferRequirementsQuery query) =>
+        new()
+        {
+            ["mrpController"] = query.MrpController,
+            ["material"] = query.Material,
+            ["storageLocation"] = query.StorageLocation,
+            ["createdBy"] = query.CreatedBy,
+        };
 
     internal static async Task<IReadOnlyList<string>> GetBinStorageTypesAsync(ISapServerClient sap, int userId, string bin, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(bin)) return [];
-        return await sap.GetAsync<List<string>>("api/warehouse/bin-storage-types", userId, new { bin }, ct: ct) ?? [];
+        return await sap.GetAsync<List<string>>(
+            QueryHelpers.AddQueryString("api/warehouse/bin-storage-types", "bin", bin),
+            userId,
+            ct: ct) ?? [];
     }
 
     internal static async Task<IReadOnlyList<TrCleanupCandidateRow>> GetTrCleanupCandidatesAsync(ISapServerClient sap, int userId, CancellationToken ct) =>

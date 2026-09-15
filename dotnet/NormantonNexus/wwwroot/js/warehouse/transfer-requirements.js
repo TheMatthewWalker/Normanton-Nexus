@@ -66,8 +66,8 @@
     { key: "material", label: "Material", readonly: true },
     { key: "quantity", label: "Quantity" },
     { key: "destType", label: "Destination Type" },
-    { key: "destBin", label: "Destination Bin" },
     { key: "pallet", label: "Pallet/Batch" },
+    { key: "destBin", label: "Destination Bin" },
   ];
 
   function openPanel(row) {
@@ -80,7 +80,7 @@
       pallet: row.batch || "",
     };
 
-    AdminEditModal.open("Confirm via LT04", `TR ${row.trNumber}`, LT04_FIELDS, record, async (values) => {
+    const card = AdminEditModal.open("Confirm via LT04", `TR ${row.trNumber}`, LT04_FIELDS, record, async (values) => {
       const body = {
         trNumber: row.trNumber,
         material: row.material,
@@ -97,6 +97,64 @@
       });
       await load();
       if (data?.type !== "S") throw new Error(`Result: ${data?.message || "unknown"}`);
+    });
+
+    card.classList.add("ps-modal--transfer-requirement");
+
+    const destBinEl = card.querySelector("#aed-destBin");
+    const destTypeEl = card.querySelector("#aed-destType");
+    if (!destBinEl || !destTypeEl) return;
+
+    card.querySelectorAll("input, select, textarea").forEach((el) => { el.disabled = true; });
+    destBinEl.disabled = false;
+    destTypeEl.disabled = true;
+
+    const choiceEl = document.createElement("div");
+    choiceEl.className = "aed-dest-choice";
+    destTypeEl.parentElement.appendChild(choiceEl);
+
+    let lookupTimer;
+    let lookupVersion = 0;
+    const lookup = async () => {
+      const bin = destBinEl.value.trim();
+      const version = ++lookupVersion;
+      destTypeEl.value = "";
+      choiceEl.innerHTML = "";
+      if (!bin) return;
+
+      let types;
+      try {
+        const response = await api(`/bin-storage-types?bin=${encodeURIComponent(bin)}`);
+        types = response.data || [];
+      } catch {
+        return;
+      }
+      if (version !== lookupVersion) return;
+
+      if (types.length === 1) {
+        destTypeEl.value = types[0];
+        return;
+      }
+
+      if (types.length > 1) {
+        choiceEl.innerHTML = `<div class="tf-locked">Choose storage type</div>` +
+          types.map((type) => `<label><input type="radio" name="aed-destType-choice" value="${esc(type)}"> ${esc(type)}</label>`).join(" ");
+        choiceEl.querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
+          destTypeEl.value = input.value;
+        }));
+      }
+    };
+
+    destBinEl.addEventListener("input", () => {
+      clearTimeout(lookupTimer);
+      lookupVersion++;
+      destTypeEl.value = "";
+      choiceEl.innerHTML = "";
+      lookupTimer = setTimeout(lookup, 300);
+    });
+    destBinEl.addEventListener("blur", () => {
+      clearTimeout(lookupTimer);
+      lookup();
     });
   }
 

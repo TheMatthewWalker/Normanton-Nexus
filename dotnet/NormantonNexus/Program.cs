@@ -25,6 +25,10 @@ QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Enable the generated static-web-assets manifest when running with the
+// Production environment under IIS/IIS Express.
+builder.WebHost.UseStaticWebAssets();
+
 builder.Services.AddRazorPages()
     .AddMvcOptions(options => options.Filters.Add<MustChangePasswordPageFilter>());
 builder.Services.AddControllers();
@@ -282,6 +286,9 @@ builder.Services.AddQuartz(q =>
 builder.Services.AddQuartzHostedService(opts => opts.WaitForJobsToComplete = true);
 
 var app = builder.Build();
+
+// Serve wwwroot assets (CSS, JavaScript, images) before endpoint routing.
+app.UseStaticFiles();
 
 if (!app.Environment.IsDevelopment())
 {

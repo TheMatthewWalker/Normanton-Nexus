@@ -33,7 +33,7 @@ window.AdminEditModal = (function () {
       } else {
         inputEl = `<input id="aed-${f.key}" class="tf-input" type="${f.type || "text"}" ${f.step ? `step="${f.step}"` : ""} value="${esc(String(raw ?? "")).replace(/"/g, "&quot;")}" ${f.readonly ? "readonly" : ""}>`;
       }
-      return `<div class="tf-field${f.wide ? " tf-field--wide" : ""}">
+      return `<div class="tf-field aed-field-${esc(f.key)}${f.wide ? " tf-field--wide" : ""}">
         <label class="tf-label">${esc(f.label)}</label>
         ${inputEl}
       </div>`;

@@ -637,6 +637,30 @@ tbody tr:last-child td { border-bottom: none; }
    while wiring the Pallet Builder's own multi-line confirm dialogs. */
 .ps-modal-body { padding: 20px; font-size: 13px; line-height: 1.55; color: var(--text-dim); white-space: pre-line; }
 .ps-modal-body p { margin: 0; }
+.ps-modal--transfer-requirement .ps-modal-body { padding: 12px 20px 18px; }
+.ps-modal--transfer-requirement .tf-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  align-items: end;
+  padding: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ps-modal--transfer-requirement .tf-field { gap: 3px; min-width: 0; }
+.ps-modal--transfer-requirement .aed-field-destBin {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.ps-modal--transfer-requirement .tf-label { font-size: 9px; letter-spacing: 0.04em; }
+.ps-modal--transfer-requirement .tf-input { min-width: 0; padding: 5px 7px; font-size: 11px; }
+.ps-modal--transfer-requirement .aed-field-destBin .tf-label { font-size: 10px; font-weight: 800; }
+.ps-modal--transfer-requirement .aed-field-destBin .tf-input { width: 100%; padding: 11px 12px; font-size: 16px; font-weight: 700; background: var(--surface); }
+.ps-modal--transfer-requirement .aed-dest-choice { margin-top: 4px; white-space: nowrap; }
+.ps-modal--transfer-requirement .aed-dest-choice label { font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-right: 6px; }
 .ps-modal-actions {
   display: flex; align-items: center; justify-content: flex-end; gap: 10px;
   padding: 14px 20px;
@@ -1389,6 +1413,7 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 }
 
 .wsm-layout { display: grid; grid-template-columns: 1fr 440px; gap: 20px; align-items: start; }
+.wsm-layout--mass { grid-template-columns: minmax(0, 1fr) minmax(480px, 1.15fr); }
 .wsm-list-panel { min-width: 0; }
 .wsm-filters {
   display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;
@@ -1451,6 +1476,23 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 .wsm-mass-dest-cell { display: flex; gap: 6px; }
 .wsm-mass-dest-cell .tf-input { width: 70px; }
 .wsm-mass-result { font-size: 10px; white-space: nowrap; }
+.wsm-transfer-panel .wsm-mass-table-wrap { overflow-x: hidden; }
+.wsm-transfer-panel .wsm-mass-table { table-layout: fixed; }
+.wsm-transfer-panel .wsm-mass-table th, .wsm-transfer-panel .wsm-mass-table td { vertical-align: top; }
+.wsm-transfer-panel .wsm-mass-table th:nth-child(1), .wsm-transfer-panel .wsm-mass-table td:nth-child(1) { width: 19%; }
+.wsm-transfer-panel .wsm-mass-table th:nth-child(2), .wsm-transfer-panel .wsm-mass-table td:nth-child(2) { width: 25%; }
+.wsm-transfer-panel .wsm-mass-table th:nth-child(3), .wsm-transfer-panel .wsm-mass-table td:nth-child(3) { width: 12%; }
+.wsm-transfer-panel .wsm-mass-table th:nth-child(4), .wsm-transfer-panel .wsm-mass-table td:nth-child(4) { width: 34%; }
+.wsm-transfer-panel .wsm-mass-table th:nth-child(5), .wsm-transfer-panel .wsm-mass-table td:nth-child(5) { width: 10%; }
+.wsm-transfer-panel .wsm-mass-table--shared th:nth-child(1), .wsm-transfer-panel .wsm-mass-table--shared td:nth-child(1) { width: 24%; }
+.wsm-transfer-panel .wsm-mass-table--shared th:nth-child(2), .wsm-transfer-panel .wsm-mass-table--shared td:nth-child(2) { width: 56%; }
+.wsm-transfer-panel .wsm-mass-table--shared th:nth-child(3), .wsm-transfer-panel .wsm-mass-table--shared td:nth-child(3) { width: 15%; }
+.wsm-transfer-panel .wsm-mass-table--shared th:nth-child(4), .wsm-transfer-panel .wsm-mass-table--shared td:nth-child(4) { display: none; width: 0; }
+.wsm-transfer-panel .wsm-mass-table--shared th:nth-child(5), .wsm-transfer-panel .wsm-mass-table--shared td:nth-child(5) { width: 5%; }
+.wsm-transfer-panel .wsm-mass-dest-cell { display: table-cell; }
+.wsm-transfer-panel .wsm-mass-dest-cell .tf-input { width: calc(50% - 4px); min-width: 0; max-width: 100%; }
+.wsm-transfer-panel .wsm-mass-destchoice { margin-top: 4px; }
+.wsm-transfer-panel .wsm-mass-result { overflow-wrap: anywhere; white-space: normal; }
 .wsm-mass-ok   { color: var(--success); }
 .wsm-mass-fail { color: var(--error); }
 
@@ -1508,7 +1550,7 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 .wsm-progress-summary--warn { color: var(--error); }
 
 @media (max-width: 900px) {
-  .wsm-layout { grid-template-columns: 1fr; }
+  .wsm-layout, .wsm-layout--mass { grid-template-columns: 1fr; }
   .wsm-transfer-panel { position: static; max-height: none; }
 }
 
