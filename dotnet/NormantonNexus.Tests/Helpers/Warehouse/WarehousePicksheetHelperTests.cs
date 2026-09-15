@@ -1,6 +1,9 @@
 using Moq;
 using NormantonNexus.Helpers.Warehouse;
 using NormantonNexus.Models;
+using NormantonNexus.Models.Dto;
+using NormantonNexus.Services;
+using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Tests.Helpers.Warehouse;
@@ -63,5 +66,28 @@ public class WarehousePicksheetHelperTests
             WarehousePicksheetHelper.LinkPicksheetAsync(db.Object, 12345, 12345, userId: 1, CancellationToken.None));
 
         db.Verify(d => d.CreateConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // StageBatchAsync's material/batch guard — the one pre-SAP-call
+    // validation path in this method, same MockBehavior.Strict precedent as
+    // WarehouseBatchCleanupHelperTests so a guard that fails to fire (and
+    // accidentally reaches SapServer or the audit logger) is actually caught.
+    [Theory]
+    [InlineData(null, "B1")]
+    [InlineData("", "B1")]
+    [InlineData("   ", "B1")]
+    [InlineData("MAT1", null)]
+    [InlineData("MAT1", "")]
+    [InlineData("MAT1", "   ")]
+    public async Task StageBatchAsync_rejects_a_missing_material_or_batch_without_calling_sap(string? material, string? batch)
+    {
+        var sap = new Mock<ISapServerClient>(MockBehavior.Strict);
+        var audit = new Mock<IAuditLogger>(MockBehavior.Strict);
+
+        var ex = await Assert.ThrowsAsync<NexusValidationException>(() =>
+            WarehousePicksheetHelper.StageBatchAsync(sap.Object, audit.Object, 12345, new StageBatchRequest(material, batch),
+                username: "tester", ipAddress: "127.0.0.1", userId: 1, CancellationToken.None));
+
+        Assert.Equal("material and batch are required", ex.Message);
     }
 }

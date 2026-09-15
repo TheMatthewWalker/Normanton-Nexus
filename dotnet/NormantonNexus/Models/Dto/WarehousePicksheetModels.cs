@@ -34,6 +34,18 @@ public sealed record PackagingHoldingRow(
 
 public sealed record LinkedPicksheetRow(long DeliveryId, long? CustomerId, string? DestinationName, bool CompletionStatus, DateTime? DispatchDate);
 
+/// <summary>POST :deliveryId/stage-batch (Pallet Builder) — body for staging one batch into this picksheet's own SAP bin.</summary>
+public sealed record StageBatchRequest(string? Material, string? Batch);
+
+/// <summary>Only the fields the builder actually needs back — SourceType/SourceBin are recorded on the resulting PalletPackages row so a later remove/delete can reverse the transfer order.</summary>
+public sealed record StageBatchResult(string TransferOrderNumber, decimal QuantityMoved, bool BinWasCreated, string SourceType, string SourceBin);
+
+/// <summary>PATCH :deliveryId/comment — the job comment shown on Create Shipment (log.DeliveryMain.picksheetComment). Empty/blank collapses to NULL and anything over 50 chars is trimmed, matching Node's own `String(x).trim().slice(0,50) || null` exactly.</summary>
+public sealed record UpdatePicksheetCommentRequest(string? PicksheetComment);
+
+/// <summary>POST :deliveryId/pallets — links a freshly-created (or existing) pallet header to this delivery via log.DeliveryLink.</summary>
+public sealed record AddPalletLinkRequest(int PalletId);
+
 public sealed record LinkSearchRow(long DeliveryId, long? CustomerId, string? DestinationName, DateTime? DispatchDate);
 
 /// <summary>

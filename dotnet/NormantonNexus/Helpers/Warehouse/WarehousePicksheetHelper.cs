@@ -4,6 +4,7 @@ using Dapper;
 using NormantonNexus.Models;
 using NormantonNexus.Models.Dto;
 using NormantonNexus.Services;
+using NormantonNexus.Services.Auth;
 using NormantonNexus.Services.Sql;
 
 namespace NormantonNexus.Helpers.Warehouse;
@@ -662,6 +663,81 @@ internal static partial class WarehousePicksheetHelper
         }
 
         return new BulkImportDeliveriesResult(inserted, skipped, errors);
+    }
+
+    /// <summary>
+    /// POST :deliveryId/stage-batch — the Pallet Builder's own "scan a batch
+    /// onto this pallet" call, moving the batch's full on-hand quantity into
+    /// this picksheet's SAP staging bin (creating the bin first if needed).
+    /// Deliberately fails closed: SapServerClient.PostAsync already throws
+    /// SapProxyException for every one of SapServer's own failure paths
+    /// (batch not found, bin couldn't be created, transfer order rejected —
+    /// all real HTTP 422s with a populated error message), so there is no
+    /// Success:false response object to branch on here in practice, only the
+    /// thrown exception — mapped to a plain 422 so the builder's addPackage()
+    /// never reaches the app's own POST /api/palletpackages when SAP staging
+    /// itself failed, matching Node's own fail-before-add ordering exactly.
+    /// </summary>
+    internal static async Task<StageBatchResult> StageBatchAsync(ISapServerClient sap, IAuditLogger audit, long deliveryId, StageBatchRequest body, string? username, string? ipAddress, int userId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(body.Material) || string.IsNullOrWhiteSpace(body.Batch))
+        {
+            throw new NexusValidationException("material and batch are required");
+        }
+
+        SapStagePicksheetBatchResponse? response;
+        try
+        {
+            response = await sap.PostAsync<SapStagePicksheetBatchResponse>("api/warehouse/picksheet-stage-batch",
+                new SapStagePicksheetBatchRequest(body.Material, body.Batch, deliveryId.ToString()), userId, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            var message = (ex as SapProxyException)?.ResponseData is SapStagePicksheetBatchResponse failed && !string.IsNullOrEmpty(failed.Error)
+                ? failed.Error
+                : ex.Message;
+            await audit.LogAsync("SAP_ERROR", username, $"Picksheet #{deliveryId} stage batch {body.Batch}/{body.Material} failed - {message}", ipAddress, ct);
+            throw new NexusUnprocessableEntityException(message);
+        }
+
+        if (response is null || !response.Success)
+        {
+            var message = response?.Error ?? "SAP staging failed";
+            await audit.LogAsync("SAP_ERROR", username, $"Picksheet #{deliveryId} stage batch {body.Batch}/{body.Material} failed - {message}", ipAddress, ct);
+            throw new NexusUnprocessableEntityException(message);
+        }
+
+        await audit.LogAsync("SAP_OK", username,
+            $"Picksheet #{deliveryId} stage batch {body.Batch}/{body.Material} succeeded{(string.IsNullOrEmpty(response.TransferOrderNumber) ? "" : $" - TR {response.TransferOrderNumber}")}",
+            ipAddress, ct);
+
+        return new StageBatchResult(response.TransferOrderNumber, response.QuantityMoved, response.BinWasCreated, response.SourceType, response.SourceBin);
+    }
+
+    /// <summary>PATCH :deliveryId/comment — direct port of deliverymain.js's own trim/slice(0,50)/null-collapse.</summary>
+    internal static async Task UpdateCommentAsync(INexusOperationsDb db, long deliveryId, string? picksheetComment, CancellationToken ct)
+    {
+        var comment = picksheetComment?.Trim();
+        if (string.IsNullOrEmpty(comment)) comment = null;
+        else if (comment.Length > 50) comment = comment[..50];
+
+        using var connection = await db.CreateConnectionAsync(ct);
+        var rowsAffected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE log.DeliveryMain SET picksheetComment = @comment WHERE deliveryID = @deliveryId",
+            new { deliveryId, comment }, cancellationToken: ct));
+        if (rowsAffected == 0)
+        {
+            throw new NexusNotFoundException("Delivery not found");
+        }
+    }
+
+    /// <summary>POST :deliveryId/pallets — links a pallet header to a delivery (log.DeliveryLink), the last step of createPallet() in the builder. No validation beyond the DB's own FK constraints, matching Node's own bare INSERT exactly.</summary>
+    internal static async Task AddPalletLinkAsync(INexusOperationsDb db, long deliveryId, int palletId, CancellationToken ct)
+    {
+        using var connection = await db.CreateConnectionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO log.DeliveryLink (deliveryID, palletID) VALUES (@deliveryId, @palletId)",
+            new { deliveryId, palletId }, cancellationToken: ct));
     }
 
     /// <summary>Mutable accumulator for one material's requiredQty/batches while GetPicksheetMaterialsAsync builds the result — mirrors Node's own byMaterial[mat] object being mutated in place across two separate forEach passes (lipsRows, then batchRows).</summary>

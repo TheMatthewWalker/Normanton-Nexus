@@ -119,3 +119,21 @@ public sealed record SapStockQuery(string? Material = null, string? StorageType 
 
 /// <summary>Mirrors SapServer's StockRow field-for-field — one LQUA quant.</summary>
 public sealed record SapStockRow(string StorageLocation, string StorageType, string Bin, string Material, decimal AvailableQty, string Batch, string StockCategory, string SpecialStockInd, string SpecialStockNum, string GrDate, string ProfitCentre);
+
+/// <summary>
+/// Mirrors SapServer's StagePicksheetBatchRequest/Response field-for-field
+/// (Helpers/PicksheetHelpers.cs there) — POST /api/warehouse/picksheet-stage-batch,
+/// the Pallet Builder's own "scan a batch onto this pallet" call. Moves the
+/// batch's full on-hand quantity into the picksheet's own 916 staging bin
+/// (creating the bin first via LS01 if SAP doesn't have it yet). Every
+/// failure path (batch not found in LQUA, bin couldn't be created, SAP
+/// rejected the transfer order) comes back as a real HTTP 422 with
+/// ApiResponse.Fail — SapServerClient.PostAsync already throws
+/// SapProxyException for that, so this port never sees a Success:false
+/// response object in practice, only the thrown exception's own message.
+/// </summary>
+public sealed record SapStagePicksheetBatchRequest(string Material, string Batch, string DeliveryNumber);
+
+public sealed record SapStagePicksheetBatchResponse(
+    bool Success, string TransferOrderNumber, decimal QuantityMoved, string DestinationBin, string DestinationType,
+    bool BinWasCreated, string SourceType, string SourceBin, string? Error, List<SapReturnMessage> Messages);

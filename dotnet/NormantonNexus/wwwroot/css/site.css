@@ -629,7 +629,13 @@ tbody tr:last-child td { border-bottom: none; }
   padding: 2px 6px;
 }
 .ps-modal-close:hover { color: var(--text); }
-.ps-modal-body { padding: 20px; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
+/* white-space:pre-line so a NexusModal.confirm()/.alert() message's own
+   embedded \n\n renders as real line breaks (matching .wc-message's
+   existing pre-line rule) instead of silently collapsing to spaces — a
+   real, previously-unnoticed gap affecting every multi-line confirm/alert
+   in the app (e.g. the Complete Delivery quantity-mismatch dialog), found
+   while wiring the Pallet Builder's own multi-line confirm dialogs. */
+.ps-modal-body { padding: 20px; font-size: 13px; line-height: 1.55; color: var(--text-dim); white-space: pre-line; }
 .ps-modal-body p { margin: 0; }
 .ps-modal-actions {
   display: flex; align-items: center; justify-content: flex-end; gap: 10px;
@@ -1553,36 +1559,23 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 .wc-btn-confirm--success { background: #059669; }
 
 /* ── Picked Pallets modal (Open Picksheets row click) ───────────────────────
-   Node's real .ps-modal-*/.ps-pcard-* families (private/css/warehouse.css)
-   — the actual "Picked Pallets" popup shown when a picksheet row is
-   clicked, distinct from the (not yet ported) full Pallet Builder wizard's
-   own .pb-overlay. */
-.ps-modal-overlay {
-  position: fixed; inset: 0;
-  background: rgba(15,25,45,0.6);
-  z-index: 2000;
-  display: flex; align-items: center; justify-content: center;
-  padding: 24px;
-  backdrop-filter: blur(3px);
-}
-.ps-modal {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgba(15,25,45,0.35);
-  width: 100%; max-width: 860px;
-  max-height: 80vh;
-  display: flex; flex-direction: column;
-  animation: fadeUp 0.2s ease both;
-}
-.ps-modal-header { display: flex; align-items: flex-start; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.ps-modal-title { font-size: 16px; font-weight: 700; color: var(--text); }
-.ps-modal-sub { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-top: 3px; }
-.ps-modal-close { background: none; border: none; font-size: 18px; color: var(--text-muted); cursor: pointer; padding: 4px 8px; line-height: 1; transition: color 0.15s; }
-.ps-modal-close:hover { color: var(--error); }
-.ps-modal-body { flex: 1; overflow: auto; padding: 20px 24px; }
-.ps-modal-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 12px 24px; border-top: 1px solid var(--border); background: var(--surface2); flex-shrink: 0; }
-
+   Node's real .ps-pcard-* family (private/css/warehouse.css) — the pallet
+   summary cards inside the "Picked Pallets" popup. The popup shell itself
+   reuses NexusModal's own .ps-modal-overlay/.ps-modal (modal.js), sized via
+   its `{ size: "xwide" }` option (see picked-pallets-modal.js) rather than
+   a second .ps-modal-overlay/.ps-modal declaration here — an earlier pass
+   verbatim-ported Node's own 860px-wide .ps-modal-overlay/.ps-modal rules
+   into this file without noticing NexusModal already defines those exact
+   class names for its own generic confirm/alert/open() shell (Phase 1) at
+   ~line 594; because both blocks target the same bare class names with
+   equal specificity, the later one silently won the cascade for every
+   NexusModal dialog anywhere in the app (not just Picked Pallets) —
+   real users of NexusModal.confirm()/.alert() across every department were
+   getting an 860px-wide box instead of the intended 460px default. Fixed
+   by deleting the duplicate block and using the size modifier the shared
+   component already provides for exactly this "I need a wider modal" case
+   (see .ps-modal--xwide above, already used by Logistics' shipment-detail-
+   outbound.js for the same reason). */
 .ps-pcard-list { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
 .ps-pcard { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
 .ps-pcard-hdr { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; user-select: none; background: var(--surface2); transition: background 0.1s; flex-wrap: wrap; }
@@ -1608,3 +1601,375 @@ mark.pg-hl { background: #FDE68A; border-radius: 2px; padding: 0 1px; }
 .ps-pcard-del { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 3px; transition: color 0.15s, background 0.15s; }
 .ps-pcard-del:hover { color: var(--error); background: rgba(220,38,38,0.08); }
 .ps-pcard-empty { padding: 16px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
+
+/* ── Pallet Builder (private/css/warehouse.css lines 909-1397, ported
+   verbatim) — the "+ Add Pallet"/"Continue" wizard opened from the Picked
+   Pallets modal above (wwwroot/js/warehouse/pallet-builder.js). A separate
+   full-screen overlay (.pb-overlay, z-index 3000) layered on top of the
+   Picked Pallets modal (NexusModal's own .ps-modal-overlay, z-index 9000
+   — wait, no: 3000 < 9000, so .pb-overlay actually renders BEHIND
+   NexusModal's overlay. That's fine in practice since the Picked Pallets
+   modal is always closed before the builder needs the screen — the builder
+   is its own top-level overlay, not nested inside NexusModal's card, and
+   nothing here currently opens both stacked at once the way the Link
+   Picksheet search dialog stacks on top of Picked Pallets). */
+.pb-overlay {
+  position: fixed; inset: 0;
+  background: rgba(15,25,45,0.7);
+  z-index: 3000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  backdrop-filter: blur(4px);
+}
+.pb-overlay.hidden { display: none; }
+
+.pb-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(15,25,45,0.45);
+  width: 100%; max-width: 1280px;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+  animation: fadeUp 0.2s ease both;
+}
+
+.pb-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 18px 24px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  border-radius: 14px 14px 0 0;
+  flex-shrink: 0;
+}
+.pb-title { font-size: 16px; font-weight: 800; }
+.pb-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted); margin-top: 3px;
+}
+.pb-close {
+  background: none; border: none; font-size: 18px;
+  color: var(--text-muted); cursor: pointer; padding: 4px 8px;
+  line-height: 1; transition: color 0.15s;
+}
+.pb-close:hover { color: var(--error); }
+
+.pb-body { flex: 1; overflow: auto; padding: 24px; }
+
+.pb-merged {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+.pb-main { min-width: 0; }
+
+.pb-stock-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  position: sticky; top: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.pb-stock-list { display: flex; flex-direction: column; gap: 14px; }
+.pb-stock-material {
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.pb-stock-material-hdr {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; margin-bottom: 8px;
+}
+.pb-stock-material-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 700; color: var(--text);
+}
+.pb-stock-material-req {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  white-space: nowrap;
+}
+.pb-stock-material-req--done { color: var(--success); }
+.pb-stock-material--done > summary { list-style: none; cursor: pointer; }
+.pb-stock-material--done > summary::-webkit-details-marker { display: none; }
+.pb-stock-material--done > summary::before {
+  content: '▸';
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-right: 6px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.pb-stock-material--done[open] > summary::before { transform: rotate(90deg); }
+.pb-stock-material--done .pb-stock-batches { margin-top: 8px; }
+.pb-stock-batches { display: flex; flex-direction: column; gap: 6px; }
+.pb-stock-batch {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.pb-stock-batch--restricted { opacity: 0.55; }
+.pb-stock-batch-no { font-weight: 700; color: var(--text); flex-shrink: 0; }
+.pb-stock-batch-bin { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-stock-batch-qty { color: var(--accent); font-weight: 600; flex-shrink: 0; }
+.pb-stock-add {
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--accent);
+  background: rgba(124,58,237,0.1);
+  color: var(--accent);
+  font-size: 13px; font-weight: 700;
+  line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.pb-stock-add:hover { background: rgba(124,58,237,0.22); }
+.pb-stock-restricted-tag {
+  flex-shrink: 0;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--error);
+  border: 1px solid var(--error);
+  border-radius: 5px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.pb-stock-nobatch {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-muted);
+  padding: 4px 0;
+}
+.pb-stock-error, .pb-stock-empty {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  padding: 8px 0;
+}
+.pb-stock-error { color: var(--error); }
+
+.pb-stock-restricted-group { margin-top: 6px; }
+.pb-stock-restricted-group summary { list-style: none; cursor: pointer; }
+.pb-stock-restricted-group summary::-webkit-details-marker { display: none; }
+.pb-stock-restricted-summary {
+  display: flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600; color: var(--text-muted);
+  padding: 4px 2px;
+  user-select: none;
+}
+.pb-stock-restricted-summary::before { content: '▸'; font-size: 9px; transition: transform 0.15s; }
+.pb-stock-restricted-group[open] .pb-stock-restricted-summary::before { transform: rotate(90deg); }
+.pb-stock-restricted-group .pb-stock-batches { margin-top: 6px; }
+
+.pb-phase1 { max-width: 720px; }
+
+.pb-section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; letter-spacing: 2px;
+  text-transform: uppercase; color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.pb-type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px; margin-bottom: 24px;
+}
+.pb-type-card {
+  border: 2px solid var(--border);
+  border-radius: 10px; padding: 14px 12px;
+  cursor: pointer; user-select: none;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+  text-align: center;
+}
+.pb-type-card:hover { border-color: var(--accent); background: var(--accent-dim); }
+.pb-type-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(124,58,237,0.15);
+}
+.pb-type-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 20px; font-weight: 800; color: var(--accent);
+  margin-bottom: 4px;
+}
+.pb-type-desc { font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+.pb-type-dims, .pb-type-wt {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text-muted);
+}
+
+.pb-row { display: flex; gap: 12px; }
+.pb-field { display: flex; flex-direction: column; flex: 1; }
+.pb-field--short { max-width: 100px; }
+.pb-field--wide  { flex: 2; }
+
+.pb-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.pb-scan-hint {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px; color: var(--accent); opacity: 0.7;
+  letter-spacing: 0.5px;
+}
+.pb-input {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px; color: var(--text);
+  background: var(--bg);
+  border: 1.5px solid var(--border); border-radius: 7px;
+  padding: 9px 12px; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pb-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,58,237,0.12); }
+.pb-input.pb-scan { font-size: 15px; letter-spacing: 0.5px; }
+.pb-input.pb-scan:focus { border-color: #059669; box-shadow: 0 0 0 3px rgba(5,150,105,0.12); }
+
+.pb-actions {
+  display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px;
+  padding-top: 20px; border-top: 1px solid var(--border);
+}
+
+.pb-phase2 { display: grid; grid-template-columns: 240px 1fr; gap: 20px; min-height: 0; }
+
+.pb-running {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  align-self: start; position: sticky; top: 0;
+}
+.pb-running-title { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 700; color: var(--accent); }
+.pb-running-dims { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+.pb-running-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 600;
+  padding: 3px 10px; border-radius: 10px;
+  background: rgba(124,58,237,0.1); color: var(--accent);
+  display: inline-block;
+}
+.pb-running-list { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.pb-running-empty {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  text-align: center; padding: 16px 0;
+  border: 1px dashed var(--border2); border-radius: 6px;
+}
+.pb-running-item {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 5px; padding: 6px 26px 6px 8px;
+  position: relative; cursor: context-menu;
+}
+.pb-running-layer { font-weight: 700; color: var(--accent); }
+.pb-running-mat   { color: var(--text); font-weight: 600; }
+.pb-running-pack  { color: var(--text-muted); font-size: 9px; }
+.pb-running-qty   { color: var(--text-dim); }
+.pb-running-batch { color: var(--text-muted); }
+.pb-running-remove {
+  position: absolute; top: 4px; right: 4px;
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 5px;
+  border-radius: 3px; transition: color 0.15s, background 0.15s;
+}
+.pb-running-remove:hover { color: var(--error); background: rgba(220,38,38,0.08); }
+.pb-running-item--container { border-color: var(--accent); background: rgba(124,58,237,0.06); }
+.pb-running-container-tag { font-size: 9px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent); }
+.pb-running-actions {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding-top: 10px; border-top: 1px solid var(--border);
+}
+.pb-running-actions .pb-finish-btn { flex: 1 1 0; width: auto; min-width: 120px; }
+.btn-danger {
+  font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 600;
+  padding: 8px 14px; background: transparent;
+  border: 1.5px solid var(--error); border-radius: 7px;
+  color: var(--error); cursor: pointer; transition: background 0.15s;
+  flex-shrink: 0;
+}
+.btn-danger:hover { background: rgba(220,38,38,0.08); }
+.pb-finish-btn { width: 100%; }
+
+.pb-ctx-menu {
+  position: fixed; z-index: 9200;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 4px 20px rgba(30,45,69,0.15);
+  padding: 4px; min-width: 170px;
+}
+.pb-ctx-item {
+  padding: 8px 12px; font-size: 12px; font-weight: 600;
+  color: var(--text); border-radius: 5px; cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.pb-ctx-item:hover { background: var(--accent-dim); color: var(--accent); }
+
+.pb-form { display: flex; flex-direction: column; gap: 14px; }
+
+.pb-pkg-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.pb-pkg-opt { cursor: pointer; user-select: none; }
+.pb-pkg-opt input[type="radio"] { display: none; }
+.pb-pkg-opt-inner {
+  display: flex; flex-direction: column;
+  padding: 8px 14px; border-radius: 7px;
+  border: 2px solid var(--border);
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 80px;
+}
+.pb-pkg-opt-inner strong { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--accent); }
+.pb-pkg-opt-inner span { font-size: 10px; color: var(--text-muted); }
+.pb-pkg-opt input:checked + .pb-pkg-opt-inner { border-color: var(--accent); background: var(--accent-dim); }
+.pb-pkg-opt:hover .pb-pkg-opt-inner { border-color: var(--accent); background: var(--accent-dim); }
+
+.pb-sap-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.pb-sap-grid .pb-field { min-width: 140px; }
+
+.pb-form-actions {
+  display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+  padding-top: 14px; border-top: 1px solid var(--border);
+}
+.pb-pkg-msg { font-family: 'JetBrains Mono', monospace; font-size: 11px; flex: 1; }
+.pb-pkg-msg--ok    { color: var(--success); }
+.pb-pkg-msg--error { color: var(--error); }
+
+.pb-running-loc { display: flex; flex-direction: column; }
+
+.pb-running-weights {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 8px; border-radius: 5px;
+  background: var(--accent-dim);
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+}
+.pb-running-weights span:first-child { color: var(--text-muted); }
+.pb-running-weights span:last-child  { font-weight: 700; color: var(--accent); }
+.pb-input--req   { border-color: #D97706; }
+.pb-input--req:focus { border-color: #D97706; box-shadow: 0 0 0 3px rgba(217,119,6,0.12); }
+.pb-input--error { border-color: var(--error); }
+.pb-input--error:focus { border-color: var(--error); box-shadow: 0 0 0 3px rgba(220,38,38,0.12); }
+
+.pb-pkg-groups { display: flex; flex-direction: column; gap: 10px; }
+.pb-pkg-group  { display: flex; flex-direction: column; gap: 6px; }
+.pb-pkg-group-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--text-muted);
+  padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.pb-pkg-opts-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.pb-no-pkg-panel {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface2); border: 1px dashed var(--border2);
+  border-radius: 10px; padding: 40px 24px;
+}
+.pb-no-pkg-msg { text-align: center; font-size: 13px; color: var(--text-dim); }

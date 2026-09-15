@@ -11,12 +11,13 @@ namespace NormantonNexus.Controllers;
 
 /// <summary>
 /// Open Picksheets, Packaging Holding, the picksheet materials/stock
-/// panel, linked picksheets, link-search, and the delivery completion
-/// pipeline — matching Node's own `api/deliverymain` mount. The remaining
-/// write half (link/unlink, stage-batch, comment, cancel-picksheet) is a
-/// later slice. No Dept:warehouse policy — Node's own mount is
-/// requireLogin-only (server.js); WAREHOUSE_OP gates the specific actions
-/// that need it, matching Node's per-route requirePermission calls exactly.
+/// panel, linked picksheets, link-search, stage-batch/comment/pallet-link
+/// (the Pallet Builder's own write actions), and the delivery completion
+/// pipeline — matching Node's own `api/deliverymain` mount. cancel-picksheet
+/// (the Create Shipment right-click action) remains unported. No
+/// Dept:warehouse policy — Node's own mount is requireLogin-only
+/// (server.js); WAREHOUSE_OP gates the specific actions that need it,
+/// matching Node's per-route requirePermission calls exactly.
 /// </summary>
 [Route("api/deliverymain")]
 public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb, ISapServerClient sapServerClient, IAuditLogger auditLogger) : NexusControllerBase
@@ -144,6 +145,32 @@ public sealed class DeliveryMainController(INexusOperationsDb nexusOperationsDb,
     {
         await WarehousePicksheetHelper.UnlinkPicksheetAsync(nexusOperationsDb, deliveryId, otherDeliveryId, ct);
         return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    /// <summary>Pallet Builder — stages one scanned/matched batch into this picksheet's own SAP bin.</summary>
+    [HttpPost("{deliveryId:long}/stage-batch")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> StageBatch(long deliveryId, [FromBody] StageBatchRequest body, CancellationToken ct)
+    {
+        var result = await WarehousePicksheetHelper.StageBatchAsync(sapServerClient, auditLogger, deliveryId, body, GetUsername(), GetIpAddress(), GetUserId(), ct);
+        return Ok(ApiResponse<StageBatchResult>.Ok(result));
+    }
+
+    /// <summary>Pallet Builder / Picked Pallets quick-finish — the job comment shown on Create Shipment.</summary>
+    [HttpPatch("{deliveryId:long}/comment")]
+    [Authorize(Policy = "Perm:" + WarehousePicksheetHelper.FnOp)]
+    public async Task<IActionResult> UpdateComment(long deliveryId, [FromBody] UpdatePicksheetCommentRequest body, CancellationToken ct)
+    {
+        await WarehousePicksheetHelper.UpdateCommentAsync(nexusOperationsDb, deliveryId, body.PicksheetComment, ct);
+        return Ok(ApiResponse<object?>.Ok(null));
+    }
+
+    /// <summary>Pallet Builder — links a freshly-created pallet header to this delivery. No permission gate, matching Node's real route exactly.</summary>
+    [HttpPost("{deliveryId:long}/pallets")]
+    public async Task<IActionResult> AddPalletLink(long deliveryId, [FromBody] AddPalletLinkRequest body, CancellationToken ct)
+    {
+        await WarehousePicksheetHelper.AddPalletLinkAsync(nexusOperationsDb, deliveryId, body.PalletId, ct);
+        return StatusCode(201, ApiResponse<object?>.Ok(null));
     }
 
     [HttpPatch("{deliveryId:long}/complete")]

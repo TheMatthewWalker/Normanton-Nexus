@@ -13,13 +13,13 @@
 // open at once exactly as Node's can (NexusModal itself only ever manages
 // one overlay).
 //
-// Deliberately NOT built in this pass: the full "+ Add Pallet"/Pallet
-// Builder wizard (creating a pallet from scratch, adding packaging, batch
-// scanning, label printing) — a separate, much larger undertaking than the
-// delivery picker this pass was specifically restoring. The pallet summary
-// list, finish/reopen/delete, and package removal are all real and wired,
-// since their backend already existed (PalletMainController/
-// PalletPackagesController).
+// "+ Add Pallet" / "Continue" open the real Pallet Builder wizard
+// (pallet-builder.js, a separate file — loaded alongside this one, see
+// OpenPicksheets.cshtml/PackagingHolding.cshtml) rather than being built
+// inline here; refreshPalletList is handed across as PalletBuilder's own
+// onChanged callback so a finished/deleted pallet updates this list without
+// either file needing to know about the other's internals beyond that one
+// function reference.
 (function () {
   const esc = NexusApi.esc;
   const dmApi = NexusApi.make("/api/deliverymain");
@@ -45,10 +45,12 @@
       </div>
       <div class="ps-modal-actions">
         <button type="button" class="btn-secondary" id="pp-complete">${fromHolding ? "Confirm Packaging ✓" : "Complete Delivery ✓"}</button>
-      </div>`);
+        <button type="button" class="btn-submit" id="pp-add-pallet">+ Add Pallet</button>
+      </div>`, { size: "xwide" });
 
     document.getElementById("pp-close").addEventListener("click", () => NexusModal.close());
     document.getElementById("pp-complete").addEventListener("click", () => completeDelivery());
+    document.getElementById("pp-add-pallet").addEventListener("click", () => PalletBuilder.open(ctx.deliveryId, ctx.destName, refreshPalletList));
 
     await Promise.all([refreshPalletList(), refreshLinkedPicksheets()]);
   }
@@ -160,6 +162,10 @@
           togglePalletCard(hdr.closest(".ps-pcard"));
         });
       });
+      body.querySelectorAll("[data-continue]").forEach((btn) => btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        PalletBuilder.openOnExisting(btn.dataset.continue, ctx.deliveryId, ctx.destName, refreshPalletList);
+      }));
       body.querySelectorAll("[data-finish]").forEach((btn) => btn.addEventListener("click", () => finishPallet(btn.dataset.finish)));
       body.querySelectorAll("[data-reopen]").forEach((btn) => btn.addEventListener("click", () => reopenPallet(btn.dataset.reopen)));
       body.querySelectorAll("[data-delete]").forEach((btn) => btn.addEventListener("click", () => deletePallet(btn.dataset.delete)));
@@ -176,7 +182,8 @@
       : `<span class="ps-pcard-badge ps-pcard-badge--wip">In Progress</span>`;
     const actions = p.palletFinish
       ? `<button type="button" class="ps-pcard-btn" title="Un-mark as finished and continue editing" data-reopen="${p.palletId}">Reopen</button>`
-      : `<button type="button" class="ps-pcard-btn ps-pcard-btn--finish" data-finish="${p.palletId}">Finish</button>`;
+      : `<button type="button" class="ps-pcard-btn" data-continue="${p.palletId}">Continue</button>
+         <button type="button" class="ps-pcard-btn ps-pcard-btn--finish" data-finish="${p.palletId}">Finish</button>`;
     const deleteBtn = `<button type="button" class="ps-pcard-btn ps-pcard-btn--delete" title="Delete pallet" data-delete="${p.palletId}">Delete</button>`;
 
     return `
@@ -269,10 +276,24 @@
     }
   }
 
+  // Raw fetch, not pmApi — a 422 (SAP reversal blocked) carries a
+  // structured data.failures list the throwing api() wrapper would discard,
+  // same reasoning as completeDelivery's own bypass below.
+  function formatReversalError(json) {
+    let msg = json.error?.message || "Delete failed";
+    const failures = json.data?.failures;
+    if (Array.isArray(failures) && failures.length) {
+      msg += "\n" + failures.map((f) => `• ${f.sapMaterial || "?"} / ${f.sapBatch || "?"}: ${f.error}`).join("\n");
+    }
+    return msg;
+  }
+
   async function deletePallet(palletId) {
     if (!await NexusModal.confirm("Delete this pallet and all its packages?\nAny stock staged in SAP will be moved back to its original location first.\nThis cannot be undone.", { title: "Delete Pallet", confirmLabel: "Delete", danger: true })) return;
     try {
-      await pmApi(`/${palletId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ palletRemoved: true }) });
+      const res = await fetch(`/api/palletmain/${palletId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ palletRemoved: true }) });
+      const json = await res.json();
+      if (!json.success) throw new Error(formatReversalError(json));
       await refreshPalletList();
     } catch (err) {
       NexusModal.alert(err.message, { title: "Error" });
